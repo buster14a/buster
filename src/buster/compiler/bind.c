@@ -195,7 +195,11 @@ struct Bind
     uint32_t* named;
     uint32_t named_count;
     // The definitions of the runtime's that take the program's over in bind_begin, which bind_end installs once the
-    // program's atoms have joined: room for one per global name, and how many (almost always none).
+    // program's atoms have joined, and how many (almost always none): room for one per global name that a symbol of the
+    // program's has, the fewer of the global names and of the link's symbols when bind_begin began. A program's own
+    // definitions are the only ones the head objects' can take over before bind_end, so that a small program's room
+    // stays small: one per global name took 40 KB with libgcc.a's names, which pushed the arrays after it past the base
+    // pages that the caller's arena starts with, and made every link of the C driver fault and clear a huge page.
     BindOverride* overrides;
     uint32_t override_count;
     // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
@@ -1920,9 +1924,9 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
         .program_symbols = link->symbols.count,
         .capacity = link->symbols.capacity,
     };
+    const uint32_t override_room = runtime->global_names.count < link->symbols.count ? runtime->global_names.count : link->symbols.count;
     bind->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);
     bind->named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count);
-    bind->overrides = BUSTER_ARENA_PUSH_ARRAY(arena, BindOverride, runtime->global_names.count);
     bind->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->link.symbols.count);
     bind->members_needed = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
     bind->members_joined = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
@@ -1933,6 +1937,7 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     bind->queue = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)runtime->member_count + 1);
     bind->imports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
     bind->exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
+    bind->overrides = BUSTER_ARENA_PUSH_ARRAY(arena, BindOverride, override_room);
     const bool pushed = bind->name_symbols != 0 && bind->named != 0 && bind->overrides != 0 && bind->symbols != 0 && bind->members_needed != 0 &&
                         bind->members_joined != 0 && bind->signatures != 0 && bind->frontier != 0 && bind->loads != 0 && bind->marks != 0 &&
                         bind->queue != 0 && bind->imports != 0 && bind->exports != 0;
