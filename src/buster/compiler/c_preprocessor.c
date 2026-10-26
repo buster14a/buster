@@ -7068,7 +7068,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                         {
                             out->count -= 1;
                             PPToken moved = right;
-                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (next_space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                            // As for an argument placed first, clang clears its line start, including one retained
+                            // while an outer argument expanded (BUSTER_PP_LINE_SPACE).
+                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | (next_space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
                             if (!right_single)
                             {
                                 moved.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);

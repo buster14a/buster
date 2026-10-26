@@ -99,7 +99,9 @@ plain-char semantics.
 ## Implementation boundary
 
 The source adapter handles nested pointer, array and function declarators;
-prototype scopes and parameter adjustments; typedefs and local scopes;
+prototype scopes and parameter adjustments; struct, union and enum definitions
+in a declarator, in a parameter's specifiers or an array bound; typedefs and
+local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
 bit-fields (with GNU attributes after a width, the member's, which the parser
 hangs on the member's end, outside the width's tree, so that the width is
@@ -148,14 +150,29 @@ duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
 does not silently change the type visible to an unprototyped call. A
-prototype's parameters, and the tags its list declares, end at its `)`. A
-definition's are declared again at its body's opening, as clang has them, since
-the body's scope is theirs too (C11 6.2.1p4): in
-`int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
-parameter's (#435). A prototype in a constant expression's type name (a
-typeof's, a builtin's operand) ends its tags at its `)` as well, in the
-evaluator's binding walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s
-`struct Z` isn't a later one's (#437).
+declarator's parameter list is a scope of its own, a level deeper than the one
+around it (C11 6.2.1p4): its parameters are declared in it, and so are the tags
+and enumeration constants it declares, those of a struct, union or enum defined
+in a parameter's specifiers or in an array bound among them, each read where it
+is, in source order. A prototype's end at its `)`. A definition's are declared
+again at its body's opening, as clang has them, since the body's scope is
+theirs too: in `int f(struct T *p) { struct T *q = p; ... }` the body's
+`struct T` is the parameter's (#435), and in
+`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). A list's
+second definition of a tag only warns in clang, which makes it a tag of its own
+that its name doesn't name, and the checker does the same. A tag that a
+declarator's array bound names or defines outside a parameter list is the
+declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
+valid. A prototype in a constant expression's type name (a typeof's, a
+builtin's operand, a bound's `sizeof`) is a scope a level deeper as well, which
+ends its tags and enumeration constants at its `)`, in the evaluator's binding
+walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s `struct Z` isn't
+a later one's (#437), and in `int f(int K, int a[sizeof(void (*)(enum E { K }))])`
+the inner `K` is that prototype's alone. A bound's definitions are read beside
+its statement expressions, before or after them; one inside a statement
+expression is refused with its bound, as a statement expression that holds a
+declaration is ("Variable-length arrays" below). A definition in a `typeof` is
+still refused, there as anywhere.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -547,18 +564,43 @@ What the lowering covers past scalars (#145's programs):
   `va_arg` of a `long double` reads its 16 bytes in the overflow area.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
-  parameter of it is a frame object of 16 bytes aligned to 16, and every object
-  of it, a global's too, is read with `LOAD` from its address and written with
-  `STORE` or `SET` through it, the address evaluated first. `x op= v`, `++` and
-  `--` on one go through its address as on memory, a postfix one keeping the old
-  value in a frame object of its own. Its constants are each function's table
+  parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
+  `STORE_LOCAL` and `SET_LOCAL` of the class read and write, and a global of it
+  is read with `LOAD` from its address and written with `STORE` or `SET`
+  through it, the address evaluated first; so are other objects' (`*p`,
+  `a[i]`, `s.m`). `x op= v`, `++` and `--` on a global or through a pointer go
+  through its address as on memory. Its constants are each function's table
   (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
   `_Bool` compare with. A function with an entry of the class or a long double
   result says so (`Tier0Function.x87`), which the lowering notes as it writes
-  each entry. What would hold one of its values in a temporary (a
-  statement expression's value or the operands live around it, `?:` without its
-  middle operand, a builtin's operand) and the floating classification builtins
-  on it are refused by name.
+  each entry. A temporary of the class (a statement expression's value or the
+  operands live around it, `?:` without its middle operand, a postfix one's old
+  value) is a frame object of its own (`check_lower_temporary`).
+  The builtins of its operands and the floating classification builtins on it
+  are refused by name.
+- **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
+  I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
+  classes as long double's is (`check_lower_memory_class`): their locals,
+  parameters and temporaries are frame objects, and their globals are read and
+  written through their addresses. A constant is one `CONST` where its high
+  half is its low half's sign or zero extension, else its high half shifted by
+  64 and ORed with its low half. The convention passes one as two INTEGER
+  eightbytes, which Tier 0 takes as a 16-byte object: an argument's value is set
+  into a frame object of its own and passed by its address (`argument_sizes`
+  16), a call's result comes back into its result object, which `LOCAL` reads,
+  and a function returns one from a frame object of its own by its address
+  (`result_size` 16). `va_arg` of one takes the path of a struct of two
+  eightbytes, its value loaded from their address. Its division and remainder
+  (`__divti3`, `__udivti3`, `__modti3`, `__umodti3`) and its conversions to and
+  from `float`, `double` and `long double` (`__floattisf` to `__fixunsxfti`) are
+  calls of libgcc's, as clang -O0 makes them: their operands set into frame
+  objects of their own and passed by their addresses. Those functions' symbols,
+  and `__errno_location`'s, are the runtime's (`CheckProgramLowered.runtime_symbols`):
+  the unit's own declaration's where its program has one with linkage, else
+  one of the lowering's own after the helpers' (`check_lower_runtime`). A shift
+  by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
+  and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
+  and a builtin of 128-bit operands are refused by name.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -623,7 +665,7 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
+`error: unsupported: FEATURE`, naming the feature: `_Complex`, `_BitInt`,
 inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 

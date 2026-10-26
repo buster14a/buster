@@ -41,17 +41,22 @@ jobs:
   # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
-  # pull requests that change what they measure.
+  # pull requests that change what they measure. The same for the first-party performance readers' qualification
+  # (`performance`): tools/performance, docs/performance, web/perf, the evidence's pin or the qualification's steps.
+  # A step gated on one of these outputs also runs on the pull request that changes it.
   # And which plain benchmarks, with their checks against the scalar twins, a pull request runs (`measure`): those whose
   # sources it changes, and those whose steps it changes (the branch-sizing qualification too: its steps or its
   # sources). A benchmark built as a translation unit of its own (build.sh's *_benchmark.c) measures what that unit
   # includes, which this job reads from the #include lines; one in main.c's units measures the files that define the
-  # functions it calls, as `benchmarks` names them. The plain runs took about 105 s of a pull request's 230, most of them
+  # functions it calls, as its entry names them. The plain runs took about 105 s of a pull request's 230, most of them
   # measuring code the pull request doesn't change; a change to build.sh runs every one.
   # On a push to main, whose pull request's run measured what it changes, every output but `code` is `false`: the full
   # set took the job past its 10 minutes on every push, which then failed, having kept the 9700X from every pull
   # request's job meanwhile. A push runs every plain benchmark (`measure` is `all`), so that main has each one's numbers
   # at every commit. The daily and dispatched runs, which skip this job, have the full set.
+  # The selector is tools/ci/changes.c: the modules' sources (`changes_modules`), the plain benchmarks'
+  # (`changes_benchmarks`) and the decision, which its --self-test checks against this workflow and the sources before
+  # it decides.
   changes:
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
@@ -71,8 +76,10 @@ jobs:
       ir_lowering: ${{ steps.files.outputs.ir_lowering }}
       ir_optimize: ${{ steps.files.outputs.ir_optimize }}
       checker: ${{ steps.files.outputs.checker }}
+      checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       check_debug: ${{ steps.files.outputs.check_debug }}
       files: ${{ steps.files.outputs.files }}
+      performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
       - name: Check out the triggering commit and its parents
@@ -82,194 +89,34 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      - name: Build the selector and check it against this workflow and the sources
+        # tools/ci/changes.c, built with the runner's cc in about a second: its self-test checks its tables against the
+        # workflow (each output a step reads, each MEASURE name, each gated step changed alone) and the sources (each
+        # pattern's alternatives and units), and its decisions on fixtures. When it fails, so does this job, and `test`
+        # runs with every benchmark.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/changes" tools/ci/changes.c
+          "$RUNNER_TEMP/changes" --self-test
+
       - id: files
         shell: bash
         run: |
           set -euo pipefail
-          modules=(zen5 ssa parser_bindings environments ir ir_lowering ir_optimize checker check_debug files)
-          # The sources each module's conditioned benchmark samples measure, under src/buster/compiler/.
-          declare -A sources=(
-              [zen5]='x86_zen5[a-z_]*'
-              [ssa]='ssa|ssa_program|ssa_benchmark|dominators'
-              [parser_bindings]='c_parser|c_parser_binding_trace|c_parser_bindings[a-z_]*|c_bindings[a-z_]*'
-              [environments]='c_environment[a-z_]*'
-              [ir]='ir|ir_validate|ir_benchmark'
-              [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_emit|ir_lower_benchmark'
-              [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
-              [checker]='c_check[a-z_]*'
-              [check_debug]='c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0'
-              [files]='c_files[a-z_]*'
-          )
-          # The plain benchmarks, each by the name its commands take after benchmark- or measure-, and the sources it
-          # measures: `unit:FILE`, the translation unit of its own whose includes it measures, or for one in main.c's
-          # units a pattern of the files under src/buster/compiler/ that define the functions it calls, transitively.
-          declare -A benchmarks=(
-              [lexer]='unit:c_lexer_benchmark.c'
-              [x86-zen5]='x86_64_encoder|x86_zen5[a-z_]*'
-              [x86-disassembler]='unit:x86_64_disassembler_benchmark.c'
-              [x86-encoder]='unit:x86_64_encoder_benchmark.c'
-              [assembler]='assembler[a-z_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|object_writer|x86_64_encoder|x86_match|x86_target[a-z_]*'
-              [branch-sizing]='unit:branch_sizing_benchmark.c'
-              [x86-semantics]='unit:x86_semantics_benchmark.c'
-              [lanes]='unit:lane_benchmark.c'
-              [dataflow]='unit:dataflow_benchmark.c'
-              [ssa]='dataflow|dominators|lane|ssa|ssa_benchmark|ssa_program'
-              [preprocessor-fuzz]='preprocessor_fuzz[a-z_]*|c_preprocessor[a-z_]*|c_predefines[a-z_]*|c_builtin_catalog|c_intern|c_lexer|c_refine|lane|x86_target'
-              [object-writer]='unit:object_writer_benchmark.c'
-              [debug]='debug[a-z_]*|lane'
-              [import]='unit:import_benchmark.c'
-              [bind]='unit:bind_benchmark.c'
-              [executable]='unit:executable_benchmark.c'
-              [snapshot]='unit:snapshot_benchmark.c'
-              [foreign]='unit:foreign_benchmark.c'
-              [foreign-strings]='foreign[a-z_]*|bind[a-z_]*|dynamic[a-z_]*|executable[a-z_]*|import[a-z_]*|link[a-z_]*|object_writer[a-z_]*|runtime|c_lexer[a-z_]*|lane|x86_64_encoder[a-z_]*'
-              [link]='unit:link_benchmark.c'
-              [refinement]='unit:c_refine_benchmark.c'
-              [preprocessor]='unit:c_preprocessor_benchmark.c'
-              [files]='unit:c_files_benchmark.c'
-              [parser]='unit:c_parser_benchmark.c'
-              [lowering]='c_lowering[a-z_]*|lane'
-              [lowering-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target'
-              [gnu]='c_bindings|c_gnu[a-z_]*|c_intern|c_lexer[a-z_]*|c_parser|c_parser_binding_trace|c_predefines|c_preprocessor|c_refine|lane|x86_target'
-              [parser-bindings]='c_bindings[a-z_]*|c_gnu|c_intern|c_lexer[a-z_]*|c_parser[a-z_]*|c_predefines|c_preprocessor|c_refine|lane|x86_target'
-              [types]='unit:c_types_benchmark.c'
-              [environments]='c_bindings[a-z_]*|c_environment[a-z_]*|c_types[a-z_]*|lane'
-              [calling-convention]='unit:calling_convention_benchmark.c'
-              [checker]='unit:c_checker_benchmark.c'
-              [checker-source]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
-              [checker-bindings]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
-              [check-debug]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|branch_sizing|calling_convention|debug|foreign_test|lane|link|object_writer|tier0|x86_64_encoder|x86_semantics|x86_target'
-              [checker-deferred]='c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target'
-              [backend]='unit:tier0_benchmark.c'
-              [unwind]='unwind[a-z_]*|debug[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
-              [streaming]='streaming[a-z_]*|unwind[a-z_]*|debug|executable|link[a-z_]*|object_writer[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics'
-              [ir]='ir|ir_validate|ir_benchmark|lane'
-              [ir-lowering]='ir|ir_validate|ir_benchmark|ir_lower[a-z_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z_]*|c_types|calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics'
-              [ir-optimize]='ir|ir_validate|ir_optimize|ir_optimize_benchmark|ir_optimize_test|dominators|lane'
-              [ir-optimize-passes]='ir|ir_validate|ir_optimize[a-z_]*|ssa|ssa_ir|dataflow|dominators|lane'
-          )
-          # Prints the repository's files that the translation unit $1 includes ("buster/..." under src/),
-          # transitively, itself among them.
-          includes()
-          {
-              local -A seen=()
-              local queue=("$1")
-              while [ "${#queue[@]}" -gt 0 ]; do
-                  local file="${queue[0]}"
-                  queue=("${queue[@]:1}")
-                  if [ -z "${seen[$file]-}" ] && [ -f "$file" ]; then
-                      seen[$file]=1
-                      echo "$file"
-                      while read -r included; do
-                          queue+=("src/$included")
-                      done < <(sed -n 's/^[[:space:]]*#[[:space:]]*include[[:space:]]*"\(buster\/[^"]*\)".*/\1/p' "$file")
-                  fi
-              done
-          }
-          # Writes each step of the workflow on standard input to a file of its own in the directory $1, named by the
-          # step's name, so that a step a pull request changes is a file that differs.
-          split_steps()
-          {
-              mkdir -p "$1"
-              awk -v directory="$1" '
-                  /^  [^ ]/ || /^      - / { if (file != "") close(file); file = "" }
-                  /^      - name: / { name = substr($0, 15); gsub(/[^A-Za-z0-9]+/, "-", name); file = directory "/" name }
-                  file != "" { print >> file }
-              '
-          }
-          declare -A measure
+          workflow=.github/workflows/9700x.yml
           if [ "$GITHUB_EVENT_NAME" = push ]; then
-              # push's paths-ignore leaves out documentation alone.
-              code=true
-              baselines=false
-              foreign=false
-              branch_sizing=false
-              for module in "${modules[@]}"; do
-                  measure[$module]=false
-              done
-              selected=all
+              "$RUNNER_TEMP/changes" --event push --workflow "$workflow" --output "$GITHUB_OUTPUT"
           else
-              # The merge's changes against its base, both names of a file renamed.
-              git diff --no-renames --name-only HEAD^1 HEAD > files
-              if grep -Ev '^docs/|\.md$' files > /dev/null; then
-                  code=true
-              else
-                  code=false
+              # The merge's changes against its base, both names of a file renamed, and the base's workflow, empty
+              # where it has none.
+              git diff --no-renames --name-only HEAD^1 HEAD > "$RUNNER_TEMP/files"
+              if ! git show "HEAD^1:$workflow" > "$RUNNER_TEMP/base.yml" 2> /dev/null; then
+                  : > "$RUNNER_TEMP/base.yml"
               fi
-              if grep -Ex 'src/buster/compiler/(link|floors)_benchmark\.c' files > /dev/null; then
-                  baselines=true
-              else
-                  baselines=false
-              fi
-              if grep -Ex 'src/buster/compiler/foreign_benchmark\.c' files > /dev/null; then
-                  foreign=true
-              else
-                  foreign=false
-              fi
-              if grep -Ex 'src/buster/compiler/(x86_64_encoder|branch_sizing(_benchmark|_generate)?)\.c' files > /dev/null; then
-                  branch_sizing=true
-              else
-                  branch_sizing=false
-              fi
-              for module in "${modules[@]}"; do
-                  if grep -Ex "src/buster/compiler/(${sources[$module]})\.c" files > /dev/null; then
-                      measure[$module]=true
-                  else
-                      measure[$module]=false
-                  fi
-              done
-              # The steps of this workflow that the merge changes or adds, and the commands they run.
-              workflow=.github/workflows/9700x.yml
-              if git cat-file -e "HEAD^1:$workflow" 2> /dev/null; then
-                  git show "HEAD^1:$workflow" | split_steps steps/base
-              else
-                  mkdir -p steps/base
-              fi
-              split_steps steps/head < "$workflow"
-              : > commands
-              for step in steps/head/*; do
-                  if ! cmp -s "$step" "steps/base/${step##*/}"; then
-                      echo "Changes the step ${step##*/}"
-                      grep -ohE '\./build/compiler (benchmark|measure)-[a-z0-9-]+' "$step" | sed 's/.* //' >> commands || true
-                      case "${step##*/}" in
-                          Check-out-pinned-branch-sizing-measurement-harnesses|Benchmark-branch-sizing) branch_sizing=true ;;
-                      esac
-                  fi
-              done
-              if grep -Fx build.sh files > /dev/null; then
-                  selected=all
-              else
-                  selected=,
-                  for name in $(printf '%s\n' "${!benchmarks[@]}" | sort); do
-                      spec="${benchmarks[$name]}"
-                      if [[ "$spec" == unit:* ]]; then
-                          includes "src/buster/compiler/${spec#unit:}" > closure
-                          changed=$(grep -Fxf closure files || true)
-                      else
-                          changed=$(grep -Ex "src/buster/compiler/($spec)\.c" files || true)
-                      fi
-                      if [ -n "$changed" ] || grep -Ex "(benchmark|measure)-$name" commands > /dev/null; then
-                          selected="$selected$name,"
-                      fi
-                  done
-              fi
+              "$RUNNER_TEMP/changes" --event pull_request --files "$RUNNER_TEMP/files" \
+                  --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
-          echo "code=$code" >> "$GITHUB_OUTPUT"
-          echo "baselines=$baselines" >> "$GITHUB_OUTPUT"
-          echo "foreign=$foreign" >> "$GITHUB_OUTPUT"
-          echo "branch_sizing=$branch_sizing" >> "$GITHUB_OUTPUT"
-          for module in "${modules[@]}"; do
-              echo "$module=${measure[$module]}" >> "$GITHUB_OUTPUT"
-          done
-          echo "measure=$selected" >> "$GITHUB_OUTPUT"
-          echo "Changes code: $code"
-          echo "Changes the baselines' harnesses: $baselines"
-          echo "Changes the foreign inputs' benchmark: $foreign"
-          echo "Changes the branch-sizing implementation or its qualification's steps: $branch_sizing"
-          for module in "${modules[@]}"; do
-              echo "Changes what $module's conditioned benchmark samples measure: ${measure[$module]}"
-          done
-          echo "Runs the plain benchmarks: $selected"
 
   test:
     name: Build and execute on Ryzen 7 9700X
@@ -322,6 +169,10 @@ jobs:
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
+        # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers
+        # (tools/performance, docs/performance, web/perf), this pin or these steps: about 11 s of building and checking that
+        # every other pull request's job spent on code it doesn't change.
+        if: needs.changes.outputs.performance != 'false'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: buster14a/buster-performance
@@ -337,6 +188,7 @@ jobs:
       - name: Qualify first-party performance readers and frozen import on the 9700X
         # The runner's job hook already holds the shared host lock. Use the
         # existing Clang/C runtime only; no dependency setup or downloader.
+        if: needs.changes.outputs.performance != 'false'
         run: |
           set -euo pipefail
           reader_root=build/performance-reader-evidence
@@ -1298,8 +1150,8 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-bindings --passes 5 "${system[@]}" "$corpus/sqlite/sqlite3.c"
 
       - name: Benchmark the checker's binding handoff in repeated processes, in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the checker's sources, c_check*.c).
-        if: needs.changes.outputs.checker != 'false'
+        # Where `changes` doesn't rule it out (the handoff's sources: `checker_bindings`).
+        if: needs.changes.outputs.checker_bindings != 'false'
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
@@ -1317,7 +1169,8 @@ jobs:
           done
 
       - name: Benchmark binding handoffs through parsing, checking and cleanup
-        if: needs.changes.outputs.checker != 'false'
+        # Where `changes` doesn't rule it out (the handoff's sources: `checker_bindings`).
+        if: needs.changes.outputs.checker_bindings != 'false'
         run: |
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
