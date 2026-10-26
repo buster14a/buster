@@ -866,9 +866,9 @@ Before the programs, checks of their own:
     constants (low halves past a sign-extended imm32 among them), arithmetic, shifts by constant and variable counts,
     `?:`, `DUP`, `STORE`'s kept value and conversions both ways, under live values at the depths where `MUL` saves rax
     and rdx and a shift rcx, against the check's own stack machine over the stream. A program counts toward the
-    coverage only once both paths compiled it, it ran and every output matched: those must reach, for each class apart
-    (their signed and unsigned code differs), every kind, every conversion to and from it and each of the saves, in
-    bitmaps of their own.
+    coverage only once both paths compiled it, it ran and every output matched, and then only the entries the stack
+    machine ran: those must reach, for each class apart (their signed and unsigned code differs), every kind, every
+    conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
 
   Every function must compile: an error of both paths alike fails the check, but a depth past the slots in a random
   program, which is counted.
@@ -1066,7 +1066,8 @@ larger shape's are.
     them; with the fixes, leaving out the programs that save rcx, or not recording `JUMP_VALUE`, fails it. And `sar 62`
     for `sar 63` in a signed `SHR`'s fill fails the boundaries of I128 alone; not counting I128's `SHR` fails its
     coverage; and an arena too small for every 50th program fails the check, where both paths refusing a function alike
-    had passed it.
+    had passed it. A `?:` whose condition is the constant 1 fails it too (each class's arms), where counting the whole
+    stream had passed the arm its run skipped.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;
