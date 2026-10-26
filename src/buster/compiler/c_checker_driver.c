@@ -425,20 +425,32 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     check_driver_diagnose(parser, pp, code->token, message);
 }
 
+// Writes the checked program's object at `output_path`. With `debug` (-g), the object carries DWARF: the unit the
+// executable's would (c_check_debug.c), relocated against the functions' sections (ObjectOptions.debug).
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool verify, bool dump_static, Arena* scratch)
+                                 bool scalar, bool verify, bool dump_static, bool debug, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const uint64_t mark = scratch->length;
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
+    CheckProgramRows rows = { 0 };
+    CheckDebug dwarf = { 0 };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, NULL, verify);
+                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL, verify);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
+    }
+    if (valid && debug)
+    {
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+        if (!valid)
+        {
+            fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
+        }
     }
     if (valid)
     {
@@ -458,7 +470,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         if (valid)
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const Object object = object_build(&code.link, &units, &symbols, 0, (ObjectOptions){ 0 }, source, scratch);
+            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL, .debug_count = debug ? 1 : 0 };
+            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
             valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission)) &&
@@ -912,10 +925,10 @@ static int run_check_command(int count, char** arguments, bool executable)
     options.semantic_pragmas = true;
     // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
     // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
-    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link
-    // with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than preprocessing the
-    // unit again for them.
-    const bool source_rows = parsed && link && (options.predefines.debug || options.predefines.debug_modules);
+    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link or
+    // an object with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than
+    // preprocessing the unit again for them.
+    const bool source_rows = parsed && (link || emit_object) && (options.predefines.debug || options.predefines.debug_modules);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {
@@ -924,7 +937,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     }
     else if (!check_input_target_supported(&options))
     {
-        fprintf(stderr, "error: checker requires C, signed char, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
+        fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
     else
     {
@@ -1159,7 +1172,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, verify, dump_static, &scratch) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, source_rows, &scratch) ? 0 : 1;
                             }
                             else
                             {

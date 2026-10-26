@@ -10,6 +10,58 @@
 
 #include "c_check_program_helpers_test.c"
 #include "c_check_program_diagnostic_test.c"
+#include "c_check_control_input_test.c"
+
+static void check_test_program_addressed(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[3] = { 0 };
+    bool ready = true;
+    for (uint32_t column = 0; column < 3; column += 1)
+    {
+        mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[column] != MAP_FAILED && ready;
+        if (mappings[column] != MAP_FAILED)
+        {
+            ready = mprotect(mappings[column] + page, page, PROT_NONE) == 0 && ready;
+        }
+    }
+    check_test_expect(test, ready, "label address columns have protected tails");
+    for (uint32_t count = 0; ready && count <= 129; count += 1)
+    {
+        uint8_t* kinds = mappings[0] + page - count;
+        uint8_t* roles = mappings[1] + page - count;
+        uint32_t* targets = (uint32_t*)(mappings[2] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t expected[130] = { 0 };
+        uint8_t scalar[130];
+        uint8_t vector[130];
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            kinds[token] = token % 2 == 0 ? PARSE_KIND_AMPAMP : PARSE_KIND_IDENTIFIER;
+            roles[token] = token % 3 == 0 ? PARSE_ROLE_PREFIX : PARSE_ROLE_LOGICAL_AND;
+            targets[token] = token % 5 == 0 ? count : (token * 7) % count;
+            if (token % 6 == 0 && token % 5 != 0)
+            {
+                expected[targets[token]] = 1;
+            }
+        }
+        Parser parser = { 0 };
+        parser.tokens.kinds = kinds;
+        parser.tree.roles = roles;
+        const CheckInput input = { .token_count = count, .label_targets = targets };
+        check_program_addressed(&parser, &input, scalar, true);
+        check_program_addressed(&parser, &input, vector, false);
+        check_test_expect(test, memcmp(scalar, expected, count + 1) == 0 && memcmp(vector, expected, count + 1) == 0,
+                          "label addresses exclude logical && and non-prefix tokens, including every guarded vector tail");
+    }
+    for (uint32_t column = 0; column < 3; column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+}
 
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
 {
@@ -142,10 +194,11 @@ static const char check_test_program_harness[] =
     "if(terminal_probe){int p=fork();if(p<0)return 2;if(!p){struct rlimit r={0,0};setrlimit(RLIMIT_CORE,&r);terminal_probe();_exit(91);}\n"
     "int s=0;if(waitpid(p,&s,0)!=p||!WIFSIGNALED(s)||WTERMSIG(s)!=SIGILL)return 3;}return 0;}\n";
 
-// What every program's build shares (#465): the harness, the same for every program, compiled once per run, and the
-// last oracle, which the scalar and vector paths' programs of one source share, compiled once per distinct text. Each
+// What every program's build shares (#465): the harness, the same for every program, compiled once per run for each
+// signedness of plain char that the programs are read with, and the last oracle, which the scalar and vector paths' programs of one source share, compiled once per distinct text. Each
 // compiles with -c and the flags of the one-step build, which gives the code that build's compiles give, so a program
-// links the same harness, oracle and checked object as before. And the last program that linked and ran as the oracle
+// links the same harness, oracle and checked object as before. The oracle's key is its text and plain char's
+// signedness. And the last program that linked and ran as the oracle
 // did: its checked object's bytes. A program whose checked object and oracle are that one's links the same files into
 // the same executable, which runs alike, so it takes that run's result (the vector path's program, mostly, after the
 // scalar path's).
@@ -153,24 +206,32 @@ typedef struct CheckTestProgramBuild CheckTestProgramBuild;
 struct CheckTestProgramBuild
 {
     char directory[40];
-    bool harness;
+    bool harness[2];
     char* oracle;
     size_t oracle_length;
+    bool oracle_unsigned;
     uint8_t* object;
     uint64_t object_size;
 };
 
 static CheckTestProgramBuild check_test_program_build;
 
-// The flags of every compile and link of a program.
-#define BUSTER_CHECK_TEST_PROGRAM_FLAGS \
+// The flags of every compile and link of a program, with plain char as the checker read it (`char_unsigned`), for the
+// oracle and the harness alike.
+#define BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned) \
     "-std=gnu17", \
     "-O0", \
     "-march=x86-64", \
     "-fno-common", \
-    "-funsigned-char", \
+    (char_unsigned) ? "-funsigned-char" : "-fsigned-char", \
     "-Wno-unused-value", \
     "-no-pie"
+
+// The harness's name in the build's directory for plain char's signedness.
+static const char* check_test_program_harness_name(bool char_unsigned)
+{
+    return char_unsigned ? "harness-unsigned" : "harness-signed";
+}
 
 static void check_test_program_build_path(char* path, size_t size, const char* name)
 {
@@ -178,18 +239,19 @@ static void check_test_program_build_path(char* path, size_t size, const char* n
 }
 
 // Compiles `name`.c, holding `text`, to `name`.o in the build's directory, its diagnostics in `out` and `err`.
-static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, const char* out, const char* err)
+static bool check_test_program_compile(const char* clang, const char* name, const char* text, size_t length, bool char_unsigned, const char* out,
+                                       const char* err)
 {
     char source[96];
     char object[96];
-    char file[16];
+    char file[32];
     snprintf(file, sizeof(file), "%s.c", name);
     check_test_program_build_path(source, sizeof(source), file);
     snprintf(file, sizeof(file), "%s.o", name);
     check_test_program_build_path(object, sizeof(object), file);
     char* compile[] = {
         (char*)clang,
-        BUSTER_CHECK_TEST_PROGRAM_FLAGS,
+        BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
         "-Wno-unused-command-line-argument",
         "-c",
         source,
@@ -200,9 +262,10 @@ static bool check_test_program_compile(const char* clang, const char* name, cons
     return parse_test_write(source, text, length) && object_test_run(compile, out, err) == 0;
 }
 
-// The build's directory, made on first use, with the harness compiled into it, and the oracle of `text` compiled
-// unless it is the last one's (`*same_oracle`).
-static bool check_test_program_prepare(const char* clang, const char* text, size_t length, const char* out, const char* err, bool* same_oracle)
+// The build's directory, made on first use, with the harness of plain char's signedness compiled into it, and the
+// oracle of `text` compiled unless it is the last one's, with the same signedness (`*same_oracle`).
+static bool check_test_program_prepare(const char* clang, const char* text, size_t length, bool char_unsigned, const char* out, const char* err,
+                                       bool* same_oracle)
 {
     CheckTestProgramBuild* build = &check_test_program_build;
     if (build->directory[0] == 0)
@@ -214,24 +277,27 @@ static bool check_test_program_prepare(const char* clang, const char* text, size
         }
     }
     bool valid = build->directory[0] != 0;
-    if (valid && !build->harness)
+    if (valid && !build->harness[char_unsigned])
     {
-        build->harness = check_test_program_compile(clang, "harness", check_test_program_harness, sizeof(check_test_program_harness) - 1, out, err);
-        valid = build->harness;
+        build->harness[char_unsigned] = check_test_program_compile(clang, check_test_program_harness_name(char_unsigned), check_test_program_harness,
+                                                                   sizeof(check_test_program_harness) - 1, char_unsigned, out, err);
+        valid = build->harness[char_unsigned];
     }
-    const bool same = build->oracle != 0 && build->oracle_length == length && memcmp(build->oracle, text, length) == 0;
+    const bool same = build->oracle != 0 && build->oracle_unsigned == char_unsigned && build->oracle_length == length &&
+                      memcmp(build->oracle, text, length) == 0;
     *same_oracle = same;
     if (valid && !same)
     {
         free(build->oracle);
         build->oracle = 0;
-        valid = check_test_program_compile(clang, "oracle", text, length, out, err);
+        valid = check_test_program_compile(clang, "oracle", text, length, char_unsigned, out, err);
         build->oracle = valid ? malloc(length) : 0;
         valid = valid && build->oracle != 0;
         if (valid)
         {
             memcpy(build->oracle, text, length);
             build->oracle_length = length;
+            build->oracle_unsigned = char_unsigned;
         }
     }
     return valid;
@@ -243,7 +309,7 @@ static void check_test_program_build_release(void)
     CheckTestProgramBuild* build = &check_test_program_build;
     if (build->directory[0] != 0)
     {
-        static const char* const names[] = { "harness.c", "harness.o", "oracle.c", "oracle.o" };
+        static const char* const names[] = { "harness-signed.c", "harness-signed.o", "harness-unsigned.c", "harness-unsigned.o", "oracle.c", "oracle.o" };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
         {
             char path[96];
@@ -257,7 +323,7 @@ static void check_test_program_build_release(void)
     *build = (CheckTestProgramBuild){ 0 };
 }
 
-static bool check_test_program_execute(Link* link, const char* source, const char* clang, Arena* scratch)
+static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -277,14 +343,16 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     uint64_t size = 0;
     bool same_oracle = false;
     bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size) && check_test_program_oracle(link, source, &text, &length);
-    valid = valid && check_test_program_prepare(clang, text, length, out, err, &same_oracle);
+    valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
     const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
-    check_test_program_build_path(harness, sizeof(harness), "harness.o");
+    char harness_file[32];
+    snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
+    check_test_program_build_path(harness, sizeof(harness), harness_file);
     check_test_program_build_path(oracle, sizeof(oracle), "oracle.o");
     char* link_command[] = {
         (char*)clang,
-        BUSTER_CHECK_TEST_PROGRAM_FLAGS,
+        BUSTER_CHECK_TEST_PROGRAM_FLAGS(char_unsigned),
         harness,
         oracle,
         object,
@@ -341,7 +409,9 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     return valid;
 }
 
-static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
+// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
+// it with the same.
+static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -349,6 +419,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     const PPOptions pp_options = {
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = true,
+        .predefines.char_unsigned = char_unsigned,
     };
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
@@ -435,7 +506,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
         if (emitted)
         {
             snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
-            check_test_expect(test, check_test_program_execute(&code.link, source, clang, &scratch), description);
+            check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -447,6 +518,12 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// A program fixture with plain char signed, x86-64's.
+static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
+{
+    check_test_program_source_char(test, source, name, clang, false);
 }
 
 static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
@@ -576,6 +653,9 @@ static void check_test_program_refused(CheckTest* test)
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_control_masks(test);
+    check_test_control_walks(test);
+    check_test_program_addressed(test);
     check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
@@ -605,6 +685,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
+    // Plain char unsigned (-funsigned-char) and signed, from one source: stores and loads of values past 0x7f,
+    // conversions, division, shifts and compares, a switch, character constants, and a char parameter and result.
+    static const char plain_char[] =
+        "static char table[]={'\\x80','\\xff','a','\\x7f',0};static char pass(char c){return c;}static int widen(char c){return c;}"
+        "int tested(int n){char c=(char)(n*37+128);int r=c/3+(c>>1)+(c>100)+widen(pass(c))+'\\xff'+(char)-1;"
+        "r+=table[(unsigned)n%5]+(table[(unsigned)n%5]<0)*1000;switch(c){case '\\xff':r+=7;break;case '\\x80':r+=11;break;default:break;}"
+        "table[(unsigned)n%5]=c;return r;}";
+    check_test_program_source_char(test, plain_char, "plain-char-unsigned", clang, true);
+    check_test_program_source_char(test, plain_char, "plain-char-signed", clang, false);
     check_test_program_source(test,
         "int global=7;int helper(int x){global+=x;return global;}"
         "int tested(int n){int a=helper(n);global+=2;return a*3+global;}", "shared-code-and-data", clang);
@@ -635,6 +724,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int helper(int n){return n+2;}int(*saved)(int)=helper;int tested(int n){return (saved==helper)+n;}", "function-address-data-reference", clang);
     check_test_program_source(test,
         "char*text=\"abc\";int tested(int n){return text[1]+n;}", "body-used-string-object", clang);
+    // The function names' arrays (__func__, __FUNCTION__, __PRETTY_FUNCTION__), private constants as a literal's are:
+    // returned, indexed, taken whole, in a static's initializer and at file scope (an empty one). In static functions,
+    // whose names the oracle's source keeps (it renames the global ones).
+    check_test_program_source(test,
+        "static unsigned fold(const char*s){unsigned h=0;while(*s)h=h*31+(unsigned char)*s++;return h;}"
+        "static const char*top=__func__;static const char*named(void){return __func__;}"
+        "static const char*pretty(int k,const char*(*f)(void)){static const char*own=__FUNCTION__;return k&1?__PRETTY_FUNCTION__:k&2?own:f();}"
+        "static int sized(int n){const char(*p)[6]=&__func__;return (int)sizeof(__PRETTY_FUNCTION__)*100+(*p)[n&3]+__func__[4];}"
+        "int tested(int n){return (int)(fold(top)^fold(named())*3^fold(pretty(n,named))*5)+sized(n)+n;}",
+        "function-name-arrays", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;int y=n?(int){++x}:(int){x+=3};return x*10+y+(int)sizeof((int){++x});}", "scalar-compound-evaluation", clang);
     check_test_program_source(test,
@@ -1028,6 +1127,63 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return (int)(a[3]*4)+(int)(p[-1]*2)+(int)sizeof(long double)+(int)_Alignof(long double)+(int)sizeof a;}"
         "long double half(long double a){return a/2;}",
         "long-double-indirect-and-unprototyped-calls", clang);
+    // The 128-bit integers (#133, #136): Tier 0's I128 and U128, their locals and parameters frame objects, every operation
+    // and conversion (to and from every integer class and floating type, the floating ones and division as libgcc's calls),
+    // constants of every shape (one CONST of either extension, and halves), shifts by counts of every class, updates of
+    // locals, globals and memory, calls passing them in register pairs and on the stack and returning them, va_arg of them
+    // from registers and the overflow area, and temporaries of them (statement expressions, ?: without its middle operand,
+    // a switch on one).
+    check_test_program_source(test,
+        "typedef __int128 i128;typedef unsigned __int128 u128;static int fold(u128 v){return (int)(unsigned)(v^(v>>29)^(v>>64)^(v>>101));}"
+        "int tested(int n){u128 a=((u128)0x0123456789abcdefULL<<64)|(unsigned long long)(n+11)*0x9e3779b97f4a7c15ULL;"
+        "i128 b=-(i128)(n+5)*1000000007LL;u128 c=((u128)0xfedcba9876543210ULL<<64)|0xfedcba9876543210ULL;i128 m=-1;"
+        "i128 h=(i128)0x8000000000000000ULL;u128 k=(u128)-5;int s=(n&7)*9+5;u128 r=a+c;r^=a*c;r+=a-c;r|=(u128)b&c;"
+        "r+=a/(c>>(n&63|1)|1);r^=a%((u128)(n+20)*3|1);i128 q=b/(i128)(n|1)+b%(i128)(n-30|1);r+=(u128)q+(u128)h+k;"
+        "r+=a<<s;r^=c>>s;r+=(u128)((i128)c>>s);r+=a<<(i128)s;r+=(u128)1<<(unsigned char)s;r+=~a;r-=-c;"
+        "int cmp=(a<c)+2*(b<0)+4*(a>=c)+8*((i128)a>b)+16*(a==a)+32*(b!=m)+64*!b+128*(a&&b)+256*(_Bool)(c-c)+512*(h>m);"
+        "double d=(double)a+(double)b;float f=(float)c;long double ld=(long double)b;"
+        "r+=(u128)(d*1e-20)+(u128)(f*1e-30f)+(u128)(-ld);i128 back=(i128)(d/3)-(i128)(ld*7)+(i128)(-f*1e-31f);"
+        "r+=(u128)back+(u128)(long double)(r>>70);long long l=(long long)b;unsigned u=(unsigned)c;signed char sc=(signed char)a;"
+        "unsigned short us=(unsigned short)(a>>3);r+=l+u+sc+us;i128 z=b;z+=n;z-=7;z*=3;z/=-5;z%=1000003;z>>=1;z&=-1;z|=4;z^=2;"
+        "u128 w=a;w++;++w;w--;--w;w<<=s;w>>=3;w*=w;w/=(u128)n*n+1;w%=0xfffffffffffffull;"
+        "return fold(r)^fold((u128)z)^fold(w)^cmp^fold((u128)back)^(int)(float)(r>>100)^(int)(d*1e-33);}",
+        "int128-arithmetic-and-conversions", clang);
+    check_test_program_source(test,
+        "typedef __int128 i128;typedef unsigned __int128 u128;static int fold(u128 v){return (int)(unsigned)(v^(v>>29)^(v>>64)^(v>>101));}"
+        "i128 gi=-12345;u128 gu[3]={1,(u128)1<<100,~(u128)0};struct S{int tag;i128 x;long t;u128 y;};struct S gs={7,-99,9,5};"
+        "i128 muladd(i128 a,u128 b,long c){return a*(i128)(b&0xffff)+c;}"
+        "u128 stacked(long a,long b,long c,long d,long e,u128 x){return x*7-(u128)(a+2*b+3*c+4*d+5*e);}"
+        "u128 sum(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);u128 r=0;"
+        "for(int i=0;i<n;i++){r=r*3+__builtin_va_arg(ap,u128);r+=__builtin_va_arg(ap,int);}__builtin_va_end(ap);return r;}"
+        "struct S make(i128 x,int t){struct S s={t,x,t*2,(u128)x*x};return s;}"
+        "u128 apply(u128(*f)(long,long,long,long,long,u128),u128 x){return f(1,2,3,4,5,x);}"
+        "int tested(int n){u128 v=gu[(unsigned)n%3];gi=gi*7%1000003-n;gu[1]>>=n&7;struct S s=make(gi,n);gs.x+=s.x;gs.y^=s.y;"
+        "u128*p=&gu[2];*p-=n;(*p)++;u128 old=(*p)--;i128*q=&gs.x;*q/=3;"
+        "u128 r=muladd(gi,v,n)+stacked(n,n,n,n,n,v)+sum(4,v,1,(u128)gi,2,old,3,*p,4)+apply(stacked,gu[1]);"
+        "return fold(r)^fold((u128)gs.x)^fold(gs.y)^fold(gu[1])^s.tag^(int)s.t;}",
+        "int128-memory-and-calls", clang);
+    check_test_program_source(test,
+        "typedef __int128 i128;typedef unsigned __int128 u128;static int fold(u128 v){return (int)(unsigned)(v^(v>>29)^(v>>64)^(v>>101));}"
+        "u128 pick(u128 a,u128 b){return a?:b;}"
+        "int tested(int n){u128 a=(u128)(n+7)<<70;i128 b=-(i128)n*99;u128 x=({u128 t=a;t+=b;t*3;})+({i128 s=b;s-=1;(u128)s;});"
+        "i128 y=n>3?b:(i128)a;u128 z=pick(0,a)+pick((u128)n,7);int sw=0;"
+        "switch(b){case 0:sw=1;break;case -99:sw=2;break;case -990 ... -100:sw=3;break;default:sw=4;}"
+        "u128 c=(u128)(n&1?b:(i128)a)*(n>5?a:(u128)b);u128 e=a*({u128 t=c;t>>=3;t;});"
+        "return fold(x)^fold((u128)y)^fold(z)^sw*7^fold(c)^fold(e);}",
+        "int128-temporaries", clang);
+    // Bit-fields of the 128-bit types, whose bits stay within 8 bytes: read, stored, updated and initialized as others are.
+    check_test_program_source(test,
+        "typedef __int128 i128;typedef unsigned __int128 u128;struct B{u128 a:20;i128 b:40;int k;u128 c:3;};struct B gb={5,-7,1,2};"
+        "int tested(int n){struct B b={(u128)n,(i128)n*-1000,n,1};b.a+=7;b.b*=3;b.c=n;u128 old=b.a++;i128 x=--b.b;gb.b-=n;gb.a^=(u128)n<<5;"
+        "return (int)(b.a+old)^(int)(x>>3)^(int)b.c^(int)gb.b^(int)gb.a^b.k;}",
+        "int128-bit-fields", clang);
+    // Long double values kept in temporaries, which frame objects of their own now hold (as the 128-bit integers').
+    check_test_program_source(test,
+        "long double pick(long double a,long double b){return a?:b;}"
+        "int tested(int n){long double a=n*0.75L;long double x=({long double t=a;t*=3;t;})+({long double s=-a;s+1;});"
+        "long double y=pick(0.0L,a)+pick(n,2.5L);long double w=a*({long double q=x;q/=2;q;});"
+        "return (int)(x*16)^(int)(y*8)^(int)(w*4);}",
+        "long-double-temporaries", clang);
     // Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
     // 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
     check_test_program_source(test,
@@ -1197,7 +1353,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "incompatible-errno-accessor-object", true, false, 0, 0);
     check_test_program_boundary(test, "extern int __errno_location;int tested(int n){return n+(0&&__builtin_sqrt(-1.0));}",
                                 "inactive-math-has-no-runtime-accessor", true, true, 0, 0);
-    check_test_program_boundary(test, "__int128 wide(__int128 x){return x+1;}", "wide-primary-program", true, false, 0, 0);
+    check_test_program_boundary(test, "__int128 wide(__int128 x){return x+1;}", "wide-primary-program", true, true, 0, 0);
     check_test_program_boundary(test, "extern int(*callback)(int);int tested(int n){return callback(n);}",
                                 "indirect-function-pointer-call", true, true, 1, 0);
     check_test_program_boundary(test,
@@ -1234,12 +1390,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "aggregate-argument-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "struct B{unsigned x:3;};int tested(int n){struct B b;b.x=n;return b.x;}",
                                 "bit-field-lowering", true, true, 0, 0);
-    // Long double: lowered, with its constants' table, and what would keep one of its values in a temporary refused.
+    // Long double: lowered, with its constants' table, its values in temporaries (frame objects of their own) too.
     check_test_program_boundary(test, "long double g;int tested(int n){long double x=n+0.5L;g=x;return g>1;}", "long-double-lowering", true, true, 1, 1);
-    check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, false, 0, 1);
-    check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, false, 0, 1);
+    check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, true, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, false, 0, 1);
+    // The 128-bit integers: lowered, but _BitInt(128) and a bit-field of them spread over more than 8 bytes.
+    check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
+    check_test_program_boundary(test, "int tested(int n){_BitInt(128) x=n;return x>1;}", "bit-int-128", true, false, 0, 1);
+    check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
+                                false, 0, 0);
     check_test_program_boundary(test,
                                 "struct __attribute__((packed)) P{unsigned char c:4;unsigned long long x:64;};"
                                 "int tested(int n){struct P p;p.x=(unsigned long long)n;return (int)p.x;}",

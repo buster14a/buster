@@ -216,9 +216,12 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
         valid = valid && check_action_integer_type(reader->types, value.type, &width, &sign);
         if (valid)
         {
+            // A name of its scope already, an enumeration constant's or (in a parameter list) a parameter's, as clang
+            // reports `int f(int K, enum E { K } e)` at the second K.
             const uint32_t identifier = parser->tokens.names[name];
             const uint32_t old = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-            valid = old == 0 || reader->bindings.depth[old - 1] != reader->scope_count;
+            const uint32_t depth = check_input_declaration_depth(reader);
+            valid = old == 0 || reader->bindings.depth[old - 1] != depth;
             if (!valid)
             {
                 check_input_report(reader, name, CHECK_INPUT_REDECLARATION);
@@ -238,7 +241,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 reader->enum_values[name] = bits;
                 reader->output->declarations[name] = name;
                 reader->output->attributes[name] = attributes;
-                valid = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_ENUMERATOR, name, i, reader->scope_count) != 0;
+                valid = c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_ENUMERATOR, name, i, depth) != 0;
                 reader->output->resource |= !valid;
                 if (valid)
                 {

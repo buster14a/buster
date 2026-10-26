@@ -329,7 +329,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->linked_types = reader->linked_declarations != 0 ? check_deferred_copy(arena, top->linked_types, names, names, sizeof(TypeId)) : 0;
     reader->builtin_names = reader->linked_types != 0 ? check_deferred_copy(arena, top->builtin_names, names, names, sizeof(uint16_t)) : 0;
     reader->tag_completions = reader->builtin_names != 0 ? check_deferred_copy(arena, top->tag_completions, top->types->tags.count, tags, sizeof(uint32_t)) : 0;
-    valid = reader->tag_completions != 0;
+    // Whether each enum has a fixed base: the top level's for its tags, and the lane's own for those its bodies make,
+    // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
+    reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
+    valid = reader->enum_fixed != 0;
     if (valid && top->intrinsic_names != 0)
     {
         // The intrinsics' cache, which the lane fills for the names it meets, and their tables, which a body that uses
@@ -382,8 +385,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
 
 // The file scope's declaration of `key` that source order's reader sees at `point`, given the history's last one
 // activated at or before it (`handle`, an event + 1, 0 for none): that one, unless a restore ended it at or before the
-// point, as it ends a tag first named in a file-scope declarator (`void g(struct S *p);`) at the declarator's end, which
-// the history keeps since its depth is 0. Then the latest of the name's earlier ones that is still active, or none.
+// point, then the latest of the name's earlier ones that is still active, or none. Only a declarator that fails ends
+// one, whose unit has a report and is source order's: a tag or an enumeration constant first declared in a file-scope
+// prototype (`void g(struct S *p);`) is of the prototype's scope, a level deeper than the file scope the history holds
+// (#438).
 static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t key, uint32_t point, uint32_t handle)
 {
     const CBindings* bindings = environment->bindings;
@@ -517,6 +522,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const uint64_t setup_begin = deferred->timing ? check_deferred_now() : 0;
     // The walk's state at a file-scope function's opening brace, before its scope.
     reader->scope_count = 0;
+    reader->prototype_depth = 0;
     reader->function_result = 0;
     reader->function_end = 0;
     reader->function_body = BUSTER_CHECK_NONE;
@@ -1351,6 +1357,9 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
+    // Plain char's signedness on the caller's table, which the merge fills and the phases after the reader read
+    // (check_input_run sets the top level's, and type_copy each lane's).
+    types->char_unsigned = pp->options.predefines.char_unsigned;
     // The caller's table as it comes, which a fallback to source order takes it back to: the merge replays into it, and
     // may fail after that.
     const TypeViewMark empty = type_view_mark(types);

@@ -1740,6 +1740,22 @@ static const PPTestCase pp_test_cases[] = {
     // after it (seed 14's case 452, C23).
     { "line markers: a paste of a line among a macro's arguments", "#define E(a) X a ## a .\nx \\\ny \\\nE(f\nz)\n", 0, "c17", "x y X f zf z .", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\n\nx y X f\nzf z .\n" },
+    // A token moved past an empty ## operand loses its line start, including one that an outer expansion retained
+    // as LINE_SPACE (#476). The first call leaves the output on a line before the second call's name: a retained line
+    // start would move the token to that name's line. Check both positions in a chain, pastes and a first output token.
+    {
+        .name = "line markers: moved argument tokens after empty paste operands",
+        .source = "#define C(a, b) a ## b\n#define D(a, b) < a ## b >\n#define D3(a, b, c) < a ## b ## c >\n"
+                  "#define WP(a) <D a>\n#define WQ(a) <D3 a>\n#define WC(a) C a\n"
+                  "WP(\n1) WP((,\ny))\nWQ(\n1) WQ((, ,\nr))\n"
+                  "WP(\n1) WP((\nx, ))\nWP(\n1) WP((\nx,\ny))\nWQ(\n1) WQ((,\nq, r))\n"
+                  "WC(\n1) WC((,\ny))\nWP(1) WP((,\ny))\nWP((,\ny))\nD(,\ny)\n",
+        .standard = "c17",
+        .expected = "<D 1> < < y > > <D3 1> < < r > > <D 1> < < x > > <D 1> < < xy > > <D3 1> < < qr > > "
+                    "C 1 y <D 1> < < y > > < < y > > < y >",
+        .markers = "# 1 \"%d/case.c\"\n\n\n\n\n\n\n<D 1> < < y > >\n\n\n<D3 1> < < r > >\n\n\n<D 1> < < x > >\n"
+                   "\n\n<D 1> < < xy > >\n\n\n\n<D3 1> < < qr > >\n\n\nC 1 y\n\n\n<D 1> < < y > >\n\n< < y > >\n\n< y >\n",
+    },
     // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
     // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
     // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
