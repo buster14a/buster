@@ -6210,8 +6210,8 @@ static PPTestChildCounts pp_test_header_set(const char* directory, const char* o
 #define BUSTER_PP_TEST_CASE_PARTS 32
 
 // Cases [first, end) of pp_test_cases in `directory`, as run_preprocessor_fixture_tests runs them all: their failures,
-// and what they added to the pp_test_system_ counters.
-static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clang, uint32_t first, uint32_t end)
+// and what they added to the pp_test_system_ counters. Unless `keep` (--keep), the files the cases leave are removed.
+static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clang, bool keep, uint32_t first, uint32_t end)
 {
     pp_test_system_units = 0;
     pp_test_system_inexact = 0;
@@ -6223,9 +6223,9 @@ static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clan
     {
         counts.failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
     }
-    // What the cases leave, which run_preprocessor_fixture_tests removes from its own directory.
+    // What the cases leave, which run_preprocessor_fixture_tests removes from its own directory unless --keep.
     static const char* const names[] = { "case.c", "other.h", "predefines.h" };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    for (uint32_t i = 0; !keep && i < BUSTER_ARRAY_LENGTH(names); i += 1)
     {
         char path[4200];
         snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
@@ -6280,6 +6280,8 @@ struct PPTestChildren
     const char* links;
     const char* empty;
     bool with_clang;
+    // --keep: the parts' directories and the files the cases leave stay.
+    bool keep;
     char** arguments;
     int argument_count;
     const PPOptions* options;
@@ -6291,14 +6293,15 @@ struct PPTestChildren
 static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint32_t part, const char* own)
 {
     PPTestChildCounts counts = { 0 };
-    const uint32_t cases = BUSTER_ARRAY_LENGTH(pp_test_cases);
+    // The cases' parts take the first `count` cases, or every one.
+    const uint32_t cases = children->count != 0 ? children->count : BUSTER_ARRAY_LENGTH(pp_test_cases);
     switch (children->work)
     {
         case PP_TEST_CHILD_HEADERS:
             counts = pp_test_header_set(own, children->ours, children->links, children->empty, part / 2, part % 2);
             break;
         case PP_TEST_CHILD_CASES:
-            counts = pp_test_case_part(own, children->with_clang, (uint32_t)((uint64_t)cases * part / children->parts),
+            counts = pp_test_case_part(own, children->with_clang, children->keep, (uint32_t)((uint64_t)cases * part / children->parts),
                                        (uint32_t)((uint64_t)cases * (part + 1) / children->parts));
             break;
         case PP_TEST_CHILD_FILES:
@@ -6334,7 +6337,7 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
                 if (mkdir(own, 0700) == 0)
                 {
                     counts = pp_test_child_part(children, started, own);
-                    if (rmdir(own) != 0)
+                    if (!children->keep && rmdir(own) != 0)
                     {
                         printf("test-preprocessor: %s isn't empty after its part\n", own);
                         counts.result = false;
@@ -6437,6 +6440,48 @@ static uint32_t pp_test_files(int passed_count, char** passed, int file_count, c
     free(with_input);
     free(clang);
     arena_release(&arena);
+    return result;
+}
+
+// The cases' parts' cleanup (#465's review): the first two cases in two parts, run as the cases are without --keep and
+// with it, in a directory of their own. Without it, the parts' directories must be gone; with it, each part's must hold
+// its last case's case.c. Prints a line and returns whether both were so.
+static bool pp_test_case_retention(const char* directory)
+{
+    bool result = true;
+    for (uint32_t keep = 0; keep < 2; keep += 1)
+    {
+        char own[4200];
+        snprintf(own, sizeof(own), "%s/retention-%u", directory, keep);
+        const PPTestChildren children = {
+            .work = PP_TEST_CHILD_CASES,
+            .parts = 2,
+            .count = 2,
+            .directory = own,
+            .keep = keep != 0,
+        };
+        const bool made = mkdir(own, 0700) == 0;
+        const PPTestChildCounts counts = made ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
+        bool as_wanted = made && counts.result && counts.failures == 0;
+        for (uint32_t part = 0; part < 2; part += 1)
+        {
+            char path[4300];
+            snprintf(path, sizeof(path), "%s/cases-%u/case.c", own, part);
+            struct stat status;
+            const bool kept = stat(path, &status) == 0;
+            unlink(path);
+            snprintf(path, sizeof(path), "%s/cases-%u", own, part);
+            const bool left = rmdir(path) == 0;
+            as_wanted = as_wanted && kept == (keep != 0) && left == (keep != 0);
+        }
+        as_wanted = rmdir(own) == 0 && as_wanted;
+        if (!as_wanted)
+        {
+            printf("case retention: the parts' files %s\n", keep != 0 ? "weren't kept with --keep" : "were left without --keep");
+        }
+        result = result && as_wanted;
+    }
+    printf("case retention: the parts' files %s\n", result ? "go, and stay with --keep" : "WRONG");
     return result;
 }
 
@@ -7112,6 +7157,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             .parts = BUSTER_PP_TEST_CASE_PARTS,
             .directory = directory,
             .with_clang = with_clang,
+            .keep = keep,
         };
         const PPTestChildCounts cases = pp_test_children(&children);
         pp_test_system_units += cases.system_units;
@@ -7127,6 +7173,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
                pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
                (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
+        passed_all &= pp_test_case_retention(directory);
+        passed_all &= test_process_test() == 0;
         passed_all &= pp_test_system_case_levels(directory);
         passed_all &= pp_test_macro_batches(directory, with_clang);
         passed_all &= pp_test_semantic_pragmas(directory, with_clang);

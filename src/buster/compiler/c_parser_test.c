@@ -129,8 +129,8 @@ struct ParseTestClang
     char message[256];
 };
 
-// Starts `clang -fsyntax-only` with `arguments` on `count` files at once, its standard error into `output` (a file,
-// which a pipe would be if clang could fill it while another process's is read). False if it couldn't start.
+// Starts `clang -fsyntax-only` with `arguments` on `count` files at once, its standard error into `output` (a file in
+// memory, test_process_file: a pipe would stall clang while another process's is read). False if it couldn't start.
 static bool parse_test_clang_spawn(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, FILE* output, pid_t* child)
 {
     const uint32_t fixed = 8;
@@ -296,7 +296,7 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
     {
         const uint32_t first = (uint32_t)((uint64_t)count * p / processes);
         const uint32_t end = (uint32_t)((uint64_t)count * (p + 1) / processes);
-        outputs[p] = result ? tmpfile() : 0;
+        outputs[p] = result ? test_process_file() : 0;
         started[p] = outputs[p] != 0 && parse_test_clang_spawn(clang_path, arguments, argument_count, paths + first, end - first, outputs[p], &children[p]);
         result = started[p];
     }

@@ -30,6 +30,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -59,6 +60,21 @@ static uint32_t test_process_cpus(void)
     return count != 0 ? count : 1;
 }
 
+// A file in memory for a process's output (memfd_create, closed on exec: a descriptor that dup2 gives a process's
+// standard output or errors stays open), or a temporary file where the kernel has none. Null if neither can be made.
+static FILE* test_process_file(void)
+{
+    // MFD_CLOEXEC, which <sys/mman.h> declares only with _GNU_SOURCE.
+    const unsigned int close_on_exec = 1;
+    const long descriptor = syscall(SYS_memfd_create, "buster-test-output", close_on_exec);
+    FILE* result = descriptor >= 0 ? fdopen((int)descriptor, "w+") : 0;
+    if (descriptor >= 0 && result == 0)
+    {
+        close((int)descriptor);
+    }
+    return result != 0 ? result : tmpfile();
+}
+
 // Starts a part: its output files and result pipe, and a child process. Returns true in the child, whose standard
 // output and errors then go to the files, and false in the parent (with pid -1 if the part couldn't start).
 static bool test_process_start(TestProcess* process)
@@ -66,8 +82,8 @@ static bool test_process_start(TestProcess* process)
     int fds[2] = { -1, -1 };
     fflush(stdout);
     fflush(stderr);
-    process->output = tmpfile();
-    process->errors = tmpfile();
+    process->output = test_process_file();
+    process->errors = test_process_file();
     process->pid = process->output != 0 && process->errors != 0 && pipe(fds) == 0 ? fork() : -1;
     const bool child = process->pid == 0;
     if (child)
@@ -88,34 +104,39 @@ static bool test_process_start(TestProcess* process)
     return child;
 }
 
-// In the child: sends `size` bytes of `result` to the parent and exits.
+// In the child: sends `size` bytes of `result` to the parent and exits, or exits without sending them if its output
+// couldn't all be written, so that the parent reports the part as failed.
 static __attribute__((noreturn)) void test_process_exit(const TestProcess* process, const void* result, size_t size)
 {
-    fflush(stdout);
-    fflush(stderr);
-    const bool sent = process->result >= 0 && write(process->result, result, size) == (ssize_t)size;
+    const bool flushed = fflush(stdout) == 0 && !ferror(stdout);
+    const bool errors_flushed = fflush(stderr) == 0 && !ferror(stderr);
+    const bool sent = flushed && errors_flushed && process->result >= 0 && write(process->result, result, size) == (ssize_t)size;
     _exit(sent ? 0 : 1);
 }
 
-// Copies the file a part's output went to into `stream`, and closes it.
-static void test_process_copy(FILE* file, FILE* stream)
+// Copies the file a part's output went to into `stream`, and closes it. Returns whether all of it was read and
+// written (a part that couldn't start has no file, and nothing to copy).
+static bool test_process_copy(FILE* file, FILE* stream)
 {
     char chunk[1 << 16];
     size_t length = 0;
-    const bool rewound = file != 0 && fseek(file, 0, SEEK_SET) == 0;
-    while (rewound && (length = fread(chunk, 1, sizeof(chunk), file)) > 0)
+    bool result = file == 0 || fseek(file, 0, SEEK_SET) == 0;
+    while (result && file != 0 && (length = fread(chunk, 1, sizeof(chunk), file)) > 0)
     {
-        fwrite(chunk, 1, length, stream);
+        result = fwrite(chunk, 1, length, stream) == length;
     }
+    result = result && (file == 0 || !ferror(file)) && fflush(stream) == 0 && !ferror(stream);
     if (file != 0)
     {
         fclose(file);
     }
+    return result;
 }
 
-// In the parent: waits for the part, reads its result into `result` (`size` bytes, zeros if none came), and prints
-// its standard output and then its errors. Returns whether it ran to the end and sent its result.
-static bool test_process_finish(TestProcess* process, void* result, size_t size)
+// In the parent: waits for the part, reads its result into `result` (`size` bytes, zeros if none came), and copies its
+// standard output to `output` and then its errors to `errors`. Returns whether it ran to the end, sent its result and
+// had all of its output copied.
+static bool test_process_finish_to(TestProcess* process, void* result, size_t size, FILE* output, FILE* errors)
 {
     int status = 0;
     const bool received = process->pid > 0 && read(process->result, result, size) == (ssize_t)size;
@@ -124,15 +145,79 @@ static bool test_process_finish(TestProcess* process, void* result, size_t size)
     {
         close(process->result);
     }
-    test_process_copy(process->output, stdout);
-    fflush(stdout);
-    test_process_copy(process->errors, stderr);
+    const bool copied = test_process_copy(process->output, output);
+    const bool errors_copied = test_process_copy(process->errors, errors);
     if (!received)
     {
         memset(result, 0, size);
     }
     *process = (TestProcess){ .result = -1, .pid = -1 };
-    return received && exited;
+    return received && exited && copied && errors_copied;
+}
+
+// test_process_finish_to this process's standard output and errors.
+static bool test_process_finish(TestProcess* process, void* result, size_t size)
+{
+    return test_process_finish_to(process, result, size, stdout, stderr);
+}
+
+// The calls' own checks (#465's review): a part whose output and result all come back; one that can't write its
+// output (its standard output closed), which must send no result; a parent that can't write a part's output (into
+// /dev/full); and a part that fails, whose result is zeros. Prints a line and returns the failures.
+static uint32_t test_process_test(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t c = 0; c < 4; c += 1)
+    {
+        TestProcess process;
+        if (test_process_start(&process))
+        {
+            uint64_t sent = 0x5eed0000u + c;
+            if (c == 1)
+            {
+                close(STDOUT_FILENO);
+            }
+            printf("output %u\n", c);
+            fprintf(stderr, "errors %u\n", c);
+            if (c == 3)
+            {
+                _exit(3);
+            }
+            test_process_exit(&process, &sent, sizeof(sent));
+        }
+        char* output_text = 0;
+        size_t output_length = 0;
+        char* errors_text = 0;
+        size_t errors_length = 0;
+        FILE* output = c == 2 ? fopen("/dev/full", "w") : open_memstream(&output_text, &output_length);
+        FILE* errors = open_memstream(&errors_text, &errors_length);
+        uint64_t received = 1;
+        const bool ran = output != 0 && errors != 0 && test_process_finish_to(&process, &received, sizeof(received), output, errors);
+        if (output != 0)
+        {
+            fclose(output);
+        }
+        if (errors != 0)
+        {
+            fclose(errors);
+        }
+        char wanted[32];
+        snprintf(wanted, sizeof(wanted), "output %u\n", c);
+        char wanted_errors[32];
+        snprintf(wanted_errors, sizeof(wanted_errors), "errors %u\n", c);
+        const bool expected = c == 0 ? ran && received == 0x5eed0000u && output_text != 0 && strcmp(output_text, wanted) == 0 && errors_text != 0 &&
+                                           strcmp(errors_text, wanted_errors) == 0
+                                     : !ran && (c == 2 || received == 0);
+        if (!expected)
+        {
+            printf("test processes: case %u came back %s\n", c, ran ? "as run" : "as failed");
+        }
+        failures += !expected;
+        free(output_text);
+        free(errors_text);
+    }
+    printf("test processes: %u of 4 cases fail (output, a part's output lost, the parent's lost, a failed part)\n", failures);
+    return failures;
 }
 
 #endif
