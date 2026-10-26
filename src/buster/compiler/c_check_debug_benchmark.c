@@ -138,7 +138,7 @@ static bool check_debug_benchmark_emit(CheckDebugBenchmark* benchmark, bool rows
     CheckProgramCode code = { 0 };
     CheckProgramRows made = { 0 };
     const bool emitted = check_program_emit(&code, &unit->selected.program, benchmark->parser, benchmark->identifiers, unit->selected.data.capacity, false, &unit->output,
-                                            &unit->bytes, &unit->scratch, NULL, rows ? &made : NULL, false);
+                                            &unit->bytes, &unit->scratch, NULL, rows ? &made : NULL, false, false);
     arena_pop_to(&unit->bytes, bytes);
     arena_pop_to(&unit->output, output);
     return emitted;

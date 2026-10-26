@@ -3343,8 +3343,9 @@ static bool abi_test_fixtures(void)
 // members of no size (GCC ignores them where clang makes a wide record or offset 16 MEMORY), misaligned members (GCC
 // checks a member's scalars against their sizes, and no _BitInt, where clang checks each member's alignment), so no
 // packing and no alignment a typedef lowers; and what GCC lays out otherwise: arrays whose element's size isn't a
-// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, _BitInt(128) bit-fields of all 128 bits
-// (GCC aligns them to 16 at an offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
+// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, bit-fields aligned below their types'
+// alignment (abi_test_world_record has the rule), _BitInt(128) bit-fields of all 128 bits (GCC aligns them to 16 at an
+// offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
 // declaration spells a vector: GCC applies a declarator's attributes before the vector_size of its specifiers, so it
 // drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`.
 
@@ -3491,6 +3492,18 @@ static bool abi_test_spells_vector(const TypeTable* table, TypeId type)
     return type_kind(table, walk) == BUSTER_TYPE_KIND_VECTOR;
 }
 
+// A member's alignment, as log2 + 1 (0 for none), in a world of GCC's (`gcc`) or clang's: the one drawn, but none for a
+// bit-field aligned below its type's alignment in GCC's. Clang checks that a bit-field fits its type's storage unit
+// before it aligns the field as its attribute says, and GCC after: a field aligned below its type, which crosses the
+// unit only once aligned, is moved to the next unit by GCC and left across it by clang.
+// `char c; unsigned long f : 45 __attribute__((aligned(4)))` has f at byte 8 in GCC and at byte 4 in clang, and
+// `char c; unsigned f : 20 __attribute__((aligned(2)))` at byte 4 and at byte 2.
+static uint8_t abi_test_member_alignment(bool gcc, const TypeTable* table, TypeId type, uint32_t width, uint8_t alignment_log2)
+{
+    const bool lowered = width != BUSTER_TYPE_NOT_BIT_FIELD && alignment_log2 != 0 && alignment_log2 - 1u < type_alignment_log2(table, type);
+    return gcc && lowered ? 0 : alignment_log2;
+}
+
 // A record of random members, completed: small ones mostly, bit-fields, arrays of small types, earlier records, and
 // now and then a flexible array member and attributes. Returns 0 if the table refused it.
 static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool big)
@@ -3533,11 +3546,13 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         }
         type = world->gcc && type_size(table, type) == 0 ? BUSTER_TYPE_CHAR : type;
         const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
+        const uint8_t alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0;
+        // GCC's worlds take the same draws, so that other seeds' worlds stay as they were, but not every alignment.
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
             .type = type,
             .bit_width = width,
-            .alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0,
+            .alignment_log2 = abi_test_member_alignment(world->gcc, table, type, width, alignment_log2),
             .packed = !unnamed && type_test_below(random, 16) == 0 && !world->gcc,
         };
     }
@@ -3623,8 +3638,11 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool gcc_member = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT16;
         const TypeId builtin = BUSTER_TYPE_BUILTIN(code);
         const bool valid = type_is_valid(table, builtin);
+        const bool complex_floating = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
+                                      code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
-                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE));
+                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
+                                                             complex_floating));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -4024,6 +4042,81 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
     return tally.failures == 0;
 }
 
+// The rule GCC's worlds keep for bit-fields (abi_test_member_alignment), whatever --seed draws. First on fixed fields:
+// `unsigned long : 45` and `unsigned : 20` aligned below their types' (GCC's worlds drop it), at and past them, a member
+// that isn't a bit-field and one without an alignment (both keep theirs). Then on worlds of the cross-check's size from
+// the fixed seeds 1 to BUSTER_ABI_TEST_GCC_SEEDS: GCC's, of the record runs and of the compiled run, must hold no
+// bit-field aligned below its type's, and clang's from the same seeds, which keep them, must hold some (8 do), or the
+// scan would pass whatever GCC's held. No compiler runs: the cross-check's seed may never draw a signature that passes
+// one (#508's seed 14 did), but a GCC world without the rule would hold several.
+#define BUSTER_ABI_TEST_GCC_SEEDS 16
+
+static bool abi_test_gcc_bit_fields(void)
+{
+    AbiTestTally tally = { 0 };
+    char detail[160];
+    AbiTestWorld fixed;
+    if (abi_test_expect(&tally, abi_test_world_open(&fixed, 64), "gcc bit-fields", "the world can't be made"))
+    {
+        const TypeTable* table = &fixed.types.test.table;
+        static const struct
+        {
+            TypeId type;
+            uint32_t width;
+            uint8_t alignment_log2;
+            bool dropped;
+        } fields[] = {
+            { BUSTER_TYPE_ULONG, 45, 3, true },
+            { BUSTER_TYPE_UINT, 20, 2, true },
+            { BUSTER_TYPE_ULONG, 45, 4, false },
+            { BUSTER_TYPE_ULONG, 45, 5, false },
+            { BUSTER_TYPE_UINT, 20, 3, false },
+            { BUSTER_TYPE_ULONG, BUSTER_TYPE_NOT_BIT_FIELD, 2, false },
+            { BUSTER_TYPE_ULONG, 45, 0, false },
+        };
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fields); f += 1)
+        {
+            const uint8_t gcc = abi_test_member_alignment(true, table, fields[f].type, fields[f].width, fields[f].alignment_log2);
+            const uint8_t clang = abi_test_member_alignment(false, table, fields[f].type, fields[f].width, fields[f].alignment_log2);
+            snprintf(detail, sizeof(detail), "field %u (width %u, alignment %u): GCC's worlds give %u, clang's %u", f, fields[f].width, fields[f].alignment_log2, gcc,
+                     clang);
+            abi_test_expect(&tally, gcc == (fields[f].dropped ? 0 : fields[f].alignment_log2) && clang == fields[f].alignment_log2, "gcc bit-fields", detail);
+        }
+        abi_test_world_close(&fixed);
+    }
+    uint64_t members = 0;
+    // Clang's worlds' bit-fields aligned below their types', then GCC's.
+    uint64_t below[2] = { 0, 0 };
+    for (uint32_t round = 0; round < BUSTER_ABI_TEST_GCC_SEEDS * 3; round += 1)
+    {
+        AbiTestWorld world;
+        const uint32_t kind = round % 3;
+        if (abi_test_expect(&tally, abi_test_world_open(&world, 8192), "gcc bit-fields", "the world can't be made"))
+        {
+            world.gcc = kind != 0;
+            world.compiled = kind == 2;
+            abi_test_world_build(&world, 1 + round / 3, 600);
+            const TypeTable* table = &world.types.test.table;
+            for (uint32_t m = 1; m < table->members.count; m += 1)
+            {
+                // A member's alignment is its log2 + 1, and 0 for none.
+                const uint8_t alignment = table->members.alignment_log2[m];
+                const bool bit_field = (table->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                below[kind != 0] += bit_field && alignment != 0 && alignment - 1u < type_alignment_log2(table, table->members.type[m]);
+            }
+            members += table->members.count - 1;
+            abi_test_world_close(&world);
+        }
+    }
+    snprintf(detail, sizeof(detail), "GCC's worlds have %" PRIu64 " bit-fields aligned below their types'", below[1]);
+    abi_test_expect(&tally, below[1] == 0, "gcc bit-fields", detail);
+    abi_test_expect(&tally, below[0] != 0, "gcc bit-fields", "clang's worlds have no bit-field aligned below its type's, so GCC's prove nothing");
+    printf("%-34s %10" PRIu64 " members; bit-fields aligned below their types': %" PRIu64 " of clang's, %" PRIu64 " of GCC's\n", "gcc bit-fields", members,
+           below[0], below[1]);
+    abi_test_report("gcc bit-fields", tally);
+    return tally.failures == 0;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Assignment: random calls over a world's types, by the vector path and by the twin.
 
@@ -4039,16 +4132,19 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a struct
-// or a union aligned to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a complex
+// float, double or long double, a struct or a union aligned to 16 at most.
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
+    const uint8_t code = table->types.code[resolved];
     const bool scalar = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] <= 8) || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER ||
-                        (kind == BUSTER_TYPE_KIND_FLOATING && (table->types.code[resolved] == BUSTER_TYPE_CODE_FLOAT || table->types.code[resolved] == BUSTER_TYPE_CODE_DOUBLE));
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
-                      (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                        (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_DOUBLE));
+    const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
+                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
+                      complex || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
 }
 
@@ -7092,6 +7188,7 @@ static int run_calling_convention_tests(int argc, char** argv)
         bool passed = abi_test_merge();
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
+        passed = abi_test_gcc_bit_fields() && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
         passed = (!cross_check || abi_test_cross_descriptors()) && passed;
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep)) && passed;

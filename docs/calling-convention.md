@@ -1165,11 +1165,22 @@ disagree with itself.
 - **Enums:** GCC ignores `aligned` on an enum, and gives one whose values no
   64-bit type holds `__int128`, where clang gives it `long`.
 - **Bit-fields:** GCC places a bit-field of an aligned typedef by the
-  typedef's alignment, clang by its type's. And GCC 16 gives a `_BitInt(128)`
-  bit-field of all 128 bits, at an offset 16 divides, TImode's alignment, 16,
-  which raises its record's: `struct { _BitInt(128) x : 128; char c; }` is 32
-  bytes aligned to 16 there, and 24 aligned to 8 to clang (and to GCC with a
-  127-bit field, or with the field at 8).
+  typedef's alignment, clang by its type's. Clang checks that a bit-field fits
+  its type's storage unit before it aligns the field as an `aligned` attribute
+  on it says, and GCC after: a field aligned below its type's alignment, which
+  crosses the unit only once aligned, is moved to the next unit by GCC and
+  left across it by clang. So
+  `struct { char c; unsigned long f : 45 __attribute__((aligned(4))); }` has
+  `f` at byte 8 in GCC and at byte 4 in clang, and GCC's worlds give a
+  bit-field no alignment below its type's. The plain test checks the rule
+  without compilers (`abi_test_gcc_bit_fields`), whatever `--seed` says: on
+  fixed fields, then on worlds from the fixed seeds 1 to 16, where GCC's must
+  have no such field and clang's some. And
+  GCC 16 gives a `_BitInt(128)` bit-field of all 128 bits, at an offset 16
+  divides, TImode's alignment, 16, which raises its record's:
+  `struct { _BitInt(128) x : 128; char c; }` is 32 bytes aligned to 16 there,
+  and 24 aligned to 8 to clang (and to GCC with a 127-bit field, or with the
+  field at 8).
 - **Declarators' attributes:** GCC applies a declarator's attributes before
   the `vector_size` of its declaration's specifiers, dropping the `aligned` of
   `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`
@@ -1432,11 +1443,12 @@ failure.
 16 bytes, put C that this compiler compiles on our side. Their worlds
 (`AbiTestWorld.compiled`) hold what its C passes: integers of up to 64 bits,
 `__int128` and `unsigned __int128` (#133's lowering to Tier 0's I128 and U128),
-enums, pointers, `float`, `double` and `long double` (#136's item 8), and the
-structs, unions, arrays and aligned typedefs made of them, aligned to 16 at most
-as Tier 0's frame objects are, with flexible array members, bit-fields, packing
-and member alignments;
-no `nullptr_t`, `_BitInt`, vector, complex or `_Atomic` type, and none of
+enums, pointers, `float`, `double` and `long double` (#136's item 8),
+`_Complex float`, `double` and `long double` (#133's lowering, as aggregates of
+their two parts), and the structs, unions, arrays and aligned typedefs made of
+them, aligned to 16 at most as Tier 0's frame objects are, with flexible array
+members, bit-fields, packing and member alignments;
+no `nullptr_t`, `_BitInt`, vector, complex integer or `_Atomic` type, and none of
 clang's directed records. C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
@@ -1464,16 +1476,23 @@ Intel SDE for its AVX-512), the compiled runs pass at seeds 1 to 11, with both
 paths' objects the same bytes every time: against clang, 4,400 signatures of
 26,801 arguments, 60,660 checks; against GCC's worlds, compiled there by GCC 13
 (`-std=gnu2x` for `-std=gnu23`), 4,400 signatures of 25,907 arguments, 58,842
-checks.
+checks. On the 7940HS (2026-10-26, clang 23.1.4 and GCC 16.2.1), once the
+compiled worlds took `__int128` and `_Complex`, every run passes at seeds 1 to
+100. The eight runs of random signatures (the six record runs and the two
+compiled ones) make 320,000 signatures and 4,465,433 checks, of which the
+compiled runs' are 80,000 signatures and 1,080,346 checks; the two extension
+runs ("Extension", below) pass as well.
 
-With the defaults (seed 1), each run has 400 signatures of 2,200 to 2,600
-arguments, and the six runs make about 34,300 checks; on the 9700X the whole
-`--cross-check` takes 4.8 s, about a clang run's time. The runs are
-independent and nearly all of each one's time is its compiler's, so they go at
-once, a child process each (one after another, they took 18.1 s); the test
-prints their lines and adds their counts in the runs' order (clang's, then
-GCC's, each at 16, 32 and 64 bytes), and a run that fails keeps its files.
-Seeds 1 to 100 pass, with clang 23.1.3 and GCC 16.2.1.
+With the defaults (seed 1), each run of random signatures has 400 of 2,200 to
+2,600 arguments, and the eight make about 45,000 checks, besides the two
+extension runs' 1,004 each; on the 9700X the six record runs took 4.8 s, about
+a clang run's time. The ten runs are independent and nearly all of each one's
+time is its compiler's, so they go at once, a child process each (the six
+record runs one after another took 18.1 s); the test prints their lines and
+adds their counts in the runs' order (clang's, then GCC's, each at 16, 32 and
+64 bytes, then the compiled runs against clang and against GCC, then the
+extension runs), and a run that fails keeps its files. The record runs passed
+seeds 1 to 100 with clang 23.1.3 and GCC 16.2.1, before the compiled runs.
 
 Capture descriptors stay above stderr, even when the command starts with
 standard streams closed. Before the ordinary cross-check, bounded child

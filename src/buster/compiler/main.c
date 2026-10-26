@@ -177,6 +177,7 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_predefines.c"
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
+#include "buster/compiler/test_process.c"
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
@@ -250,6 +251,9 @@ int run_bind_benchmark(int argc, char** argv);
 #include "buster/compiler/executable.c"
 #include "buster/compiler/executable_test.c"
 #include "buster/compiler/debug_executable_test.c"
+// The object writer's DWARF checks (ObjectOptions.debug), which test-object-writer runs: they need debug.c's units and
+// the executable tests' ELF reading.
+#include "buster/compiler/object_debug_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
 // A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.
@@ -446,6 +450,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
+#include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.

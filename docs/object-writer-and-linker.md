@@ -721,7 +721,15 @@ A dynamic PIE on this system needs:
   prologues and epilogues), `crtbeginS.o` (233 bytes) and `crtendS.o`;
 - `libc_nonshared.a` (four members: `atexit`, `at_quick_exit`,
   `pthread_atfork`, `__stack_chk_fail_local`);
-- libgcc and `libgcc_s.so.1` when referenced;
+- GCC's `libgcc.a`, which the driver names before `libc.so` and again after
+  it (`-lgcc -lgcc_s_asneeded -lc -lgcc -lgcc_s_asneeded`): the functions a
+  compiler's code calls of its own accord, such as the 128-bit integers'
+  division and conversions (`__udivti3`, `__floattidf`) and the complex
+  types' arithmetic (`__muldc3`), 298 members in GCC 16's. It defines none of
+  the names `libc.so.6` and the loader export, and its integer and binary
+  floating helpers are hidden. `libgcc_s.so.1`, which the driver names as
+  needed, has the unwinder, which only `libgcc.a`'s split-stack members refer
+  to of what it and libc don't define: the direct path doesn't link it;
 - `libc.so.6` itself: 3,189 dynamic symbols, and version definitions from
   `GLIBC_2.2.5` to `GLIBC_2.44`, `GLIBC_ABI_DT_RELR` among them. It is found
   through `/usr/lib/libc.so`, a linker script naming it,
@@ -736,7 +744,8 @@ it once and keeps the result in a snapshot under `$XDG_CACHE_HOME/buster/`.
 
 **Contents:**
 
-- **The crt objects and `libc_nonshared.a`,** imported and laid out together.
+- **The crt objects, `libgcc.a` and `libc_nonshared.a`,** imported and laid
+  out together.
   Their internal references are resolved. What remains are fixups against the
   program and the dynamic sections: `main`, `__libc_start_main@GLIBC_2.34`
   through the GOT, `_init`/`_fini`, `__dso_handle`, the `.init_array` entries
@@ -779,7 +788,8 @@ without it, made private (mode 0700) when it is missing. Each holds its
 kind, which the loader checks: the other kind's file at its name is stale.
 
 - **The file** is the runtime's records as the compiler lays them out in
-  memory, each region at a multiple of 64 bytes, in two parts:
+  memory, each region of the directory at a multiple of 64 bytes and each
+  of the pieces' records at its elements' alignment, in two parts:
   - **the directory,** what every link reads: a header (the counts, the paths
     and each region's place), then from the second page the probes,
     `libc.so.6`'s versions, the members, the strings, the pieces (the crt
@@ -787,8 +797,18 @@ kind, which the loader checks: the other kind's file at its name is stale.
     piece's hash, the global names with their index and filter, the exports,
     and the pieces' references and COMDAT groups;
   - **the pieces' records,** of which a link reads those of the pieces it
-    joins: the link's columns, the bindings and the symbols' global names,
-    then the data, the names run and each piece's atoms' bytes.
+    joins. Every link joins the crt objects, and most join no member, so
+    their records come first and together (#490, format 6): each column
+    binding reads (the link's and the symbols' global names) over the crt
+    objects' records, from each table's record 0; then the data, the crt
+    objects' names, every piece's atoms' bytes and the members' names; then
+    the same columns over the members' records; then the columns nothing
+    reads of a loaded runtime (the atoms' addresses, the symbols' GOT slots,
+    dynamic indices, versions and references, and the bindings), whole. A
+    loaded runtime's `link` points at the crt objects' regions, and its
+    `member_link` at the members', placed so that the runtime's ids index
+    both; binding reads each piece through `runtime_piece_link` and each
+    symbol through `runtime_symbol_link`.
 
   The dynamic runtime's is 198 KB on the 9700X: 2,685 global names with their
   index and filter, and `libc.so.6`'s 2,630 exports and the loader's 38. The
@@ -919,7 +939,7 @@ not, so that one installed into a version's existing directory shows too. The
 import reads each file once into an arena that the atoms point into:
 
 - the crt objects become units 0 to 4, in the driver's order, and each member
-  of `libc_nonshared.a` a unit after them. An object's allocated sections
+  of `libgcc.a` and of `libc_nonshared.a`, in that order, a unit after them. An object's allocated sections
   become atoms of the class lld gives them; `.sframe` (which GCC 16's
   `Scrt1.o` has, and lld 23 copies into the output), notes and `.comment` are
   dropped. `Scrt1.o`'s `.note.ABI-tag` is kept aside for the executable's
@@ -1114,7 +1134,9 @@ against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
 - **Every definition with default or protected visibility is an export**
   (`bind_shared_exports`), not only those of names a library defines or
   `libc.so.6` refers to. The crt objects' and `libc_nonshared.a`'s global
-  names are all hidden, so the exports are the program's. The vector path
+  names are all hidden, and so are `libgcc.a`'s but for its decimal
+  floating-point and split-stack members', so the exports are the program's
+  (and those members', as GNU ld and lld export them). The vector path
   takes 16 symbols at a time, a mask of their flags', atoms' and sources'
   columns, compressed in a register and stored with a mask of its count; its
   exact twin takes a symbol at a time.
@@ -1323,8 +1345,8 @@ and binds every name before any layout:
   link order. So the runtime's objects join around the program's atoms rather
   than being sorted later: `bind_begin` joins `Scrt1.o`, `crti.o` and
   `crtbeginS.o` after the program's symbols and before its atoms, and
-  `bind_end` the members of `libc_nonshared.a` the link needs, then
-  `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
+  `bind_end` the members of `libgcc.a` and `libc_nonshared.a` the link needs,
+  then `crtendS.o` and `crtn.o`, after them. The test programs leave room for this
   (`link_program_generate_begin`, `_atoms` and `_end`).
 - **One symbol per global name.** A global or weak symbol of the runtime's
   takes the link's symbol of its name, if there is one. So `bind_begin` first
@@ -1369,8 +1391,11 @@ and binds every name before any layout:
   each is looked up: the linker's names (`_GLOBAL_OFFSET_TABLE_` and the init
   and fini arrays' bounds), a crt object after the program, an export of
   `libc.so.6` (an import, with the export's type and version) but only for a
-  reference with default visibility, a member of `libc_nonshared.a` for a
-  strong reference, nothing for a weak one. A hidden, internal or protected
+  reference with default visibility, a member of `libgcc.a` or
+  `libc_nonshared.a` for a strong reference, nothing for a weak one. The
+  driver names `libgcc.a` before `libc.so`, but since it defines none of the
+  names `libc.so.6` exports, an export's binding first binds each name as that
+  order does. A hidden, internal or protected
   reference needs a definition within the executable: GNU ld refuses a strong
   one that only a shared library defines and gives a weak one 0, and lld
   does the same.
@@ -2673,6 +2698,165 @@ one that exports it, each needed library's reference to `b_func` is refused, nam
 definition too, but not with a global one, nor where neither library is needed; and a library whose `DT_NEEDED` names
 one the link lacks isn't checked.
 
+#### libgcc.a in a dynamic link
+
+A compiler's code calls libgcc's functions of its own accord: the 128-bit
+integers' division, remainder and conversions to and from the floating types,
+which #133's lowering of `__int128` calls as clang -O0 does, and the complex
+types' arithmetic. GCC's driver names `libgcc.a` before `libc.so` and again
+after it (`-lgcc -lgcc_s_asneeded -lc -lgcc -lgcc_s_asneeded`, GCC 16's line
+for a PIE and for `-shared`). So a dynamic PIE's and a shared library's
+runtimes have it as their first archive, before `libc_nonshared.a`, its 298
+members (GCC 16's) units after the crt objects'. Binding joins them round by
+round, as it joins `libc_nonshared.a`'s:
+
+- **The order.** Binding takes an export of `libc.so.6` before a member, where
+  the line has `libgcc.a` first. The two agree because `libgcc.a` defines
+  none of the names `libc.so.6` and the loader export, which `test-import`
+  checks on the system's files; a system where it did would need the members
+  first.
+- **`libgcc_s.so.1`,** which the driver names as needed, isn't linked. Of the
+  names `libgcc.a`'s members refer to that neither it nor libc defines, it has
+  the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`), which only the
+  split-stack member (`morestack.o`) refers to: split-stack code
+  (`-fsplit-stack`, whose prologues call `__morestack`) and its API
+  (`__splitstack_getcontext`) make it join. A PIE and a shared library that
+  join it are refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong reference
+  to a name nothing defines that only the members which joined refer to,
+  naming the first such member), where the shared library left the names to
+  the loader, as `-shared` leaves a program's own: it would load only beside
+  a library that defines them. GCC's and lld's links of such a library need
+  `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc but not
+  `libgcc_s.so.1` doesn't load into a process without it ("undefined symbol:
+  __gcc_personality_v0"). Linking it as needed, its exports a third library
+  of the snapshot's after `libc.so.6` and the loader, is #489.
+- **Hidden helpers.** The integer and binary floating helpers are hidden, so a
+  shared library exports none of them. Only the decimal floating-point and
+  split-stack members define names with default visibility, which GNU ld and
+  lld export too.
+- **A pending member's reference.** Members of `libgcc.a` refer to each other,
+  which `libc_nonshared.a`'s never did. A strong reference whose member
+  binding marked as needed kept source NONE until the member joined, at the
+  end of the round, and a member that joined first with a reference to the
+  same name took it for a reference left to nothing: `__fixdfti`'s member
+  calls `__fixunsdfti`, so a program that called both failed. Such a symbol
+  now has source `RUNTIME_ARCHIVE` (`bind_resolve_symbol`), as one that
+  `crtendS.o` defines when it joins has.
+- **One round's members.** Two members that join in one round can refer to a
+  name that neither defines and that binding hasn't reached: the first one's
+  join adds its symbol, which the next round binds, and the second one's took
+  that for a weak reference left to nothing. `memset` (of the `_BitInt` and
+  decimal floating conversions), `__sfp_handle_exceptions` (of the
+  `__float128` helpers) and the decimal floating point's thread-local flags
+  (`__bid_IDEC_glbflags`) failed 32 of the 300 members' links so. `bind_merge`
+  takes a symbol of source NONE for one so only below `Bind.resolved`, the end
+  of the symbols binding has bound.
+- **The room.** The room a link reserves for the runtime counted every member
+  (`bind_capacity`): 2,063 symbols for a PIE's runtime, against 51 before
+  `libgcc.a`. The C driver's links count only the crt objects and the members
+  that their names may make join (`bind_capacity_needed`): the closure of the
+  members that define the names the unit refers to without defining them (its
+  symbols with linkage, and the runtime functions its lowering calls) and the
+  crt objects' references, over the members' references
+  (`Runtime.reference_members`), since a member joins only for a strong
+  reference to a name it defines. A name that the link defines or a library
+  exports counts a member that doesn't join. A link of one member's name
+  needs 72 symbols of room on average, and 266 at most. The room reads only
+  what the snapshot's directory holds, which loading hashes whole: the global
+  names, the pieces' references and marks, and each piece's atoms' room
+  (`RuntimePiece.atom_room`), which the import sums. It reads no piece's
+  records, which binding checks only as it joins the piece: a damaged one
+  can't size the link (an alignment past 63 would make an undefined shift, a
+  size an arena past any), and its join fails as damaged
+  (`BIND_ERROR_SNAPSHOT`), on which the C driver discards the snapshot and
+  imports the runtime again.
+- **The overrides.** `bind_begin`'s room for the runtime's definitions that
+  take the program's over was one per global name, 3,387 of 12 bytes with
+  `libgcc.a`'s names, which put the arrays after it past the 64 KB of base
+  pages the C driver's arena starts with: clearing `Bind.symbols` then faulted
+  and cleared a 2 MB huge page in every link. Only the program's own
+  definitions can be taken over, in `bind_begin`'s joins, so the room is the
+  fewer of the global names and the link's symbols then, pushed last.
+
+**The cost**, on the 9700X against main (ff8936be), two rounds each, main's and
+the branch's in turn ([the
+record](https://github.com/buster14a/buster-performance/tree/0c80bfaaac18e96b40aebeec78ef7c9a63455dbb/docs/measurements/libgcc-483-2026-10-26)):
+the dynamic runtime's snapshot grew from 197,828 bytes to 3,281,015 (302
+members, 3,387 global names), and `runtime_open` from 9.9 us to 11.7 us (the
+directory's hash 3.2 to 4.65 us, and `libgcc.a`'s probe). The direct path's
+link of one worker as a PIE took 24.6 us against 19.7, open and `bind_begin`
+4.9 us of it: `bind_begin` takes 3 us more, 5 us for 102,400 workers, as it
+reads the crt objects' records at the starts of columns that now span 302
+pieces, a page of the mapping each. That stays constant in a program's size: 2,000
+workers' PIE 144.1 us against 139.0, and the larger links' differences are
+within their writes' rounds. The C driver compiling and linking a hello world
+took 2.349 ms against 2.329 (+0.9%), its peak resident set 31,768 KB against
+31,196 and 574 minor faults against 560; before the overrides' bound it took
+2.433 ms and 33,844 KB. The direct path couldn't link a 128-bit integer's
+division or a complex product without `libgcc.a` at all, so the constant is the
+price of linking them; laying the crt objects' records out apart from the
+members' takes back `bind_begin`'s part (#490, below).
+
+**The crt objects' records apart (#490).** With each column whole, the crt
+objects' records were the starts of 24 columns spread over 260 KB of the
+mapping, and their atoms' bytes came after the 30 KB names run: a link that
+joined no member faulted four 64 KB windows of the mapping that the
+directory's hash hadn't (a file's read fault maps a window around its page).
+Format 6 puts them in one span of 3.5 KB right after the directory, in the
+window the hash faults last ("The file", above); `bind_begin` no longer clears
+an entry of `Bind.symbols` for every member's symbol, which each piece's join
+writes before anything reads it; and the pieces' regions are aligned to their
+elements, not to 64 bytes. On the 9700X, the branch's final head against main
+(35f26f68) and against main before `libgcc.a` (ff8936be), ten rounds in turn
+([the record](https://github.com/buster14a/buster-performance/tree/3de2d80081d62ab317eb564b93ed260e8301bfd6/docs/measurements/snapshot-crt-region-490-2026-10-26)):
+
+| | before `libgcc.a` | main | this |
+| --- | ---: | ---: | ---: |
+| `bind_begin`, 1 worker, PIE | 0.7 µs | 3.8 µs, 4 faults | 0.8 µs, 0 faults |
+| `bind_begin`, 1 worker, static | 15.0 µs | 15.3 µs, 21 faults | 1.0 µs, 0 faults |
+| link, 1 worker, PIE | 19.4 µs | 24.1 µs | 21.4 µs |
+| link, 1 worker, static | 379.1 µs | 377.6 µs | 367.7 µs |
+| `runtime_open`, dynamic | 9.88 µs | 11.82 µs | 11.79 µs |
+| dynamic snapshot | 197,828 bytes | 3,283,511 bytes | 3,282,344 bytes |
+| C driver's hello world | 2.319 ms, 560 faults | 2.354 ms, 573 faults | 2.352 ms, 567 faults |
+
+Main with its mapping populated before use (a diagnostic switch) took 0.9 µs
+in `bind_begin` and no fault there: the faults were its 3 µs. A static link's
+`bind_begin` took as long before `libgcc.a` (15.0 µs), its crt objects' records
+spread over the columns of 2,618 members. Counted step by step in diagnostic
+builds, the hello world's link takes 42 faults against 50 on main and 38 before
+`libgcc.a`; the four more come with the larger runtime (the closure's scratch,
+the global names' table that `bind_begin` clears, `dynamic_inputs`' arrays),
+and the rest of the process varies with each build's code (the same front end
+faulted 528 to 533 times in three builds).
+
+`test-import` checks the archives' order, `__udivti3` a member's of
+`libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;
+`test-bind`'s libgcc program calls `__udivti3`, `__fixunsdfti` and
+`__fixdfti` through references of source NONE, as the C driver's are, and
+must join exactly their three members (with `--cross-check`, ld.lld's and
+ld.bfd's links of it run, and lld extracts the same members). Its room check
+binds, against a PIE's runtime and a shared library's, a link of each
+member's first name that no library exports, which must bind (or be refused
+for `morestack.o`'s unwinder) within `bind_capacity_needed`'s room for the
+name; its rules refuse references to `__morestack` and
+`__splitstack_getcontext`, and bind one beside the program's own unwinder;
+and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
+library and as a PIE, by both paths, where cc's links with GNU ld and lld
+need `libgcc_s.so.1`, load into a harness that doesn't and run.
+`test-snapshot` damages a byte of the pieces' records at 171 places of each
+kind's snapshot, and each damaged copy must give a link of every member's
+names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
+program as a PIE among its cases, and links a shared library whose code, cc's,
+calls seven of `libgcc.a`'s functions; and `test-checker-driver --executable`
+compiles and links a C program of 128-bit division and conversions by both
+paths into the same bytes, which needs `libc.so.6` alone and prints what the
+test's own code computes, links it again over a snapshot whose `__udivti3`
+member's first atom has an alignment of 2^255 and a size of 2^64 - 1 (which
+must import the runtime again, silently, and leave the first link's snapshot),
+and refuses a call of `__splitstack_getcontext` with the one error and no
+executable.
+
 #### The unwind tables
 
 Step 5 compares the direct path with linkers on outputs of the same features,
@@ -3195,6 +3379,14 @@ builds an object in its scratch arena and writes it with one `pwrite`.
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
   named symbol at offset 0. Each section is followed by its `.rela.<section>`
   if its atoms have fixups;
+- with `ObjectOptions.debug`'s entry for the unit, the DWARF of its functions (#395):
+  debug.c's `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_addr` and
+  `.debug_rnglists`, unallocated, `.debug_info` followed by its relocations
+  (each unit's fields that point into the other four, `R_X86_64_32` against
+  their sections' symbols), and with functions `.debug_line` and
+  `.debug_addr` by theirs (each function's address, `R_X86_64_64` against its
+  section's symbol). [The debug guide](debug.md) ("Relocatable objects") has
+  the rules;
 - `.note.GNU-stack`, which must be there or linkers assume an executable
   stack, and `.comment`;
 - `.symtab`, `.symtab_shndx` when it is needed, `.strtab` and `.shstrtab`,
@@ -3206,9 +3398,8 @@ contents start in the file at a multiple of its alignment, as GNU as places
 them, up to 4 KB: linkers copy contents from any offset, and more would only
 pad the file. The generated programs' `.eh_frame` atoms ("The unwind
 tables") give each object a `.eh_frame` and its `.rela.eh_frame`. Not yet:
-`.debug_*`, which waits for DWARF (step 9), and priorities in
-`.init_array`'s and `.fini_array`'s names, which the representation doesn't
-have.
+priorities in `.init_array`'s and `.fini_array`'s names, which the
+representation doesn't have.
 
 **Symbols:**
 
@@ -4258,12 +4449,22 @@ calling its entry or starting replacement threads. `lane_alone` does not
 permit nesting. The entry's shared writes are visible when `lane_run` returns;
 each worker releases its scratch arenas after the operation, while the
 calling thread keeps its scratch and gets its prior lane context, counter and
-CPU affinity back. Dispatch/completion synchronization is separate from the
-barriers inside an operation.
+CPU affinity back. A command whose operations follow one another can have its
+workers keep their arenas instead (`lane_team_keep_scratch`), emptied after
+each operation and released when the team stops: `link-foreign` does (#501),
+where it measured 2.5% off its small links on eight lanes and 0.7% off a
+102,400-worker one (each link's 14 reservations and unmappings fewer, and 28
+to 47 page faults), for up to 1.9 MB more peak resident memory ([the
+record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)). The benchmarks'
+teams release them, so that each operation pays for its scratch as a command
+does. Dispatch/completion synchronization is separate from the barriers inside
+an operation.
 
-`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
-output modes of `benchmark-executable` own teams. Each handler starts and
-stops its team in the translation unit that runs the operations: the
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link`, the
+output modes of `benchmark-executable` and `link-foreign` own teams:
+`link-foreign`'s resolution, conversion and write share one (#501). Each
+handler starts and stops its team in the translation unit that runs the
+operations: the
 benchmarks' units have thread-local contexts of their own, beside the one
 that `main.c`'s units share (`lane.c`). The ordinary
 preprocess/parse command still runs on one lane; the broader frontend work is

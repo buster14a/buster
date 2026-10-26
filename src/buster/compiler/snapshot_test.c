@@ -34,7 +34,8 @@
 //     region misaligned, past the end or of the wrong size, counts out of range); runtime_open must replace them. A
 //     directory and a FIFO at the snapshot's path must neither block nor fail the link.
 //   - Damaged pieces, of each kind's snapshot: a byte of the pieces' records changed, which only the piece that holds
-//     it shows, and a link that reads that piece fails (snapshot_test_damaged).
+//     it shows and no link's room (bind_capacity_needed) sees, and a link that reads that piece fails
+//     (snapshot_test_damaged).
 //   - Concurrency: eight processes opening the runtime at once in an empty directory must each get it, imported or
 //     loaded, and leave one snapshot, which loads, and no other file.
 //   - The cache directory: snapshot_directory from XDG_CACHE_HOME and HOME.
@@ -61,8 +62,9 @@
 #define BUSTER_SNAPSHOT_TEST_SECONDS 30
 // The headers the invalid files' check changes and rehashes: the version, the magic, the header's size, a region
 // misaligned, one running past the end, one shorter than its column, the index's bits past 31, the names run past the
-// data, a region starting past the end, and the directory's end before its last region's.
-#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 10
+// data, a region starting past the end, more crt objects' records than the table has, the members' names before the
+// crt objects' end, and the directory's end before its last region's.
+#define BUSTER_SNAPSHOT_TEST_HEADER_CHANGES 12
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
@@ -114,21 +116,34 @@ static bool snapshot_test_same_column(const void* a, const void* b, uint64_t byt
     return bytes == 0 || (a != 0 && b != 0 && memcmp(a, b, bytes) == 0);
 }
 
-// Whether two runtimes' links have the same records, as bind_test_same_links compares two links, the names' and atoms'
-// bytes through each runtime's accessors (a loaded runtime's columns hold offsets).
+// The link whose columns hold record `record` of a table whose crt objects' records end at `objects` (the first member's
+// record): a loaded runtime keeps the members' in Runtime.member_link (snapshot.c).
+static const Link* snapshot_test_record_link(const Runtime* runtime, uint32_t record, uint32_t objects)
+{
+    return runtime->snapshot != 0 && record >= objects ? &runtime->member_link : &runtime->link;
+}
+
+// Whether two runtimes' links have the same records, as bind_test_same_links compares two links, each record through the
+// link that holds it (snapshot_test_record_link), the names' and atoms' bytes through each runtime's accessors (a loaded
+// runtime's columns hold offsets).
 static bool snapshot_test_same_link(const Runtime* x, const Runtime* y)
 {
-    const Link* a = &x->link;
-    const Link* b = &y->link;
-    bool result = a->names.count == b->names.count && a->atoms.count == b->atoms.count && a->symbols.count == b->symbols.count && a->fixups.count == b->fixups.count &&
-                  a->fixups.wide_count == b->fixups.wide_count && a->priorities.count == b->priorities.count;
-    for (NameId name = 1; result && name < a->names.count; name += 1)
+    const ImportMark ox = runtime_object_records(x);
+    const ImportMark oy = runtime_object_records(y);
+    bool result = x->link.names.count == y->link.names.count && x->link.atoms.count == y->link.atoms.count && x->link.symbols.count == y->link.symbols.count &&
+                  x->link.fixups.count == y->link.fixups.count && x->link.fixups.wide_count == y->link.fixups.wide_count &&
+                  x->link.priorities.count == y->link.priorities.count;
+    for (NameId name = 1; result && name < x->link.names.count; name += 1)
     {
+        const Link* a = snapshot_test_record_link(x, name, ox.names);
+        const Link* b = snapshot_test_record_link(y, name, oy.names);
         result = a->names.length[name] == b->names.length[name] && a->names.hash[name] == b->names.hash[name] &&
                  memcmp(runtime_name_bytes(x, name), runtime_name_bytes(y, name), (uint64_t)a->names.length[name] + 1) == 0;
     }
-    for (AtomId atom = 1; result && atom < a->atoms.count; atom += 1)
+    for (AtomId atom = 1; result && atom < x->link.atoms.count; atom += 1)
     {
+        const Link* a = snapshot_test_record_link(x, atom, ox.atoms);
+        const Link* b = snapshot_test_record_link(y, atom, oy.atoms);
         const uint8_t* p = runtime_atom_bytes(x, atom);
         const uint8_t* q = runtime_atom_bytes(y, atom);
         result = a->atoms.class[atom] == b->atoms.class[atom] && a->atoms.alignment_log2[atom] == b->atoms.alignment_log2[atom] && a->atoms.unit[atom] == b->atoms.unit[atom] &&
@@ -136,22 +151,76 @@ static bool snapshot_test_same_link(const Runtime* x, const Runtime* y)
                  a->atoms.fixup_count[atom] == b->atoms.fixup_count[atom] && a->atoms.address[atom] == b->atoms.address[atom] && (p != 0) == (q != 0) &&
                  (p == 0 || memcmp(p, q, a->atoms.size[atom]) == 0);
     }
-    const LinkSymbols* s = &a->symbols;
-    const LinkSymbols* t = &b->symbols;
-    for (SymbolId symbol = 1; result && symbol < s->count; symbol += 1)
+    for (SymbolId symbol = 1; result && symbol < x->link.symbols.count; symbol += 1)
     {
+        const LinkSymbols* s = &snapshot_test_record_link(x, symbol, ox.symbols)->symbols;
+        const LinkSymbols* t = &snapshot_test_record_link(y, symbol, oy.symbols)->symbols;
         result = s->name[symbol] == t->name[symbol] && s->atom[symbol] == t->atom[symbol] && s->value[symbol] == t->value[symbol] && s->size[symbol] == t->size[symbol] &&
                  s->flags[symbol] == t->flags[symbol] && s->source[symbol] == t->source[symbol] && s->got_slot[symbol] == t->got_slot[symbol] &&
                  s->dynamic_index[symbol] == t->dynamic_index[symbol] && s->version[symbol] == t->version[symbol] && s->reference[symbol] == t->reference[symbol];
     }
-    for (FixupId fixup = 1; result && fixup < a->fixups.count; fixup += 1)
+    for (FixupId fixup = 1; result && fixup < x->link.fixups.count; fixup += 1)
     {
+        const Link* a = snapshot_test_record_link(x, fixup, ox.fixups);
+        const Link* b = snapshot_test_record_link(y, fixup, oy.fixups);
         result = a->fixups.offset[fixup] == b->fixups.offset[fixup] && a->fixups.target[fixup] == b->fixups.target[fixup] && a->fixups.kind[fixup] == b->fixups.kind[fixup] &&
                  link_fixup_addend(a, fixup) == link_fixup_addend(b, fixup);
     }
-    for (uint32_t entry = 1; result && entry < a->priorities.count; entry += 1)
+    for (uint32_t entry = 1; result && entry < x->link.priorities.count; entry += 1)
     {
+        const Link* a = snapshot_test_record_link(x, entry, ox.priorities);
+        const Link* b = snapshot_test_record_link(y, entry, oy.priorities);
         result = a->priorities.atom[entry] == b->priorities.atom[entry] && a->priorities.priority[entry] == b->priorities.priority[entry];
+    }
+    return result;
+}
+
+// The most bytes the crt objects' records take after a snapshot's directory: 3.5 KB for the dynamic runtime of the
+// laptop's GCC 16 and glibc 2.44, the regions' alignments included.
+#define BUSTER_SNAPSHOT_TEST_OBJECT_BYTES (16ull << 10)
+
+// Whether a loaded runtime's crt objects' records, which every link joins, are together after its snapshot's directory
+// (#490): every slice of a crt object that binding reads (runtime_piece_slices) within the bytes from the directory's
+// end to the end of their atoms' bytes in the data, at most BUSTER_SNAPSHOT_TEST_OBJECT_BYTES, and none of a member's
+// there, so that a link that joins no member reads no page the members' records hold.
+static bool snapshot_test_objects_together(const Runtime* loaded, uint64_t* object_bytes)
+{
+    const SnapshotHeader* header = (const SnapshotHeader*)loaded->snapshot;
+    const uintptr_t low = (uintptr_t)loaded->snapshot + header->directory_bytes;
+    const uintptr_t high = (uintptr_t)loaded->snapshot_data + loaded->piece_data[RUNTIME_OBJECTS];
+    *object_bytes = high - low;
+    bool result = high > low && high - low <= BUSTER_SNAPSHOT_TEST_OBJECT_BYTES;
+    for (uint32_t piece = 0; result && piece < RUNTIME_OBJECTS + loaded->member_count; piece += 1)
+    {
+        RuntimeSlice slices[BUSTER_RUNTIME_PIECE_SLICES];
+        const uint32_t count = runtime_piece_slices(loaded, piece, slices);
+        for (uint32_t s = 0; result && s < count; s += 1)
+        {
+            const uintptr_t start = (uintptr_t)slices[s].bytes;
+            const uintptr_t end = start + slices[s].size;
+            const bool inside = start >= low && end <= high;
+            const bool outside = end <= low || start >= high;
+            result = slices[s].size == 0 || (piece < RUNTIME_OBJECTS ? inside : outside);
+        }
+    }
+    return result;
+}
+
+// Whether every fixup of each piece of a runtime targets one of the piece's own symbols: binding writes a piece's entries
+// of Bind.symbols as it joins, and reads them only for the piece's fixups, never clearing the rest (#490).
+static bool snapshot_test_fixups_in_pieces(const Runtime* runtime)
+{
+    bool result = true;
+    for (uint32_t piece = 0; result && piece < RUNTIME_OBJECTS + runtime->member_count; piece += 1)
+    {
+        const Link* link = runtime_piece_link(runtime, piece);
+        const ImportMark begin = runtime->pieces[piece].begin;
+        const ImportMark end = runtime->pieces[piece].end;
+        for (FixupId fixup = begin.fixups; result && fixup < end.fixups; fixup += 1)
+        {
+            const SymbolId target = link->fixups.target[fixup];
+            result = target >= begin.symbols && target < end.symbols;
+        }
     }
     return result;
 }
@@ -171,11 +240,20 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         current = current && runtime_piece_current(loaded, piece);
     }
     snapshot_test_expect(tally, current, "every piece as it was written", index);
-    const Link* link = &loaded->link;
-    bool names_run = loaded->names.length == imported->names.length && memcmp(loaded->names.base, imported->names.base, imported->names.length) == 0;
-    for (NameId name = 1; names_run && name < link->names.count; name += 1)
+    snapshot_test_expect(tally, snapshot_test_fixups_in_pieces(imported) && snapshot_test_fixups_in_pieces(loaded), "each piece's fixups target its own symbols", index);
+    uint64_t together = 0;
+    snapshot_test_expect(tally, snapshot_test_objects_together(loaded, &together), "the crt objects' records together after the directory", together);
+    // The names run in its two parts: the crt objects' names (Runtime.names) and the members' (Runtime.member_names), each
+    // name at its place in the import's run.
+    const ImportMark objects = runtime_object_records(loaded);
+    const uint64_t object_bytes = objects.name_bytes;
+    bool names_run = loaded->names.length == object_bytes && object_bytes <= imported->names.length &&
+                     memcmp(loaded->names.base, imported->names.base, object_bytes) == 0 &&
+                     memcmp(loaded->member_names + object_bytes, imported->names.base + object_bytes, imported->names.length - object_bytes) == 0;
+    for (NameId name = 1; names_run && name < imported->link.names.count; name += 1)
     {
-        names_run = runtime_name_bytes(loaded, name) - loaded->names.base == imported->link.names.bytes[name] - imported->names.base;
+        const uint8_t* run = name < objects.names ? loaded->names.base : loaded->member_names;
+        names_run = runtime_name_bytes(loaded, name) - run == imported->link.names.bytes[name] - imported->names.base;
     }
     snapshot_test_expect(tally, names_run, "the names run, each name where the import put it", index);
     const uint64_t pieces = RUNTIME_OBJECTS + (uint64_t)imported->member_count;
@@ -204,8 +282,11 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
                                     snapshot_test_same_column(loaded->groups, imported->groups, groups * sizeof(RuntimeGroup)) &&
                                     snapshot_test_same_column(loaded->group_atoms, imported->group_atoms, group_atoms * sizeof(AtomId)),
                          "the groups", index);
+    const uint64_t object_symbols = objects.symbols;
     snapshot_test_expect(tally, snapshot_test_same_column(loaded->bindings, imported->bindings, symbols * sizeof(RuntimeBinding)) &&
-                                    snapshot_test_same_column(loaded->symbol_names, imported->symbol_names, symbols * sizeof(uint32_t)),
+                                    snapshot_test_same_column(loaded->symbol_names, imported->symbol_names, object_symbols * sizeof(uint32_t)) &&
+                                    snapshot_test_same_column(loaded->member_symbol_names + object_symbols, imported->symbol_names + object_symbols,
+                                                              (symbols - object_symbols) * sizeof(uint32_t)),
                          "the bindings and the symbols' global names", index);
     bool members = true;
     for (uint32_t m = 0; m < imported->member_count; m += 1)
@@ -384,6 +465,15 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     const bool bound = bound_imported && bound_loaded;
     snapshot_test_expect(tally, bound, "the program bound against both", index);
     snapshot_test_expect(tally, bound && bind_test_same_links(&a.program.link, &b.program.link) && bind_test_same_binds(&a.bind, &b.bind), "the same link and binding", index);
+    // Against the loaded runtime again, over binding's arena dirtied first (bind_test_dirty): the members' records read
+    // through their own view (#490), and Bind.symbols not cleared.
+    BindTestProgram c;
+    const bool bound_dirty = bind_test_program_dirtied(&c, loaded, options, path, bind_test_dirty_bytes(b.arena.length));
+    snapshot_test_expect(tally,
+                         !bound || (bound_dirty && bind_test_same_links(&b.program.link, &c.program.link) && bind_test_same_binds(&b.bind, &c.bind) &&
+                                    bind_test_kept_pattern(&c.bind, loaded)),
+                         "the loaded runtime's binding over a dirty arena the same", index);
+    bind_test_release(&c);
     char path_a[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     char path_b[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(path_a, directory->path, "imported");
@@ -950,6 +1040,14 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
             // Starting past the end.
             header->regions[SNAPSHOT_REGION_FILTER].offset = (good.length + 2 * BUSTER_SNAPSHOT_ALIGNMENT) & ~(uint64_t)(BUSTER_SNAPSHOT_ALIGNMENT - 1);
             break;
+        case 9:
+            // A table's crt objects' records past its records: the members' regions would hold a negative count.
+            header->counts.object_symbols = header->counts.symbols + 1;
+            break;
+        case 10:
+            // The members' names placed before the run's first part ends: Runtime.member_names would point before the data.
+            header->counts.member_names_run = header->counts.object_name_bytes - 1;
+            break;
         default:
             // Ending before the directory's last region does, which its hash would then leave out.
             header->directory_bytes -= BUSTER_SNAPSHOT_ALIGNMENT;
@@ -1022,15 +1120,17 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
 // A snapshot whose directory is whole but one of whose pieces' records isn't loads: binding checks each piece when it
 // first reads it (runtime_piece_current), so that a link reads only what this executable wrote.
 
-// The table a piece region's column is a column of, by the mark of its records in `mark`.
+// The table a piece region's column is a column of, by the mark of its records in `mark`: of a region of the members'
+// records, its crt objects' region's.
 static uint64_t snapshot_test_mark(ImportMark mark, uint32_t region)
 {
+    const uint32_t r = region >= SNAPSHOT_REGION_MEMBER_NAME_BYTES && region <= SNAPSHOT_REGION_MEMBER_SYMBOL_NAMES ? region - BUSTER_SNAPSHOT_MEMBER_REGIONS : region;
     uint64_t result = mark.symbols;
-    result = region >= SNAPSHOT_REGION_NAME_BYTES && region <= SNAPSHOT_REGION_NAME_HASH ? mark.names : result;
-    result = region >= SNAPSHOT_REGION_ATOM_CLASS && region <= SNAPSHOT_REGION_ATOM_ADDRESS ? mark.atoms : result;
-    result = region >= SNAPSHOT_REGION_FIXUP_OFFSET && region <= SNAPSHOT_REGION_FIXUP_KIND ? mark.fixups : result;
-    result = region == SNAPSHOT_REGION_WIDE_ADDENDS ? mark.wide_addends : result;
-    result = region == SNAPSHOT_REGION_PRIORITY_ATOM || region == SNAPSHOT_REGION_PRIORITY_VALUE ? mark.priorities : result;
+    result = r >= SNAPSHOT_REGION_NAME_BYTES && r <= SNAPSHOT_REGION_NAME_HASH ? mark.names : result;
+    result = (r >= SNAPSHOT_REGION_ATOM_CLASS && r <= SNAPSHOT_REGION_ATOM_FIXUP_COUNT) || r == SNAPSHOT_REGION_ATOM_ADDRESS ? mark.atoms : result;
+    result = r >= SNAPSHOT_REGION_FIXUP_OFFSET && r <= SNAPSHOT_REGION_FIXUP_KIND ? mark.fixups : result;
+    result = r == SNAPSHOT_REGION_WIDE_ADDENDS ? mark.wide_addends : result;
+    result = r == SNAPSHOT_REGION_PRIORITY_ATOM || r == SNAPSHOT_REGION_PRIORITY_VALUE ? mark.priorities : result;
     return result;
 }
 
@@ -1044,26 +1144,33 @@ static bool snapshot_test_hashed(uint32_t region)
 
 // The piece whose records hold byte `offset` of a snapshot (`header`, viewed as loaded in `view`), by the test's own
 // reading of the layout: in a column its hash covers (snapshot_test_hashed), the piece of the record (piece 0 from
-// record 0); in the data, the piece of the names run's byte or of the atoms' bytes. UINT32_MAX for a byte of the
-// directory, of a column no hash covers, or of no piece's records (padding).
+// record 0; a region of the members' records holds its column's elements from the first member's); in the data, the
+// piece of the names run's byte, in its first part (the crt objects' names) or its second (the members'), or of the atoms'
+// bytes between them. UINT32_MAX for a byte of the directory, of a column no hash covers, or of no piece's records
+// (padding).
 static uint32_t snapshot_test_piece_at(const SnapshotHeader* header, Runtime* view, uint64_t offset)
 {
+    const SnapshotCounts* counts = &header->counts;
     SnapshotColumn columns[SNAPSHOT_REGIONS];
-    snapshot_columns(view, &header->counts, columns);
+    snapshot_columns(view, counts, columns);
     uint32_t result = UINT32_MAX;
     for (uint32_t r = BUSTER_SNAPSHOT_PIECE_REGIONS; r < SNAPSHOT_REGIONS; r += 1)
     {
         const SnapshotPlace place = header->regions[r];
         const bool inside = snapshot_test_hashed(r) && offset >= place.offset && offset - place.offset < place.bytes;
         const uint64_t within = inside ? offset - place.offset : 0;
-        for (uint32_t p = 0; inside && p < header->counts.pieces; p += 1)
+        const bool object_names = within >= counts->names_run && within - counts->names_run < counts->object_name_bytes;
+        const bool member_names = within >= counts->member_names_run;
+        // The byte's place in the names run, in either part.
+        const uint64_t run = object_names ? within - counts->names_run : within - counts->member_names_run + counts->object_name_bytes;
+        for (uint32_t p = 0; inside && p < counts->pieces; p += 1)
         {
             const ImportMark begin = view->pieces[p].begin;
             const ImportMark end = view->pieces[p].end;
             bool held = false;
-            if (r == SNAPSHOT_REGION_DATA && within < header->counts.names_run_bytes)
+            if (r == SNAPSHOT_REGION_DATA && (object_names || member_names))
             {
-                held = within >= (p == 0 ? 0 : begin.name_bytes) && within < end.name_bytes;
+                held = run >= (p == 0 ? 0 : begin.name_bytes) && run < end.name_bytes;
             }
             else if (r == SNAPSHOT_REGION_DATA)
             {
@@ -1071,7 +1178,7 @@ static uint32_t snapshot_test_piece_at(const SnapshotHeader* header, Runtime* vi
             }
             else
             {
-                const uint64_t record = within / columns[r].element;
+                const uint64_t record = columns[r].first + within / columns[r].element;
                 held = record >= (p == 0 ? 0 : snapshot_test_mark(begin, r)) && record < snapshot_test_mark(end, r);
             }
             result = held ? p : result;
@@ -1081,16 +1188,41 @@ static uint32_t snapshot_test_piece_at(const SnapshotHeader* header, Runtime* vi
 }
 
 // A byte of a piece's records: the first of its symbols' values, or else of its names' lengths, of its atoms' bytes or
-// of its atoms' sizes.
+// of its atoms' sizes, in whichever region holds it (snapshot_record_offset).
 static uint64_t snapshot_test_piece_byte(const SnapshotHeader* header, const Runtime* view, uint32_t piece)
 {
     const ImportMark begin = view->pieces[piece].begin;
     const ImportMark end = view->pieces[piece].end;
-    uint64_t result = header->regions[SNAPSHOT_REGION_ATOM_SIZE].offset + sizeof(uint64_t) * begin.atoms;
+    uint64_t result = snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_SIZE, begin.atoms);
     result = view->piece_data[piece] != view->piece_data[piece + 1] ? header->regions[SNAPSHOT_REGION_DATA].offset + view->piece_data[piece] : result;
-    result = begin.names != end.names ? header->regions[SNAPSHOT_REGION_NAME_LENGTH].offset + sizeof(uint32_t) * begin.names : result;
-    result = begin.symbols != end.symbols ? header->regions[SNAPSHOT_REGION_SYMBOL_VALUE].offset + sizeof(uint64_t) * begin.symbols : result;
+    result = begin.names != end.names ? snapshot_record_offset(header, SNAPSHOT_REGION_NAME_LENGTH, begin.names) : result;
+    result = begin.symbols != end.symbols ? snapshot_record_offset(header, SNAPSHOT_REGION_SYMBOL_VALUE, begin.symbols) : result;
     return result;
+}
+
+// The room bind_capacity_needed gives a link of `runtime` that refers to every global name a member defines, whose
+// closure takes every member: from the snapshot's directory alone, whatever the pieces' records hold. False if there
+// is no room for the names' list.
+static bool snapshot_test_room(const Runtime* runtime, LinkCapacity* room, uint64_t* name_bytes, uint64_t* atom_bytes, Arena* arena)
+{
+    const RuntimeNames* names = &runtime->global_names;
+    const uint64_t length = arena->length;
+    String8* list = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)names->count + 1);
+    uint32_t count = 0;
+    for (uint32_t e = 0; list != 0 && e < names->count; e += 1)
+    {
+        if (names->member[e] != 0 && !names->linker[e])
+        {
+            list[count] = (String8){
+                .pointer = (char*)runtime_global_name(names, e),
+                .length = names->length[e],
+            };
+            count += 1;
+        }
+    }
+    *room = list != 0 ? bind_capacity_needed(runtime, list, count, arena, name_bytes, atom_bytes) : (LinkCapacity){ 0 };
+    arena_pop_to(arena, length);
+    return list != 0;
 }
 
 // The snapshot at `path`, whose file (`file`) holds `good`, with the byte at `flip` changed in place (none for
@@ -1103,8 +1235,9 @@ static SnapshotStatus snapshot_test_damage(Runtime* loaded, int file, const char
 }
 
 // A runtime's snapshot with a byte of its pieces' records changed, one at a time: at each 1/61 of them, and the first
-// and last of each piece region. Each loads, and every piece is current but the one whose records hold the byte
-// (snapshot_test_piece_at), if any. Then binding a program by each path: a program that joins a damaged piece
+// and last of each piece region. Each loads, every piece is current but the one whose records hold the byte
+// (snapshot_test_piece_at), if any, and a link's room is the whole snapshot's (snapshot_test_room), since sizing reads
+// only the directory, before binding checks a piece (#483's review). Then binding a program by each path: a program that joins a damaged piece
 // (Scrt1.o's, crt1.o's or rcrt1.o's, which bind_begin joins; crtendS.o's or crtend.o's, which it checks first; or a
 // member the program joins) must fail with BIND_ERROR_SNAPSHOT, and one that doesn't (a member it doesn't join) must
 // bind as against the snapshot whole. After a failure, snapshot_discard and runtime_open give a runtime imported again,
@@ -1141,6 +1274,10 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
     bool repaired = file >= 0;
     uint64_t cases = 0;
     uint64_t harmless = 0;
+    LinkCapacity whole_room = { 0 };
+    uint64_t whole_names = 0;
+    uint64_t whole_atoms = 0;
+    snapshot_test_expect(&tally, snapshot_test_room(imported, &whole_room, &whole_names, &whole_atoms, scratch.arena), "the whole runtime's room", 0);
     for (uint64_t i = 0; copy != 0 && i < 61 + 2 * (uint64_t)regions; i += 1)
     {
         const uint64_t first = header->directory_bytes;
@@ -1157,6 +1294,12 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
             wrong = runtime_piece_current(&loaded, p) == (p == expected) && wrong == UINT32_MAX ? p : wrong;
         }
         snapshot_test_expect(&tally, wrong == UINT32_MAX, "only the damaged piece not current", i * 1000000 + wrong);
+        LinkCapacity room = { 0 };
+        uint64_t room_names = 0;
+        uint64_t room_atoms = 0;
+        const bool roomed = status == SNAPSHOT_STATUS_LOADED && snapshot_test_room(&loaded, &room, &room_names, &room_atoms, scratch.arena);
+        snapshot_test_expect(&tally, roomed && memcmp(&room, &whole_room, sizeof(room)) == 0 && room_names == whole_names && room_atoms == whole_atoms,
+                             "a link's room whatever the pieces' records hold", i);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
             runtime_release(&loaded);

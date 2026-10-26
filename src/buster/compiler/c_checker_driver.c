@@ -430,20 +430,33 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     check_driver_diagnose(parser, pp, code->token, message);
 }
 
+// Writes the checked program's object at `output_path`. With `debug` (-g), the object carries DWARF: the unit the
+// executable's would (c_check_debug.c), relocated against the functions' sections (ObjectOptions.debug); and with
+// `unwind`, its functions' unwind tables (check_program_emit's).
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool verify, bool dump_static, Arena* scratch)
+                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const uint64_t mark = scratch->length;
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
+    CheckProgramRows rows = { 0 };
+    CheckDebug dwarf = { 0 };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, NULL, verify);
+                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL, unwind, verify);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
+    }
+    if (valid && debug)
+    {
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+        if (!valid)
+        {
+            fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
+        }
     }
     if (valid)
     {
@@ -463,7 +476,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         if (valid)
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const Object object = object_build(&code.link, &units, &symbols, 0, (ObjectOptions){ 0 }, source, scratch);
+            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL, .debug_count = debug ? 1 : 0 };
+            const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
             valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission)) &&
@@ -596,10 +610,10 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
 // With `debug` (-g), the executable carries DWARF: a unit of the program's functions with their source rows (#395,
-// c_check_debug.c).
+// c_check_debug.c); and with `unwind`, its functions' unwind tables, which .eh_frame_hdr indexes with the runtime's.
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
-                                     const CheckDriverLibraries* libraries, Arena* scratch)
+                                     bool unwind, const CheckDriverLibraries* libraries, Arena* scratch)
 {
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
@@ -646,7 +660,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, debug ? &rows : NULL, verify))
+        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, debug ? &rows : NULL, unwind, verify))
         {
             valid = false;
             again = bind.error == BIND_ERROR_SNAPSHOT;
@@ -697,6 +711,19 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     const String8 version = named.reference_versions[bind.library][bind.reference];
                     fprintf(stderr, "error: %.*s: undefined reference to '%.*s%s%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
                             (const char*)references->name[bind.reference], version.length != 0 ? "@" : "", (int)version.length, version.pointer);
+                }
+                else if (bind.error == BIND_ERROR_MEMBER_UNDEFINED)
+                {
+                    // A member that joined refers to a name nothing defines, as GNU ld words it, with the archive's
+                    // path and the member's name: on GCC's link line only libgcc_s.so.1 could define it, which the
+                    // driver names as needed and the direct path doesn't link (morestack.o's unwinder, for split-stack
+                    // code).
+                    const bool known = bind.member != UINT32_MAX;
+                    const String8 archive = known ? runtime_member_archive(&runtime, bind.member)->path : (String8){ 0 };
+                    const String8 member = known ? runtime_member_name(&runtime, bind.member) : (String8){ 0 };
+                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, which the direct path doesn't link\n",
+                            (int)archive.length, archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer,
+                            known ? ")" : "", name);
                 }
                 else if (bind.error == BIND_ERROR_LIBRARY_VERSION)
                 {
@@ -917,10 +944,12 @@ static int run_check_command(int count, char** arguments, bool executable)
     options.semantic_pragmas = true;
     // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
     // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
-    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link
-    // with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than preprocessing the
-    // unit again for them.
-    const bool source_rows = parsed && link && (options.predefines.debug || options.predefines.debug_modules);
+    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link or
+    // an object with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than
+    // preprocessing the unit again for them.
+    const bool source_rows = parsed && (link || emit_object) && (options.predefines.debug || options.predefines.debug_modules);
+    // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
+    const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {
@@ -1164,7 +1193,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, verify, dump_static, &scratch) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, source_rows, unwind_tables, &scratch) ? 0 : 1;
                             }
                             else
                             {
@@ -1178,7 +1207,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                                 source_rows, &libraries, &scratch) ? 0 : 1;
+                                                                 source_rows, unwind_tables, &libraries, &scratch) ? 0 : 1;
                             }
                             else
                             {

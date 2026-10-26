@@ -29,21 +29,31 @@
 //     of a name the runtime has and of one it doesn't; strong and weak references to __cxa_finalize; one to
 //     pthread_atfork, which a member defines, hidden too; hidden and protected references to puts, which libc.so.6
 //     can't satisfy, and a weak hidden one, which binds to nothing; references to the init and fini arrays' bounds,
-//     which the linker defines; and links without room.
+//     which the linker defines; references to __morestack and to __splitstack_getcontext, whose members of libgcc.a
+//     make morestack.o join, whose strong reference to the unwinder only libgcc_s.so.1 defines (refused, naming
+//     _Unwind_Resume and the member: BIND_ERROR_MEMBER_UNDEFINED), and a reference to __morestack beside the program's
+//     own unwinder (bound); and links without room.
 //   - Programs that GNU ld and lld decide for themselves (the linkers' cases): a weak _init against crti.o's, a weak
 //     data_start after Scrt1.o's, a hidden and a weak hidden puts, and the arrays' bounds, each bound or refused as
 //     the linkers do.
 //   - A program that calls atexit, which libc_nonshared.a's member defines: bound, it must pass link_check, and the
 //     member must join, defining atexit, with its references bound (__cxa_atexit to libc.so.6, __dso_handle to
-//     crtbeginS.o).
+//     crtbeginS.o). And one that calls __udivti3, __fixunsdfti and __fixdfti, whose members of libgcc.a must join, and
+//     no others, each defining its name hidden; __fixdfti's member calls __fixunsdfti too.
+//   - The room (bind_capacity_needed): for each member with a global name no library exports, a link of main and a
+//     strong reference to that name, bound with every member's room, must bind (or be refused as a member's reference
+//     to the unwinder) adding no more records, names' bytes and atoms' bytes than bind_capacity_needed counts for the
+//     name, and that count no more than bind_capacity's. Members that join in one round refer to names none of them
+//     defines yet (memset, __sfp_handle_exceptions, the decimal floating point's thread-local flags), which bind_merge
+//     must not take for weak references left to nothing (Bind.resolved).
 //   - With --cross-check, which needs ld.lld, ld.bfd, cc and readelf on PATH: each bound program is written as
 //     objects, one per unit, and linked by ld.lld and ld.bfd as a PIE with only libc.so.6 and the loader besides, in
 //     GCC's order, without errors or warnings. It must run and print what its model predicts; the atexit program must
-//     exit with its handler's status, 0, rather than main's, 3. And the same program's own objects linked by cc with
-//     lld must have the imports at their versions, the weak references with default visibility and the exports that
-//     binding found in readelf's .dynsym, and the members that lld's --why-extract lists. Each of the linkers' cases'
-//     own objects, linked by cc with GNU ld and with lld, must link, or fail to, as binding did, and run with the
-//     case's status, as the bound link must.
+//     exit with its handler's status, 0, rather than main's, 3, and the libgcc program with its results' sum, 15. And
+//     the same program's own objects linked by cc with lld must have the imports at their versions, the weak
+//     references with default visibility and the exports that binding found in readelf's .dynsym, and the members that
+//     lld's --why-extract lists, of either archive. Each of the linkers' cases' own objects, linked by cc with GNU ld
+//     and with lld, must link, or fail to, as binding did, and run with the case's status, as the bound link must.
 // Then the same against this system's static runtime (runtime_import_static), by both paths, which must make the same
 // link and join the same members:
 //   - Static programs: test-link's two sets that call libc. The members that join must be those GNU ld's archive scan
@@ -67,6 +77,12 @@
 //     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
 //     imported as the program, bound and checked as the static programs are, and linked by both linkers, with the
 //     same members, to run with the program's status.
+// Then, against a shared library's runtime (runtime_import_shared), the programs, rules (a reference to __morestack
+// refused as a PIE refuses it, not left to the loader) and the room, and with --cross-check its C libraries; and
+// split-stack code (bind_test_split_stack): C compiled with -fsplit-stack as a library and as a PIE, which binding must
+// refuse by both paths, naming _Unwind_Resume and libgcc.a(morestack.o), while cc's links with GNU ld and lld need
+// libgcc_s.so.1, load into a harness that doesn't (dlopen, RTLD_NOW) and run; and lld's link of the library with
+// libgcc.a and libc but not libgcc_s.so.1, which leaves the unwinder to the loader, must fail to load there.
 // Then the static programs, and with --cross-check the C programs (compiled with -fPIE), against this system's static
 // PIE's runtime (runtime_import_static_pie), by both paths, which must make the same link and join the same members,
 // checked as against the static runtime: the members the oracle loads, in which rcrt1.o, which doesn't define
@@ -77,8 +93,8 @@
 // status is 1 if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the tally, the programs and their comparisons, the programs' checks, the names, links made by
-// hand, the rules, the atexit program, the cross-check, the linkers' cases, the checks, the static runtimes, and
-// run_bind_tests.
+// hand, the rules, the atexit program, the libgcc program, the room, the cross-check, the linkers' cases, the checks,
+// the static runtimes, the shared library's runtime, split-stack code, and run_bind_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -98,6 +114,8 @@
 #define BUSTER_BIND_TEST_ARENA_BYTES (1ull << 32)
 #define BUSTER_BIND_TEST_BIND_BYTES (1ull << 30)
 #define BUSTER_BIND_TEST_PATH_BYTES 4096
+// What a dirty arena holds where binding pushes its arrays (bind_test_dirty_arena).
+#define BUSTER_BIND_TEST_DIRTY_BYTE 0xa5
 
 typedef struct BindTestTally BindTestTally;
 struct BindTestTally
@@ -136,6 +154,7 @@ static const char* const bind_test_errors[] = {
     [BIND_ERROR_SNAPSHOT] = "snapshot",
     [BIND_ERROR_LIBRARY_UNDEFINED] = "library undefined",
     [BIND_ERROR_LIBRARY_VERSION] = "library version",
+    [BIND_ERROR_MEMBER_UNDEFINED] = "member undefined",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -151,9 +170,24 @@ struct BindTestProgram
     bool bound;
 };
 
+// Fills the arena's next `bytes` bytes with BUSTER_BIND_TEST_DIRTY_BYTE and pops them again, so that what binding pushes
+// there holds the pattern where a fresh mapping holds zeros, as an arena that held other data would.
+static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
+{
+    const uint64_t length = arena->length;
+    uint8_t* filled = arena_push(arena, bytes, 64);
+    if (filled != 0)
+    {
+        memset(filled, BUSTER_BIND_TEST_DIRTY_BYTE, bytes);
+        arena_pop_to(arena, length);
+    }
+    return filled != 0;
+}
+
 // Generates the program with room for the runtime, joins the runtime's first objects after its symbols, adds its atoms,
-// and binds the rest, numbering the runtime's units after the program's.
-static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+// and binds the rest, numbering the runtime's units after the program's; with `dirty`, over binding's arena dirtied that
+// far (bind_test_dirty_arena).
+static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty)
 {
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
@@ -161,12 +195,18 @@ static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, Lin
     test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
     test->bind = (Bind){ 0 };
     bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
+    result = result && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
     result = result && bind_begin(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
     result = result && link_program_generate_atoms(&test->program);
     result = result && bind_end(&test->bind, &test->program.link);
     result = result && link_program_generate_end(&test->program);
     test->bound = result;
     return result;
+}
+
+static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+{
+    return bind_test_program_dirtied(test, runtime, options, path, 0);
 }
 
 static void bind_test_release(BindTestProgram* test)
@@ -214,11 +254,31 @@ static bool bind_test_same_links(const Link* a, const Link* b)
     return result;
 }
 
+// The bytes to dirty for a binding again: as far as `used`, what the clean binding pushed on its arena, and as far again.
+static uint64_t bind_test_dirty_bytes(uint64_t used)
+{
+    return 2 * used + 4096;
+}
+
+// Whether the dirty arena's pattern reached Bind.symbols: an entry of a piece that didn't join keeps it, since binding
+// writes only the entries of the pieces that join.
+static bool bind_test_kept_pattern(const Bind* bind, const Runtime* runtime)
+{
+    const SymbolId pattern = 0x01010101u * BUSTER_BIND_TEST_DIRTY_BYTE;
+    bool kept = false;
+    for (SymbolId symbol = 1; !kept && symbol < runtime->link.symbols.count; symbol += 1)
+    {
+        kept = bind->symbols[symbol] == pattern;
+    }
+    return kept;
+}
+
 // Whether two bindings ended alike: the error and its name, the imports, the exports and the members that joined.
 static bool bind_test_same_binds(const Bind* a, const Bind* b)
 {
     const uint32_t words = (a->runtime->member_count + 63) / 64;
-    bool result = a->error == b->error && a->name == b->name && a->import_count == b->import_count && a->export_count == b->export_count &&
+    bool result = a->error == b->error && a->name == b->name && (a->error != BIND_ERROR_MEMBER_UNDEFINED || a->member == b->member) &&
+                  a->import_count == b->import_count && a->export_count == b->export_count &&
                   memcmp(a->imports, b->imports, a->import_count * sizeof(SymbolId)) == 0 && memcmp(a->exports, b->exports, a->export_count * sizeof(SymbolId)) == 0;
     for (uint32_t w = 0; result && w < words; w += 1)
     {
@@ -568,6 +628,21 @@ static void bind_test_structure(BindTestTally* tally, const BindTestProgram* tes
     bind_test_expect(tally, eh_last == base + RUNTIME_OBJECT_END, ".eh_frame: crtendS.o's last", eh_last);
 }
 
+// Binds the program again by the clean binding's path, over binding's arena dirtied as far as bind_test_dirty_bytes
+// says, which must give the clean binding's link and binding: binding reads no entry of the arrays it pushes before
+// writing it, Bind.symbols's among them, which it doesn't clear (each piece's join writes its symbols' entries before
+// that piece's fixups read them, #490's review).
+static void bind_test_dirty(BindTestTally* tally, const BindTestProgram* clean, const Runtime* runtime, LinkProgramOptions options)
+{
+    BindTestProgram dirty;
+    const bool bound = bind_test_program_dirtied(&dirty, runtime, options, clean->bind.path, bind_test_dirty_bytes(clean->arena.length));
+    bind_test_expect(tally, bound == clean->bound && bind_test_same_links(&clean->program.link, &dirty.program.link) && bind_test_same_binds(&clean->bind, &dirty.bind),
+                     clean->bind.path == BIND_PATH_VECTOR ? "the vector path over a dirty arena as over a clean one" : "the exact path over a dirty arena as over a clean one",
+                     0);
+    bind_test_expect(tally, !bound || bind_test_kept_pattern(&dirty.bind, runtime), "the dirty arena's pattern in Bind.symbols", 0);
+    bind_test_release(&dirty);
+}
+
 // Binds the program by both paths, which must agree, and checks the vector path's link. The vector path's program is
 // left in `kept` for the cross-check, released by the caller.
 static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkProgramOptions options, const char* name, BindTestProgram* kept, Arena* arena)
@@ -584,6 +659,8 @@ static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkPr
     }
     bind_test_expect(tally, bind_test_same_links(&kept->program.link, &exact.program.link), "the paths' links the same", 0);
     bind_test_expect(tally, bind_test_same_binds(&kept->bind, &exact.bind), "the paths' imports, exports and members the same", 0);
+    bind_test_dirty(tally, kept, runtime, options);
+    bind_test_dirty(tally, &exact, runtime, options);
     if (vector_bound)
     {
         bind_test_structure(tally, kept, runtime, arena);
@@ -722,6 +799,17 @@ static bool bind_test_define(BindTestLink* test, SymbolId symbol)
 // ---------------------------------------------------------------------------------------------------------------------
 // The rules
 
+static uint32_t bind_test_member(const Runtime* runtime, const char* name);
+
+// Whether binding refused a link of split-stack code as it must: BIND_ERROR_MEMBER_UNDEFINED, naming _Unwind_Resume
+// and libgcc.a's morestack.o, which joined.
+static bool bind_test_split_refused(const Bind* bind, const Link* link, const Runtime* runtime)
+{
+    const uint32_t morestack = bind_test_member(runtime, "morestack.o");
+    return bind->error == BIND_ERROR_MEMBER_UNDEFINED && bind_test_named(link, bind->name, "_Unwind_Resume") && morestack < runtime->member_count &&
+           bind->member == morestack && (bind->members_joined[morestack / 64] >> (morestack % 64) & 1) != 0;
+}
+
 typedef enum BindTestRule
 {
     BIND_TEST_RULE_START,
@@ -748,6 +836,9 @@ typedef enum BindTestRule
     BIND_TEST_RULE_WEAK_HIDDEN_REFERENCE,
     BIND_TEST_RULE_HIDDEN_MEMBER,
     BIND_TEST_RULE_ARRAY_BOUNDS,
+    BIND_TEST_RULE_MORESTACK,
+    BIND_TEST_RULE_SPLITSTACK,
+    BIND_TEST_RULE_MORESTACK_UNWINDER,
     BIND_TEST_RULE_NO_ROOM,
     BIND_TEST_RULES,
 } BindTestRule;
@@ -777,6 +868,9 @@ static const char* const bind_test_rule_names[] = {
     "a weak hidden reference to puts",
     "a hidden reference to pthread_atfork, which a member defines",
     "references to the init and fini arrays' bounds, which the linker defines",
+    "a reference to __morestack, whose member refers to the unwinder that only libgcc_s.so.1 defines",
+    "a reference to __splitstack_getcontext, whose member makes morestack.o join",
+    "a reference to __morestack beside the program's own _Unwind_Resume and __gcc_personality_v0",
     "a link without room for the crt objects' symbols",
 };
 
@@ -906,6 +1000,17 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
             symbols[i] = bind_test_symbol(test, bounds[i], global_reference, none);
         }
     }
+    else if (which == BIND_TEST_RULE_MORESTACK || which == BIND_TEST_RULE_MORESTACK_UNWINDER)
+    {
+        const bool own = which == BIND_TEST_RULE_MORESTACK_UNWINDER;
+        symbols[0] = bind_test_symbol(test, "__morestack", global_reference, none);
+        symbols[1] = own ? bind_test_symbol(test, "_Unwind_Resume", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program) : 0;
+        symbols[2] = own ? bind_test_symbol(test, "__gcc_personality_v0", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program) : 0;
+    }
+    else if (which == BIND_TEST_RULE_SPLITSTACK)
+    {
+        symbols[0] = bind_test_symbol(test, "__splitstack_getcontext", global_reference, none);
+    }
     rule->begun = built && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
     // The program's atoms, and the symbols it adds after bind_begin.
     rule->begun = rule->begun && bind_test_define(test, rule->main);
@@ -924,6 +1029,10 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     else if (which == BIND_TEST_RULE_LATE_IMPORT)
     {
         symbols[0] = rule->begun ? bind_test_symbol(test, "memcpy", global_reference, shared) : 0;
+    }
+    else if (which == BIND_TEST_RULE_MORESTACK_UNWINDER)
+    {
+        rule->begun = rule->begun && bind_test_define(test, symbols[1]) && bind_test_define(test, symbols[2]);
     }
     rule->ended = rule->begun && bind_end(&test->bind, &test->link);
 }
@@ -1081,6 +1190,23 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
             result = result && rule->symbols[i] != 0 && symbols->atom[rule->symbols[i]] == 0 && symbols->source[rule->symbols[i]] == BUSTER_LINK_SOURCE_LINKER;
         }
     }
+    else if (which == BIND_TEST_RULE_MORESTACK || which == BIND_TEST_RULE_SPLITSTACK)
+    {
+        // morestack.o joins (after generic-morestack.o, for __splitstack_getcontext), and its strong reference to the
+        // unwinder, which no other piece has, is refused, naming the member: _Unwind_Resume, before __gcc_personality_v0
+        // in its symbol table.
+        result = rule->begun && !rule->ended && bind_test_split_refused(bind, link, runtime);
+    }
+    else if (which == BIND_TEST_RULE_MORESTACK_UNWINDER)
+    {
+        // With the unwinder the program's, morestack.o and generic-morestack.o join and the link binds.
+        const uint32_t morestack = bind_test_member(runtime, "morestack.o");
+        const uint32_t generic = bind_test_member(runtime, "generic-morestack.o");
+        result = rule->ended && atom != 0 && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE && morestack < runtime->member_count &&
+                 generic < runtime->member_count && (bind->members_joined[morestack / 64] >> (morestack % 64) & 1) != 0 &&
+                 (bind->members_joined[generic / 64] >> (generic % 64) & 1) != 0 && symbols->source[rule->symbols[1]] == BUSTER_LINK_SOURCE_PROGRAM &&
+                 symbols->atom[rule->symbols[1]] != 0;
+    }
     else
     {
         result = !rule->begun && bind->error == BIND_ERROR_FULL;
@@ -1090,7 +1216,8 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
 
 // bind_merge's rule for a strong reference that joins, once binding has begun, a weak one that it left to nothing (as
 // a member's would, which libc_nonshared.a's don't have): an error naming it, but not for one left to a crt object
-// after the program (source RUNTIME_ARCHIVE). Two links of a symbol each stand for the runtime and the program.
+// after the program (source RUNTIME_ARCHIVE), nor for one that a member of the current round added and binding hasn't
+// reached (Bind.resolved), which is still to bind. Two links of a symbol each stand for the runtime and the program.
 static bool bind_test_strong_after_weak(void)
 {
     const LinkCapacity capacity = {
@@ -1121,6 +1248,7 @@ static bool bind_test_strong_after_weak(void)
     link.symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK;
     bind.resolving = true;
     bind.bound = true;
+    bind.resolved = symbol + 1;
     bind_merge(&bind, &link, from_symbol, symbol, 0, false);
     result = result && bind.error == BIND_ERROR_UNDEFINED && bind.name == name;
     bind.error = BIND_ERROR_NONE;
@@ -1128,6 +1256,11 @@ static bool bind_test_strong_after_weak(void)
     link.symbols.source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
     bind_merge(&bind, &link, from_symbol, symbol, 0, false);
     result = result && bind.error == BIND_ERROR_NONE;
+    link.symbols.flags[symbol] = BUSTER_LINK_SYMBOL_WEAK;
+    link.symbols.source[symbol] = BUSTER_LINK_SOURCE_NONE;
+    bind.resolved = symbol;
+    bind_merge(&bind, &link, from_symbol, symbol, 0, false);
+    result = result && bind.error == BIND_ERROR_NONE && (link.symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
     arena_release(&tables);
     arena_release(&names);
     return result;
@@ -1662,7 +1795,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
 // exits with status 0.
 
 #define BUSTER_BIND_TEST_MAIN_STATUS 3
-#define BUSTER_BIND_TEST_MAX_CODE 16
+#define BUSTER_BIND_TEST_MAX_CODE 32
 
 // A TEXT atom of the instructions, in unit 0, defining `symbol`: the references are each instruction's displacement.
 static bool bind_test_code(BindTestLink* test, const X86Instruction* instructions, uint32_t count, const LinkReference* references, uint32_t reference_count, SymbolId symbol)
@@ -1692,8 +1825,8 @@ struct BindTestAtexit
 
 // The program's symbols, then the runtime's first objects, its code, and the rest; without `bound`, only the program,
 // for a link of its own objects by cc. program->bound also needs link_check to accept the link, as the object writer
-// does of the links the cross-check writes.
-static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
+// does of the links the cross-check writes. With `dirty`, binding's arena is dirtied that far (bind_test_dirty_arena).
+static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
 {
     BindTestLink* test = &program->test;
     bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -1701,6 +1834,7 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
     program->handler = built ? bind_test_symbol(test, "buster_handler", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
     program->atexit = built ? bind_test_symbol(test, "atexit", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE) : 0;
     built = program->main != 0 && program->handler != 0 && program->atexit != 0;
+    built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
     built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
     // main: sub rsp, 8; lea rdi, [rip + handler]; call atexit; add rsp, 8; mov eax, 3; ret.
     const X86Instruction main_code[] = {
@@ -1770,6 +1904,11 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
+static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
+{
+    bind_test_atexit_dirtied(program, runtime, path, bound, 0);
+}
+
 // The index of the runtime's first member named `name` (libc_nonshared.a's, or the static runtimes' archives'), or the
 // member count.
 static uint32_t bind_test_member(const Runtime* runtime, const char* name)
@@ -1820,8 +1959,363 @@ static bool bind_test_atexit_program(const Runtime* runtime)
     bind_test_atexit_checks(&tally, &vector, runtime);
     bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
                      "the paths agree", 0);
+    // Each path again over binding's arena dirtied (bind_test_dirty), with the member that joins.
+    const BindTestAtexit* cleans[] = {
+        &vector,
+        &exact,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
+    {
+        BindTestAtexit dirty;
+        bind_test_atexit_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
+                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
+                         "the path over a dirty arena as over a clean one", c);
+        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
+        bind_test_link_end(&dirty.test);
+    }
     bind_test_link_end(&vector.test);
     bind_test_link_end(&exact.test);
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The libgcc program
+//
+// main calls three functions of libgcc.a's, as a compiler's code of 128-bit integers calls them: it divides 100 by 7
+// through __udivti3, converts 3.0 to an unsigned 128-bit integer through __fixunsdfti and -2.0 to a signed one through
+// __fixdfti, and returns 14 + 3 - 2. Its references have source NONE, as the C driver's emission makes them.
+// __fixdfti's member calls __fixunsdfti too, and joins before __fixunsdfti's member, in the same round: its reference
+// meets the program's, which binding must keep for that member's definition rather than take for a reference left to
+// nothing.
+
+#define BUSTER_BIND_TEST_LIBGCC_STATUS 15
+#define BUSTER_BIND_TEST_LIBGCC_CALLS 3
+
+static const char* const bind_test_libgcc_names[BUSTER_BIND_TEST_LIBGCC_CALLS] = {
+    "__udivti3",
+    "__fixunsdfti",
+    "__fixdfti",
+};
+
+typedef struct BindTestLibgcc BindTestLibgcc;
+struct BindTestLibgcc
+{
+    BindTestLink test;
+    SymbolId main;
+    SymbolId calls[BUSTER_BIND_TEST_LIBGCC_CALLS];
+    bool bound;
+};
+
+// As bind_test_atexit: the program's symbols, then the runtime's first objects, its code, and the rest; without
+// `bound`, only the program, for a link of its own objects by cc; with `dirty`, over binding's arena dirtied that far.
+static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
+{
+    BindTestLink* test = &program->test;
+    bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+    program->main = built ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+    built = program->main != 0;
+    for (uint32_t c = 0; c < BUSTER_BIND_TEST_LIBGCC_CALLS; c += 1)
+    {
+        program->calls[c] = built ? bind_test_symbol(test, bind_test_libgcc_names[c], BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) : 0;
+        built = built && program->calls[c] != 0;
+    }
+    built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    // main: push rbx (which aligns the stack for the calls); __udivti3 of 100 in rsi:rdi by 7 in rcx:rdx, the quotient's
+    // low half in eax, kept in ebx; __fixunsdfti of 3.0 and __fixdfti of -2.0 in xmm0, each low half in eax added to
+    // ebx; then eax = ebx, pop rbx, ret.
+    const X86Instruction main_code[] = {
+        {
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_PUSH_R64,
+        },
+        {
+            .immediate = 100,
+            .rm = X86_REGISTER_RDI,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 0,
+            .rm = X86_REGISTER_RSI,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 7,
+            .rm = X86_REGISTER_RDX,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .immediate = 0,
+            .rm = X86_REGISTER_RCX,
+            .form = X86_FORM_MOV_R32_IMM32,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R32_RM32,
+        },
+        // 3.0's bits.
+        {
+            .immediate = 0,
+            .displacement = 0x40080000,
+            .rm = X86_REGISTER_RAX,
+            .form = X86_FORM_MOV_R64_IMM64,
+        },
+        {
+            .reg = 0,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOVQ_X_RM64,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_ADD_R32_RM32,
+        },
+        // -2.0's bits.
+        {
+            .immediate = 0,
+            .displacement = (int32_t)0xc0000000u,
+            .rm = X86_REGISTER_RAX,
+            .form = X86_FORM_MOV_R64_IMM64,
+        },
+        {
+            .reg = 0,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOVQ_X_RM64,
+        },
+        {
+            .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP,
+        },
+        {
+            .reg = X86_REGISTER_RBX,
+            .rm = X86_REGISTER_RAX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_ADD_R32_RM32,
+        },
+        {
+            .reg = X86_REGISTER_RAX,
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R32_RM32,
+        },
+        {
+            .rm = X86_REGISTER_RBX,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_POP_R64,
+        },
+        {
+            .form = X86_FORM_RET,
+        },
+    };
+    const LinkReference main_references[] = {
+        {
+            .instruction = 5,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[0],
+            .addend = 0,
+        },
+        {
+            .instruction = 9,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[1],
+            .addend = 0,
+        },
+        {
+            .instruction = 13,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = program->calls[2],
+            .addend = 0,
+        },
+    };
+    built = built && bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), main_references, BUSTER_ARRAY_LENGTH(main_references), program->main);
+    program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
+}
+
+static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
+{
+    bind_test_libgcc_dirtied(program, runtime, path, bound, 0);
+}
+
+// The members of libgcc.a that joined must be those the three names have, and no others, each defining its name,
+// hidden, as libgcc.a's helpers are; nothing is imported from libc.so.6 for them.
+static void bind_test_libgcc_checks(BindTestTally* tally, const BindTestLibgcc* program, const Runtime* runtime)
+{
+    const Link* link = &program->test.link;
+    const LinkSymbols* symbols = &link->symbols;
+    const Bind* bind = &program->test.bind;
+    const RuntimeNames* names = &runtime->global_names;
+    const bool archived = runtime->archive_count != 0 && import_test_path_is(runtime->archives[0].path, "libgcc.a");
+    uint32_t joined = 0;
+    for (uint32_t w = 0; w < (runtime->member_count + 63) / 64; w += 1)
+    {
+        joined += (uint32_t)__builtin_popcountll(bind->members_joined[w]);
+    }
+    bind_test_expect(tally, program->bound, "the libgcc program bound", bind->error);
+    bind_test_expect(tally, joined == BUSTER_BIND_TEST_LIBGCC_CALLS, "three members joined", joined);
+    for (uint32_t c = 0; c < BUSTER_BIND_TEST_LIBGCC_CALLS; c += 1)
+    {
+        const char* name = bind_test_libgcc_names[c];
+        const uint32_t length = (uint32_t)strlen(name);
+        const uint32_t entry = runtime_find_global_name(names, (const uint8_t*)name, length, link_hash((const uint8_t*)name, length));
+        const uint32_t member = entry != 0 && names->member[entry - 1] != 0 ? names->member[entry - 1] - 1 : runtime->member_count;
+        const bool libgcc = archived && member < runtime->archives[0].archive.member_count;
+        const SymbolId symbol = program->calls[c];
+        const AtomId atom = symbols->atom[symbol];
+        bool imported = false;
+        for (uint32_t i = 0; i < bind->import_count; i += 1)
+        {
+            imported = imported || bind->imports[i] == symbol;
+        }
+        bind_test_expect(tally, libgcc && (bind->members_joined[member / 64] >> (member % 64) & 1) != 0, "its member of libgcc.a joined", c);
+        bind_test_expect(tally, atom != 0 && link->atoms.unit[atom] == 1 + RUNTIME_OBJECTS + member && symbols->source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
+                                    (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_HIDDEN && !imported,
+                         "defined by its member, hidden, not an import", c);
+    }
+}
+
+static bool bind_test_libgcc_program(const Runtime* runtime)
+{
+    BindTestTally tally = {
+        .check = "libgcc",
+    };
+    BindTestLibgcc vector;
+    BindTestLibgcc exact;
+    bind_test_libgcc(&vector, runtime, BIND_PATH_VECTOR, true);
+    bind_test_libgcc(&exact, runtime, BIND_PATH_EXACT, true);
+    bind_test_libgcc_checks(&tally, &vector, runtime);
+    bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
+                     "the paths agree", 0);
+    // Each path again over binding's arena dirtied (bind_test_dirty), with the members that join, in one round.
+    const BindTestLibgcc* cleans[] = {
+        &vector,
+        &exact,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
+    {
+        BindTestLibgcc dirty;
+        bind_test_libgcc_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
+                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
+                         "the path over a dirty arena as over a clean one", c);
+        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
+        bind_test_link_end(&dirty.test);
+    }
+    bind_test_link_end(&vector.test);
+    bind_test_link_end(&exact.test);
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The room
+//
+// bind_capacity_needed's bound, for a dynamic PIE's runtime and a shared library's: for each member of the archives
+// with a global name that no library exports, a link of main and a strong reference to that name (the member's first
+// among the runtime's names), bound by the vector path with every member's room (bind_capacity), may add no more names,
+// atoms, symbols, fixups, wide addends, priorities, names' bytes and atoms' bytes than bind_capacity_needed counts for
+// the name, whether it binds or is refused (morestack.o's, BIND_ERROR_MEMBER_UNDEFINED); and the count is never more
+// than bind_capacity's. A member joins only for such a reference, so these links reach every member that can join, each
+// beside the members it makes join.
+
+// The link's record counts.
+static LinkCapacity bind_test_counts(const Link* link)
+{
+    const LinkCapacity result = {
+        .names = link->names.count,
+        .atoms = link->atoms.count,
+        .symbols = link->symbols.count,
+        .fixups = link->fixups.count,
+        .wide_addends = link->fixups.wide_count,
+        .priorities = link->priorities.count,
+    };
+    return result;
+}
+
+// Whether every count of `a` is at most `b`'s.
+static bool bind_test_within(LinkCapacity a, LinkCapacity b)
+{
+    return a.names <= b.names && a.atoms <= b.atoms && a.symbols <= b.symbols && a.fixups <= b.fixups && a.wide_addends <= b.wide_addends && a.priorities <= b.priorities;
+}
+
+static bool bind_test_room_bound(const Runtime* runtime, const char* check, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = check,
+    };
+    const RuntimeNames* names = &runtime->global_names;
+    uint64_t every_name_bytes = 0;
+    uint64_t every_atom_bytes = 0;
+    const LinkCapacity every = bind_capacity(runtime, &every_name_bytes, &every_atom_bytes);
+    uint64_t needed_symbols = 0;
+    uint32_t largest = 0;
+    uint32_t linked = 0;
+    for (uint32_t m = 0; m < runtime->member_count; m += 1)
+    {
+        uint32_t entry = names->count;
+        for (uint32_t e = 0; entry == names->count && e < names->count; e += 1)
+        {
+            entry = names->member[e] == m + 1 && !names->linker[e] && names->export[e] == 0 ? e : entry;
+        }
+        if (entry < names->count)
+        {
+            const String8 name = {
+                .pointer = (char*)runtime_global_name(names, entry),
+                .length = names->length[entry],
+            };
+            uint64_t name_bytes = 0;
+            uint64_t atom_bytes = 0;
+            const LinkCapacity needed = bind_capacity_needed(runtime, &name, 1, arena, &name_bytes, &atom_bytes);
+            BindTestLink test;
+            const bool reserved = bind_test_link_begin(&test, runtime, bind_test_room(runtime));
+            const SymbolId main_symbol = reserved ? bind_test_symbol(&test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            const NameId reference_name = reserved ? link_add_name(&test.link, (const uint8_t*)name.pointer, (uint32_t)name.length) : 0;
+            const SymbolId reference = reference_name != 0 ? link_add_symbol(&test.link, reference_name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE,
+                                                                               BUSTER_LINK_SOURCE_NONE) :
+                                                             0;
+            const bool built = main_symbol != 0 && reference != 0 && bind_test_define(&test, main_symbol);
+            const LinkCapacity before = bind_test_counts(&test.link);
+            const uint64_t names_before = test.names.length;
+            const uint64_t bytes_before = test.bytes.length;
+            const bool begun = built && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena);
+            const bool ended = begun && bind_end(&test.bind, &test.link);
+            bind_test_expect(&tally, ended || (begun && test.bind.error == BIND_ERROR_MEMBER_UNDEFINED), "bound, or refused for a member's reference", m);
+            const LinkCapacity after = bind_test_counts(&test.link);
+            const LinkCapacity added = {
+                .names = after.names - before.names,
+                .atoms = after.atoms - before.atoms,
+                .symbols = after.symbols - before.symbols,
+                .fixups = after.fixups - before.fixups,
+                .wide_addends = after.wide_addends - before.wide_addends,
+                .priorities = after.priorities - before.priorities,
+            };
+            bind_test_expect(&tally,
+                             begun && bind_test_within(added, needed) && test.names.length - names_before <= name_bytes && test.bytes.length - bytes_before <= atom_bytes,
+                             "no more than bind_capacity_needed's room", m);
+            bind_test_expect(&tally, bind_test_within(needed, every) && name_bytes <= every_name_bytes && atom_bytes <= every_atom_bytes, "no more room than every member's",
+                             m);
+            needed_symbols += needed.symbols;
+            largest = needed.symbols > largest ? needed.symbols : largest;
+            linked += 1;
+            bind_test_link_end(&test);
+        }
+    }
+    printf("  %u members' names linked: room for %llu symbols on average and %u at most, against every member's %u\n", linked,
+           (unsigned long long)(linked != 0 ? needed_symbols / linked : 0), largest, every.symbols);
+    bind_test_expect(&tally, linked != 0, "members linked", linked);
     return bind_test_report(&tally);
 }
 
@@ -2084,20 +2578,30 @@ static bool bind_test_same_dynamic(const Link* link, const Bind* bind, const Run
 }
 
 // The members lld's --why-extract lists (lines of "reference\textracted\tsymbol", the member as archive(member)), each
-// of libc_nonshared.a, against those that joined.
+// of an archive of the runtime's (libgcc.a or libc_nonshared.a), against those that joined.
 static bool bind_test_same_members(String8 text, const Bind* bind, const Runtime* runtime)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
-    uint64_t extracted[4] = { 0 };
+    uint64_t extracted[64] = { 0 };
     bool result = words <= BUSTER_ARRAY_LENGTH(extracted) && text.pointer != 0;
-    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
+    for (uint32_t a = 0; result && a < runtime->archive_count; a += 1)
     {
-        char needle[512];
-        const String8 member = runtime_member_name(runtime, m);
-        snprintf(needle, sizeof(needle), "libc_nonshared.a(%.*s)", (int)member.length, member.pointer);
-        if (strstr(text.pointer, needle) != 0)
+        const RuntimeArchive* archive = &runtime->archives[a];
+        uint64_t file = archive->path.length;
+        while (file != 0 && archive->path.pointer[file - 1] != '/')
         {
-            extracted[m / 64] |= 1ull << (m % 64);
+            file -= 1;
+        }
+        for (uint32_t i = 0; i < archive->archive.member_count; i += 1)
+        {
+            const uint32_t m = archive->first_member + i;
+            char needle[512];
+            const String8 member = runtime_member_name(runtime, m);
+            snprintf(needle, sizeof(needle), "%.*s(%.*s)", (int)(archive->path.length - file), archive->path.pointer + file, (int)member.length, member.pointer);
+            if (strstr(text.pointer, needle) != 0)
+            {
+                extracted[m / 64] |= 1ull << (m % 64);
+            }
         }
     }
     for (uint32_t w = 0; result && w < words; w += 1)
@@ -2805,6 +3309,29 @@ static bool bind_test_atexit_cross_check(const Runtime* runtime, const char* dir
     return bind_test_report(&tally);
 }
 
+// The libgcc program's: its bound link run by ld.lld's and ld.bfd's links, with the quotient as its status, and its own
+// objects linked by cc with lld, which extracts the same member of libgcc.a.
+static bool bind_test_libgcc_cross_check(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "libgcc, cross-check",
+    };
+    BindTestLibgcc bound;
+    BindTestLibgcc own;
+    bind_test_libgcc(&bound, runtime, BIND_PATH_VECTOR, true);
+    bind_test_libgcc(&own, runtime, BIND_PATH_VECTOR, false);
+    bind_test_expect(&tally, bound.bound && own.bound, "the libgcc program built", 0);
+    if (bound.bound && own.bound)
+    {
+        bind_test_link_and_run(&tally, &bound.test.link, &bound.test.bind, runtime, 1, directory, "libgcc", (const uint8_t*)"", 0, BUSTER_BIND_TEST_LIBGCC_STATUS, keep,
+                               arena);
+        bind_test_against_lld(&tally, &own.test.link, 1, &bound.test.link, &bound.test.bind, runtime, directory, "libgcc", keep, arena);
+    }
+    bind_test_link_end(&bound.test);
+    bind_test_link_end(&own.test);
+    return bind_test_report(&tally);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // The static runtimes
 //
@@ -3274,6 +3801,8 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
             bind_test_expect(&tally, vector_bound && exact_bound && generated, link_test_program_names[i], vector.bind.error);
             bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link), "the paths' links the same", i);
             bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", i);
+            bind_test_dirty(&tally, &vector, runtime, options[i]);
+            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound && generated)
             {
                 bind_test_static_expected(runtime, &own.link, expected, arena);
@@ -3887,6 +4416,8 @@ static bool bind_test_shared_programs(const Runtime* runtime, uint64_t seed)
             bind_test_expect(&tally, vector_bound && exact_bound, link_test_program_names[i], vector.bind.error);
             bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link) && bind_test_same_binds(&vector.bind, &exact.bind),
                              "the paths' links and bindings the same", i);
+            bind_test_dirty(&tally, &vector, runtime, options[i]);
+            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound)
             {
                 bind_test_shared_structure(&tally, &vector.program.link, &vector.bind);
@@ -3906,6 +4437,7 @@ typedef enum BindTestSharedRule
     BIND_TEST_SHARED_HIDDEN_NOWHERE,
     BIND_TEST_SHARED_VISIBILITY,
     BIND_TEST_SHARED_IMPORTS,
+    BIND_TEST_SHARED_MORESTACK,
     BIND_TEST_SHARED_RULES,
 } BindTestSharedRule;
 
@@ -3914,6 +4446,7 @@ static const char* const bind_test_shared_rule_names[BIND_TEST_SHARED_RULES] = {
     [BIND_TEST_SHARED_HIDDEN_NOWHERE] = "a hidden reference to a name nothing defines",
     [BIND_TEST_SHARED_VISIBILITY] = "definitions with default, protected and hidden visibility, and a weak one",
     [BIND_TEST_SHARED_IMPORTS] = "references to __tls_get_addr and puts",
+    [BIND_TEST_SHARED_MORESTACK] = "a reference to __morestack, whose member's reference to the unwinder isn't left to the loader",
 };
 
 // The most symbols a shared rule's link names.
@@ -3952,6 +4485,10 @@ static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtim
             symbols[i] = bind_test_symbol(test, definitions[i], definition_flags[i], BUSTER_LINK_SOURCE_PROGRAM);
             result = symbols[i] != 0 && bind_test_define(test, symbols[i]);
         }
+    }
+    else if (result && rule == BIND_TEST_SHARED_MORESTACK)
+    {
+        symbols[0] = bind_test_symbol(test, "__morestack", strong, BUSTER_LINK_SOURCE_NONE);
     }
     else if (result)
     {
@@ -4002,6 +4539,10 @@ static bool bind_test_shared_rules(const Runtime* runtime)
         {
             holds = bound && vector.bind.export_count == 3 && vector.bind.exports[0] == symbols[0] && vector.bind.exports[1] == symbols[1] &&
                     vector.bind.exports[2] == symbols[3];
+        }
+        else if (rule == BIND_TEST_SHARED_MORESTACK)
+        {
+            holds = bind_test_split_refused(&vector.bind, &vector.link, runtime);
         }
         else
         {
@@ -4227,6 +4768,239 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Split-stack code
+//
+// C compiled with -fsplit-stack calls __morestack in its functions' prologues, which libgcc.a's morestack.o defines, and
+// that member refers to the unwinder (_Unwind_Resume, __gcc_personality_v0), which GCC's driver takes from
+// libgcc_s.so.1, as needed (-lgcc_s_asneeded), and the direct path doesn't link. The cross-check compiles a library and
+// a PIE of such code, then:
+//   - binds each against its runtime (the shared library's and the dynamic PIE's), by both paths, which must refuse it
+//     alike as BIND_ERROR_MEMBER_UNDEFINED naming _Unwind_Resume and libgcc.a's morestack.o;
+//   - links the same objects by cc with GNU ld and with lld: each output must need libgcc_s.so.1, each library must
+//     load into a harness that doesn't (dlopen with RTLD_NOW, as alone) and return 0 from split_entry, and each PIE run
+//     with status 0;
+//   - and links the library by lld with libgcc.a and libc but not libgcc_s.so.1, which is what leaving the unwinder to
+//     the loader makes: the harness must fail to load it, naming an undefined symbol.
+
+static const char bind_test_split_source[] = "#include <stdio.h>\n"
+                                             "int split_depth(int n)\n"
+                                             "{\n"
+                                             "    char buffer[256];\n"
+                                             "    snprintf(buffer, sizeof(buffer), \"%d\", n);\n"
+                                             "    return n == 0 ? (int)buffer[0] : split_depth(n - 1) + 1;\n"
+                                             "}\n"
+                                             "int split_entry(void) { return split_depth(10000) == '0' + 10000 ? 0 : 1; }\n"
+                                             "#ifdef BUSTER_SPLIT_MAIN\n"
+                                             "int main(void) { return split_entry(); }\n"
+                                             "#endif\n";
+
+static const char bind_test_split_harness[] = "#include <dlfcn.h>\n"
+                                              "#include <stdio.h>\n"
+                                              "int main(int argc, char** argv)\n"
+                                              "{\n"
+                                              "    void* library = argc == 2 ? dlopen(argv[1], RTLD_NOW | RTLD_LOCAL) : 0;\n"
+                                              "    int (*entry)(void) = library != 0 ? (int (*)(void))dlsym(library, \"split_entry\") : 0;\n"
+                                              "    if (library == 0)\n"
+                                              "    {\n"
+                                              "        fprintf(stderr, \"%s\\n\", dlerror());\n"
+                                              "    }\n"
+                                              "    return library == 0 ? 2 : entry == 0 ? 3 : entry();\n"
+                                              "}\n";
+
+// Whether readelf's dynamic section of `path` names libgcc_s.so.1 among its DT_NEEDED entries; false if readelf fails.
+static bool bind_test_needs_libgcc_s(const char* path, const char* out, const char* err, Arena* arena)
+{
+    char* readelf[] = {
+        "readelf",
+        "-dW",
+        (char*)path,
+        0,
+    };
+    const uint64_t length = arena->length;
+    const String8 text = object_test_run(readelf, out, err) == 0 ? object_test_read_file(arena, out) : (String8){ 0 };
+    const bool result = text.pointer != 0 && strstr(text.pointer, "(NEEDED)") != 0 && strstr(text.pointer, "[libgcc_s.so.1]") != 0;
+    arena_pop_to(arena, length);
+    return result;
+}
+
+// The object at `object_path`, compiled from split.c, bound against `runtime` by both paths: refused alike, as
+// split-stack code must be (bind_test_split_refused).
+static void bind_test_split_bind(BindTestTally* tally, const Runtime* runtime, const char* object_path, const char* what, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    const String8 object = object_test_read_file(arena, object_path);
+    BindTestLink vector;
+    BindTestLink exact;
+    const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
+    const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
+    bind_test_expect(tally, vector_imported && exact_imported, what, 0);
+    const bool vector_begun = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena);
+    const bool exact_begun = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena);
+    const bool vector_ended = vector_begun && bind_end(&vector.bind, &vector.link);
+    const bool exact_ended = exact_begun && bind_end(&exact.bind, &exact.link);
+    bind_test_expect(tally, vector_begun && !vector_ended && bind_test_split_refused(&vector.bind, &vector.link, runtime), what, vector.bind.error);
+    bind_test_expect(tally, exact_begun && !exact_ended && bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind),
+                     "the paths' refusals the same", exact.bind.error);
+    if (object.pointer != 0)
+    {
+        bind_test_link_end(&vector);
+        bind_test_link_end(&exact);
+    }
+    arena_pop_to(arena, length);
+}
+
+static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_runtime, const char* directory, bool keep, Arena* arena)
+{
+    BindTestTally tally = {
+        .check = "split-stack code, cross-check",
+    };
+    enum
+    {
+        SOURCE,
+        HARNESS_SOURCE,
+        HARNESS,
+        LIBRARY_OBJECT,
+        PIE_OBJECT,
+        BFD_LIBRARY,
+        LLD_LIBRARY,
+        BARE_LIBRARY,
+        BFD_PIE,
+        LLD_PIE,
+        OUT,
+        ERR,
+        PATHS,
+    };
+    static const char* const names[PATHS] = {
+        [SOURCE] = "split.c",
+        [HARNESS_SOURCE] = "split-harness.c",
+        [HARNESS] = "split-harness",
+        [LIBRARY_OBJECT] = "split-pic.o",
+        [PIE_OBJECT] = "split-pie.o",
+        [BFD_LIBRARY] = "split-bfd.so",
+        [LLD_LIBRARY] = "split-lld.so",
+        [BARE_LIBRARY] = "split-bare.so",
+        [BFD_PIE] = "split-bfd",
+        [LLD_PIE] = "split-lld",
+        [OUT] = "split.out",
+        [ERR] = "split.err",
+    };
+    char paths[PATHS][BUSTER_BIND_TEST_PATH_BYTES];
+    for (uint32_t i = 0; i < PATHS; i += 1)
+    {
+        snprintf(paths[i], sizeof(paths[i]), "%s/%s", directory, names[i]);
+    }
+    const bool written = bind_test_write_file(paths[SOURCE], bind_test_split_source, sizeof(bind_test_split_source) - 1) &&
+                         bind_test_write_file(paths[HARNESS_SOURCE], bind_test_split_harness, sizeof(bind_test_split_harness) - 1);
+    char* compile_library[] = {
+        "cc",
+        "-O2",
+        "-fsplit-stack",
+        "-fPIC",
+        "-c",
+        "-o",
+        paths[LIBRARY_OBJECT],
+        paths[SOURCE],
+        0,
+    };
+    char* compile_pie[] = {
+        "cc",
+        "-O2",
+        "-fsplit-stack",
+        "-fPIE",
+        "-DBUSTER_SPLIT_MAIN",
+        "-c",
+        "-o",
+        paths[PIE_OBJECT],
+        paths[SOURCE],
+        0,
+    };
+    char* compile_harness[] = {
+        "cc",
+        "-O2",
+        "-o",
+        paths[HARNESS],
+        paths[HARNESS_SOURCE],
+        0,
+    };
+    const bool compiled = written && object_test_run(compile_library, paths[OUT], paths[ERR]) == 0 && object_test_run(compile_pie, paths[OUT], paths[ERR]) == 0 &&
+                          object_test_run(compile_harness, paths[OUT], paths[ERR]) == 0;
+    bind_test_expect(&tally, compiled, "split.c and the harness compiled by cc", 0);
+    if (compiled)
+    {
+        bind_test_split_bind(&tally, shared_runtime, paths[LIBRARY_OBJECT], "the library refused by binding", arena);
+        bind_test_split_bind(&tally, runtime, paths[PIE_OBJECT], "the PIE refused by binding", arena);
+        bind_test_expect(&tally, !bind_test_needs_libgcc_s(paths[HARNESS], paths[OUT], paths[ERR], arena), "the harness doesn't need libgcc_s.so.1", 0);
+        static const char* const fuses[] = {
+            "-fuse-ld=bfd",
+            "-fuse-ld=lld",
+        };
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fuses); f += 1)
+        {
+            char* library = paths[f == 0 ? BFD_LIBRARY : LLD_LIBRARY];
+            char* pie = paths[f == 0 ? BFD_PIE : LLD_PIE];
+            const bool linked = bind_test_shared_link(fuses[f], 0, paths[LIBRARY_OBJECT], library, paths[OUT], paths[ERR]) == 0;
+            bind_test_expect(&tally, linked && bind_test_needs_libgcc_s(library, paths[OUT], paths[ERR], arena), "cc -shared's library needs libgcc_s.so.1", f);
+            char* load[] = {
+                paths[HARNESS],
+                library,
+                0,
+            };
+            const int loaded = linked ? object_test_run(load, paths[OUT], paths[ERR]) : -1;
+            bind_test_expect(&tally, loaded == 0, "cc -shared's library loads alone and runs", (uint64_t)loaded);
+            char* link_pie[] = {
+                "cc",
+                (char*)fuses[f],
+                "-o",
+                pie,
+                paths[PIE_OBJECT],
+                0,
+            };
+            const bool pie_linked = object_test_run(link_pie, paths[OUT], paths[ERR]) == 0;
+            char* run_pie[] = {
+                pie,
+                0,
+            };
+            const int ran = pie_linked ? object_test_run(run_pie, paths[OUT], paths[ERR]) : -1;
+            bind_test_expect(&tally, pie_linked && bind_test_needs_libgcc_s(pie, paths[OUT], paths[ERR], arena) && ran == 0, "cc's PIE needs libgcc_s.so.1 and runs",
+                             (uint64_t)ran);
+        }
+        // libgcc.a and libc without libgcc_s.so.1: the unwinder left to the loader.
+        char libgcc[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(libgcc, sizeof(libgcc), "%.*s", (int)shared_runtime->archives[0].path.length, shared_runtime->archives[0].path.pointer);
+        char* link_bare[] = {
+            "cc",
+            "-fuse-ld=lld",
+            "-shared",
+            "-nodefaultlibs",
+            "-o",
+            paths[BARE_LIBRARY],
+            paths[LIBRARY_OBJECT],
+            libgcc,
+            "-lc",
+            0,
+        };
+        const bool bare_linked = object_test_run(link_bare, paths[OUT], paths[ERR]) == 0;
+        char* load_bare[] = {
+            paths[HARNESS],
+            paths[BARE_LIBRARY],
+            0,
+        };
+        const int bare_loaded = bare_linked ? object_test_run(load_bare, paths[OUT], paths[ERR]) : -1;
+        const uint64_t length = arena->length;
+        const String8 errors = bare_loaded == 2 ? object_test_read_file(arena, paths[ERR]) : (String8){ 0 };
+        bind_test_expect(&tally, bare_linked && !bind_test_needs_libgcc_s(paths[BARE_LIBRARY], paths[OUT], paths[ERR], arena) && errors.pointer != 0 &&
+                                     strstr(errors.pointer, "undefined symbol") != 0,
+                         "the library without libgcc_s.so.1 doesn't load alone", (uint64_t)bare_loaded);
+        arena_pop_to(arena, length);
+    }
+    for (uint32_t i = 0; !keep && i < PATHS; i += 1)
+    {
+        unlink(paths[i]);
+    }
+    return bind_test_report(&tally);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // run_bind_tests
 
 static int run_bind_tests(int argc, char** argv)
@@ -4284,9 +5058,12 @@ static int run_bind_tests(int argc, char** argv)
         passed = bind_test_rules(&runtime) && passed;
         passed = bind_test_libraries(&runtime, directory) && passed;
         passed = bind_test_atexit_program(&runtime) && passed;
+        passed = bind_test_libgcc_program(&runtime) && passed;
+        passed = bind_test_room_bound(&runtime, "room", &arena) && passed;
         if (cross_check)
         {
             passed = bind_test_atexit_cross_check(&runtime, directory, keep, &arena) && passed;
+            passed = bind_test_libgcc_cross_check(&runtime, directory, keep, &arena) && passed;
         }
         passed = bind_test_linker_cases(&runtime, cross_check, directory, keep, &arena) && passed;
         // The static runtime.
@@ -4328,10 +5105,12 @@ static int run_bind_tests(int argc, char** argv)
         {
             passed = bind_test_shared_programs(&shared_runtime, seed) && passed;
             passed = bind_test_shared_rules(&shared_runtime) && passed;
+            passed = bind_test_room_bound(&shared_runtime, "shared room", &arena) && passed;
         }
         if (shared_imported == RUNTIME_ERROR_NONE && cross_check)
         {
             passed = bind_test_shared_compiled(&shared_runtime, directory, keep, &arena) && passed;
+            passed = bind_test_split_stack(&runtime, &shared_runtime, directory, keep, &arena) && passed;
         }
         runtime_release(&shared_runtime);
         if (keep)
