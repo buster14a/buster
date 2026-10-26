@@ -511,8 +511,8 @@ static void check_test_driver_damaged_snapshot(CheckTest* test, const char* exec
     const uint32_t member = entry != 0 ? view.global_names.member[entry - 1] : 0;
     const uint32_t piece = member != 0 ? RUNTIME_OBJECTS + member - 1 : UINT32_MAX;
     const AtomId atom = piece != UINT32_MAX ? view.pieces[piece].begin.atoms : 0;
-    const uint64_t alignment = piece != UINT32_MAX ? header->regions[SNAPSHOT_REGION_ATOM_ALIGNMENT].offset + atom * sizeof(*view.link.atoms.alignment_log2) : 0;
-    const uint64_t size = piece != UINT32_MAX ? header->regions[SNAPSHOT_REGION_ATOM_SIZE].offset + atom * sizeof(*view.link.atoms.size) : 0;
+    const uint64_t alignment = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_ALIGNMENT, atom) : 0;
+    const uint64_t size = piece != UINT32_MAX ? snapshot_record_offset(header, SNAPSHOT_REGION_ATOM_SIZE, atom) : 0;
     const bool placed = piece != UINT32_MAX && view.pieces[piece].end.atoms > atom && snapshot_test_piece_at(header, &view, alignment) == piece &&
                         snapshot_test_piece_at(header, &view, size) == piece;
     check_test_expect(test, placed, "the __udivti3 member's first atom's alignment and size in the snapshot");
