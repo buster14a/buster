@@ -4066,7 +4066,7 @@ or the bodies: a lane's copy of the reader and its wake-up must be paid for by
 its share of the walks, and a woken lane reads at about half the first lane's
 speed.
 
-`./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 44 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or

@@ -59,9 +59,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "enum-completed-between-bodies", "enum E;\nint f(void) { enum E* e = 0; return e != 0; }\nenum E { A, B };\nint g(void) { enum E e = B; return e; }\n", true },
     { "typedef-of-a-later-completion",
       "struct S;\nint f(void) { typedef struct S T; T* t = 0; return t != 0; }\nstruct S { int x; };\nint g(void) { typedef struct S T; T t = { 2 }; return t.x; }\n", true },
-    // A tag first named in a file-scope declarator (a prototype's parameter, a sizeof in an array's bound, a
-    // definition's parameter) ends with the declarator in source order's reader, which the history doesn't say: a later
-    // body that names the tag makes one of its own. The last declares the tag first, which every body sees.
+    // A tag first named in a file-scope declarator's parameter list (a prototype's, a definition's) ends with the list in
+    // source order's reader, whose scope is deeper than the file scope the history holds: a later body that names the
+    // tag makes one of its own. One that an array's bound names is the file scope's, which later bodies see, as is the
+    // last fixture's, which the file scope declares first.
     { "tag-in-a-prototype", "void g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
     { "tag-in-a-prototype-then-passed", "void g(struct S *p);\nvoid f(void) { struct S *q = 0; g(q); }\n", true },
     { "tag-in-a-prototype-two-bodies", "void g(struct S *p);\nint f1(void) { struct S *q = 0; return q != 0; }\nint f2(void) { struct S *r = 0; return r != 0; }\n", true },
@@ -109,6 +110,14 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
     { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
     { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
+    // Structs, unions and enums defined in a parameter list (#438): a definition's tags and enumeration constants, which
+    // its body declares again at its opening, whether it names them or not; and a prototype's, which end with it.
+    { "parameter-list-definitions-in-its-body",
+      "int f(struct S { int x; } s, enum E { K = 7 } e) { struct S t = s; enum E k = K; return t.x + k + e; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-constant-shadows-the-file-scope", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return K + e; }\nint g(void) { return K; }\n", true },
+    { "parameter-list-constant-its-body-doesnt-name", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return e; }\nint g(void) { return K; }\n", true },
+    { "prototype-list-constant-ends-with-it", "void g(enum E { K = 7 } e);\nint f(void) { int K = 3; return K; }\n", true },
+    { "definition-in-an-array-bound", "int a[sizeof(struct V { int x; })];\nint f(void) { struct V v = { 2 }; return v.x; }\n", true },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
