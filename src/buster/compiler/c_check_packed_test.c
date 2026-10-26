@@ -1,0 +1,312 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+// Original source probes, checked against external Clang through the production diagnostic renderer in both
+// schedules. Compare warning/error counts, complete packed-member messages and presumed line/column pairs.
+
+typedef struct CheckPackedTestDiagnostic CheckPackedTestDiagnostic;
+struct CheckPackedTestDiagnostic
+{
+    uint32_t line;
+    uint32_t column;
+    bool error;
+    char message[256];
+};
+
+static int check_test_packed_run(const char* executable, const char* source, const char* output, const char* errors, bool scalar)
+{
+    int result = -1;
+    if (executable != NULL)
+    {
+        char* arguments[] = { (char*)executable, scalar ? "--scalar" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source, NULL };
+        result = object_test_run(arguments, output, errors);
+    }
+    else
+    {
+        fflush(NULL);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            const int out = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            const int err = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (out < 0 || err < 0 || dup2(out, STDOUT_FILENO) < 0 || dup2(err, STDERR_FILENO) < 0)
+            {
+                _exit(126);
+            }
+            close(out);
+            close(err);
+            char* arguments[] = { scalar ? "--scalar" : "-fsyntax-only", "-fsyntax-only", "-std=gnu17", (char*)source };
+            const int code = run_check_command(BUSTER_ARRAY_LENGTH(arguments), arguments, true);
+            fflush(NULL);
+            _exit(code);
+        }
+        int status = 0;
+        pid_t waited = -1;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && errno == EINTR);
+        if (waited == child && child > 0 && WIFEXITED(status))
+        {
+            result = WEXITSTATUS(status);
+        }
+    }
+    return result;
+}
+
+static uint32_t check_test_packed_diagnostics(const char* path, CheckPackedTestDiagnostic* diagnostics, uint32_t capacity)
+{
+    FILE* file = fopen(path, "r");
+    uint32_t count = 0;
+    char* text = NULL;
+    size_t allocated = 0;
+    while (file != NULL && getline(&text, &allocated, file) >= 0)
+    {
+        char* message = strstr(text, "taking address of packed member");
+        if (message != NULL)
+        {
+            CheckPackedTestDiagnostic diagnostic = { .error = strstr(text, "error: ") != NULL };
+            const bool located = sscanf(text, "%*[^:]:%u:%u:", &diagnostic.line, &diagnostic.column) == 2;
+            char* end = strstr(message, " [-W");
+            end = end != NULL ? end : strchr(message, '\n');
+            const size_t length = end != NULL ? (size_t)(end - message) : strlen(message);
+            if (!located || count >= capacity || length >= sizeof(diagnostic.message))
+            {
+                count = UINT32_MAX;
+                break;
+            }
+            memcpy(diagnostic.message, message, length);
+            uint32_t place = count;
+            while (place != 0 && (diagnostics[place - 1].line > diagnostic.line ||
+                                 (diagnostics[place - 1].line == diagnostic.line && diagnostics[place - 1].column > diagnostic.column)))
+            {
+                diagnostics[place] = diagnostics[place - 1];
+                place -= 1;
+            }
+            diagnostics[place] = diagnostic;
+            count += 1;
+        }
+    }
+    free(text);
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    else
+    {
+        count = UINT32_MAX;
+    }
+    return count;
+}
+
+static void check_test_packed_bounds(CheckTest* test)
+{
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* memory = mmap(NULL, page * 5, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_READ | PROT_WRITE) == 0 &&
+                       mprotect(memory + page * 3, page, PROT_READ | PROT_WRITE) == 0;
+    check_test_expect(test, ready, "packed classifier guard allocation");
+    for (uint32_t width = 0; ready && width <= 129; width += 1)
+    {
+        uint8_t* kinds = memory + page * 2 - width;
+        uint8_t* roles = memory + page * 4 - width;
+        for (uint32_t i = 0; i < width; i += 1)
+        {
+            kinds[i] = i % 3 == 0 ? PARSE_KIND_AMP : PARSE_KIND_IDENTIFIER;
+            roles[i] = i % 5 == 0 ? PARSE_ROLE_OPERAND : PARSE_ROLE_PREFIX;
+        }
+        Parser parser = { .tokens = { .kinds = kinds, .count = width }, .tree = { .roles = roles } };
+        for (uint32_t first = 0; first < width || (width == 0 && first == 0); first += 64)
+        {
+            const uint32_t count = width - first < 64 ? width - first : 64;
+            uint64_t expected = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                expected |= (uint64_t)((first + i) % 3 == 0 && (first + i) % 5 != 0) << i;
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                parser.options.scalar = scalar != 0;
+                check_test_expect(test, check_input_packed_candidates(&parser, first, count) == expected,
+                                  "packed classifiers match independent positions at guarded tails");
+            }
+        }
+        for (uint32_t i = 0; i < width; i += 1)
+        {
+            kinds[i] = i % 3 == 0 ? 4 : 0;
+        }
+        for (uint32_t first = 0; first <= width; first += 1)
+        {
+            bool expected = false;
+            for (uint32_t i = first; i < width; i += 1)
+            {
+                expected |= i % 3 == 0;
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                check_test_expect(test, check_input_packed_any(kinds, first, width, 4, scalar != 0) == expected,
+                                  "packed metadata scan respects the logical end and guard page");
+            }
+        }
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, page * 5);
+    }
+    const uint8_t packed[] = { 0, 1 };
+    uint8_t kind = PARSE_KIND_AMP;
+    uint8_t role = PARSE_ROLE_PREFIX;
+    Parser parser = { .tokens = { .kinds = &kind, .count = 1 }, .tree = { .roles = &role } };
+    TypeTable types = { .tags = { .packed = (uint8_t*)packed, .count = 2 } };
+    for (uint32_t failure = 0; failure < 2; failure += 1)
+    {
+        Arena arena = arena_reserve(4096);
+        Arena scratch = arena_reserve(4096);
+        const uint64_t arena_capacity = arena.capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        arena.capacity = failure == 0 ? 0 : arena.capacity;
+        scratch.capacity = failure == 1 ? 0 : scratch.capacity;
+        CheckInput input = { 0 };
+        CheckInputReader reader = { .output = &input, .parser = &parser, .types = &types, .arena = &arena, .scratch = &scratch, .expression_limit = 1 };
+        check_input_packed_members(&reader);
+        check_test_expect(test, input.resource && input.packed_member_count == 0 && scratch.length == 0,
+                          "packed witness allocation failure is explicit and restores scratch");
+        arena.capacity = arena_capacity;
+        scratch.capacity = 0;
+        input = (CheckInput){ .packed_member_count = 1, .graph = { .count = 1 } };
+        check_test_expect(test, !check_input_packed_finalize(&input, &parser, &types, NULL, &scratch) && input.resource && scratch.length == 0,
+                          "packed conversion-context allocation failure is explicit");
+        scratch.capacity = scratch_capacity;
+        arena_release(&scratch);
+        arena_release(&arena);
+    }
+}
+
+static void check_test_packed_members(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_packed_bounds(test);
+    const char* prefix =
+        "struct __attribute__((packed)) P { char c; int w; int a[2]; };\n"
+        "struct __attribute__((packed)) F { int w; };\n"
+        "struct __attribute__((packed,aligned(4))) A { int first; char c; int w; };\n"
+        "struct Q { char c; int w __attribute__((packed)); };\n"
+        "struct N { struct P p; };\n"
+        "struct __attribute__((packed)) O { char c; struct { int x; int y; } n; };\n"
+        "struct Plain { char c; int w; };\n"
+        "struct P *get(void); void take(void*); void itake(int*);\n";
+    const struct
+    {
+        const char* source;
+        uint32_t warnings;
+        bool rejected;
+    } fixtures[] =
+    {
+        { "int*f(struct P*p){return &p->w;}\n", 1 },
+        { "int*f(struct P*p){return &(p->w);}\n", 1 },
+        { "int*f(struct P*p){return &((p)->w);}\n", 1 },
+        { "int*f(struct P*p){return &__extension__ p->w;}\n", 1 },
+        { "char*f(struct P*p){return &p->c;}\n", 0 },
+        { "int*f(struct Plain*p){return &p->w;}\n", 0 },
+        { "int*f(struct F*p){return &p->w;}\n", 1 },
+        { "int*f(struct A*p){return &p->first;}\n", 0 },
+        { "int*f(struct A*p){return &p->w;}\n", 1 },
+        { "int*f(struct Q*p){return &p->w;}\n", 1 },
+        { "int*f(struct N*p){return &p->p.w;}\n", 1 },
+        { "int*f(struct O*p){return &p->n.y;}\n", 1 },
+        { "void*f(struct P*p){return &p->w;}\n", 0 },
+        { "void f(struct P*p){take(&p->w);}\n", 0 },
+        { "void f(struct P*p){itake(&p->w);}\n", 1 },
+        { "char*f(struct P*p){return (char*)&p->w;}\n", 0 },
+        { "short*f(struct P*p){return (short*)&p->w;}\n", 1 },
+        { "long f(struct P*p){return (long)&p->w;}\n", 0 },
+        { "void f(struct P*p){(void)&p->w;}\n", 1 },
+        { "int*f(struct A*p){return (int*)&p->w;}\n", 0 },
+        { "int*f(struct P*p){return &get()->w;}\n", 0 },
+        { "int*f(struct P*p){return &(*p).w;}\n", 0 },
+        { "int*f(struct P*p){return &p[0].w;}\n", 0 },
+        { "int*f(struct P*p){return &p->a[0];}\n", 0 },
+        { "int*f(struct P*p){return p->a;}\n", 0 },
+        { "int(*f(struct P*p))[2]{return &p->a;}\n", 1 },
+        { "void f(struct P*p){__builtin_memcpy(&p->w,&p->a,4);}\n", 0 },
+        { "void*f(struct P*p){return __builtin_assume_aligned(&p->w,1);}\n", 1 },
+        { "void f(struct P*p){__builtin_prefetch(&p->w);}\n", 0 },
+        { "unsigned long f(struct P*p){return __builtin_object_size(&p->w,0);}\n", 0 },
+        { "int f(struct P*p){return __atomic_load_n(&p->w,0);}\n", 1 },
+        { "int*f(struct P*p){return 0?&p->w:(void*)0;}\n", 1 },
+        { "void*f(struct P*p){return 0?&p->w:(void*)0;}\n", 0 },
+        { "void*f(struct P*p){return (0,&p->w);}\n", 0 },
+        { "void f(struct P*p){(void)(&p->w,0);}\n", 1 },
+        { "unsigned long f(struct P*p){return sizeof(&p->w);}\n", 1 },
+        { "unsigned long f(struct P*p){return sizeof((char*)&p->w);}\n", 0 },
+        { "void f(struct P*p){__typeof__(&p->w) v;}\n", 1 },
+        { "void f(struct P*p){__typeof__((void*)&p->w) v;}\n", 0 },
+        { "struct F g; int*f(void){return &g.w;}\n", 1 },
+        { "struct F g __attribute__((aligned(4))); int*f(void){return &g.w;}\n", 0 },
+        { "struct P g __attribute__((aligned(4))); int*f(void){return &g.w;}\n", 1 },
+        { "typedef struct F AF __attribute__((aligned(4))); AF g; int*f(void){return &g.w;}\n", 0 },
+        { "#pragma pack(1)\nstruct K{char c;int w;};\n#pragma pack()\nint*f(struct K*p){return &p->w;}\n", 0 },
+        { "union __attribute__((packed)) U{char c;int w;}; int*f(union U*p){return &p->w;}\n", 1 },
+        { "struct __attribute__((packed)) R {char c; struct { int x; };}; int*f(struct R*p){return &p->x;}\n", 1 },
+        { "struct R {struct __attribute__((packed)){char c;int w;};}; int*f(struct R*p){return &p->w;}\n", 1 },
+        { "typedef struct __attribute__((packed)){char c;int w;} T; int*f(T*p){return &p->w;}\n", 1 },
+        { "struct __attribute__((packed)){char c;int w;} a; int*f(void){return &a.w;}\n", 1 },
+        { "struct R{struct{struct __attribute__((packed)){char c;int w;} n;} m;}; int*f(struct R*p){return &p->m.n.w;}\n", 1 },
+        { "struct R{union __attribute__((packed)){char c;int w;};}; int*f(struct R*p){return &p->w;}\n", 1 },
+        { "#define ANON struct __attribute__((packed)){char c;int w;}\nANON a; int*f(void){return &a.w;}\n", 1 },
+        { "struct H{struct P*next;}; int*f(struct H*p){return &p->next->w;}\n", 0 },
+        { "struct Incomplete; struct Incomplete*f(struct P*p){return (struct Incomplete*)&p->w;}\n", 0 },
+        { "void f(struct P*p){int*v=&p->w;}\n", 1 },
+        { "void f(struct P*p){void*v=&p->w;}\n", 0 },
+        { "void f(struct P*p){int*v;v=&p->w;}\n", 1 },
+        { "void f(struct P*p){void*v;v=&p->w;}\n", 0 },
+        { "int f(struct P*p,void*q){return &p->w==q;}\n", 1 },
+        { "int f(struct P*p){if(&p->w)return 1;return 0;}\n", 0 },
+        { "int f(struct P*p){return !!&p->w;}\n", 0 },
+        { "int f(struct P*p){return __builtin_constant_p(&p->w);}\n", 1 },
+        { "int*f(struct P*p){return __builtin_choose_expr(0,(int*)0,&p->w);}\n", 1 },
+        { "int*f(struct P*p){return _Generic(0,int:&p->w);}\n", 1 },
+        { "#pragma GCC diagnostic ignored \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 0 },
+        { "#pragma GCC diagnostic error \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 1, true },
+        { "#pragma GCC diagnostic ignored \"-Weverything\"\n#pragma GCC diagnostic warning \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 1 },
+        { "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n#pragma GCC diagnostic pop\nint*g(struct P*p){return &p->w;}\n", 1 },
+        { "#define ADDR(p) (&(p)->w)\nint*f(struct P*p){return ADDR(p);}\n", 1 },
+        { "int*f(struct P*p){return &p->w;}\nthis is invalid;\n", 1, true },
+    };
+    char path[1024];
+    char output[1024];
+    char errors[1024];
+    snprintf(path, sizeof(path), "%s/packed.c", directory);
+    snprintf(output, sizeof(output), "%s/packed.out", directory);
+    snprintf(errors, sizeof(errors), "%s/packed.err", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[8192];
+        const int length = snprintf(source, sizeof(source), "%s%s", prefix, fixtures[i].source);
+        const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", "-Wno-unused-value", path, NULL };
+        const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
+        CheckPackedTestDiagnostic oracle[16] = { 0 };
+        const uint32_t oracle_count = check_test_packed_diagnostics(errors, oracle, BUSTER_ARRAY_LENGTH(oracle));
+        char description[320];
+        snprintf(description, sizeof(description), "packed fixture %u: Clang warns %u times (expected %u), status %d", i, oracle_count, fixtures[i].warnings, oracle_status);
+        check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle_count == fixtures[i].warnings, description);
+        for (uint32_t route = 0; route < (executable != NULL ? 4u : 2u); route += 1)
+        {
+            const int status = written ? check_test_packed_run(route >= 2 ? executable : NULL, path, output, errors, (route & 1) != 0) : -1;
+            CheckPackedTestDiagnostic actual[16] = { 0 };
+            const uint32_t count = check_test_packed_diagnostics(errors, actual, BUSTER_ARRAY_LENGTH(actual));
+            snprintf(description, sizeof(description), "packed fixture %u, route %u: %u diagnostics/status %d, Clang %u/%d", i, route, count, status, oracle_count, oracle_status);
+            check_test_expect(test, status == oracle_status && count == oracle_count, description);
+            for (uint32_t item = 0; count == oracle_count && item < count && item < BUSTER_ARRAY_LENGTH(actual); item += 1)
+            {
+                snprintf(description, sizeof(description), "packed fixture %u, route %u: warning at %u:%u, Clang %u:%u: %.150s", i, route,
+                         actual[item].line, actual[item].column, oracle[item].line, oracle[item].column, actual[item].message);
+                check_test_expect(test, actual[item].line == oracle[item].line && actual[item].column == oracle[item].column &&
+                                      actual[item].error == oracle[item].error && strcmp(actual[item].message, oracle[item].message) == 0, description);
+            }
+        }
+    }
+    unlink(errors);
+    unlink(output);
+    unlink(path);
+}

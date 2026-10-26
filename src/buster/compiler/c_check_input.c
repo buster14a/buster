@@ -77,6 +77,18 @@ typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
+typedef struct CheckInputPackedMember CheckInputPackedMember;
+struct CheckInputPackedMember
+{
+    uint32_t address;
+    uint32_t token;
+    uint32_t member;
+    uint32_t record;
+    String8 member_name;
+    String8 record_name;
+    uint8_t alignment_log2;
+    bool suppressed;
+};
 #define CHECK_INPUT_FUNCTION_INLINE 0x01u
 #define CHECK_INPUT_FUNCTION_EXTERN 0x02u
 struct CheckInputVla
@@ -144,6 +156,9 @@ struct CheckInput
     uint32_t* initializer_begins;
     uint32_t* initializer_ends;
     uint32_t* token_nodes;
+    // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
+    CheckInputPackedMember* packed_members;
+    uint32_t packed_member_count;
     uint8_t* constant_warnings;
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
@@ -4167,6 +4182,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 }
 
 #include "c_check_binding.c"
+#include "c_check_packed_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
 // (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
@@ -4766,6 +4782,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (input->report_count == 0 && !input->resource)
                 {
                     check_input_vla_finish(&reader);
+                }
+                if (!input->resource)
+                {
+                    check_input_packed_members(&reader);
                 }
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
             }
