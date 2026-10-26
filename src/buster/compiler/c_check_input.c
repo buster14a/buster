@@ -45,16 +45,16 @@ static const char* const check_input_messages[] =
     "unroll pragma's count unclosed",
 };
 
-// The type/action tables currently describe one C LP64 model: signed plain char, 32-bit wchar_t, x87 long double
-// stored in 16 bytes, and arithmetic evaluated in its source format. Refuse preprocessing options that advertise
-// a different model before applying those fixed tables to the source.
+// The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
+// arithmetic evaluated in its source format, with plain char signed or unsigned as the options say
+// (TypeTable.char_unsigned). Refuse preprocessing options that advertise a different model before applying those fixed
+// tables to the source.
 static bool check_input_target_supported(const PPOptions* options)
 {
     const PredefinesOptions* target = &options->predefines;
     const bool source_evaluation = target->fp_eval_method == BUSTER_PREDEFINES_EVAL_SOURCE ||
                                    (target->fp_eval_method == BUSTER_PREDEFINES_EVAL_DEFAULT && predefines_eval_method(target) == 0);
-    return !options->assembly && !target->char_unsigned && !target->short_wchar &&
-           target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
+    return !options->assembly && !target->short_wchar && target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
 }
 
 // CheckInputReader.enum_fixed: an enum without a fixed underlying type (or another tag), one with it whose enumerators
@@ -163,6 +163,8 @@ struct CheckInput
     uint32_t* parameter_next;
     uint32_t* control_owners;
     uint32_t* label_targets;
+    // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
+    uint32_t label_address_count;
     uint32_t* case_ranges;
     CheckInputRegion* regions;
     uint32_t* expression_regions;
@@ -1283,8 +1285,9 @@ static CheckLiteral check_input_literal(CheckInputReader* reader, uint32_t token
     }
     else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
     {
-        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ? check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023) :
-                 check_literal_number(bytes, length, reader->scratch);
+        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ?
+                     check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned) :
+                     check_literal_number(bytes, length, reader->scratch);
     }
     reader->output->resource |= result.resource;
     arena_pop_to(reader->scratch, mark);
@@ -3683,26 +3686,6 @@ static void check_input_expressions(CheckInputReader* reader)
                 }
             }
         }
-        else if (check_input_label_address(parser, token))
-        {
-            // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the label's own
-            // object, its token plus one, which no declaration has.
-            const uint32_t label = reader->output->label_targets[token];
-            const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
-            supported = label < parser->tokens.count && pointer != 0 && count == 0;
-            node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
-            if (node != BUSTER_CHECK_NONE)
-            {
-                graph->leaves[node] = (CheckValue)
-                {
-                    .type = pointer,
-                    .category = CHECK_RVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
-                    .constant_kind = CHECK_CONSTANT_ADDRESS,
-                    .object = label + 1,
-                };
-            }
-        }
         else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
                  check_input_indirect_goto(parser, parser->tree.parents[token]))
         {
@@ -3717,6 +3700,27 @@ static void check_input_expressions(CheckInputReader* reader)
             supported = count == 1;
             switch (kind)
             {
+                case PARSE_KIND_AMPAMP:
+                {
+                    // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
+                    // label's own object, its token plus one, which no declaration has.
+                    const uint32_t label = reader->output->label_targets[token];
+                    const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
+                    supported = label < parser->tokens.count && pointer != 0 && count == 0;
+                    node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+                    if (node != BUSTER_CHECK_NONE)
+                    {
+                        graph->leaves[node] = (CheckValue)
+                        {
+                            .type = pointer,
+                            .category = CHECK_RVALUE,
+                            .flags = BUSTER_CHECK_STATIC_OBJECT,
+                            .constant_kind = CHECK_CONSTANT_ADDRESS,
+                            .object = label + 1,
+                        };
+                    }
+                    break;
+                }
                 case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
                 case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
                 case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
@@ -4247,6 +4251,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                             CheckDeferred* deferred)
 {
     *input = (CheckInput){ 0 };
+    // Plain char's signedness, which every phase after the reader reads from the table too.
+    types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     uint32_t size_queries = 0;

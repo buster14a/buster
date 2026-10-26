@@ -1052,9 +1052,35 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(characters); i += 1)
     {
-        const CheckLiteral value = check_literal_character((const uint8_t*)characters[i].spelling, (uint32_t)strlen(characters[i].spelling), false);
+        const CheckLiteral value = check_literal_character((const uint8_t*)characters[i].spelling, (uint32_t)strlen(characters[i].spelling), false, false);
         check_test_expect(test, value.valid == characters[i].valid && (!value.valid || (value.type == characters[i].type && value.integer == characters[i].integer)),
                           "bounded character decoding matches the expected target value");
+    }
+    // Where plain char is unsigned (-funsigned-char), one ordinary character is its unsigned value, and the rest are as
+    // they are where it is signed: multicharacter constants, u8's and the wide ones.
+    static const struct
+    {
+        const char* spelling;
+        uint64_t integer;
+        // One ordinary character, whose value depends on char's signedness.
+        bool single;
+    } unsigned_characters[] = {
+        { "'\\xff'", 255, true },
+        { "'\\200'", 128, true },
+        { "'\\x7f'", 127, true },
+        { "'a'", 97, true },
+        { "'\\xff\\xfe'", 0xfffe, false },
+        { "u8'\\xff'", 255, false },
+        { "L'\\xff'", 255, false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unsigned_characters); i += 1)
+    {
+        const char* spelling = unsigned_characters[i].spelling;
+        const CheckLiteral value = check_literal_character((const uint8_t*)spelling, (uint32_t)strlen(spelling), false, true);
+        const CheckLiteral signed_value = check_literal_character((const uint8_t*)spelling, (uint32_t)strlen(spelling), false, false);
+        check_test_expect(test, value.valid && value.integer == unsigned_characters[i].integer &&
+                                    (unsigned_characters[i].single || (signed_value.valid && signed_value.integer == value.integer)),
+                          "a character constant has its unsigned char's value where plain char is unsigned");
     }
     const uint8_t embedded_zero[] = {
         '\'',
@@ -1062,11 +1088,11 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
         0,
         '\''
     };
-    check_test_expect(test, !check_literal_character(embedded_zero, sizeof(embedded_zero), false).valid, "an escaped NUL byte does not index past the escape table");
-    check_test_expect(test, !check_literal_character(embedded_zero + 2, 0, false).valid, "an empty character spelling is invalid");
+    check_test_expect(test, !check_literal_character(embedded_zero, sizeof(embedded_zero), false, false).valid, "an escaped NUL byte does not index past the escape table");
+    check_test_expect(test, !check_literal_character(embedded_zero + 2, 0, false, false).valid, "an empty character spelling is invalid");
     const uint8_t basic_ucn[] = "'\\u0041'";
-    const CheckLiteral old_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, false);
-    const CheckLiteral new_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, true);
+    const CheckLiteral old_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, false, false);
+    const CheckLiteral new_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, true, false);
     check_test_expect(test, !old_ucn.valid && new_ucn.valid && new_ucn.integer == 65, "basic-character UCNs are accepted only from C23 onward");
     const uint64_t mark = scratch->length;
     const CheckLiteral floating = check_literal_number((const uint8_t*)"0x1.000002p100f", sizeof("0x1.000002p100f") - 1, scratch);
@@ -1817,6 +1843,8 @@ struct CheckSourceFixture
     bool extension;
     // The C standard both sides check it in, GNU's dialect of it: 0 for gnu17, or 2023 for gnu23.
     uint32_t standard;
+    // Whether both sides check it with plain char unsigned (-funsigned-char).
+    bool char_unsigned;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1844,6 +1872,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         },
         .no_standard_includes = true,
         .semantic_pragmas = true,
+        .predefines.char_unsigned = fixture->char_unsigned,
     };
     const ParseOptions parser_options[2] = {
         {
@@ -3260,6 +3289,162 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // #480's second review: an empty clang loop count is clang's missing argument, and only an expression's keywords
+        // start a count.
+        {
+            "an empty unroll_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty interleave_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty vectorize_width refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty pipeline_initiation_interval refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop pipeline_initiation_interval()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count no expression starts with refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(;)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(return)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll return\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a type keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll int\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of typeof refused",
+            "int f(int n) { int s = 0;\n#pragma unroll typeof(1)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of sizeof unsupported",
+            "int f(int n) { int s = 0;\n#pragma unroll sizeof(int)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "a clang loop count of an enumerator unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        // clang drops a loop pragma with tokens after its options (or a count's parentheses), with a warning: no hint, so
+        // nothing to place or to check, at file scope too; it ignores what follows the state or the constant expression an
+        // argument starts with, with a warning; licm takes disable, vectorize_predicate assume_safety; and a count this
+        // doesn't evaluate is still a hint of its category, or clang's error.
+        {
+            "loop pragmas clang drops, at file scope and before a statement",
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\nint f(int n) { int s = 0;\n"
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\n s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "a dropped clang loop pragma's arguments and hints unchecked",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0) 4\n#pragma clang loop unroll_count() 4\n"
+            "#pragma clang loop unroll_count(4))\n#pragma clang loop unroll(disable)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "what follows a loop hint's argument ignored",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize(enable x) unroll(enable, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(scalable, 4) interleave_count(4, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4, scalable x) unroll_count(4 = 5)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4 x, scalable)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(fixed, 4)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm and vectorize_predicate's assume_safety",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) vectorize_predicate(assume_safety)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm enabled refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(enable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "licm twice refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) licm(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a vectorize_width count without its kind refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width(4, x)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator count beside unroll(full) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) unroll(full)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator width beside vectorize(disable) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator count before an invalid state refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) vectorize(bogus)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a misplaced enumerator count refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator unroll count after unroll(enable) refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll(enable)\n#pragma unroll N\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator unroll count at file scope refused",
+            "enum { N = 4 };\n#pragma unroll N\nint x;\n",
+            true,
+            false
+        },
         // An inferred array's elements of struct type from subscripts, members and indirections, and compound literals in
         // a block-scope static's initializer, as this compiler's own main.c has them.
         {
@@ -3322,6 +3507,69 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // Plain char unsigned (-funsigned-char): its conversions, promotions, division and shifts, character constants,
+        // _Generic (char stays a type of its own), a mode attribute's base, and C23's char-based enum, and the assertions
+        // that hold only where it is signed, refused.
+        {
+            "unsigned plain char: values",
+            "_Static_assert((char)-1 == 255, \"conversion\");\n_Static_assert((char)200 > 100, \"comparison\");\n"
+            "_Static_assert((int)(char)0x80 == 128, \"widening\");\n_Static_assert((char)256 == 0, \"truncation\");\n"
+            "_Static_assert(-(char)1 == -1, \"promotion\");\n_Static_assert((char)-1 / 3 == 85, \"division\");\n"
+            "_Static_assert(((char)0x80 >> 1) == 64, \"shift\");\n"
+            "_Static_assert(_Generic((char)0, char: 1, unsigned char: 2, signed char: 3) == 1, \"distinct\");\n"
+            "typedef char C2 __attribute__((mode(HI)));\n_Static_assert((C2)-1 > 0, \"mode\");\n_Static_assert(__CHAR_UNSIGNED__ == 1, \"macro\");\n",
+            false,
+            false,
+            .char_unsigned = true
+        },
+        {
+            "unsigned plain char: character constants",
+            "_Static_assert('\\xff' == 255, \"hexadecimal\");\n_Static_assert('\\200' > 0, \"octal\");\n_Static_assert('a' == 97, \"letter\");\n"
+            "_Static_assert(L'\\xff' == 255, \"wide\");\n",
+            false,
+            false,
+            .char_unsigned = true
+        },
+        {
+            "unsigned plain char: a char-based enum and u8 constants in C23",
+            "enum E : char { A = 200 };\n_Static_assert(A == 200, \"fixed base\");\n_Static_assert((enum E)-1 > 0, \"unsigned base\");\n"
+            "_Static_assert(u8'\\xff' == 255, \"u8\");\n",
+            false,
+            false,
+            .standard = 2023,
+            .char_unsigned = true
+        },
+        {
+            "unsigned plain char: a signed conversion refused",
+            "_Static_assert((char)-1 < 0, \"signed\");\n",
+            true,
+            false,
+            .char_unsigned = true
+        },
+        {
+            "unsigned plain char: a signed character constant refused",
+            "int x = 1;\n_Static_assert('\\xff' == -1, \"signed\");\n",
+            true,
+            false,
+            .char_unsigned = true
+        },
+        {
+            "signed plain char: a char-based enum past its range refused in C23",
+            "enum E : char { A = 200 };\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            // A builtin type's flags don't say its signedness, which a mode attribute once read from them.
+            "mode attribute: the base's signedness kept",
+            "typedef unsigned int U2 __attribute__((mode(HI)));\n_Static_assert((U2)-1 > 0 && sizeof(U2) == 2, \"unsigned\");\n"
+            "typedef unsigned char U4 __attribute__((mode(SI)));\n_Static_assert((U4)-1 > 0 && sizeof(U4) == 4, \"unsigned char\");\n"
+            "typedef int S2 __attribute__((mode(HI)));\n_Static_assert((S2)-1 < 0, \"signed\");\n"
+            "typedef char C1 __attribute__((mode(QI)));\n_Static_assert((C1)-1 < 0, \"plain char\");\n",
+            false,
+            false
+        },
     };
     enum
     {
@@ -3368,24 +3616,30 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         "-std=gnu17"
     };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
-    // The fixtures in gnu23, again in their dialect.
-    char* c23_pointers[FILE_COUNT];
-    uint32_t c23_fixtures[FILE_COUNT];
-    ParseTestClang c23_outcomes[FILE_COUNT];
-    uint32_t c23_count = 0;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        c23_pointers[c23_count] = paths[i];
-        c23_fixtures[c23_count] = i;
-        c23_count += fixtures[i].standard == 2023 ? 1 : 0;
-    }
-    const char* c23_arguments[] = {
-        "-std=gnu23"
+    // The fixtures in gnu23 or with plain char unsigned, again in their dialect and with their char: gnu23, gnu17 with
+    // -funsigned-char, and gnu23 with it.
+    static const char* const variant_arguments[3][2] = {
+        { "-std=gnu23", "-fsigned-char" },
+        { "-std=gnu17", "-funsigned-char" },
+        { "-std=gnu23", "-funsigned-char" },
     };
-    ready = ready && (c23_count == 0 || parse_test_clang(clang, c23_arguments, BUSTER_ARRAY_LENGTH(c23_arguments), c23_pointers, c23_count, c23_outcomes));
-    for (uint32_t k = 0; ready && k < c23_count; k += 1)
+    for (uint32_t v = 0; ready && v < 3; v += 1)
     {
-        outcomes[c23_fixtures[k]] = c23_outcomes[k];
+        char* variant_pointers[FILE_COUNT];
+        uint32_t variant_fixtures[FILE_COUNT];
+        ParseTestClang variant_outcomes[FILE_COUNT];
+        uint32_t variant_count = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+        {
+            variant_pointers[variant_count] = paths[i];
+            variant_fixtures[variant_count] = i;
+            variant_count += (fixtures[i].standard == 2023) == (v != 1) && fixtures[i].char_unsigned == (v != 0) ? 1 : 0;
+        }
+        ready = variant_count == 0 || parse_test_clang(clang, variant_arguments[v], 2, variant_pointers, variant_count, variant_outcomes);
+        for (uint32_t k = 0; ready && k < variant_count; k += 1)
+        {
+            outcomes[variant_fixtures[k]] = variant_outcomes[k];
+        }
     }
     check_test_expect(test, ready, "clang source oracle could not run");
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
@@ -3439,11 +3693,11 @@ static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
     if (ready)
     {
         CheckInput input;
-        pp.options.predefines.char_unsigned = true;
+        pp.options.predefines.short_wchar = true;
         const bool target = check_input(&input, &parser, &pp, &table, &storage, &scratch);
         check_test_expect(test, !target && !input.resource && input.graph.count == 0 && input.report_count == 1 && input.reports[0].message == CHECK_INPUT_TARGET,
                           "source adapter rejects a mismatched target model before type construction");
-        pp.options.predefines.char_unsigned = false;
+        pp.options.predefines.short_wchar = false;
         const bool adapted = check_input(&input, &parser, &pp, &table, &storage, &scratch);
         bool resource_report = false;
         for (uint32_t i = 0; i < input.report_count; i += 1)
@@ -3487,7 +3741,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
     PPOptions options = { 0 };
     check_test_expect(test, check_input_target_supported(&options), "default semantic target is supported");
     options.predefines.char_unsigned = true;
-    check_test_expect(test, !check_input_target_supported(&options), "unsigned plain-char target is explicit unsupported input");
+    check_test_expect(test, check_input_target_supported(&options), "unsigned plain-char target is supported");
     options.predefines.char_unsigned = false;
     options.predefines.short_wchar = true;
     check_test_expect(test, !check_input_target_supported(&options), "short wchar target is explicit unsupported input");

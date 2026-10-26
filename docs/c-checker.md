@@ -85,16 +85,30 @@ The combined `-c --dump-static` command validates the object and renders the
 same resolved `Link` before publishing the object file. Its data relocations
 therefore share the actual emitted functions' symbols.
 
-Semantic checking currently uses one C LP64 target model: signed plain `char`,
-32-bit `wchar_t`, 80-bit x87 `long double` stored in 16 bytes, and floating
-arithmetic evaluated in its source format. Options that advertise a different
-model are rejected before declaration elaboration. This includes unsigned
-plain `char`, short `wchar_t`, 64/128-bit `long double`, double/extended floating
-evaluation, and default extended evaluation when SSE is disabled. Explicit
-source-format evaluation is accepted. Assembly is outside this adapter, and
-the C language option parser does not admit C++ modes. The host compiler's
-`-funsigned-char` implementation flag does not select the input program's
-plain-char semantics.
+Semantic checking currently uses one C LP64 target model: 32-bit `wchar_t`,
+80-bit x87 `long double` stored in 16 bytes, and floating arithmetic evaluated
+in its source format, with plain `char` signed (x86-64's) or unsigned, as
+`-funsigned-char` and its spellings say. Options that advertise a different
+model are rejected before declaration elaboration. This includes short
+`wchar_t`, 64/128-bit `long double`, double/extended floating evaluation, and
+default extended evaluation when SSE is disabled. Explicit source-format
+evaluation is accepted. Assembly is outside this adapter, and the C language
+option parser does not admit C++ modes.
+
+Plain `char`'s signedness is the type table's (`TypeTable.char_unsigned`), which
+`check_input_run` sets from the unit's options, the deferred reader on the
+caller's table too, and `type_copy` keeps. Every phase reads it from there:
+`type_integer_properties` answers it, so the folding, conversions and
+comparisons, the initializers, a `mode` attribute's base (which keeps its
+signedness, an unsigned one's too) and the lowering's classes (U8 where it was
+I8) follow it, as does the convention's extension of a char argument
+(`abi_extension`, zero for unsigned). An ordinary character constant of one
+character is its char's value (`'\xff'` is 255 where char is unsigned, -1
+where it's signed); multicharacter, `u8`, `u`, `U` and `L` constants don't
+depend on it. `test-checker`'s fixtures check each against clang with
+`-funsigned-char`, and its program fixtures build clang's oracle with the
+fixture's own signedness (`-fsigned-char` but for those that ask otherwise),
+one of them from the same source both ways.
 
 ## Implementation boundary
 
@@ -140,25 +154,35 @@ visible tag, as clang has it, not a declaration of it alone.)
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
 
-- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its ten
-  options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
-  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories. A state
-  takes its own words, and a count must be a positive integer constant that
-  fits an `int` (`vectorize_width` also `fixed` or `scalable`). No hint may come
-  twice in one category, across the pragmas before one loop too, nor a count
-  beside a state that rules it out (`unroll`'s every state, the others'
-  `disable`). A `for`, `while` or `do`-`while` loop must follow, in a function.
-  Errors are reported on the pragma's line, but a misplaced one's at the
-  statement after it, as clang reports them. `GCC unroll` is `unroll` (#480's
-  review), whose count may be left out, in parentheses or the rest of the line,
-  as clang's `ParseLoopHintValue` reads it: an empty count (`unroll()`), an
-  unclosed one (`unroll (4`) and one no expression starts with (`unroll ;`) are
-  errors, with clang's messages, and a pragma clang drops, with a warning
-  (`nounroll 4`, `unroll (4) x`), is no hint. A count here is an integer
-  literal, alone or before a token no expression goes on with (`unroll 4)`, as
-  clang reads it): another constant expression (`4 + 4`, `-1`, an enumerator)
-  is refused as unsupported, not guessed. Tier 0 has no loop transformation for
-  the hints to steer, so nothing keeps them.
+- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its
+  eleven options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
+  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories, read in
+  clang's three steps. Its pragma handler lexes the options' names and their
+  arguments in parentheses: an unknown name, a missing `(` and an unclosed
+  argument are errors, and a token after the options that isn't another one's
+  name drops the pragma, with a warning (`unroll_count(4))`), so that nothing
+  in it is placed or checked. Then each argument: a state takes its own words
+  (`licm` only `disable`, `vectorize_predicate` `assume_safety` too), and a
+  count must be a positive integer constant that fits an `int`
+  (`vectorize_width` also `fixed` or `scalable`, alone or after the count).
+  What follows the word or the constant expression clang reads is ignored,
+  with a warning (`vectorize(enable x)`, `vectorize_width(scalable, 4)`); an
+  empty argument is an error, and so is one no expression starts with
+  (`unroll_count(;)`, `unroll return`). Last, no hint may come twice in one
+  category, across the pragmas before one loop too, nor a count beside a state
+  that rules it out (`unroll`'s every state, the others' `disable`), and a
+  `for`, `while` or `do`-`while` loop must follow, in a function. Errors are
+  reported on the pragma's line, but a misplaced one's at the statement after
+  it, as clang reports them. `GCC unroll` is `unroll` (#480's review), whose
+  count may be left out, in parentheses or the rest of the line, as clang's
+  `ParseLoopHintValue` reads it; a pragma clang drops with a warning
+  (`nounroll 4`, `unroll (4) x`) is no hint. A count here is an integer
+  literal, alone or before a token no expression goes on with (`unroll 4)`,
+  `unroll_count(4, x)`, as clang reads them): another constant expression
+  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed, but
+  where it is an error whatever its value (beside `unroll(full)`, before a
+  statement that isn't a loop) the answer is the error. Tier 0 has no loop
+  transformation for the hints to steer, so nothing keeps them.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
@@ -615,18 +639,43 @@ What the lowering covers past scalars (#145's programs):
   `va_arg` of a `long double` reads its 16 bytes in the overflow area.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
-  parameter of it is a frame object of 16 bytes aligned to 16, and every object
-  of it, a global's too, is read with `LOAD` from its address and written with
-  `STORE` or `SET` through it, the address evaluated first. `x op= v`, `++` and
-  `--` on one go through its address as on memory, a postfix one keeping the old
-  value in a frame object of its own. Its constants are each function's table
+  parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
+  `STORE_LOCAL` and `SET_LOCAL` of the class read and write, and a global of it
+  is read with `LOAD` from its address and written with `STORE` or `SET`
+  through it, the address evaluated first; so are other objects' (`*p`,
+  `a[i]`, `s.m`). `x op= v`, `++` and `--` on a global or through a pointer go
+  through its address as on memory. Its constants are each function's table
   (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
   `_Bool` compare with. A function with an entry of the class or a long double
   result says so (`Tier0Function.x87`), which the lowering notes as it writes
-  each entry. What would hold one of its values in a temporary (a
-  statement expression's value or the operands live around it, `?:` without its
-  middle operand, a builtin's operand) and the floating classification builtins
-  on it are refused by name.
+  each entry. A temporary of the class (a statement expression's value or the
+  operands live around it, `?:` without its middle operand, a postfix one's old
+  value) is a frame object of its own (`check_lower_temporary`).
+  The builtins of its operands and the floating classification builtins on it
+  are refused by name.
+- **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
+  I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
+  classes as long double's is (`check_lower_memory_class`): their locals,
+  parameters and temporaries are frame objects, and their globals are read and
+  written through their addresses. A constant is one `CONST` where its high
+  half is its low half's sign or zero extension, else its high half shifted by
+  64 and ORed with its low half. The convention passes one as two INTEGER
+  eightbytes, which Tier 0 takes as a 16-byte object: an argument's value is set
+  into a frame object of its own and passed by its address (`argument_sizes`
+  16), a call's result comes back into its result object, which `LOCAL` reads,
+  and a function returns one from a frame object of its own by its address
+  (`result_size` 16). `va_arg` of one takes the path of a struct of two
+  eightbytes, its value loaded from their address. Its division and remainder
+  (`__divti3`, `__udivti3`, `__modti3`, `__umodti3`) and its conversions to and
+  from `float`, `double` and `long double` (`__floattisf` to `__fixunsxfti`) are
+  calls of libgcc's, as clang -O0 makes them: their operands set into frame
+  objects of their own and passed by their addresses. Those functions' symbols,
+  and `__errno_location`'s, are the runtime's (`CheckProgramLowered.runtime_symbols`):
+  the unit's own declaration's where its program has one with linkage, else
+  one of the lowering's own after the helpers' (`check_lower_runtime`). A shift
+  by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
+  and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
+  and a builtin of 128-bit operands are refused by name.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -679,6 +728,29 @@ What the lowering covers past scalars (#145's programs):
   table's pointers point at. Not yet: the difference of two labels' addresses
   as a static initializer's constant (GNU's relative jump tables), which clang
   folds and the checker refuses as not a constant.
+  The two control walks filter the parser's immutable kind/role columns in
+  bounded 64-byte blocks and visit exact events in source order: function
+  bodies, labels, cases, gotos and label addresses in the first walk; gotos,
+  label addresses and semicolons in the second. Masked tails need no padding;
+  the scalar option retains the original full traversals. Deferred masking,
+  branch priorities, body expiry and diagnostic order are unchanged.
+  The control reader counts resolved `&&label` expressions while finding their
+  targets (`CheckInput.label_address_count`) and reuses the loaded kind/role
+  facts in their consumers. A unit without one has no
+  addressed-label table or scan in `check_program`. A unit with one filters
+  64 kind/role bytes at a time, then marks only the selected targets, with an
+  exact scalar twin and a scalar tail requiring no input padding. The table
+  belongs to the program pass's scratch arena; an absent table means no label
+  needs a `CHECK_CONTROL_LABEL` entry.
+  In five paired rounds on the exclusively locked 9700X, exact source `f7af14f`
+  against `9de3d30` reduces frozen SQLite user instructions from 1,718,752,973
+  to 1,688,577,437 (−1.7557%), wall time from 147.964 to 146.825 ms and peak
+  RSS from 598,300 to 598,208 KiB. Required Lua and computed-goto dispatch
+  inputs show no consistent wall/RSS regression; dispatch cycles vary in sign.
+  The saving includes removing ordinary control-loop work, so it is not an
+  exact attribution of #431's older 13.3-million-instruction delta. The
+  [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
+  retain the limits and raw evidence for #449.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
@@ -691,7 +763,7 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
+`error: unsupported: FEATURE`, naming the feature: `_Complex`, `_BitInt`,
 inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 

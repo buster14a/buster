@@ -54,6 +54,13 @@ has on x86-64, as the owner asked on #132:
 | 23 | `nullptr_t` |
 | 32 + element | the complex types |
 
+Plain `char` is signed, as x86-64 has it, unless the table's `char_unsigned`
+says otherwise (`-funsigned-char`, which the checker's reader sets from the
+unit's options): `type_integer_properties` answers its signedness, so the
+conversions, promotions of bit-fields and machine modes follow it, and `char`
+stays a type of its own either way. The promotions don't depend on it (every
+character type promotes to `int`).
+
 The floating codes in rank order make the usual arithmetic conversions of two
 floating types a maximum. `_BitInt(N)` and complex `_BitInt`s are derived types
 (hash-consed by N); their codes are `BIT_INT` (24), `UNSIGNED_BIT_INT` (25) and
@@ -102,7 +109,8 @@ overflows.
 `type_machine_mode(table, base, mode)` implements the target type action for
 `__attribute__((mode(...)))`. It accepts bounded plain or paired-underscore
 spellings, selects the supported scalar/complex target types and uses the
-existing vector constructor for vector modes. It replaces the declaration's
+existing vector constructor for vector modes. It keeps the base's signedness
+(plain `char`'s as `char_unsigned` says) and replaces the declaration's
 type, stripping existing qualifiers and aligned typedef wrappers as Clang does;
 later declaration qualifiers remain the checker's responsibility. Enum typedef
 transformation leaves the original tag unchanged.
