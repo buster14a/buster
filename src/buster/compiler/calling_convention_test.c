@@ -3504,8 +3504,11 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool gcc_member = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT16;
         const TypeId builtin = BUSTER_TYPE_BUILTIN(code);
         const bool valid = type_is_valid(table, builtin);
+        const bool complex_floating = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
+                                      code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE;
         const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
-                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE));
+                                                             builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE ||
+                                                             complex_floating));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
             abi_test_world_add(world, builtin);
@@ -3920,16 +3923,19 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a struct
-// or a union aligned to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a complex
+// float, double or long double, a struct or a union aligned to 16 at most.
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
+    const uint8_t code = table->types.code[resolved];
     const bool scalar = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] <= 8) || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER ||
-                        (kind == BUSTER_TYPE_KIND_FLOATING && (table->types.code[resolved] == BUSTER_TYPE_CODE_FLOAT || table->types.code[resolved] == BUSTER_TYPE_CODE_DOUBLE));
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
-                      (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                        (kind == BUSTER_TYPE_KIND_FLOATING && (code == BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_DOUBLE));
+    const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX && (code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT || code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_DOUBLE ||
+                                                              code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
+                      complex || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
 }
 
