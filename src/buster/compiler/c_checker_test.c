@@ -3439,6 +3439,26 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // #480's third review: before one loop, an error in a later pragma outranks an earlier count this doesn't
+        // evaluate, which is a hint of its category either way.
+        {
+            "an enumerator count before unroll(full)'s pragma refused",
+            "enum { N = 4 };\nint f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            false
+        },
+        {
+            "an enumerator width before vectorize(disable)'s pragma refused",
+            "enum { N = 4 };\nint f(int n) {\n#pragma clang loop vectorize_width(N)\n#pragma clang loop vectorize(disable)\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            false
+        },
+        {
+            "an enumerator unroll count before another refused",
+            "enum { N = 4 };\nint f(int n) {\n#pragma unroll N\n#pragma GCC diagnostic push\n#pragma unroll 4\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            false
+        },
         {
             "an enumerator unroll count at file scope refused",
             "enum { N = 4 };\n#pragma unroll N\nint x;\n",
