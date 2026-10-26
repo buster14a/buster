@@ -270,7 +270,11 @@ designs and the compilers already built this way.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
-  acceptance remain separate requirements.
+  acceptance remain separate requirements. The atomic builtins lower through
+  per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
+  clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
+  #126); `test-checker` runs them against clang's code and checks that a
+  misaligned one is refused exactly where clang calls libatomic.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5

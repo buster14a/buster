@@ -323,11 +323,32 @@ a RET by itself does not constrain optimization. Each original order,
 pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
 
-The producer must establish natural alignment at least `required_alignment`.
-Unknown or insufficient alignment, wider objects and formats outside the
-selected helper need another real fallback. A helper must not make unaligned
-ordinary MOV appear atomic. The semantic result retains alignment evidence
-and unsupported requirements without turning valid source into fake success.
+An atomic object's alignment is the one clang's code generation gives its
+address (`EmitPointerWithAlignment`), the owner's decision for #126 (2026-10-26):
+`check_graph_atomic_alignment` (`c_checker.c`) works it out from the pointer
+argument's subgraph as clang does.
+
+- A pointer value gets its pointee type's alignment: an aligned typedef's, which
+  may be less.
+- An object at the base of an `&` path gets its declaration's alignment
+  (`getDeclAlign`): an aligned attribute's alone, which may also be less, or else
+  its type's, at least 16 for an array of 16 bytes or more. The reader's witness
+  (`check_input_declaration_alignment`) gives it.
+- A member gets its base's alignment at its offset, so a packed record's members
+  get 1.
+- An element and pointer arithmetic get the alignment at the element's offset,
+  or at its size for an index that isn't a constant.
+- An explicit cast gets its own pointee type's alignment, unless its operand's
+  came from a declaration.
+
+clang calls libatomic for an object aligned below its size, and the lowering
+refuses that one: "a misaligned atomic object, which clang calls libatomic for".
+It also refuses a path it doesn't model: "an atomic object whose address's
+alignment this doesn't work out". `test-checker` compiles 30 such accesses with
+clang. The lowering must refuse exactly the ones whose clang object calls an
+`__atomic_` function. A helper must not make an unaligned ordinary MOV look
+atomic. The semantic result keeps the alignment evidence and unsupported
+requirements without turning valid source into a fake success.
 
 `c_check_builtin_atomic_rmw.c` checks 34 scalar GNU and legacy spellings:
 exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, clang's
@@ -337,8 +358,11 @@ lock-test-and-set and lock-release. The source checker takes every one of them
 (#126): `check_graph_builtin_op` gives them the atomic op, and the graph and
 the declaration-time reader send them to this module, with the orders' ICE
 proofs from the source's own analysis (`check_builtin_atomic_rmw_order_ice`).
-The lowering refuses them as unsupported ("atomic read-modify-write builtins")
-until the producer calls the leaves below. It retains actual source types, converted
+The lowering calls the leaves below: `c_check_program_helpers.c` plans one per
+builtin, width and format. It takes integers, pointers and bool, and GNU's
+exchange of `float` and `double` through the F32/F64 leaves. A legacy call's
+protected variables, floating arithmetic, min and max, bool arithmetic and
+NAND, and integers narrower than a byte stay refused by name. The checker retains actual source types, converted
 fixed operands, old/new/boolean/void result kind, conditional object/expected
 writes and explicit runtime format. Checking never reads or folds a source
 memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
@@ -370,8 +394,11 @@ Success permits read-only expected storage and `expected == object` without
 overwriting the desired object value. Legacy CAS instead takes an expected
 value. Legacy lock-release is a pure exact-width MOV of zero followed by
 MFENCE: it adds no object read or read/modify/write event. All calls remain
-unknown-effect compiler barriers, including release, and require proven
-natural object alignment and operation-appropriate accessibility.
+unknown-effect compiler barriers, including release, and require natural
+object alignment, as above, and operation-appropriate accessibility. clang's
+min and max compare in the object's width, unsigned for integer and bool bits
+and signed for `SIGNED_BITS`, which no other operation takes. The loop keeps
+the operand where it is smaller or larger (CMP, then CMOV).
 
 Source-valid operations can still require an unsupported runtime format.
 Canonical boolean exchange/CAS/AND/OR/XOR/release preserve 0/1 storage.
@@ -379,8 +406,12 @@ Boolean add/sub/NAND may produce noncanonical bytes and remain explicit
 runtime gaps rather than being silently normalized. Floating exchange alone
 has F32/F64 raw-bit leaves; floating arithmetic, wider/complex formats,
 sub-byte integer representations, objects wider than eight bytes and absent
-or insufficient alignment proof need another consumer. Floating helper
-transport never numerically converts between FP and integer bits. No module
+or insufficient alignment need another consumer. Floating helper transport
+never numerically converts between FP and integer bits: `check_lower_helper`
+passes and takes a `float` or `double` as its bits, through a frame
+temporary. Atomic loads and stores of them are lowered so too; before #126's
+alignment rule they were refused, and a numeric conversion would have
+changed their values. No module
 grants source, constant-expression or either-tier capability merely because
 typed checking or an isolated helper succeeds.
 
