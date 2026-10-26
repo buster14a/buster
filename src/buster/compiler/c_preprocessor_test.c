@@ -354,6 +354,7 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         run.scalar = false;
         run.expansion_starts = false;
         run.defer_history = k == 1;
+        run.timing = true;
         streams[k] = open_memstream(&texts[k], &lengths[k]);
         run.diagnostics = streams[k];
         ready[k] = streams[k] != 0 && intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
@@ -372,6 +373,19 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
     {
         printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
                label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
+    }
+    // The statistics but the timing ones, which the deferred run's paths (the templates among them) must count as the
+    // recorded run's do.
+    PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        statistics[k].include_ticks = 0;
+        statistics[k].embed_ticks = 0;
+    }
+    if (result && memcmp(&statistics[0], &statistics[1], sizeof(PPStatistics)) != 0)
+    {
+        printf("%s: with its history deferred, a run counts different statistics\n", label);
+        result = false;
     }
     const uint32_t count = runs[0].output.count;
     uint32_t probe = count;
@@ -1211,6 +1225,58 @@ static const PPTestCase pp_test_cases[] = {
       "#define D 1\n#define F(x) D x\n#define G F(g)\nF(a) G\n#undef D\n#define D 2 3\nF(b) G\n#pragma push_macro(\"D\")\n#undef D\n#define D 4 5 6\nF(c) G\n"
       "#pragma pop_macro(\"D\")\nF(d) G\n#undef D\nF(e) G\n",
       0, "c17", "1 a 1 g\n2 3 b 2 3 g\n4 5 6 c 4 5 6 g\n2 3 d 2 3 g\nD e D g\n", false },
+    // Chains of one to three operands with every operand empty or not, in a file's text (pp_invoke_file) and collected from
+    // an expansion (pp_finish_simple), where the arguments are the same: the same tokens and spaces either way.
+    { "pastes from a template in a file's text and collected",
+      "#define C2(a, b) a ## b\n#define C3(a, b, c) a ## b ## c\n#define ID(x) x\n#define W2(a, b) [C2(a, b)]\n#define W3(a, b, c) [C3(a, b, c)]\n[C2(x, y)] [C2(, y)] [C2(x, )] [C2(,)] [C3(p, q, r)] [C3(, q, r)] [C3(p, , r)] [C3(p, q, )] [C3(, , r)] [C3(,,)]\nW2(x, y) W2(, y) W2(x, ) W2(,) W3(p, q, r) W3(, q, r) W3(p, , r) W3(p, q, ) W3(, , r) W3(,,)\na C2(b, c)d e C2( , f) g C2(h ,)i\n",
+      0, "c17", "[xy] [y] [x] [] [pqr] [qr] [pr] [pq] [r] []\n[xy] [y] [x] [] [pqr] [qr] [pr] [pq] [r] []\na bc d e f g h i\n", false },
+    // A template's chains between body tokens, parameters and #, each chain's first operand a body token or a parameter,
+    // and a chain's body token that names a macro whose body would go straight in (it doesn't: its paste is the token).
+    { "pastes with body tokens and other items",
+      "#define M(x, y) < x ## _end y pre_ ## x ## _post #x y >\n#define N(x) x ## 1 x 1 ## x\n#define W(x, y) M(x, y) N(x)\nM(a, b) M(, b) M(a, ) N(z) N()\nW(a, b) W(, ) W(q r, s)\n#define ONE 1\n#define K(x) ONE ## x ONE\n#define WK(x) [K(x)]\nK(2) K() WK(3) WK()\n",
+      0, "c17", "< a_end b pre_a_post \"a\" b > < _end b pre__post \"\" b > < a_end pre_a_post \"a\" > z1 z 1z 1 1\n< a_end b pre_a_post \"a\" b > a1 a 1a < _end pre__post \"\" > 1 1 < q r_end s pre_q r_post \"q r\" s > q r1 q r 1q r\nONE2 1 1 1 [ONE3 1] [1 1]\n", false },
+    // Numbers pasted onto names and names onto numbers, numbers first, and __LINE__'s integer (expanded by the wrapper's
+    // arguments first).
+    { "pastes of numbers",
+      "#define C(a, b) a ## b\n#define X(a, b) C(a, b)\n#define W(a, b) [C(a, b)]\nC(1, 2) C(x, 1) C(1, x) C(0x, 1fu) C(1e, 5) C(__LINE__, u)\nW(1, 2) W(x, 1) W(1, x)\nX(__LINE__, u) X(u, __LINE__) X(__LINE__, __LINE__)\n",
+      0, "c17", "12 x1 1x 0x1fu 1e5 __LINE__u\n[12] [x1] [1x]\n6u u6 66\n", false },
+    // Operands the templates don't paste: of two tokens or more, punctuators, literals, '$', and a GNU comma and __VA_OPT__,
+    // which have no template.
+    { "pastes the templates leave to pp_substitute",
+      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define V(a, ...) a , ## __VA_ARGS__\n#define O(a, ...) a ## __VA_OPT__(x)\nC(a b, c) C(a, b c) C(<, <) C(L, 'x') C(u8, \"s\") C(a$, b) C(., 5)\nW(a b, c) W(<, <) W(L, 'x')\nV(1) V(1, 2) O(a) O(a, b)\n",
+      0, "c17", "a bc ab c << L'x' u8\"s\" a$b .5\n[a bc] [<<] [L'x']\n1 1 , 2 a ax\n", false },
+    // Names a paste makes: a macro's that expands (rescanned, from the expansions), the invoked macro's and a disabled
+    // macro's (painted where the expansion goes out).
+    { "pasted names that expand, painted and rescanned",
+      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define foobar 42\n#define fn(x) <x>\n#define G(x) G ## x\n#define A B(A, )\n#define B(x, y) x ## y\nC(foo, bar) W(foo, bar) C(f, n)(1) W(f, n)(2) G() G(1) A W(A, ) C(fo, obar)\n",
+      0, "c17", "42 [42] <1> [fn](2) G G1 A [A] 42\n", false },
+    // The variadic parameter on the left of ##, given and omitted, and a function-like macro without parameters.
+    { "pastes of a variadic argument and without parameters",
+      "#define V(...) __VA_ARGS__ ## _x\n#define F() a ## b\n#define W(x) V(x) F()\nV(a) V() F() W(b) W()\n",
+      0, "c17", "a_x _x ab b_x ab _x ab\n", false },
+    // # in a template, in a collected invocation, and in a file's text (which the templates leave to pp_invoke).
+    { "stringizing from a template",
+      "#define S(x, y) #x y #y\n#define T(x) x ## _ #x\n#define W(x, y) S(x, y) T(x)\nS(a, b) S(, ) S(a  +  b, \"q\\\\\") T(p) W(a, b) W(, ) W(q, \"y\")\n",
+      0, "c17", "\"a\" b \"b\" \"\" \"\" \"a + b\" \"q\\\\\" \"\\\"q\\\\\\\\\\\"\" p_ \"p\" \"a\" b \"b\" a_ \"a\" \"\" \"\" _ \"\" \"q\" \"y\" \"\\\"y\\\"\" q_ \"q\"\n", false },
+    // Arguments that start a line, placed first, moved past an empty operand and pasted, from a file's text and from an
+    // expansion, where a token that started a line inside an argument has BUSTER_PP_LINE_SPACE.
+    { "pastes on new lines",
+      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((,\ny)) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r)) WQ((, ,\nr))\n",
+      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [y] < < y > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >] [r] [< r >]\n", false },
+    // A chain that makes no token leaves the space pending before it to the next token, which starts a run, and at the
+    // end to the token after the expansion.
+    { "pastes that make nothing among other tokens",
+      "#define P(a, b) [ a ## b]\n#define Q(a, b) x a ## b\n#define R(a, b) a ## b c\n#define WP(a, b) P(a, b) Q(a, b)y R(a, b)\nP(,) P(u,) Q(,)y Q(,v)y R(,) R(, d)\nWP(,) WP(u, v)\n",
+      0, "c17", "[ ] [ u] x y x v y c d c\n[ ] x y c [ uv] x uv y uv c\n", false },
+    // A template's expansion longer than it writes, left to pp_substitute: 16 tokens and 17.
+    { "an expansion of a template with ## past 16 tokens",
+      "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
+      0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
+    // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
+    // name takes the main loop's path).
+    { "poisoned names a template pastes",
+      "#define C(a, b) a ## b\n#define C3(a, b, c) a ## b ## c\n#define W(a, b) [C(a, b)]\n#define W3(a, b, c) [C3(a, b, c)]\n#pragma GCC poison foobar\nW(foo, bar) W3(foo, bar, baz) W(foo, ba)\n",
+      0, "c17", "[foobar] [foobarbaz] [fooba]\n", true, 0, 0, 0, 0, 0 },
     { "an alias's invocation", "#define F(x) x\n#define ALIAS F\nALIAS (7)\n", 0, "c17", "7\n", false },
     { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
     { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },

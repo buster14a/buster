@@ -611,6 +611,29 @@ macro's expansion, an argument being expanded, or a directive's line):
   no templates: that path is the templates' twin. `test-preprocessor` compares
   each case's deferred run with its recorded one, and each fuzz case's deferred
   run with its scalar twins' runs.
+- **Templates with `##` and `#`** (#117). A function-like macro of at most 16
+  items of tokens, parameters, `##` and `#`, without `__VA_OPT__`, each `##`
+  between a token or a parameter and not before the variadic parameter (GNU's
+  comma), gets a template too, with masks of its `##`s, of each chain of pastes'
+  first and last operands and of its `#`s. Its invocations, collected
+  (`pp_finish_simple`) or in a file's text without `#` (`pp_invoke_file`), are
+  planned first and change nothing until the plan holds
+  (`pp_template_operators`, `pp_plan_operators`): each operand of a chain must
+  have at most one token, and where two or more have one, they must be
+  identifiers and numbers spelled in at most 64 ASCII letters, digits and `_`,
+  an identifier or a number first. Each paste then makes an identifier or a
+  pp-number without lexing it, as `pp_paste`'s own test finds; anything else
+  takes `pp_substitute`. Then the pastes and strings are made in the items'
+  order, as `pp_substitute` makes them, into the scratch text and the intern
+  table with their statistics and poisoned names' errors (`pp_template_make`),
+  and `pp_template_write` writes each chain's token or `#`'s string, if any, as
+  one more segment: it takes the space pending before it (with its first item's
+  own), and its flags are an argument's placed first, moved past empty operands
+  or pasted onto, as `pp_substitute` gives them. A name a paste makes of a macro
+  that expands (but the invoked one) is read again from the expansions; any
+  other macro's is painted where the expansion goes straight out. An empty
+  expansion's trailing space is any of its items' but a `##`'s, which
+  `pp_substitute` doesn't read.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
