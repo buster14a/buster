@@ -1280,6 +1280,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
     const uint32_t active = paid < most ? (uint32_t)paid : most;
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
+    // A one-lane cold run starts no worker and preserves this thread's affinity and context, independently of any
+    // installed team. More than one lane keeps the team's fixed workers and CPU assignment.
     const bool ran = !valid || deferred->body_count == 0 ||
                      (active == 1 ? lane_run_cold(1, check_deferred_lane, &run, 0) : lane_run(active, check_deferred_lane, &run, deferred->cpus));
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
