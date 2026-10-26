@@ -531,8 +531,10 @@ static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, 
     return kept;
 }
 
-_Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO && BUSTER_OBJECT_DEBUG_LINE == DEBUG_SECTION_LINE &&
-                   BUSTER_OBJECT_DEBUG_ADDR == DEBUG_SECTION_ADDR && BUSTER_OBJECT_DEBUG_FIELDS == BUSTER_DEBUG_SECTIONS - 1,
+_Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO &&
+                   BUSTER_OBJECT_DEBUG_ABBREV == DEBUG_SECTION_ABBREV && BUSTER_OBJECT_DEBUG_LINE == DEBUG_SECTION_LINE &&
+                   BUSTER_OBJECT_DEBUG_ADDR == DEBUG_SECTION_ADDR && BUSTER_OBJECT_DEBUG_RNGLISTS == DEBUG_SECTION_RNGLISTS &&
+                   BUSTER_OBJECT_DEBUG_FIELDS == BUSTER_DEBUG_SECTIONS - 1,
                "the object writer takes debug.c's sections in its order, and the fields of all but .debug_info");
 
 // The C driver's DWARF for its executable or its object: the debug.c unit, its sections and what executable_write and
