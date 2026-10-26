@@ -238,6 +238,19 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
 - **Placement.** Branchy scalar loops run slower at some 64-byte offsets, in states that differ between processes, and
   stack slots or rows that share their low 12 bits with stores alias. A difference that comes and goes between builds of
   the same source is probably one of these (dataflow.md, "Where the scalar twin's code falls").
+- **The stack's page offset.** Address space randomization starts each process's stack at another offset in its page,
+  and a stage can then run fast in some processes of one build and slow in others. With the stack placed at every 64th
+  byte of its page, `benchmark-checker-source`'s body checking on `sqlite3.c` ran 3 to 13% slower at seven offsets from
+  208 to 656 bytes (all those sampled but 528) and 4% at 2,832, with the same instructions and more store-to-load
+  conflicts (`ls_bad_status2.stli_other`, loads that couldn't take an older store's data). That is consistent with stack
+  slots that share their low 12 bits with the data the loop stores (4 KiB aliasing), though the record doesn't identify
+  the loads and stores. With randomization, 8 of 32 processes of a campaign were over 2% slower, in main and #424's head
+  alike, while the whole driver's `-fsyntax-only` moved by at most 1.5% over its own 64-offset sweep (#445, [the
+  record](https://github.com/buster14a/buster-performance/tree/e0f03a362c29568db3230b265600b2085afe6ce0/docs/measurements/checker-source-slow-state-445-2026-10-26)).
+  Compare such a stage's medians over many processes, or place the stack alike in every process: `setarch -R` with the
+  same argument and environment bytes (both executables at paths of the same length, and an environment of a chosen
+  length, as the record's `procbench` gives them with `norandom` and `pad=N`), each process's offset checked
+  (`/proc/PID/stat`'s startstack modulo 4,096, which `procbench` records), and the builds compared at several offsets.
 - **Two threads.** Two lexer processes on one core's two hardware threads had 1.22 times the throughput of one: one
   thread uses about 80% of what the core does for that mix, so SMT is no lever.
 - **A phase's cost is in context.** The difference between runs that stop after a phase and before it is the phase's
