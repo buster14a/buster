@@ -8,18 +8,19 @@
 // a static executable's runtime, a static PIE's and a shared library's (runtime_import_static, runtime_import_static_pie
 // and runtime_import_shared), each in a file of its own. Each kind's file holds that kind, which the loader checks.
 //
-// The file holds the runtime's records as this executable lays them out in memory, each region at a multiple of 64
-// bytes: a header, then the directory, which every link reads (from the second page: the probes, libc.so.6's and the
-// loader's versions, the members, the strings, the pieces, the global names with their index and filter, the two
-// libraries' exports, the pieces' references and COMDAT groups), then the pieces' records, of which a link reads only
-// those of the pieces it joins. A piece is a crt object or a member, as Runtime.pieces has them. Every link joins the
-// crt objects, and most join no member, so their records come first and together, in the pages after the directory's
-// last (#490): each column binding reads (the link's and the symbols' global names) over the crt objects' records, then
-// the data (the crt objects' names, every piece's atoms' bytes, then the members' names), then the same columns over
-// the members' records (Runtime.member_link), then the columns nothing reads of a loaded runtime. With each column whole,
-// the crt objects' records were the starts of columns that span every member, and their atoms' bytes came after every
-// piece's names: with libgcc.a's 298 members, in pages of the mapping apart from the directory's and from each other,
-// each a minor fault for a link that joins no member.
+// The file holds the runtime's records as this executable lays them out in memory, the directory's regions each at a
+// multiple of 64 bytes and the pieces' at their elements' alignment: a header, then the directory, which every link
+// reads (from the second page: the probes, libc.so.6's and the loader's versions, the members, the strings, the pieces,
+// the global names with their index and filter, the two libraries' exports, the pieces' references and COMDAT groups),
+// then the pieces' records, of which a link reads only those of the pieces it joins. A piece is a crt object or a
+// member, as Runtime.pieces has them. Every link joins the crt objects, and most join no member, so their records come
+// first and together, in the pages after the directory's last (#490): each column binding reads (the link's and the
+// symbols' global names) over the crt objects' records, then the data (the crt objects' names, every piece's atoms'
+// bytes, then the members' names), then the same columns over the members' records (Runtime.member_link), then the
+// columns nothing reads of a loaded runtime. With each column whole, the crt objects' records were the starts of
+// columns that span every member, and their atoms' bytes came after every piece's names: with libgcc.a's 298 members,
+// in pages of the mapping apart from the directory's and from each other, each a minor fault for a link that joins no
+// member.
 //   - Validation: the file must have this format's magic, version and header, and the size its header gives; the
 //     directory's hash must be its bytes' (executable.c's chunk hash, over the file up to the pieces' records, with the
 //     hash's field as zeros); this very executable must have written it (the identity of /proc/self/exe: st_dev,
@@ -132,6 +133,10 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 #define BUSTER_SNAPSHOT_STATIC_PIE_NAME "runtime-static-pie.snapshot"
 #define BUSTER_SNAPSHOT_SHARED_NAME "runtime-shared.snapshot"
 #define BUSTER_SNAPSHOT_ALIGNMENT 64
+// The pieces' regions are aligned to their elements' alignment, 8 bytes at most, rather than to 64: binding reads a
+// piece's records from whichever record it starts at, with masked loads, so a column's first record starting a cache
+// line gains nothing, and 64 bytes would pad each of their 55 regions.
+#define BUSTER_SNAPSHOT_PIECE_ALIGNMENT 8
 // The records with pointers start a page of their own, so that rebasing them copies a page (or as few as they need),
 // and not the header's.
 #define BUSTER_SNAPSHOT_PAGE_BYTES 4096
@@ -269,6 +274,13 @@ typedef enum SnapshotRegion
 
 _Static_assert(SNAPSHOT_REGION_MEMBER_SYMBOL_NAMES - SNAPSHOT_REGION_SYMBOL_NAMES == BUSTER_SNAPSHOT_MEMBER_REGIONS,
                "each column binding reads has a region of the members' records");
+
+// A region's alignment in the file: the directory's are cache lines', the pieces' their elements' (the first, the
+// probes, is a page's, which the writer gives it).
+static uint64_t snapshot_region_alignment(uint32_t region)
+{
+    return region < BUSTER_SNAPSHOT_PIECE_REGIONS ? BUSTER_SNAPSHOT_ALIGNMENT : BUSTER_SNAPSHOT_PIECE_ALIGNMENT;
+}
 
 // The region of the members' records of a column binding reads whose crt objects' records are in `region` (from
 // SNAPSHOT_REGION_NAME_BYTES to SNAPSHOT_REGION_SYMBOL_NAMES).
@@ -587,13 +599,12 @@ static String8 snapshot_string(uint8_t* strings, SnapshotString string)
 // keep theirs until snapshot_rebase. The members' records of a column binding reads go into Runtime.member_link's,
 // placed so that the runtime's ids index it as they index the crt objects' in Runtime.link's: the region less the
 // first member's elements, which the crt objects' region and the data before it hold (snapshot_valid_header).
-static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
+// `columns` are the header's columns of `runtime` (snapshot_columns), which loading has from its checks.
+static void snapshot_view_columns(Runtime* runtime, uint8_t* file, uint64_t bytes, const SnapshotColumn* columns)
 {
     const SnapshotHeader* header = (const SnapshotHeader*)file;
     const SnapshotCounts counts = header->counts;
     *runtime = (Runtime){ 0 };
-    SnapshotColumn columns[SNAPSHOT_REGIONS];
-    snapshot_columns(runtime, &counts, columns);
     for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
     {
         if (r != SNAPSHOT_REGION_STRINGS && r != SNAPSHOT_REGION_DATA)
@@ -682,6 +693,13 @@ static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
     members->name_arena = link->name_arena;
     runtime->snapshot = file;
     runtime->snapshot_bytes = bytes;
+}
+
+static void snapshot_view(Runtime* runtime, uint8_t* file, uint64_t bytes)
+{
+    SnapshotColumn columns[SNAPSHOT_REGIONS];
+    snapshot_columns(runtime, &((const SnapshotHeader*)file)->counts, columns);
+    snapshot_view_columns(runtime, file, bytes, columns);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -866,7 +884,7 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
     uint64_t end = sizeof(SnapshotHeader);
     for (uint32_t r = 0; r < SNAPSHOT_REGIONS; r += 1)
     {
-        const uint64_t alignment = r == 0 ? BUSTER_SNAPSHOT_PAGE_BYTES : BUSTER_SNAPSHOT_ALIGNMENT;
+        const uint64_t alignment = r == 0 ? BUSTER_SNAPSHOT_PAGE_BYTES : snapshot_region_alignment(r);
         const uint64_t offset = (end + alignment - 1) & ~(alignment - 1);
         const uint64_t bytes = r == SNAPSHOT_REGION_STRINGS ? strings_bytes : r == SNAPSHOT_REGION_DATA ? data_bytes : columns[r].element * columns[r].count;
         header.regions[r] = (SnapshotPlace){ offset, bytes };
@@ -1165,8 +1183,9 @@ static void snapshot_rebase(Runtime* runtime)
 // Whether the header describes a file of this format and of `bytes` bytes, with each region inside it, aligned and of
 // its column's size, the directory's before its end and the pieces' after it, the members' records of a column after
 // as many bytes as the crt objects' (where snapshot_view places the column), and the names run's two parts inside the
-// data (`runtime` only gives the columns' places, which this doesn't touch).
-static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, Runtime* runtime)
+// data. `columns` gets the header's columns of `runtime`, whose fields this doesn't touch (snapshot_columns), for the
+// view.
+static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, Runtime* runtime, SnapshotColumn* columns)
 {
     const SnapshotCounts* counts = &header->counts;
     bool result = header->magic == BUSTER_SNAPSHOT_MAGIC && header->version == BUSTER_SNAPSHOT_VERSION && header->header_bytes == sizeof(SnapshotHeader) &&
@@ -1181,14 +1200,14 @@ static bool snapshot_valid_header(const SnapshotHeader* header, uint64_t bytes, 
     {
         result = counts->first_members[a] <= counts->members && (a == 0 || counts->first_members[a - 1] <= counts->first_members[a]);
     }
-    SnapshotColumn columns[SNAPSHOT_REGIONS];
     snapshot_columns(runtime, &header->counts, columns);
     for (uint32_t r = 0; result && r < SNAPSHOT_REGIONS; r += 1)
     {
         const SnapshotPlace place = header->regions[r];
         const bool sized = r == SNAPSHOT_REGION_STRINGS || r == SNAPSHOT_REGION_DATA || place.bytes == columns[r].element * columns[r].count;
         const bool side = r < BUSTER_SNAPSHOT_PIECE_REGIONS ? place.offset + place.bytes <= header->directory_bytes : place.offset >= header->directory_bytes;
-        result = place.offset % BUSTER_SNAPSHOT_ALIGNMENT == 0 && place.offset >= sizeof(SnapshotHeader) && place.offset <= bytes && place.bytes <= bytes - place.offset && sized &&
+        result = place.offset % snapshot_region_alignment(r) == 0 && place.offset >= sizeof(SnapshotHeader) && place.offset <= bytes && place.bytes <= bytes - place.offset &&
+                 sized &&
                  side && columns[r].first * columns[r].element <= place.offset;
     }
     const SnapshotPlace data = header->regions[SNAPSHOT_REGION_DATA];
@@ -1236,7 +1255,8 @@ static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, RuntimeK
     {
         const SnapshotHeader* header = (const SnapshotHeader*)file;
         uint8_t hash[sizeof(header->hash)];
-        bool valid = snapshot_valid_header(header, bytes, runtime);
+        SnapshotColumn columns[SNAPSHOT_REGIONS];
+        bool valid = snapshot_valid_header(header, bytes, runtime, columns);
         if (valid)
         {
             snapshot_hash(file, header->directory_bytes, hash);
@@ -1247,7 +1267,7 @@ static SnapshotStatus snapshot_load(Runtime* runtime, const char* path, RuntimeK
         snapshot_time(times, SNAPSHOT_PHASE_HASH, &start);
         if (result == SNAPSHOT_STATUS_LOADED)
         {
-            snapshot_view(runtime, file, bytes);
+            snapshot_view_columns(runtime, file, bytes, columns);
             snapshot_rebase(runtime);
             snapshot_time(times, SNAPSHOT_PHASE_VIEW, &start);
             result = runtime_probes_current(runtime) ? result : SNAPSHOT_STATUS_STALE;

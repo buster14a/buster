@@ -788,7 +788,8 @@ without it, made private (mode 0700) when it is missing. Each holds its
 kind, which the loader checks: the other kind's file at its name is stale.
 
 - **The file** is the runtime's records as the compiler lays them out in
-  memory, each region at a multiple of 64 bytes, in two parts:
+  memory, each region of the directory at a multiple of 64 bytes and each
+  of the pieces' records at its elements' alignment, in two parts:
   - **the directory,** what every link reads: a header (the counts, the paths
     and each region's place), then from the second page the probes,
     `libc.so.6`'s versions, the members, the strings, the pieces (the crt
