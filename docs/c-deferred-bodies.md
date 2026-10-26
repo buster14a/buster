@@ -187,8 +187,12 @@ passes every checker test.
   (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
   bodies are read again with the reader timing what its lanes cost
   (`CheckDeferred.timing`), on one lane and on every one of 8: one lane must
-  wait for no other, and `lane_run`'s dispatch and the wake-up must fall within
-  the lanes' span. A copy whose wake-up counts from `lane_run`'s call, and one
+  wait for no other, and the launcher's dispatch and the wake-up must fall within
+  the lanes' span. The one-lane reading also runs inside a live pinned team
+  on two distinct CPUs, with an unfinished take and an impossible inner pin
+  target. It must preserve Lane/taken/running and immediate affinity, keep
+  the installed team, and reuse both original worker identities afterward.
+  A copy whose wake-up counts from the launcher's call, and one
   whose dispatch is the lanes' span, each fail it. Then
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
@@ -261,9 +265,9 @@ the rest (the phases after the merge); the position checks per body too, the
 lanes the bodies ran on (`active`: as many as the rule gives them, or with
 `--every-lane` every lane they can take) and those that copied the reader
 (`copies`); and what a lane costs, in nanoseconds: a copy of the reader
-(`copy`); `lane_run`'s dispatch, from its call to the first lane's arrival at
-the partition (`dispatch`: the first lane's pinning and the others' wake
-calls); and the others' wake-up, from the first lane's arrival there to the
+(`copy`); the launcher's dispatch, from its call to the first lane's arrival at
+the partition (`dispatch`: on multiple lanes, the first lane's pinning and
+the others' wake calls); and the others' wake-up, from the first lane's arrival there to the
 last one's (`wake`, none on one lane), which is the first lane's wait at the
 partition's sync. Before #448's review, `wake` was the first lane's whole time
 in `lane_parts_by_cost`, its share of the boundaries and its order of the parts
@@ -271,6 +275,15 @@ with its wait, and left the dispatch out. `--cpus` pins the command to the
 first CPU, where the parse, source order and the top level run, and its lanes
 to the list. The measurements before "How many lanes" were made with the three
 rotating orders.
+
+One active lane uses the existing `lane_run_cold(1, ..., NULL)` utility. It
+starts no worker, makes no affinity calls, and saves/resets/restores the
+calling thread's lane, counter and running state with a fresh group. It
+leaves an installed team untouched. Multiple lanes keep `lane_run` and the
+original CPU list; generic pinned-team and nested-dispatch validation is
+unchanged. In particular, generic `lane_run(1, ..., NULL)` on a pinned team
+is still refused. Only the checker's known one-lane entry takes this private
+isolated path. Arrival/wake accounting and the adaptive rule are unchanged.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
 `--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes
@@ -394,6 +407,49 @@ they came within 0.9% of each other on the 62 programs of 1,000 tokens or
 more, and within the noise of readings of tens of microseconds on the others
 (a standard deviation of 2.9% under 100 tokens).
 
+## One-lane pinning removed (#450)
+
+The exact `35f26f68` baseline and `1d2b12c6` candidate were compared on the
+9700X under its shared exclusive lock, with 24 passes, the six reading orders,
+CPU list `2,0,1,3,4,5,6,7`, frozen SQLite/headers and unchanged options. Five
+alternating process pairs covered 13 units, followed by a 219-program screen
+and a predeclared five-pair repeat of every eligible corpus unit. All 2758
+timed processes succeeded; 226 identities matched before/after. The six
+measurement holds lasted 37/24/1/2/3/36 seconds, each bounded below the
+approved 60-second cap. The [immutable evidence record](https://github.com/buster14a/buster-performance/blob/1294f0afc4f39db0d98630018e9808fde4c44ea3/docs/measurements/deferred-one-lane-450-2026-10-26/README.md)
+contains exact sources, commands, raw logs, controls and the separate
+confirmatory corpus results.
+
+| SQLite reading or metric | Baseline | Candidate | Change of build medians |
+| --- | ---: | ---: | ---: |
+| Whole checker, one lane (ns/token) | 120.29 | 119.66 | -0.5237% |
+| Whole checker, eight lanes (ns/token) | 104.09 | 103.84 | -0.2402% |
+| Dispatch, one lane (ns) | 7204 | 391 | -94.6% |
+
+One-lane whole paired changes are all negative (-0.8064% to -0.1917%);
+eight-lane changes are mixed (-0.7550% to +0.1442%). Small-unit dispatch is
+30 to 40 ns, with zero one-lane wake time. These whole-reader timings
+exclude preprocessing and the separately measured parse; no instruction or
+RSS improvement is claimed.
+
+The original screen retained 36 rows above +2%, including both 3035-token
+`00056.c` readings. The independent all-corpus confirmation has 33 positive
+build-median rows, at most +1.5749%, and none worse in all five pairs. Its
+largest paired median is +2.8326% with mixed signs. The original 26-token
+`00066.c` one-lane median is +2.2499%, while confirmation is +0.8668% by
+build medians and -0.4233% by paired median. All observations remain separate;
+no normalization or pooling waives them. This protocol detects no repeatable
+measurable regression and supports manual acceptance, with integration CI
+still a separate gate.
+
+Native code generation retains the common reader's 0x808 stack allocation;
+its text grows 32 bytes. The compiler naturally separates the existing cold
+utility, reducing the checker team's wrapper allocation from 0x2380 to
+0x138, without an added helper or annotation. Earlier direct-context,
+helper, outlined-phase and affinity-check attempts were rejected; their
+[negative evidence](https://github.com/buster14a/buster-performance/tree/10b5cd568edc50d851fc93bfc28b9a1db9f7da8a/docs/measurements/deferred-one-lane-450-2026-10-26)
+is retained.
+
 ## What is left
 
 The top level, the merge and the phases after it are sequential, so the lanes
@@ -411,10 +467,7 @@ whichever lane takes first, which may be a woken one: two lanes read
 `00200.c`, a body of 20,420 tokens beside one of 30, 19% slower than one did.
 That is why the rule counts the largest body twice. Leaving the largest bodies
 to the first lane would let a unit of one large body beside many smaller ones
-take the lanes it pays for, which the rule now forgoes. A unit the rule reads
-on one lane still goes through `lane_run`, which pins its lane and puts its
-affinity back: 0.6 to 7.5 µs of the dispatch on the 9700X, which a direct call
-would spare.
+take the lanes it pays for, which the rule now forgoes.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
