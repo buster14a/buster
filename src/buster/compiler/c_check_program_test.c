@@ -488,6 +488,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int helper(int n){return n+2;}int(*saved)(int)=helper;int tested(int n){return (saved==helper)+n;}", "function-address-data-reference", clang);
     check_test_program_source(test,
         "char*text=\"abc\";int tested(int n){return text[1]+n;}", "body-used-string-object", clang);
+    // The function names' arrays (__func__, __FUNCTION__, __PRETTY_FUNCTION__), private constants as a literal's are:
+    // returned, indexed, taken whole, in a static's initializer and at file scope (an empty one). In static functions,
+    // whose names the oracle's source keeps (it renames the global ones).
+    check_test_program_source(test,
+        "static unsigned fold(const char*s){unsigned h=0;while(*s)h=h*31+(unsigned char)*s++;return h;}"
+        "static const char*top=__func__;static const char*named(void){return __func__;}"
+        "static const char*pretty(int k,const char*(*f)(void)){static const char*own=__FUNCTION__;return k&1?__PRETTY_FUNCTION__:k&2?own:f();}"
+        "static int sized(int n){const char(*p)[6]=&__func__;return (int)sizeof(__PRETTY_FUNCTION__)*100+(*p)[n&3]+__func__[4];}"
+        "int tested(int n){return (int)(fold(top)^fold(named())*3^fold(pretty(n,named))*5)+sized(n)+n;}",
+        "function-name-arrays", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;int y=n?(int){++x}:(int){x+=3};return x*10+y+(int)sizeof((int){++x});}", "scalar-compound-evaluation", clang);
     check_test_program_source(test,

@@ -467,8 +467,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
             flags = kind | (program->input->linkage[declaration] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
         }
-        else if (object != 0 && object - 1 < parser->tokens.count && parser->tokens.kinds[object - 1] == PARSE_KIND_STRING)
+        else if (object != 0 && object - 1 < parser->tokens.count &&
+                 (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
         {
+            // A string literal's, or a function name's array (__func__, __FUNCTION__, __PRETTY_FUNCTION__), which clang
+            // makes a private constant as it makes a literal's.
             char spelling[48];
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
