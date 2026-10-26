@@ -651,6 +651,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/conversions.ir",
                 "tests/ir/control.ir",
                 "tests/ir/memory-calls.ir",
+                "tests/ir/dynamic-stack.ir",
                 "tests/ir/empty.ir",
                 "tests/ir/tier0-add.ir",
                 "tests/ir/hello.ir",

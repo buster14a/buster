@@ -1361,6 +1361,23 @@ static int run_checker_driver_tests(int argc, char** argv)
             .rejected = true,
             .quiet = true,
         },
+        // clang's default-error -Wint-conversion, suppressed in a system header: a line marker's system region returns an
+        // integer as a pointer (suppressed), and so does its macro, invoked in the user's file (reported there, by its
+        // expansion location, which the preprocessor's runs give: pp_system_levels).
+        {
+            .name = "a system header's macro returns an integer as a pointer in the user's file",
+            .source = "# 1 \"sys.h\" 3\nstatic int *in_system(void) { return 1; }\n#define FROM_SYSTEM(x) return x;\n# 10 \"user.c\"\n"
+                      "int *in_user(void) { FROM_SYSTEM(2) }\n",
+            .rejected = true,
+        },
+        // A system header's macro invoked in the user's file, with a line marker among its arguments: the body's tokens
+        // are where the invocation starts, before the marker, in the user's file, which only the history says (the runs are
+        // inexact). The runs alone, or the tokens' own places, would suppress the error.
+        {
+            .name = "a line marker among a macro's arguments leaves its body in the user's file",
+            .source = "# 1 \"sys.h\" 3\n#define F(x) int *f(void) { return 1; } int x;\n# 3 \"user.c\"\nF(\n# 5 \"sys2.h\" 3\ny)\n",
+            .rejected = true,
+        },
         {
             .name = "late assembler label retains its ignored attribute warning",
             .source = "int object=1;\nextern int object asm(\"renamed\");\n",

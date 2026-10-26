@@ -8,6 +8,18 @@
 // of main_command's branches first tests its unit, so that the other units' branches fold to false, and clang, which
 // emits a static function only once emitted code refers to it, emits none of theirs. main, in the driver's unit, asks
 // each other unit for the command in turn, then its own commands, then runs the compiler itself.
+//
+// The modules that several units' commands run compile in one unit alone, their home, which the others call (#270):
+// the lexer in the driver's unit, the preprocessor and the parser in the front end's, and the linker's (the runtime's
+// import and binding, a PIE's inputs and the executable writer) in the dynamic PIEs' unit. A module's entry points
+// take its macro (BUSTER_LEXER_ENTRY and the others, below) where its other functions take static: in the home it is
+// nothing, so that they have external linkage there, and in the other units BUSTER_ELSEWHERE, which makes their
+// definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
+// static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
+// has them static. Each unit still reads every definition, so that its diagnostics are the whole file's. A command
+// whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
+// variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
+// checks the rest (call_graph.c).
 #define BUSTER_UNIT_DRIVER 0
 #define BUSTER_UNIT_X86 1
 #define BUSTER_UNIT_FRONTEND 2
@@ -24,6 +36,39 @@
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
+
+// An entry point in a unit that isn't its module's home: an inline definition, which clang emits only to inline it,
+// and noinline keeps it from that, so that the unit's calls go to the home's external definition. Calling the module's
+// static functions from it is a C2y feature that clang takes in C17 as an extension (-Wstatic-in-inline): the
+// definition is only ever compiled in its home.
+#define BUSTER_ELSEWHERE inline __attribute__((noinline))
+#pragma clang diagnostic ignored "-Wstatic-in-inline"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#define BUSTER_HOME_DRIVER
+#else
+#define BUSTER_HOME_DRIVER BUSTER_ELSEWHERE
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+#define BUSTER_HOME_FRONTEND
+#else
+#define BUSTER_HOME_FRONTEND BUSTER_ELSEWHERE
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
+#define BUSTER_HOME_DYNAMIC
+#else
+#define BUSTER_HOME_DYNAMIC BUSTER_ELSEWHERE
+#endif
+// The modules' homes (at the top): the lexer's (c_lexer.c), the preprocessor's (c_preprocessor.c), the parser's
+// (c_parser.c) but for the fragments' unit, which compiles a parser of its own with the fragment sink, and the linker's
+// (link.c's).
+#define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
+#define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS)
+#define BUSTER_PARSER_ENTRY static
+#else
+#define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
+#endif
+#define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -223,6 +268,8 @@ int run_snapshot_benchmark(int argc, char** argv);
 // Foreign inputs (other compilers' objects, archives, shared libraries and scripts: opened, parsed and resolved, with
 // the archive members the link needs loaded and COMDAT groups picked) and their tests, for the test-foreign command. Its
 // benchmark is another translation unit.
+#include "buster/compiler/inflate.c"
+#include "buster/compiler/inflate_test.c"
 #include "buster/compiler/foreign.c"
 #include "buster/compiler/foreign_unwind.c"
 #include "buster/compiler/foreign_unwind_benchmark.c"
@@ -307,6 +354,8 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_initializer.c"
 #include "buster/compiler/c_check_data.c"
 #include "buster/compiler/c_check_input.c"
+// #113's deferred bodies: check_input with every function body read apart, out of order and on lanes.
+#include "buster/compiler/c_check_deferred.c"
 #include "buster/compiler/c_check_diagnostic.c"
 #include "buster/compiler/c_check_initializer_input.c"
 #include "buster/compiler/c_check_data_input.c"
@@ -367,6 +416,10 @@ int run_backend_benchmark(int argc, char** argv);
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
 #include "buster/compiler/c_check_program.c"
+// #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
+// the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
+// --cross-check.
+#include "buster/compiler/c_lowering_symbols.c"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
@@ -389,12 +442,19 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+#include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
+// #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
+#include "buster/compiler/c_check_deferred_benchmark.c"
+// #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
+#include "buster/compiler/c_lowering_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
+#include "buster/compiler/c_lowering_source_benchmark_test.c"
+#include "buster/compiler/c_check_corpus_symbols_test.c"
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
@@ -443,6 +503,7 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
+#include "buster/compiler/ir_stack_test.c"
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
@@ -787,6 +848,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-inflate") == 0)
+    {
+        result = run_inflate_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign") == 0)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
@@ -975,9 +1040,21 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_checker_corpus(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-deferred") == 0)
+    {
+        result = run_checker_deferred_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-deferred") == 0)
+    {
+        result = run_checker_deferred_benchmark(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-source") == 0)
     {
         result = run_checker_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
+    {
+        result = run_lowering_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {

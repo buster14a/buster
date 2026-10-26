@@ -17,9 +17,11 @@
 // broadcast is one barrier rather than two (see LaneGroup); and the barrier spins and then waits in mwaitx before it
 // sleeps on a futex, where the RAD Debugger's on Linux is pthread_barrier_wait, which sleeps at every wait.
 //
-// Each command's translation unit includes this file and owns its thread context and any command-long team. A team
-// must therefore be started in the command's unit, not in a dispatcher in another unit. Each part declares its interface
-// first, then defines it. In this order:
+// Each translation unit that includes this file owns its thread context and any command-long team, but for main.c's
+// units, which share one (thread_context): a command runs in its own unit's code and in the homes of the modules it
+// calls (main.c). A team must therefore be started in the command's code, not in main.c's dispatcher, which also runs
+// the benchmarks' units, whose contexts are their own. Each part declares its interface first, then defines it. In this
+// order:
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
@@ -223,13 +225,24 @@ struct ThreadContext
     uint64_t taken;
 };
 
+// main.c's units share one context, the driver's unit's, since a command's code runs in more than one of them (main.c:
+// a module's entry points compile in one unit, their home, which the others call); a unit of its own, such as a
+// benchmark's, has its own.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local ThreadContext thread_context;
+#else
+#if defined(BUSTER_UNIT)
+_Thread_local ThreadContext thread_context = {
+#else
 static _Thread_local ThreadContext thread_context = {
+#endif
     .lane = {
         .index = 0,
         .count = 1,
         .group = 0,
     },
 };
+#endif
 
 typedef struct Scratch Scratch;
 struct Scratch

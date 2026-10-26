@@ -166,6 +166,7 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         .values = values,
         .count = 3,
     };
+    // Every class but long double (F80), which the interpreter refuses: a conversion to it and from it is invalid.
     for (uint32_t from = BUSTER_TYPED_CLASS_I8; from < BUSTER_TYPED_CLASSES; from += 1)
     {
         classes[0] = (uint8_t)from;
@@ -174,9 +175,11 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         {
             classes[1] = (uint8_t)to;
             classes[2] = (uint8_t)to;
+            const bool x87 = from == BUSTER_TYPED_CLASS_F80 || to == BUSTER_TYPED_CLASS_F80;
             const uint64_t expected = to == BUSTER_TYPED_CLASS_F32 ? 0x41300000ull : to == BUSTER_TYPED_CLASS_F64 ? 0x4026000000000000ull : 11;
             const InterpreterResult result = interpreter_test_run(&function, scratch, 0);
-            interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == expected, "every scalar conversion pair");
+            interpreter_test_expect(tally, x87 ? result.status == INTERPRETER_INVALID : result.status == INTERPRETER_OK && result.value.low == expected,
+                                    "every scalar conversion pair");
         }
     }
     classes[0] = BUSTER_TYPED_CLASS_F64;
@@ -413,6 +416,37 @@ static void interpreter_test_limits(InterpreterTestTally* tally, Arena* scratch)
     value = UINT64_MAX;
     result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_INVALID, "invalid branch target");
+    {
+        // An indirect jump to a label (#133), which an interpreted function has no code at: a valid stream, refused.
+        const uint8_t indirect_kinds[] = {
+            BUSTER_TYPED_CONST,
+            BUSTER_TYPED_JUMP_INDIRECT,
+            BUSTER_TYPED_RETURN,
+        };
+        const uint8_t indirect_classes[] = {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID,
+        };
+        const uint64_t indirect_values[] = {
+            7,
+            0,
+            0,
+        };
+        const uint32_t indirect_labels[] = {
+            2,
+        };
+        const Tier0Function indirect = {
+            .kinds = indirect_kinds,
+            .classes = indirect_classes,
+            .values = indirect_values,
+            .count = 3,
+            .label_entries = indirect_labels,
+            .label_count = 1,
+        };
+        result = interpreter_test_run(&indirect, scratch, 0);
+        interpreter_test_expect(tally, tier0_validate(&indirect).error == TIER0_OK && result.status == INTERPRETER_INVALID, "indirect jump refused");
+    }
     function.count = 0;
     result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 0, "empty void function");

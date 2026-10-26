@@ -16,10 +16,10 @@ Spans are independent jobs. Each stores the original event range, its undo-base,
 use/declaration counts and source-order slot. `c_body_bindings_span` is a one-off
 convenience that scans the preceding prefix for a single body.
 
-The producer reactivates parameters and labels at the opening body. Preceding
-file activations give the difference between original and private undo marks.
-Exit restores may occur at the closing token or immediately afterward, or be
-omitted when empty. A final translation-unit cleanup stays outside the slice.
+The producer reactivates parameters, the tags their list declared, and labels
+at the opening body. Preceding file activations give the difference between
+original and private undo marks. Exit restores may occur at the closing token
+or immediately afterward, or be omitted when empty. A final translation-unit cleanup stays outside the slice.
 The function's own file declaration at `OPEN_BODY` remains in the private view,
 with its historical type identity; an earlier activation uses the file index.
 Nested function definitions are rejected by the current validated parser.
@@ -104,7 +104,7 @@ the locked host. All 36 source measurement processes matched; the large
 vector pipeline measured 66.444–67.839 ns/token on one lane and 63.055–63.408
 on eight. The measurement guide records costs, states, memory and revision
 boundaries. Subsequent main integration and actual parser-trace test additions
-require fresh qualification. Independent
-name resolution alone does not satisfy #113: complete top-level initializer
-checking, private body types, source-order effects/output reconciliation and
-actual deferred semantic/IR/corpus equivalence remain required.
+require fresh qualification. #113's deferred
+reader ([the deferred bodies guide](c-deferred-bodies.md)) reads each body with
+the checker's own walk instead, on private types, and merges the bodies in
+source order; this helper's resolution stays a separate consumer.

@@ -41,7 +41,7 @@
 // are invalid or a check fails.
 //
 // Layout, in this order: the tally, the random numbers and the table helpers; the fixtures; hash-consing; batches;
-// layout; conversions; compatibility; printing; run_type_tests.
+// layout; conversions; compatibility; printing; #113's deferred bodies (c_types_deferred_test.c); run_type_tests.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -2405,10 +2405,6 @@ struct TypeTestWorld
     uint32_t* name_lengths;
     TypeNames names;
     uint32_t next_name;
-    // A world whose C this compiler compiles (the calling convention's compiled worlds, #137), whose front end takes
-    // neither C23's enums of a fixed underlying type nor an attribute after a bit-field's width: its enums' types are
-    // their values', and a bit-field's attributes go before its type.
-    bool compiled;
 };
 
 static uint32_t type_test_new_name(TypeTestWorld* world)
@@ -2528,7 +2524,7 @@ static void type_test_world_enum(TypeTestWorld* world, uint64_t* random)
     const uint8_t alignment = type_test_below(random, 5) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0;
     world->enum_begin[tag] = world->enum_value_count;
     TypeId underlying = 0;
-    if (type_test_below(random, 3) == 0 && !world->compiled)
+    if (type_test_below(random, 3) == 0)
     {
         const TypeId fixed[] = {
             BUSTER_TYPE_BOOL,
@@ -3004,19 +3000,13 @@ static void type_test_write_member_attributes(const TypeTable* table, TypeTestTe
     }
 }
 
-// A member's declaration after `indent`, its attributes after its declarator, but a compiled world's bit-field's before
-// its type.
+// A member's declaration after `indent`, its attributes after its declarator (a bit-field's after its width).
 static void type_test_write_member(TypeTestWorld* world, TypeTestText* text, uint32_t member, const char* indent)
 {
     const TypeTable* table = &world->test.table;
     const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
-    const bool first = world->compiled && bit_field;
     const TypeTestSpelling spelling = type_test_qualified(world, table->members.type[member]);
     type_test_format(text, "%s", indent);
-    if (first)
-    {
-        type_test_write_member_attributes(table, text, member, "", " ");
-    }
     type_test_format(text, "%s", spelling.left);
     if (table->members.name[member] != 0)
     {
@@ -3027,10 +3017,7 @@ static void type_test_write_member(TypeTestWorld* world, TypeTestText* text, uin
     {
         type_test_format(text, " : %u", table->members.bit_width[member]);
     }
-    if (!first)
-    {
-        type_test_write_member_attributes(table, text, member, " ", "");
-    }
+    type_test_write_member_attributes(table, text, member, " ", "");
     type_test_format(text, ";\n");
 }
 
@@ -4378,6 +4365,9 @@ static bool type_test_batch_after_completion(void)
     return tally.failures == 0;
 }
 
+// #113's deferred bodies: the change records, views and replay.
+#include "c_types_deferred_test.c"
+
 static int run_type_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -4426,6 +4416,7 @@ static int run_type_tests(int argc, char** argv)
         passed = type_test_hash_consing(seed, (uint32_t)count) && passed;
         passed = type_test_batches(seed, (uint32_t)count * 8) && passed;
         passed = type_test_batch_after_completion() && passed;
+        passed = type_test_deferred(seed, (uint32_t)count / 20) && passed;
         passed = type_test_layout_fixtures_check() && passed;
         passed = type_test_member_lookup() && passed;
         passed = type_test_layout_twins(seed, (uint32_t)count / 4) && passed;

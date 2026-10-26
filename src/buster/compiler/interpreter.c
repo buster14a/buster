@@ -72,6 +72,7 @@ struct InterpreterRuntime
     uint32_t memory_capacity;
     bool check_memory;
     bool check_undefined;
+    uint64_t stack_serial;
 };
 
 typedef struct InterpreterBinding InterpreterBinding;
@@ -532,9 +533,147 @@ static uint16_t interpreter_typed_ir_type(uint32_t class)
         IR_I64,
         IR_F32,
         IR_F64,
+        // Typed long double has no execution model here.
+        IR_VOID,
     };
     const uint16_t result = types[class];
     return result;
+}
+
+// Dynamic storage is lazy and frame-owned. Only allocations and distinct live stack positions allocate metadata.
+// Saves at the same position share a handle. A restore searches issued handles without dereferencing input bits,
+// removes only later dynamic objects, and rewinds their arena bytes/definedness together. Static locals precede it.
+typedef struct InterpreterStackAllocation InterpreterStackAllocation;
+struct InterpreterStackAllocation
+{
+    InterpreterStackAllocation* previous;
+    uint8_t* bytes;
+};
+
+typedef struct InterpreterStackSave InterpreterStackSave;
+struct InterpreterStackSave
+{
+    InterpreterStackSave* previous;
+    InterpreterStackAllocation* allocation;
+    uint64_t mark;
+    uint64_t handle;
+    uint64_t position;
+};
+
+typedef struct InterpreterStack InterpreterStack;
+struct InterpreterStack
+{
+    InterpreterStackAllocation* allocation;
+    InterpreterStackSave* saved;
+    uint64_t position;
+};
+
+static InterpreterStatus interpreter_stack_allocate(InterpreterStack* stack, uint64_t size, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, uint64_t* address)
+{
+    InterpreterStatus status = size > UINT64_MAX - 15 ? INTERPRETER_ARITHMETIC : INTERPRETER_OK;
+    const uint64_t mark = arena->length;
+    if (status == INTERPRETER_OK && size == 0)
+    {
+        // Zero reserves no bytes and changes no logical position, including across save bookkeeping. The address
+        // may alias an older live object; memory checks still require a live registered extent for any access.
+        if (stack->position == 0)
+        {
+            const uintptr_t position = (uintptr_t)arena->base + mark;
+            stack->position = (position + 15) & ~(uintptr_t)15;
+        }
+        *address = stack->position;
+    }
+    else if (status == INTERPRETER_OK)
+    {
+        const uint64_t rounded = (size + 15) & ~UINT64_C(15);
+        InterpreterStackAllocation* allocation = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterStackAllocation, 1);
+        uint8_t* bytes = arena_push(arena, rounded, 16);
+        uint8_t* defined = runtime->check_undefined ? arena_push(arena, rounded, 1) : 0;
+        if (allocation == 0 || bytes == 0 || (runtime->check_undefined && defined == 0))
+        {
+            status = INTERPRETER_RESOURCE;
+        }
+        else
+        {
+            if (defined != 0)
+            {
+                memset(defined, 0, rounded);
+            }
+            if (!interpreter_memory_add(runtime, bytes, rounded, defined, true, owner))
+            {
+                status = INTERPRETER_RESOURCE;
+            }
+            else
+            {
+                *allocation = (InterpreterStackAllocation){
+                    .previous = stack->allocation,
+                    .bytes = bytes,
+                };
+                stack->allocation = allocation;
+                *address = (uintptr_t)bytes;
+                stack->position = *address;
+            }
+        }
+    }
+    if (status != INTERPRETER_OK)
+    {
+        arena_pop_to(arena, mark);
+    }
+    return status;
+}
+
+static InterpreterStatus interpreter_stack_save(InterpreterStack* stack, InterpreterRuntime* runtime, Arena* arena, uint64_t* handle)
+{
+    InterpreterStatus status = INTERPRETER_OK;
+    if (stack->saved == 0 || stack->saved->allocation != stack->allocation)
+    {
+        const uintptr_t position = (uintptr_t)arena->base + arena->length;
+        InterpreterStackSave* saved = runtime->stack_serial == UINT64_MAX ? 0 : BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterStackSave, 1);
+        if (saved == 0)
+        {
+            status = INTERPRETER_RESOURCE;
+        }
+        else
+        {
+            runtime->stack_serial += 1;
+            stack->position = stack->position != 0 ? stack->position : (position + 15) & ~(uintptr_t)15;
+            *saved = (InterpreterStackSave){
+                .previous = stack->saved,
+                .allocation = stack->allocation,
+                .mark = arena->length,
+                .handle = runtime->stack_serial,
+                .position = stack->position,
+            };
+            stack->saved = saved;
+        }
+    }
+    if (status == INTERPRETER_OK)
+    {
+        *handle = stack->saved->handle;
+    }
+    return status;
+}
+
+static InterpreterStatus interpreter_stack_restore(InterpreterStack* stack, uint64_t handle, InterpreterRuntime* runtime, Arena* arena)
+{
+    InterpreterStackSave* saved = stack->saved;
+    while (saved != 0 && saved->handle != handle)
+    {
+        saved = saved->previous;
+    }
+    const InterpreterStatus status = saved == 0 ? INTERPRETER_INVALID : INTERPRETER_OK;
+    if (status == INTERPRETER_OK)
+    {
+        while (stack->allocation != saved->allocation)
+        {
+            interpreter_memory_remove(runtime, stack->allocation->bytes);
+            stack->allocation = stack->allocation->previous;
+        }
+        stack->saved = saved;
+        stack->position = saved->position;
+        arena_pop_to(arena, saved->mark);
+    }
+    return status;
 }
 
 typedef struct InterpreterTypedFrame InterpreterTypedFrame;
@@ -545,6 +684,8 @@ struct InterpreterTypedFrame
     uint32_t stack_base;
     uint32_t local_base;
     uint8_t return_class;
+    uint64_t arena_mark;
+    InterpreterStack dynamic;
 };
 
 static uint32_t interpreter_typed_find_function(const InterpreterProgram* program, SymbolId symbol)
@@ -614,7 +755,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     result = result && (function->argument_count == 0 || function->argument_classes != 0);
     for (uint32_t l = 0; result && l < function->local_count; l += 1)
     {
-        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASSES;
+        result = function->local_classes[l] > BUSTER_TYPED_CLASS_VOID && function->local_classes[l] < BUSTER_TYPED_CLASS_F80;
     }
     for (uint32_t c = 0; result && c < function->call_count; c += 1)
     {
@@ -622,7 +763,7 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     }
     for (uint32_t a = 0; result && a < function->argument_count; a += 1)
     {
-        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASSES;
+        result = function->argument_classes[a] > BUSTER_TYPED_CLASS_VOID && function->argument_classes[a] < BUSTER_TYPED_CLASS_F80;
         // An aggregate's bytes pass by value through its address (#137), which this interpreter doesn't model.
         result = result && (function->argument_sizes == 0 || function->argument_sizes[a] == 0);
     }
@@ -706,6 +847,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         result->status = function->local_count <= limits.max_locals ? interpreter_typed_enter(function, locals, defined, 0, arguments, argument_count, &runtime, 1) : INTERPRETER_RESOURCE;
         frames[0] = (InterpreterTypedFrame){
             .function = initial,
+            .arena_mark = scratch->length,
         };
         depth = 1;
         local_top = function->local_count;
@@ -733,15 +875,16 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // The kinds after COPY (ALLOCA and the stack's positions) aren't interpreted, and would read as binary operations.
-        if (kind == BUSTER_TYPED_NONE || kind > BUSTER_TYPED_COPY || class >= BUSTER_TYPED_CLASSES)
+        // Validate the dispatch domain before classifying effects; long double has no InterpreterValue, and an indirect jump
+        // (#133) goes to a label's address, which an interpreted function has no code at.
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || class >= BUSTER_TYPED_CLASS_F80)
         {
             result->status = INTERPRETER_INVALID;
             break;
         }
         uint32_t needed = 0;
         uint32_t pushed = 0;
-        if (kind >= BUSTER_TYPED_CONST && kind <= BUSTER_TYPED_GLOBAL_ADDRESS)
+        if ((kind >= BUSTER_TYPED_CONST && kind <= BUSTER_TYPED_GLOBAL_ADDRESS) || kind == BUSTER_TYPED_STACK_SAVE)
         {
             pushed = 1;
         }
@@ -779,7 +922,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             break;
         }
         bool shape = true;
-        if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE || (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID))
+        if (kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE)
+        {
+            shape = class == BUSTER_TYPED_CLASS_U64 && value == 0 && (kind == BUSTER_TYPED_STACK_SAVE || classes[top - 1] == BUSTER_TYPED_CLASS_U64);
+        }
+        else if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_JUMP_VALUE || (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID))
         {
             shape = classes[top - 1] == class;
         }
@@ -983,6 +1130,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                         .stack_base = top - count,
                         .local_base = local_top,
                         .return_class = (uint8_t)class,
+                        .arena_mark = scratch->length,
                     };
                     top -= count;
                     local_top += target->local_count;
@@ -1052,6 +1200,17 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         case BUSTER_TYPED_DISCARD:
             top -= 1;
             break;
+        case BUSTER_TYPED_ALLOCA:
+            result->status = interpreter_stack_allocate(&frame->dynamic, stack[top - 1].low, depth, &runtime, scratch, &stack[top - 1].low);
+            break;
+        case BUSTER_TYPED_STACK_SAVE:
+            result->status = interpreter_stack_save(&frame->dynamic, &runtime, scratch, &stack[top].low);
+            stack[top].high = 0;
+            classes[top++] = BUSTER_TYPED_CLASS_U64;
+            break;
+        case BUSTER_TYPED_STACK_RESTORE:
+            result->status = interpreter_stack_restore(&frame->dynamic, stack[--top].low, &runtime, scratch);
+            break;
         case BUSTER_TYPED_BRANCH_FALSE:
         case BUSTER_TYPED_BRANCH_TRUE:
             top -= 1;
@@ -1073,6 +1232,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
                 break;
             }
             interpreter_memory_remove_owner(&runtime, depth);
+            arena_pop_to(scratch, frame->arena_mark);
             local_top = frame->local_base;
             top = frame->stack_base;
             depth -= 1;

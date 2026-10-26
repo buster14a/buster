@@ -23,6 +23,12 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
+- **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
+  structs returned in x87 registers ("Long double", below).
+- **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
+  AVX-512 ("Conversions between U64 and floating values", below).
+- **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
+  values at once, among them calls of up to 64 arguments, in frame slots ("Deep values", below).
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -31,9 +37,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **`test-tier0`,** with a cross-check against clang -O0.
 - **`benchmark-backend`.**
 
-- **c-testsuite (#145):** 219 of its 220 programs compile through #133's producer and Tier 0, link by the direct path
+- **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
-  ([the c-testsuite guide](c-testsuite.md)). The other one, 00204, waits on item 8 of #136's plan (`long double`).
+  ([the c-testsuite guide](c-testsuite.md)).
 
 **Waits for #133, #145 and #146:**
 
@@ -121,9 +127,17 @@ table. The kinds are:
 - `JUMP` goes to its target.
 - `JUMP_VALUE` carries an arm's value of `?:`, or a value's `&&` and `||`, to the arm after it.
 - `RETURN` returns at statement level.
+- `JUMP_INDIRECT` pops an address (U64) and goes there: GNU C's `goto *p`, at statement level. Its targets are the
+  function's labels whose addresses the code takes (`&&label`), an optional column, `label_entries` (`label_count`
+  entry indices, each a statement's start or the count). Tier 0 reports each one's first record
+  (`Tier0Code.label_records`); the front end defines the label's symbol there, after branch sizing, and an address of
+  a label is a `GLOBAL_ADDRESS` of it. Each label is a target in the fusion's windows, reached with nothing on the
+  stacks.
 
 The producer lowers conditions to jumps, the short-circuit operators straight to their targets. Wherever control
 arrives at a target, the stacks hold the same values; `tier0_validate` checks that, as WebAssembly's validator does.
+A label of `label_entries` counts as reached with empty stacks before the first entry, since a `JUMP_INDIRECT` may
+arrive at any time; and a `JUMP_INDIRECT` must leave the stacks empty, in a function with a label.
 
 **The memory contract:**
 
@@ -137,8 +151,8 @@ arrives at a target, the stacks hold the same values; `tier0_validate` checks th
 
 **What Tier 0 derives itself,** under #298's producer–consumer rule:
 
-- **The labels** (a bitset of targets): one pass over the control entries the vector path finds 64 at a time. A
-  producer's bitset would cost the same to build and adds a column to keep consistent.
+- **The labels** (a bitset of targets): one pass over the control entries the vector path finds 64 at a time, and the
+  labels of `label_entries`. A producer's bitset would cost the same to build and adds a column to keep consistent.
 - **Each entry's operand class:** a shifted load of `classes`.
 
 The rest of what fusion needs is in the stream. A unit-wide API, one stream for every function of a unit, would keep
@@ -258,6 +272,149 @@ result an object of its own, a function with a hidden result pointer its paramet
 object its alignment, to 16; `docs/calling-convention.md` has the cross-check of C that this compiler compiles against
 clang's and GCC's.
 
+## Long double (#136's item 8)
+
+A `long double` is the x87's 80-bit extended value in 16 bytes, which the System V convention passes in memory (on the
+stack) and returns in st0; a struct of one returns in st0, and a struct of a `_Complex long double` in st0 and st1
+(#137's X87 results). Its class is F80 (`BUSTER_TYPED_CLASS_F80`), whose values Tier 0 keeps in memory:
+
+- **A value** takes an integer depth, as an address does, and lives in that depth's 16-byte slot of the frame
+  (`Tier0Frame.x87_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
+  loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
+  stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
+  `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
+- **Its locals and parameters are objects** of 16 bytes aligned to 16, and its globals are reached through their
+  addresses: there is no `LOCAL`, `STORE_LOCAL`, `SET_LOCAL`, `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a
+  front end reads one with `LOAD` and writes it with `STORE` or `SET`, the address first. A parameter's home is its
+  incoming stack slot, whose place is a multiple of 16.
+- **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
+  the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
+  slot.
+- **A function says whether it has long double values** (`Tier0Function.x87`: an entry of class F80, or a long double
+  result), which its producer knows as it writes them. Only such a function has the slots, and only its compile looks
+  for long double's entries: selection, measuring and the deferred entries' emitter are each written once with the flag
+  a constant (`tier0_select_entries`, `tier0_select_vector_entries`, `tier0_measure_vector_entries` and
+  `tier0_emit_deferred_entry`), the instance without long doubles inline where the code was before and the one with them
+  out of line. A function without long doubles then compiles with the code Tier 0 had before them, but for a test of the
+  flag at each of those uses (#423's measurements, below). A struct result in x87 registers, which goes to its object,
+  takes no slot: any function's calls handle one.
+- **The kinds:** `CONST`, `DUP`, `NEG` (`fchs`), `LOAD`, `STORE`, `SET`, `ADD`, `SUB`, `MUL` and `DIV` (`faddp` and the
+  others on st(1) and st(0)), the compares (`fucomip`, the operands swapped for `<` and `<=`, with clang's results for
+  unordered operands: true for `!=` alone), `CONVERT` to and from every class, `CALL`, `DISCARD`, `JUMP_VALUE` and
+  `RETURN`.
+- **Conversions:** from an integer by `fild` of it widened to 64 bits, an unsigned 64-bit one past 2^63 corrected by
+  adding 2^64; to an integer by `fistp` with the rounding control set to truncation and restored (`fnstcw`, `fldcw`), an
+  unsigned 64-bit one past 2^63 by subtracting 2^63 first and setting the top bit after, as clang's code does; and to and
+  from float and double through the red zone.
+- **Calls:** an F80 argument is copied from its slot to its place in the outgoing area (`fld`, `fstp`); a call's F80
+  result is stored from st0 into the slot of its depth, and a struct result in x87 registers into its object, part k at
+  16 · k. A function's F80 result is the value at depth 0 its `RETURN` leaves, which the epilogue loads into st0; a
+  function returning a struct in x87 registers loads its parts from the address its `RETURN` gives.
+
+Each truncation restores the control word it changed, which the convention has callee-saved, and MXCSR is untouched.
+`tier0_validate` refuses a local of the class that isn't an object, a global read or stored as an F80 value, a constant
+past the column, an integer operation of the class or a branch on it, an F80 argument anywhere but its 16 bytes of the
+outgoing area at a multiple of 16, a `RETURN` of F80 from a function whose result isn't one long double in st0 and of
+another class from one whose is, a function returning a `_Complex long double` (st0 and st1, which no class holds),
+a call whose x87 result neither an F80 class nor a result object takes, and an F80 entry or a long double result in a
+function without `x87`.
+
+## Conversions between U64 and floating values (#136's item 5)
+
+SSE converts between floating values and signed integers alone (AVX-512's `vcvtusi2sd` and `vcvttsd2usi` are past the
+baseline). Tier 0's `CONVERT` from U64 to F32 or F64, and from those to U64, is deferred (`tier0_emit_u64_convert`), with
+no branch, in one of two forms:
+
+- **the register form**, in the operand's register, the result's and the stacks' first free ones, with no memory;
+- **the red zone form**, with no register but the operand's and the result's, its scratch values in red zone
+  temporaries, where the register form's free registers are past their tables.
+
+`tier0_u64_convert_registers` chooses, from the stacks' depths before the conversion, d (integer) and f (floating), and
+the integer table's depths (15, or 14 with a frame pointer):
+
+| Conversion | Register form | Red zone form |
+| --- | --- | --- |
+| to F32 or F64 (the operand at d − 1, the scratch at d) | d < 15, or d < 14 with a frame pointer | d = 15, or 14 with one |
+| to U64 (the result at d, the scratch at d + 1; the operand at f − 1, the scratch at f) | d + 1 < 15 (or 14) and f < 16 | d + 1 = 15 (or 14), or f = 16 |
+
+So every depth with room for the conversion's own values takes it, as it did before the register form (#429's review:
+the register form alone refused a conversion to U64 with 14 integers or 16 floating values below it, and one from U64
+with its operand in the integer table's last register). The two forms of a direction have as many records, so that
+measuring needn't know which a conversion takes. Each selection counts the conversion's result in its stacks' tops,
+and the register form's scratch registers where it takes the conversion, which a frame pointer decides only once the
+selection has seen every entry: it keeps the scratch's highest depths both with and without one, and takes the right
+one at the end. Neither form takes a home's variant, so no local fuses into one.
+
+- **To F32 or F64 from U64:** a signed conversion of the value where its top bit is clear, and otherwise of the value
+  halved with its lowest bit kept, `(x >> 1) | (x & 1)`, which rounds as the value does (made in the integer stack's
+  free register; `cmovns` chooses which), then the result's exponent raised by the value's top bit, which doubles it
+  exactly where it was halved. The result's register is zeroed first (`xorps`), so that `cvtsi2sd` doesn't wait for the
+  value it held. The red zone form halves the value in its own register, from its copy in a temporary, and raises the
+  exponent in the result's bits in another. 14 records, where clang -O0 branches between the two conversions.
+- **To U64 from F32 or F64:** one signed truncation, of the value less a bias: 2^63 where the value is at least that
+  (`cmovae` from one compare with 2^63, which the integer stack's register past the result's and the floating stack's
+  free one hold, or a temporary), 0 below it. The top bit comes back from the compare's result, which `setae` keeps (in
+  that register's low byte, or a temporary's), shifted into place by 63, which keeps its lowest bit alone, and `xor`ed
+  in. 11 records. The subtraction is exact (Sterbenz's lemma from 2^63, and of 0 below it), and the truncation's operand
+  is below 2^63. So a value in U64's range raises the invalid exception never and inexact only where it has a fraction,
+  as C's conversion does. (#429's first sequence truncated both ways and chose, which raised invalid from 2^63 on, and
+  inexact for a value like 1.0.) A value out of U64's range, which C leaves undefined, gives the signed truncation's
+  result with its top bit flipped.
+
+#429's first versions had the red zone form alone: on the 9700X, a loop of the four conversions (#429's review) took 2.1
+times clang -O0's time, 25.7 cycles an iteration against 12.2, as each conversion's loads waited for the stores before
+them. So it takes only the depths where the register form has no room.
+
+## Deep values (#136's item 6)
+
+A stack's values fit its depth table up to 15 integer ones (14 in a function with a frame pointer, whose rbp is the
+table's last) and 16 floating ones. Past that, they live in the frame's deep slots, 8 bytes per depth of each stack,
+value d in slot d (`Tier0Frame.deep_area`). Selection finds such a function as before, by the depths its entries'
+registers reach (`TIER0_ERROR_DEPTH`), and `tier0_select_deep` takes it on from there, shared by both paths: code within
+the tables doesn't pay for it.
+
+**Where values are.** At each entry's start, a stack's values are where its depth says: all in their registers up to the
+table's count, all in their slots past it. Every way into a label agrees, since the stacks there have the same depths
+whichever way control arrives.
+
+**Deep entries.** An entry is deep on a stack when its start and its exit (a `JUMP_VALUE`'s at its target, which its
+value is on) are on the two sides of that line, or when it uses the stack's registers where the stack is past it or
+reaches past the table (a template's reach, as selection reads it, or a deferred emitter's). A deep entry is deferred,
+in both paths (`tier0_emit_deep`):
+
+1. if the stack's values were in their registers, it stores them into their slots;
+2. it loads the values it reads (its window: 2 at most, below its depth, from the template's register sources, or the
+   values a template for one depth reads through its fixed registers, as division's dividend in rax) from their slots
+   into the stack's first registers;
+3. its own records run at that depth, which the depth columns hold for it from here on: its template's, home case and
+   choice of immediate forms included, or its deferred emitter's (division, shifts, copies, the stack's entries and the
+   conversions between U64 and the floating classes), which then finds rax, rdx and rcx where a template for depth 2
+   does. A conversion takes the form selection chose at its depths before its window's (`tier0_u64_convert_registers`),
+   so that its registers are those selection counted: a deep one to U64 is always the red zone's, and one from U64 the
+   registers' only where it is deep on the floating stack alone with room at its integer depth;
+4. its result goes from its register at that depth into its slot;
+5. if its exit is within the table, the stack's values are loaded back into their registers;
+6. a template's branch, its last record, comes after them, which keep the flags its compare set: both ways out
+   arrive with the stacks where their depths say.
+
+A call deep on either stack (`tier0_emit_deep_call`) stores both stacks' registers into their slots if they were there,
+copies each argument on the stack from its slot through rax into the outgoing area, loads each in a register straight
+from its slot (after the stack ones), its callee into r11, makes the call as `tier0_emit_call` does (al, the hidden
+pointer, the result object), stores the result into its slot and loads back the stacks within the tables. Nothing below
+its arguments needs saving: it is in the slots.
+
+A deep function's deep code takes the depth registers below the tables, which its depths reach anyway: no other
+register, and never a frame pointer's rbp.
+
+**Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a function with long double values whose stacks pass the tables,
+since an F80 value's slot is its integer depth's; a call with aggregate arguments where its copies' scratch registers
+are past the tables; and a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
+past (a stack rises by one entry at a time at most, so it shows there first).
+
+**Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
+crosses the line. `test-tier0`'s deep shape (below) has about 2% of its entries deep, and its cross-check's code is 1.33
+times clang -O0's (1.16 for the larger shape's), with run times about the same.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
@@ -308,7 +465,11 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
 `PC32` or `CALL`, or for a symbol outside the image `LOAD_GOT`, `TPOFF32` or `GOTTPOFF`, the target `SymbolId` and
-addend 0, in record order. An indirect call is `call r11`, with none.
+addend 0, in record order. An indirect call is `call r11`, with none, and an indirect jump `jmp` through the address's
+register.
+
+**The labels' records** (`label_records`, one per entry of `label_entries`): the first record of each label whose
+address the code takes, from the positions both paths compute; equal in both, as the tests compare.
 
 ## The design
 
@@ -343,8 +504,8 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
   measure.
 - **Values live across a call** are exactly the depths below its arguments. The call saves the caller-saved ones to
   the frame's save area and restores them; depths in callee-saved registers survive it by themselves.
-- **Deeper expressions:** past 15 integer or 16 floating values live at once, the function is refused
-  (`TIER0_ERROR_DEPTH`). Spilling deep values is the issue's deferred case, not written yet (see the follow-ups).
+- **Deeper expressions:** past 15 integer or 16 floating values live at once, the values go to frame slots ("Deep
+  values", below).
 
 **Homes.**
 
@@ -493,8 +654,8 @@ chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_
 ## Tests
 
 `test-tier0` (about 0.8 s, or 2.9 s with `--cross-check`, on the 9700X, before the records' shape) generates programs of
-five shapes: one function of integers, integers and calls, everything, larger, and larger with structs and unions by
-value (#137), 300 each by default. Each program:
+six shapes: one function of integers, integers and calls, everything, larger, larger with structs and unions by value
+(#137), and larger past the depth tables, 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns and references.
@@ -512,9 +673,10 @@ Before the programs, checks of their own:
 - **applies:** the vector path's application of the chosen forms against the scalar path's
   (`x86_choice_instruction`), on 2,000 batches of random records, each with a candidate form of a random row or
   `X86_FORM_NONE` (which keeps the record) and a random value.
-- **errors:** both paths must refuse the same streams alike: a conversion from U64 to a floating class at 200
-  places among 64-entry blocks, before another (the first entry reported), and 14 to 17 values on the integer
-  stack at once, past the 15 depths from 17 on (the last constant is the first add's immediate). And both must
+- **errors:** both paths must refuse the same streams alike: an entry without a template (`NOT` of a double, which
+  `tier0_validate` refuses too) at 200 places among 64-entry blocks, before another (the first entry reported), and
+  14 to 17, 32, 239 and 240 values on the integer stack at once, past the 15 depths from 17 on (the last constant is
+  the first add's immediate), which must compile alike, and 241 and 250, past `BUSTER_TIER0_MAX_DEPTH`. And both must
   compile 40 locals set from constants their stores absorb, from INT32_MIN on: past 32 locals emission gathers the
   homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
@@ -525,11 +687,41 @@ Before the programs, checks of their own:
     some address-taken, and `VA_LIST`s of 24 bytes. Both paths compile them, and must agree. Each local's place, from
     its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
     from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+- **unsigned floating:** the conversions between U64 and the floating classes (`tier0_emit_u64_convert`), each as a
+  function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 22
+  named values under each of MXCSR's four rounding modes: from U64 around 2^53, 2^63 and 2^64, where the halving's kept
+  bit decides the rounding (ties to even and just past them), and to U64 from -0.5, -0.0 and values below 2^63, at it
+  and up to the largest below 2^64, each against C's conversion under the same mode. Each call's MXCSR invalid and
+  inexact flags must be those of C's conversion of the same value (compiled with `FENV_ACCESS`), and every conversion
+  to U64 runs again with invalid unmasked, where a spurious one would raise SIGFPE. The generator's programs have these
+  conversions too (`Tier0ProgramOptions.unsigned_floating`, in the shapes with floating values; to U64 only where C
+  defines it, in the clang cross-check's).
+- **unsigned floating limits:** the same conversions at the stacks' limits (#429's review), each as a function of x and
+  `out` that holds integers and doubles below the conversion, stores their sums at `out[0]` and `out[1]` and returns
+  the conversion: from U64 with x in the integer table's last register but one and in its last, without a frame
+  pointer and with one (14 depths), and with the result in xmm15; to U64 with the result in the table's last register
+  but one and in its last, with and without a frame pointer, with x in xmm14 and in xmm15, and with both limits at once.
+  Both paths must compile each alike in the form the check's own rule gives (the red zone form's records are those at
+  negative displacements from rsp), the prologue must push the register form's scratch where it is callee-saved, and
+  each call, as the unsigned floating check makes them, must give C's conversion and its flags and both sums.
+- **deep** (`tier0_deep_test.c`, #136's item 6): nine functions of one U64 parameter whose stacks fill their tables,
+  then cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it
+  and dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it,
+  a compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
+  them dropped across the floating line), division by a local (whose dividend only rax reads) and by a value, `%`, and
+  shifts by a register past it, a frame pointer's 14 values and two past them, both stacks crossing at one conversion,
+  rsp moved past a frame pointer's line (#434's review): rsp saved, two allocations stored through and loaded back,
+  rsp restored, every entry a deep one while the values below are in their slots, which rbp addresses; and a conversion
+  to U64 deep on the floating stack alone at integer depth 13, whose register form's scratch would be rbp, which
+  nothing else in it reaches. Each must compile by both paths into the same records with deep entries, a frame pointer
+  exactly in the cases that have one, write no callee-saved register that its prologue doesn't push (by
+  `x86_instructions_effects_scalar`), be encoded alike by both encoders, and give this file's model of it natively on
+  six inputs.
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
   - a copy of 1, 3, 8, 15, 16, 40 and 256 bytes above every count of 0 to 13 integer and 0 to 16 floating values.
-    Both selections must count its scratch register among the frame's clobbers, or refuse the function as too deep
-    where its stack has none left, and both paths must compile it alike. The values are then folded in postorder, the
+    Both selections must count its scratch register among the frame's clobbers, or find the function too deep where
+    its stack has none left, which the deep slots then take, and both paths must compile it alike. The values are then folded in postorder, the
     doubles onto a zero pushed above them, which takes one more floating depth: 16 doubles are too deep whatever the
     copy.
 - **operands:** `tier0_validate` must refuse each of nine streams at the entry whose last operand has another class
@@ -572,14 +764,43 @@ Before the programs, checks of their own:
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
     another class or with a value, and a restore of another class or with a value, and take a save restored.
-  - 14 integer values at once must compile with a frame pointer and without, and 15 only without (rbp, their last
-    depth, is the frame's), by both paths alike.
+  - 14 and 15 integer values at once must compile with a frame pointer and without, by both paths alike: with one,
+    the 15th goes to its deep slot (rbp, the table's last depth, is the frame's).
   - a function of the test's own (`tier0_test_stack_entry`) allocates 64 KB and up 1,000 times in a loop, each in a
     scope of its own: the position saved, the allocation's first and last words written, its address modulo 16 added
     in, a call with stack arguments made (whose outgoing area mustn't overlap the allocation), the words read back and
     the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
     `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
     expected one.
+- **labels** (#133's labels as values, `tier0_label_test.c`):
+  - `tier0_validate` must refuse, at the entry, an indirect jump to an I64, of class I64, with a value, with a value left
+    under it and in a function without labels, a label past the end, the labels' count without their entries and a
+    label that control reaches with a value, and take the stream beside them.
+  - a function of the test's own dispatches on its argument's base-4 digits through a table of five labels' addresses,
+    one label going on to another through the table, as an interpreter's loop does. Both paths must compile it alike,
+    labels' records included, in ascending order; both encoders must give the same bytes; and it must run in a child
+    on 12 inputs, the table filled from the labels' records and the records' offsets after branch sizing, with this
+    file's results.
+- **x87** (#136's item 8, `tier0_x87_test.c`), long double compiled by both paths into the same records, encoded by
+  both encoders into the same bytes and run natively in a child, called from C through function pointers, so that the
+  file's C (clang's code) is the oracle of the convention for its arguments, parameters and results, and its x87
+  arithmetic the oracle of their values:
+  - **rules:** each break of the class's rules (above) refused at its entry by `tier0_validate`, and the streams beside
+    them taken;
+  - **functions** of long double parameters and results called from C: two on the stack around an integer in a
+    register, a struct of one returned in st0, a call of a C function whose such struct comes back into its object, long
+    doubles passed to a variadic C function, and one kept in its slot across a call;
+  - **boundaries:** each conversion with a sequence of its own on named cases: to `unsigned long` at 0 and 1, below 2^63
+    by 1 and by a half, at it, past it by 1 and at 10^19, and at its largest value; to `long` and `int` at their limits
+    and on fractions of either sign; and back from `unsigned long` (2^63 ± 1 and the largest two values among them) and
+    `long`. Each must give C's conversion of the value, every case in range, and each call, made under rounding upward,
+    must truncate and leave the control word as it was;
+  - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
+    long double; an integer, a float or a double converted from one; a compare's result), from inputs of every class,
+    through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions both ways (unsigned 64-bit ones past
+    2^63 too) and calls of C functions through their addresses, against the check's own stack machine over the stream.
+    The programs must reach every kind and conversion of the class. A program past the depth tables is counted, not
+    compiled.
 - **access:** `tier0_validate` must refuse a global entry whose symbol is past the access column, and an access past
   the last, and take the last. Then GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant,
   and GLOBAL_ADDRESS, of every class, by each access. Both paths must compile each alike to valid records with one
@@ -637,6 +858,10 @@ Before the programs, checks of their own:
   whose first 8 bytes hold its own address as the C library's thread control block does. Each run copies the
   thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone, and copies
   them back beside the other globals, whose bytes it compares with the interpreter's.
+- with the `deep` option (the sixth shape), values past the depth tables: one function in four has 13 to 32
+  parameters, whose callers evaluate each argument over the ones before it on the stacks, and expressions have room
+  for 40 values at once. With the default count, at least one entry in a hundred must be deep (about 2% are). A program
+  without the option is the one the same seed gave before it;
 - with the `records` option (the fifth shape, #137), structs and unions passed and returned by value, from a catalog
   that `tier0_tables_open` builds in the type table and classifies: byte arrays of 1 to 17 bytes, whose parts load in
   every way and the largest of which goes on the stack; floats and doubles, mixed with integers both ways round; unions;
@@ -648,7 +873,8 @@ Before the programs, checks of their own:
   frame pointer (the shape's variable-length arrays) that pass, take or return records.
 
 Everything in them is defined behavior, and nothing recurses: expressions are built from a worklist, and emitted and
-printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do.
+printed by walks with explicit stacks. Their expressions stay within 12 stack slots, as a front end's do, but with the
+`deep` option.
 
 **The cross-check** (`--cross-check`, 60 programs of the larger shape) writes Tier 0's code as an ELF object through the
 link representation and the object writer. clang -O0 compiles the same program as C, and a generated harness links both,
@@ -670,7 +896,8 @@ milliseconds a program, where `clang -shared` of the same data as C took tens: i
 
 Then as many programs of the records shape are linked **mixed**: their even functions Tier 0's and their odd ones
 clang's (clang's own copies of the even ones made weak), so that calls pass and return structs and unions by value
-between the two compilers both ways; each must give what clang's own build gives.
+between the two compilers both ways; each must give what clang's own build gives. And as many of the deep shape, as the
+larger shape's are.
 
 **Robustness:**
 
@@ -743,6 +970,25 @@ between the two compilers both ways; each must give what clang's own build gives
     And on the producer's control stream (`c_check_program.c`), checked by `test-checker`'s programs: no restore at
     a block's end, none before a jump out of a block, or none before a `goto` back above an array's declaration. In
     each case the programs whose arrays would then take 80 MB of stack fail, on both paths.
+  - and on deep values (#136's item 6), each a change to `tier0.c` with the backend's unit built at -O1:
+    - one register fewer stored into its slot on entry: 347; one fewer loaded back on exit: 346;
+    - every value of a window loaded from one slot: the deep shape's runs crash and differ;
+    - integer results not stored into their slots: 185;
+    - the branch before the loads back: 24;
+    - a deep call's arguments one slot off: 41; its result one slot off: 112; floating values not stored around it: 57;
+    - the vector path's count one record more past 9: 227 (the paths differ);
+    - no choice of immediate forms in deep entries: 8;
+    - a template for one depth's window without its fixed registers: the test crashes;
+    - crossing the line not counted as deep: 11, the deep check's dropped values on both stacks (no generated program
+      drops one there);
+    - a window that only fixed registers read not counted as using the stack: 3, the deep check's division by a local,
+      which found that bug in the first version;
+    - the deep slots addressed from rsp (#434's review): the deep check's case with rsp moved, on all six inputs, and
+      the deep shape's runs; the frame pointer's case without a move passes;
+    - a deep variadic call's al left at 0 (#434's review): test-checker's `variadic-calls-past-the-depth-tables`, on
+      both paths, whose callee clang compiles; test-tier0 passes;
+    - a deep conversion's form chosen at its window's depths: 5, the deep check's conversion past the floating line,
+      whose register form overwrote rbp, x's home there.
 - **Every stream source against the operands' rule:** a scratch build validated every function each compile path
   took, besides the validations the sources make, and printed every refusal. The sources were:
   - the generator's programs, with and without the cross-check;
@@ -807,6 +1053,18 @@ path's 11.1.
   (#411), the job measured 169.31 and 574.35, the cycles (80.27 and 232.97, against 80.11 and 229.83) within the runs'
   spread. Under Intel SDE, no variant of the passes tried brought the vector path back to the 0.5 instructions per entry
   fewer that `ac4ccbd`'s inlining happened to give.
+- **Long double (#136's item 8)** at no cost to code without it (#423's review). On these programs, which have no long
+  double, the 9700X measured `6c33fae`, whose x87 checks were inline in both selections' loops, in the call's emitter and
+  count and in the deferred entries' dispatch, against main's `7c428ce` in four rounds in alternating order: the vector
+  path at 171.56 instructions per entry (81.0 to 81.9 cycles) against 169.31 (79.2 to 79.6), and alone 79.5 cycles
+  against 77.8 and 78.0; the scalar path at 580.49 instructions against 574.35, its cycles (231.4 to 231.8 against 232.5
+  to 232.8) within the runs' spread. The checks themselves cost little: on the 7940HS, removing the four groups took the
+  vector path from 170.66 to 168.62 instructions per entry against main's 168.46, and each alone part of the way, as
+  their code changed clang's for the passes around them. With the flag (`Tier0Function.x87`) and the long doubles' code
+  out of line ("Long double" above), the 7940HS measures 169.01 and 575.97 instructions per entry against main's 168.46
+  and 574.25: a test of the flag at each use, and clang's code for the shared passes, which moves by about that much with
+  any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
+  are the same bytes as main's.
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   The vector path is still about 2.3 times that; the budget is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
@@ -830,17 +1088,17 @@ path's 11.1.
 
 ## Follow-ups
 
-- **Spilling deep values:** expressions past the depth tables are refused (`TIER0_ERROR_DEPTH`), among them a call
-  whose arguments, with the values under them and the scratch register its aggregates' copies take, need more than the
-  15 integer or 16 floating depths: every argument is on the stacks at the call. The issue defers them to the scalar
-  path, with frame slots.
+- **Deep values' refusals:** a function with long double values past the depth tables, and a call with aggregate
+  arguments there (`TIER0_ERROR_DEPTH`). Long double's would take its F80 slots by true depth in the deep emitters; the
+  aggregates', their copies through a deep scratch register. And deep code that hovers around the tables' edge stores
+  and loads every register at each crossing: a stack of 15 integer values that takes and drops one a few times pays
+  about 30 records each time, where storing and loading the one register the entry needs would do.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
-  - conversions between U64 and floating values;
   - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
-  - `va_arg` of `long double` and `_Complex` (the scalar classes and structs and unions have recipes);
+  - `_Complex` values, and `va_arg` of them (the scalar classes, long double, and structs and unions have recipes);
   - inline assembly, `setjmp` and atomics;
   - `switch` (no kind yet: a compare sequence or a jump table).
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
@@ -861,7 +1119,8 @@ path's 11.1.
   tcc. c-testsuite (#145) runs.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
-  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp.
+  writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a
+  function with long double code, whose x87 forms `x86_semantics.c` has no rows for yet.
 
 ## Boundary audit #298
 
@@ -893,7 +1152,8 @@ precedes use and concurrent readers.
 
 The typed producer already knows machine classes, pointer scale, explicit
 conversion, branch targets and ABI placement; omitting them would force
-reconstruction. Labels are deliberately derived from control entries and the
+reconstruction. Labels are deliberately derived from control entries (but those
+an indirect jump reaches, which only the producer knows) and the
 last-operand class from a shifted load. Keeping an extra label column requires
 a measured benefit and a consistency rule. Small-function occupancy motivates
 a unit-batch alternative, but batching cannot fuse across function boundaries,

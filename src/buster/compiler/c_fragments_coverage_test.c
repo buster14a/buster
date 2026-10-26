@@ -457,8 +457,10 @@ static bool c_fragment_test_coverage(const Parser* parser, const CFragmentSink* 
             }
             else if (context == C_FRAGMENT_COVER_GOTO)
             {
-                result = role == PARSE_ROLE_OPERAND || (role == PARSE_ROLE_PREFIX && input == PARSE_KIND_STAR);
-                left = middle = right = role == PARSE_ROLE_PREFIX ? C_FRAGMENT_COVER_EXPRESSION : C_FRAGMENT_COVER_EXCLUDED;
+                // A label's name, or a computed goto's `*`, whose child is the whole expression (the parser's
+                // PARSE_MODE_GOTO gives it `return`'s role).
+                result = role == PARSE_ROLE_OPERAND || (role == PARSE_ROLE_RETURN && input == PARSE_KIND_STAR);
+                left = middle = right = role == PARSE_ROLE_RETURN ? C_FRAGMENT_COVER_EXPRESSION : C_FRAGMENT_COVER_EXCLUDED;
             }
             else if (role >= PARSE_ROLE_CLOSE_ATTRIBUTE && role <= PARSE_ROLE_CLOSE_ATTRIBUTE_LIST)
             {

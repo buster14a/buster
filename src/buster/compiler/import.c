@@ -59,7 +59,8 @@
 // AS_NEEDED can mark, and comments. Any other command is an error.
 //
 // main.c includes this file after link.c, whose representation it fills, lane.c, whose arenas it uses, and
-// object_writer.c, whose relocation types it reads the other way. Layout, in this order:
+// object_writer.c, whose relocation types it reads the other way. import_object takes BUSTER_LINKER_ENTRY rather than
+// static: main.c's units compile it in one unit alone (link.c). Layout, in this order:
 //   - API: ImportError, ImportResult, the readers' outputs and the entry points' prototypes.
 //   - Bytes: bounded reads, strings and the ELF header and section table (ImportElf).
 //   - Objects: import_section_class, import_fixup_kind, import_object_capacity and import_object_scalar.
@@ -299,7 +300,7 @@ static __attribute__((unused)) ImportResult import_object_capacity(String8 bytes
 // Imports a relocatable object into `link` as input `unit`, its defined symbols of `source`; object->section_atoms and
 // symbols are pushed from `arena`. On failure, what was added before it stays in the link. The vector path
 // (import_object_vector) imports it, or if anything in it is out of the ordinary, import_object_scalar does.
-static __attribute__((unused)) ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object);
+BUSTER_LINKER_ENTRY __attribute__((unused)) ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object);
 // The exact path: the same import a record at a time, which reports what is wrong and where. It is the oracle the tests
 // compare the vector path with.
 static __attribute__((unused)) ImportResult import_object_scalar(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object);
@@ -2138,7 +2139,7 @@ static bool import_object_vector(Link* link, String8 bytes, uint32_t unit, uint8
     return result;
 }
 
-static ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object)
+BUSTER_LINKER_ENTRY ImportResult import_object(Link* link, String8 bytes, uint32_t unit, uint8_t source, Arena* arena, ImportObject* object)
 {
     const ImportMark mark = import_mark(link, arena);
     ImportResult result = { 0 };

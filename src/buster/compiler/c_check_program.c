@@ -24,6 +24,10 @@ typedef enum CheckProgramStatus
 // block's STACK_SAVE, and the block's end and every break, continue or goto that leaves the block's region (after the
 // save, to its end) by a STACK_RESTORE of the outermost block it leaves (`target`, a closing token). The function's
 // own block's end needs none: its return releases its frame.
+// GNU C's labels as values: a label whose address the program takes (&&label) marks its place with CHECK_CONTROL_LABEL
+// (`token` the label), which does nothing else, and a computed goto (goto *expression) is CHECK_CONTROL_JUMP_INDIRECT of
+// its operand (`node`, converted to const void *), which goes to one of them. It releases no variable-length array's
+// storage on its way out of their blocks, as clang's code doesn't: the function's return does.
 typedef enum CheckControlKind
 {
     CHECK_CONTROL_EVALUATE,
@@ -37,6 +41,9 @@ typedef enum CheckControlKind
     CHECK_CONTROL_STACK_SAVE,
     CHECK_CONTROL_ALLOCATE,
     CHECK_CONTROL_STACK_RESTORE,
+    CHECK_CONTROL_LABEL,
+    CHECK_CONTROL_JUMP_INDIRECT,
+    // The kinds from here on go to a label: their `target`.
     CHECK_CONTROL_BRANCH_FALSE,
     CHECK_CONTROL_BRANCH_TRUE,
     CHECK_CONTROL_JUMP,
@@ -85,6 +92,13 @@ struct CheckProgramOptions
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     bool scalar;
+    // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
+    // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129).
+    bool unselected_operands;
+    // With them, of an if whose condition is an integer constant without side effects, only the arm it runs, when no
+    // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
+    // same model's. Tier 0 lowers both arms, which -c's program keeps.
+    bool folded_ifs;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -134,6 +148,9 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
+    // CheckProgramOptions.unselected_operands and folded_ifs.
+    bool unselected_operands;
+    bool folded_ifs;
 };
 
 typedef enum CheckControlTaskKind
@@ -186,6 +203,8 @@ struct CheckControlWriter
     uint32_t* repeats;
     const uint32_t* region_first;
     const uint32_t* region_next;
+    // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
+    const uint8_t* addressed;
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
@@ -597,6 +616,38 @@ static void check_control_leave(CheckControlWriter* writer, uint32_t jump, uint3
     }
 }
 
+// The first and last tokens of the statement `arm`: its first children's first and its last children's last.
+static void check_control_extent(const CheckControlWriter* writer, uint32_t arm, uint32_t* low, uint32_t* high)
+{
+    *low = arm;
+    *high = arm;
+    for (uint32_t token = arm; token != BUSTER_CHECK_NONE; token = writer->first[token])
+    {
+        *low = token < *low ? token : *low;
+    }
+    for (uint32_t token = arm; token != BUSTER_CHECK_NONE; token = writer->last[token])
+    {
+        *high = token > *high ? token : *high;
+    }
+}
+
+// Whether a jump can enter the statement `arm` (none for BUSTER_CHECK_NONE) other than at its start: it holds a label,
+// or a case of a switch outside it, as clang's CodeGenFunction::ContainsLabel finds.
+static bool check_control_enterable(const CheckControlWriter* writer, uint32_t arm)
+{
+    const uint8_t* roles = writer->parser->tree.roles;
+    const uint32_t* owners = writer->program->input->control_owners;
+    uint32_t low = 0;
+    uint32_t high = 0;
+    check_control_extent(writer, arm, &low, &high);
+    bool enterable = false;
+    for (uint32_t token = low; arm != BUSTER_CHECK_NONE && !enterable && token <= high; token += 1)
+    {
+        enterable = roles[token] == PARSE_ROLE_LABEL || (roles[token] == PARSE_ROLE_CLOSE_CASE && (owners[token] < low || owners[token] > high));
+    }
+    return enterable;
+}
+
 static void check_control_expand(CheckControlWriter* writer, CheckControlTask task)
 {
     const Parser* parser = writer->parser;
@@ -649,16 +700,53 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_IF)
         {
-            const uint32_t otherwise = alternate != BUSTER_CHECK_NONE ? check_control_label(writer) : end;
-            check_control_mark(writer, end);
-            if (alternate != BUSTER_CHECK_NONE)
+            // folded_ifs' model of clang -O0's code: the arm a constant condition runs, without the condition. The
+            // condition's node is its truth (CHECK_OP_CONDITION); clang folds the expression's, of an integer type.
+            const CheckGraph* graph = &input->graph;
+            const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
+            const CheckValue* value = writer->program->stream->values + expression;
+            uint32_t width = 0;
+            bool sign = false;
+            bool truth = false;
+            const bool folded = writer->program->folded_ifs && expression < graph->count && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                                check_action_integer_type(writer->program->types, value->type, &width, &sign) &&
+                                check_program_runtime_truth(writer->program, condition, expression, &truth) &&
+                                !check_control_enterable(writer, truth ? alternate : body);
+            const uint32_t executed = truth ? body : alternate;
+            const uint32_t skipped = truth ? alternate : body;
+            if (folded)
             {
-                check_control_statement(writer, alternate, task.stop, task.repeat);
-                check_control_mark(writer, otherwise);
-                check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, end);
+                // The arm left out takes its own switches with it, whose cases go where the if ends, since every case
+                // of a body has a place.
+                uint32_t low = 0;
+                uint32_t high = 0;
+                check_control_extent(writer, skipped, &low, &high);
+                check_control_mark(writer, end);
+                for (uint32_t case_token = low; skipped != BUSTER_CHECK_NONE && case_token <= high; case_token += 1)
+                {
+                    if (parser->tree.roles[case_token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        check_control_mark(writer, writer->source_labels[case_token]);
+                    }
+                }
+                if (executed != BUSTER_CHECK_NONE)
+                {
+                    check_control_statement(writer, executed, task.stop, task.repeat);
+                }
             }
-            check_control_statement(writer, body, task.stop, task.repeat);
-            check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, token, condition, otherwise);
+            else
+            {
+                const uint32_t otherwise = alternate != BUSTER_CHECK_NONE ? check_control_label(writer) : end;
+                check_control_mark(writer, end);
+                if (alternate != BUSTER_CHECK_NONE)
+                {
+                    check_control_statement(writer, alternate, task.stop, task.repeat);
+                    check_control_mark(writer, otherwise);
+                    check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, end);
+                }
+                check_control_statement(writer, body, task.stop, task.repeat);
+                check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, token, condition, otherwise);
+            }
         }
         else if (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE)
         {
@@ -780,6 +868,18 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 check_control_entry(writer, CHECK_CONTROL_JUMP, jump, BUSTER_CHECK_NONE, stops ? task.stop : task.repeat);
                 check_control_leave(writer, jump, BUSTER_CHECK_NONE, stops ? writer->stops : writer->repeats, stops ? task.stop : task.repeat);
             }
+            else if (kind == PARSE_KIND_GOTO && check_input_indirect_goto(writer->parser, jump))
+            {
+                const uint32_t node = input->token_nodes[jump + 1];
+                if (node != BUSTER_CHECK_NONE)
+                {
+                    check_control_entry(writer, CHECK_CONTROL_JUMP_INDIRECT, jump, node, BUSTER_CHECK_NONE);
+                }
+                else
+                {
+                    check_program_fail(writer->program, CHECK_PROGRAM_INVALID, jump);
+                }
+            }
             else if (kind == PARSE_KIND_GOTO)
             {
                 const uint32_t target = input->label_targets[jump];
@@ -824,6 +924,10 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             {
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
+        }
+        if (role == PARSE_ROLE_LABEL && writer->addressed[token] != 0)
+        {
+            check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         }
         check_control_mark(writer, writer->source_labels[token]);
     }
@@ -1260,7 +1364,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
             }
             bool truth = false;
-            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
+            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && !program->unselected_operands &&
                 check_program_runtime_truth(program, node, operands[0], &truth))
             {
                 if (op == CHECK_OP_CONDITIONAL)
@@ -1334,8 +1438,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
-                               .initializers = options.initializers, .asms = options.asms,
-                               .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+                               .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
+                               .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -1379,10 +1483,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint8_t* needed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* addressed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControlTask, capacity) : 0;
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
-            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && entries != 0 && tasks != 0 && plan_first != 0 && (options.initializers == 0 || plan_next != 0) &&
+            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && addressed != 0 && entries != 0 && tasks != 0 && plan_first != 0 &&
+            (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
             allocation_first != 0 && allocation_next != 0 && vla_blocks != 0 && vla_saves != 0;
@@ -1415,6 +1521,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
         }
         memset(needed, 0, (uint64_t)count + 1);
+        memset(addressed, 0, (uint64_t)count + 1);
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         memset(stops, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -1450,6 +1557,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 last[parent] = token;
             }
             body_count += input->body_declarations[token] != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0);
+            if (check_input_label_address(parser, token) && input->label_targets[token] < count)
+            {
+                addressed[input->label_targets[token]] = 1;
+            }
             if (input->initializer_nodes[token] < node_count)
             {
                 initializers[input->initializer_nodes[token]] = token;
@@ -1603,6 +1714,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .repeats = repeats,
         .region_first = region_first,
         .region_next = region_next,
+        .addressed = addressed,
         .entries = entries,
         .tasks = tasks,
         .labels = labels,

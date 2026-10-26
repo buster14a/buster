@@ -263,11 +263,20 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first
 
 static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
 {
-    for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+    // The body's parameters are the only declarations whose body the walk has set to this one here. Reading no token
+    // outside their range keeps a body read on a lane (#113) from reading what another lane's body writes.
+    uint32_t first = BUSTER_CHECK_NONE;
+    uint32_t last = 0;
+    for (uint32_t p = reader->parameters[body]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+    {
+        first = p < first ? p : first;
+        last = p > last ? p : last;
+    }
+    for (uint32_t i = 0; first != BUSTER_CHECK_NONE && i < reader->output->vla_count; i += 1)
     {
         CheckInputVla* vla = &reader->output->vlas[i];
         const uint32_t declaration = vla->declaration;
-        if (declaration < reader->parser->tokens.count && reader->output->declaration_bodies[declaration] == body)
+        if (declaration >= first && declaration <= last && reader->output->declaration_bodies[declaration] == body)
         {
             vla->body = body;
             vla->scope_begin = body;
@@ -453,6 +462,9 @@ static uint32_t check_input_vla_size(CheckInputReader* reader, uint32_t token, T
     return valid ? result : BUSTER_CHECK_NONE;
 }
 
+static bool check_input_indirect_goto(const Parser* parser, uint32_t token);
+static bool check_input_label_address(const Parser* parser, uint32_t token);
+
 static void check_input_vla_finish(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -501,6 +513,37 @@ static void check_input_vla_finish(CheckInputReader* reader)
             {
                 check_input_report(reader, token, CHECK_INPUT_DECLARATION);
             }
+        }
+    }
+    // A computed goto may go to any label whose address its function takes, so it must be inside the scope of every
+    // variable-length array such a label is in (clang's JumpScopeChecker), whichever way it leaves its own: the labels'
+    // innermost scopes intersect in one interval, [low, high), which holds each goto.
+    for (uint32_t opening = 0; reader->indirect_gotos != 0 && opening < parser->tokens.count; opening += 1)
+    {
+        const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[opening] != 0;
+        const uint32_t closing = parser->tree.parents[opening];
+        if (!deferred && parser->tree.roles[opening] == PARSE_ROLE_OPEN_BODY && closing < parser->tokens.count)
+        {
+            uint32_t low = 0;
+            uint32_t high = UINT32_MAX;
+            for (uint32_t token = opening + 1; token < closing; token += 1)
+            {
+                const uint32_t label = check_input_label_address(parser, token) ? reader->output->label_targets[token] : BUSTER_CHECK_NONE;
+                if (label < parser->tokens.count && reader->scope_marks[label] != 0)
+                {
+                    const uint32_t declaration = reader->scope_marks[label] - 1;
+                    low = declaration > low ? declaration : low;
+                    high = reader->vla_scope_ends[declaration] < high ? reader->vla_scope_ends[declaration] : high;
+                }
+            }
+            for (uint32_t token = opening + 1; token < closing; token += 1)
+            {
+                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token < low || token >= high))
+                {
+                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+            }
+            opening = closing;
         }
     }
 }

@@ -884,12 +884,12 @@ static bool foreign_join(char* path, String8 directory, const char* prefix, Stri
     if (result)
     {
         uint64_t at = 0;
-        memcpy(path, directory.pointer, directory.length);
-        at += directory.length;
+        // Without a directory there are no bytes to copy, and memcpy mustn't be given its null pointer even for none.
         if (directory.length != 0)
         {
-            path[at] = '/';
-            at += 1;
+            memcpy(path, directory.pointer, directory.length);
+            path[directory.length] = '/';
+            at = directory.length + 1;
         }
         memcpy(path + at, prefix, prefix_length);
         at += prefix_length;
@@ -2554,7 +2554,11 @@ static bool foreign_grow(ForeignTable* table, Arena* arena)
     const bool result = entries != 0 && slots != 0 && capacity < UINT32_MAX / 2;
     if (result)
     {
-        memcpy(entries, table->entries, (uint64_t)table->count * sizeof(ForeignEntry));
+        // A table that grows from nothing has no entries to copy (and no array to copy them from).
+        if (table->count != 0)
+        {
+            memcpy(entries, table->entries, (uint64_t)table->count * sizeof(ForeignEntry));
+        }
         memset(slots, 0, (uint64_t)slot_count * sizeof(uint32_t));
         for (uint32_t e = 0; e < table->count; e += 1)
         {
@@ -2582,7 +2586,10 @@ static bool foreign_grow_groups(ForeignTable* table, Arena* arena)
     const bool result = groups != 0 && slots != 0 && capacity < UINT32_MAX / 2;
     if (result)
     {
-        memcpy(groups, table->groups, (uint64_t)table->group_count * sizeof(ForeignGroupEntry));
+        if (table->group_count != 0)
+        {
+            memcpy(groups, table->groups, (uint64_t)table->group_count * sizeof(ForeignGroupEntry));
+        }
         memset(slots, 0, (uint64_t)slot_count * sizeof(uint32_t));
         for (uint32_t e = 0; e < table->group_count; e += 1)
         {
@@ -2899,7 +2906,10 @@ static void foreign_need(ForeignLane* lane, uint32_t a, uint32_t member)
         uint64_t* needs = BUSTER_ARENA_PUSH_ARRAY(&lane->arena, uint64_t, capacity);
         if (needs != 0)
         {
-            memcpy(needs, lane->needs, lane->need_count * sizeof(uint64_t));
+            if (lane->need_count != 0)
+            {
+                memcpy(needs, lane->needs, lane->need_count * sizeof(uint64_t));
+            }
             lane->needs = needs;
             lane->need_capacity = capacity;
         }

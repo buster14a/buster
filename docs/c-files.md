@@ -19,11 +19,12 @@ table's ids and spellings, every file's tokens, values, leading-space bits,
 directive table and guard, what the walk did, and each translation unit's
 output stream (kinds, flags, values and locations), `-E` text and diagnostics
 when it preprocesses with the cache. Each unit's spellings and diagnostics are
-also those it gives with a cache of its own, as the preprocessor runs alone. On
-the 9700X this holds for the test's tree and generated spellings, `sqlite3.c`,
-musl 1.2.5's 1,357 units, this repository's 22 units, and, prepared without
-their includes, the C library corpus (8,983 files). Lua 5.4.8's 34 units passed
-too before the units' `-E` text and diagnostics were compared.
+also those it gives with a cache of its own, as the preprocessor runs alone. The
+9700X job checks this for the test's tree and generated spellings, this
+repository's 53 units and `src` (without its includes), and the preprocessor
+oracle's frozen corpora (#262): musl 1.2.5's 1,355 units, `sqlite3.c`, and,
+prepared without their includes, the C library corpus (8,983 files). Lua 5.4.8's
+34 units passed too before the units' `-E` text and diagnostics were compared.
 
 **The same output whatever the ids.** Ids are opaque (#153): nothing a unit
 prints, or a record holds, may depend on the order the shared table hands them
@@ -31,64 +32,77 @@ out in. `test-files` runs every check again with the table primed before the
 walk, so that it gives its names other ids, on every lane count: every unit's
 `-E` text, diagnostics and locations, and every record, spelled the same. On
 the 9700X this holds for the same inputs, where every name but at most one in
-each run changes ids (597,429 of the C library corpus's 597,430, 41,698 of
-`sqlite3.c`'s 41,699 and 15,330 of musl's 15,331).
+each run changes ids (597,427 of the C library corpus's 597,428, 41,698 of
+`sqlite3.c`'s 41,699, all 15,327 of musl's and all 76,005 of this
+repository's).
 
-**Speed**, measured on 2026-10-22 on the 9700X (clang 23.1.1, `build.sh`'s
-`-O3 -march=native`), under the `exclusive.sh` lock, lane i on CPU i, by
-`benchmark-files`: medians of 21 runs, each from nothing (a new intern table
-and cache, and every file opened, read or mapped, lexed, refined and indexed):
+**Speed**, measured on 2026-10-25 on the 9700X (clang 23.1.1, `build.sh`'s
+`-O3 -march=native`) by the 9700X job's `benchmark-files`, under the host's
+lock, lane i on CPU i: medians of 21 runs, each from nothing (a new intern table
+and cache, and every file opened, read or mapped, lexed, refined and indexed).
+The corpora are the preprocessor oracle's frozen ones
+([docs/preprocessor-oracle.md](preprocessor-oracle.md)), and the repository's
+units those of #262's pull request:
 
-| Lanes | C library corpus, flat | `sqlite3.c` and its headers | musl, 1,357 units | This repository, 20 units |
+| Lanes | C library corpus, flat | `sqlite3.c` and its headers | musl, 1,355 units | This repository, 53 units |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 73.93 ms | 7.45 ms | 4.07 ms | 5.68 ms |
-| 2 | 58.41 ms (1.27×) | 7.48 ms | 3.15 ms (1.29×) | **5.50 ms (1.03×)** |
-| 3 | 46.73 ms (1.58×) | **7.43 ms (1.00×)** | 3.03 ms (1.34×) | 5.57 ms |
-| 4 | 41.90 ms (1.76×) | 7.51 ms | **2.99 ms (1.36×)** | 5.67 ms |
-| 5 | 39.59 ms (1.87×) | 7.57 ms | 3.07 ms | 5.73 ms |
-| 6 | **38.88 ms (1.90×)** | 7.60 ms | 3.16 ms | 5.84 ms |
-| 7 | 39.37 ms (1.88×) | 7.80 ms | 3.24 ms | 6.09 ms |
-| 8 | 40.37 ms (1.83×) | 7.77 ms | 3.40 ms (1.20×) | 6.14 ms |
+| 1 | 74.35 ms | 7.09 ms | 4.93 ms | 14.89 ms |
+| 2 | 57.45 ms (1.29×) | **6.98 ms (1.02×)** | 3.86 ms (1.28×) | 12.53 ms (1.19×) |
+| 3 | 46.19 ms (1.61×) | 7.04 ms | 3.44 ms (1.43×) | 11.10 ms (1.34×) |
+| 4 | 41.61 ms (1.79×) | 7.03 ms | **3.28 ms (1.50×)** | 10.21 ms (1.46×) |
+| 5 | 39.14 ms (1.90×) | 7.09 ms | 3.33 ms | 10.25 ms |
+| 6 | **38.65 ms (1.92×)** | 7.13 ms | 3.36 ms | 10.52 ms |
+| 7 | 39.14 ms (1.90×) | 7.23 ms | 3.48 ms | 9.09 ms (1.64×) |
+| 8 | 39.55 ms (1.88×) | 7.31 ms (0.97×) | 3.57 ms (1.38×) | **9.03 ms (1.65×)** |
+
+Main's code before #262, which the same job ran earlier that day in turns
+with its variants, took 74.50 ms on one lane and 38.78 on 6 for the corpus,
+7.02 and 7.40 on 8 for `sqlite3.c`, 4.83 and 3.25 on 4 for musl, and for the
+repository's walk, of 834 files then, 14.94, 12.52 on 3 and 13.70 on 8. On one
+lane both take the same path, and their times differ between the two runs by
+up to 0.15 ms.
 
 What a run does (the reads and mappings are those of 8 lanes):
 
 | Roots | Rounds | Files | Bytes | Tokens | Shared ids | Opens | Reads, mappings |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| The C library corpus (Zig 0.14.1 `lib/libc`), without includes | 1 | 8,983 | 93.8 MB | 13,152,141 | 597,638 | 8,983 | 8,188, 765 |
-| `sqlite3.c` 3.53 | 8 | 420 | 15.1 MB | 1,665,617 | 40,093 | 1,085 | 354, 66 |
-| musl 1.2.5's sources, with its build's options | 4 | 1,598 | 2.4 MB | 580,440 | 15,026 | 2,535 | 1,571, 16 |
-| This repository's translation units, with `-march=native` | 7 | 449 | 10.6 MB | 1,384,621 | 37,034 | 1,326 | 334, 115 |
+| The C library corpus (Zig 0.14.1 `lib/libc`), without includes | 1 | 8,983 | 93.8 MB | 13,152,141 | 597,639 | 8,983 | 8,188, 765 |
+| `sqlite3.c` 3.53 | 8 | 420 | 15.1 MB | 1,663,924 | 40,088 | 1,085 | 354, 66 |
+| musl 1.2.5's sources, with its build's options | 4 | 1,596 | 2.4 MB | 578,817 | 15,025 | 2,524 | 1,569, 16 |
+| This repository's translation units, with `-march=native` | 7 | 839 | 27.4 MB | 3,875,979 | 58,772 | 2,058 | 469, 370 |
 
 - **The C library corpus** is the one large round: 94 MB prepared by every
-  lane, 1.90 times as fast on 6 lanes as on one, 338 million tokens a second.
-  It scales no further because eight lanes are bound by memory: their IPC falls
-  from 2.15 on one lane to 0.79, while the clock falls only from 5.54 to 4.97
-  GHz (`perf stat` of whole runs). "Where the time goes" has the phases.
-- **The walks** are made of rounds below 4 MB per lane
-  (`BUSTER_FILES_LANE_BYTES`), which one lane prepares while every lane probes
-  paths. musl's walk gains from its 2,535 probes, which take 0.74 ms on 4 lanes
-  against 2.00 ms on one. Round 0 of `sqlite3.c`'s walk is `sqlite3.c` itself,
-  9.5 MB that one lane lexes and refines in 3.8 ms; its headers take 3.7 ms on
-  one lane and 3.5 ms on 3, and on 7 or 8 lanes the walk is 4% slower than on
-  one. The repository's walk is 3% faster on 2 lanes and 8% slower on 8: lane
-  0, which prepares all of its rounds, spends 0.6 ms more there (4.68 ms
-  preparing against 4.26 on one lane, and 0.45 ms of work alone against 0.25),
-  lexing files that other lanes read ("Not yet").
+  lane, 1.92 times as fast on 6 lanes as on one, 340 million tokens a second.
+  It scales no further because eight lanes are bound by memory: on 2026-10-22
+  their IPC fell from 2.15 on one lane to 0.79, while the clock fell only from
+  5.54 to 4.97 GHz (`perf stat` of whole runs). "Where the time goes" has the
+  phases.
+- **The walks** take a lane per megabyte for their rounds of 4 MB or more, and
+  leave the others to lane 0 while every lane probes paths. The repository's
+  walk is 1.65 times as fast on 8 lanes as on one, where main's code was 1.09
+  times as fast ("The walks, round by round"). musl's rounds are all below
+  4 MB, and its walk gains from its 2,524 probes, which take 0.88 ms of a lane
+  on 4 lanes against 2.66 on one. Round 0 of `sqlite3.c`'s walk is `sqlite3.c`
+  itself, 9.5 MB that lane 0 prepares in 3.4 ms, and the others are below 4 MB:
+  the walk takes 6.98 to 7.13 ms on 2 to 6 lanes against 7.09 on one, and up to
+  3% longer on 7 and 8 ("Not yet").
 
 **Speculation.** The walk follows every literal include, also those under an
 `#if` that turns out to be false. What it prepared that no unit entered:
 
 | Roots | Files prepared | Unused | Their tokens |
 | --- | ---: | ---: | ---: |
-| `sqlite3.c` | 420 | 250 | 423,621 of 1,665,617 (25.4%) |
-| musl's sources | 1,598 | 0 | 0 |
-| This repository's units | 449 | 42 | 18,793 of 1,384,621 (1.4%) |
+| `sqlite3.c` | 420 | 250 | 423,621 of 1,663,924 (25.5%) |
+| musl's sources | 1,596 | 0 | 0 |
+| This repository's units | 839 | 58 | 78,624 of 3,875,979 (2.0%) |
 
-`sqlite3.c`'s unused tokens are 85% of its headers' 497,487: clang's AVX-512
-intrinsic headers (`avx512fintrin.h` alone is 64,533 tokens), which an
+`sqlite3.c`'s unused tokens are 85% of its headers': clang's AVX-512 intrinsic
+headers (`avx512fintrin.h` alone is 64,533 tokens), which an
 `#include <immintrin.h>` under an `#if` that is false here reaches, and ICU's
-`urename.h` (`SQLITE_ENABLE_ICU`). The repository's are glibc's 32-bit and
-fortified headers. musl's units enter every header the walk reaches.
+`urename.h` (`SQLITE_ENABLE_ICU`). The repository's are mostly the fragment
+experiment's sources, which `main.c` includes only for `main_unit_fragments.c`
+(not among the benchmark's units), and clang's headers for other targets
+(`arm_acle.h`, `intrin.h`). musl's units enter every header the walk reaches.
 
 ## Design
 
@@ -127,28 +141,34 @@ each walk, so this reuses threads without retaining the walk's temporary
 memory. The ordinary preprocess/parse command remains single-lane; integrating
 the frontend is separate work under #149.
 
-The measurements above predate thread reuse. Their timed region starts inside
-the lane entry after the warm-up sync, so both the historical and current
-`benchmark-files` times exclude thread startup and shutdown. The benchmark
-prints its current command-owned lifecycle alongside the timings.
+The results above use the team; most of "Where the time goes" but its round
+by round section predates it. The timed region starts inside the lane entry
+after the warm-up sync, so both the historical and current `benchmark-files`
+times exclude thread startup and shutdown. The benchmark prints its current
+command-owned lifecycle alongside the timings.
 
 A round of files is prepared by `files_prepare`, which every lane of the group
 calls. The files are in the walk's order (the order one lane prepares them
-in), and rule 1's costs are their bytes. The lanes that work on a round are
-one per `BUSTER_FILES_LANE_BYTES` of its bytes, up to all of them:
+in), and rule 1's costs are their bytes. A round of less than 4 MB
+(`BUSTER_FILES_SHARED_BYTES`) is lane 0's alone, and a larger one takes a lane
+per megabyte of it (`BUSTER_FILES_LANE_BYTES`), up to all of them
+(`files_working_lanes`):
 
 - **One lane** prepares the files one after another straight into the shared
   intern table (`pp_prepare_into`, as a translation unit would).
 - **Several** each prepare their files into an intern table of their own, and
-  then merge (below). With all the group's lanes and enough bytes per lane, the
-  lanes take rule 1's parts from a counter; with fewer, or few bytes per lane,
-  each working lane takes one range (`range_part_by_cost`).
+  then merge (below). They take rule 1's parts from a counter: `lane_take`'s
+  with all the group's lanes, and the run's own (`FilesRun.taken`) with fewer,
+  which the other lanes leave alone. With few bytes per lane
+  (`BUSTER_FILES_SPLIT_BYTES`), each working lane takes one range instead
+  (`range_part_by_cost`).
 
-A lane that joins a round pays for the fresh memory of its own arenas and
-table, whose first touches the kernel clears, and for the merge: with a working
-lane per megabyte, the merge's steps took about 1 ms of the repository's walk,
-for its 33,639 candidates on 8 lanes. On the 9700X a round pays that back from
-about 4 MB of source per lane; "Where the time goes" has the measurements.
+A lane that joins a round pays for the merge and for the fresh memory of its
+arenas and its own table: about 0.5 to 1 ms on the 9700X. `sqlite3.c`'s round
+of 3.1 MB took 1.60 ms on 2 of 8 lanes against 1.37 on one, which is what the
+4 MB keeps on lane 0; past them, a lane per megabyte rather than per 2 MB made
+the repository's walk 1.2 ms faster on 7 and 8 lanes. "Where the time goes"
+has the measurements.
 
 ### Interning from several lanes
 
@@ -183,8 +203,10 @@ occurrences:
 The merge, in `files_prepare`, with a sync between steps:
 
 1. **Lookup.** Each lane looks its round's new spellings up in the shared table
-   (read-only while lanes read it). Those there get their ids; the others are
-   candidates, counted by partition of their hashes.
+   (read-only while lanes read it), 16 at a time: it hashes them and prefetches
+   their buckets before looking any of them up, so that their misses overlap.
+   Those there get their ids; the others are candidates, counted by partition
+   of their hashes.
 2. **Exchange.** Each lane places its candidates in the partitions' array,
    after every partition before theirs and, within one, every lane before it.
    A candidate carries the spelling's first 16 bytes, its hash, and a key that
@@ -198,11 +220,14 @@ The merge, in `files_prepare`, with a sync between steps:
    room in the shared table for all of them at once (`intern_bulk_begin`).
 5. **Additions.** Each lane adds its first occurrences with their ids
    (`intern_bulk_add`; if the table grew, its old spellings are placed again
-   too, a range of ids per lane), then takes every other candidate's id from
-   its spelling's first.
+   too, a range of ids per lane, 16 at a time with their new buckets prefetched
+   for writing: `intern_bulk_replace`), then takes every other candidate's id
+   from its spelling's first.
 6. **Rewrite.** Each lane rewrites its files' identifier values, and their
    guards, from its own ids to the shared table's (`files_remap`, 64 tokens at a
-   time: one compare finds the identifiers).
+   time: one compare finds the identifiers, and a gather takes 16 of their
+   shared ids at once; for the scalar kernels, `files_remap_scalar`, a token at
+   a time, is its twin).
 
 A lane writes only its own spellings and its own segments of the partitions,
 and reads the others' through the candidates (rule 2). The shared table's
@@ -255,7 +280,9 @@ preparing ("Where the time goes").
   (`BUSTER_FILES_READ_LIMIT`), and maps the larger ones. Every mapping holds
   the process's memory map lock, on which lanes that map at once queue, so one
   lane maps with `MAP_POPULATE` and several map without it, which holds the
-  lock for less time; their pages fault in as the lexer reads them.
+  lock for less time. Then the lane that prepares a mapped file maps its pages
+  in one call (`MADV_POPULATE_READ`) before lexing them, rather than fault them
+  in as the lexer reads them.
 - **Contexts.** What a file's includes resolve to depends on the file, the
   search directory it was found in (for `#include_next`), whether it is a root,
   and the directory its path is in. A path that leads to a file the walk has
@@ -291,34 +318,47 @@ cache reserves each lane's arenas before the lanes start, since reserving takes
 the memory map lock. Before the lanes write a fresh array they share (the
 candidates, the shared table's new buckets, spans and records), each touches a
 range of its pages (`files_touch`): a page that lanes fault at once is cleared
-by one while the others wait. Each lane's own table starts at the size of a
-working lane's share of its first round's bytes (`intern_initialize_with`).
+by one while the others wait. Each lane reserves its own table's memory as it
+starts, with room for `BUSTER_FILES_MAX_BUCKETS` buckets, and lays the table
+out at its first round of several lanes that it works on, at the size of its
+share of that round's bytes (`intern_initialize_in`); a lane that never works
+on such a round never touches it.
+
+In a group of more than 4 lanes (`BUSTER_FILES_HUGE_LANES`), each lane's
+spellings, shared ids and own table start with 1 MB of base pages, and the
+token columns of the lanes past lane 0 with 2 MB (`FileCache.lane_small_bytes`,
+which `files_run_initialize` sets before the cache reserves them). There, the
+lanes that clear fresh huge pages at once are bound by the memory's bandwidth,
+while each lane's share of a walk's rounds fills little more than one; with
+fewer lanes, each lane's share is larger and huge pages cost less ("Where the
+time goes").
 
 ## Where the time goes
 
 The C library corpus without includes, on 1 and 8 lanes (ms, on the lane that
-spent the most on each phase; medians of 21 runs):
+spent the most on each phase; medians of 21 runs, the results' run of
+2026-10-25):
 
 | Phase | 1 lane | 8 lanes |
 | --- | ---: | ---: |
-| Preparing (lexing, refining, directive tables) | 56.84 | 20.98 |
-| The merge's lookups | | 1.89 |
-| The exchange and first occurrences | | 4.50 |
-| Additions to the shared table, and taking ids | | 4.58 |
-| Rewriting the files' identifiers | | 2.44 |
-| Searches and probes (opening, reading and mapping the files) | 15.60 | 4.01 |
-| Work on one lane alone | 1.46 | 1.64 |
-| Waiting at syncs | | 4.56 |
-| The run | 73.93 | 40.37 |
+| Preparing (lexing, refining, directive tables) | 55.09 | 19.99 |
+| The merge's lookups | | 1.41 |
+| The exchange and first occurrences | | 4.42 |
+| Additions to the shared table, and taking ids | | 4.63 |
+| Rewriting the files' identifiers | | 2.66 |
+| Searches and probes (opening, reading and mapping the files) | 17.74 | 4.34 |
+| Work on one lane alone | 1.50 | 1.70 |
+| Waiting at syncs | | 4.21 |
+| The run | 74.35 | 39.55 |
 
-The 9700X's profile of the 8-lane run (`perf record`, all samples): the kernel
-clearing fresh pages (`clear_page_erms`) takes 31.7%, the lexer 13.8% and
-refinement 16.6%. The clearing is the lanes' fresh memory: the lexer's token
-columns (9 bytes a token) 11.1% of the samples, the candidates 3.1%, each
-lane's own table 2.3%, and the rest of the merge's arrays and the shared
-table's new layout and records; reading files into the arenas, 0.5%. One lane
-clears the columns too, but eight lanes clearing at once compete for the same
-memory bandwidth.
+Before #262, the 9700X's profile of the 8-lane run (`perf record`, all
+samples, then 40.37 ms): the kernel clearing fresh pages (`clear_page_erms`)
+takes 31.7%, the lexer 13.8% and refinement 16.6%. The clearing is the lanes'
+fresh memory: the lexer's token columns (9 bytes a token) 11.1% of the
+samples, the candidates 3.1%, each lane's own table 2.3%, and the rest of the
+merge's arrays and the shared table's new layout and records; reading files
+into the arenas, 0.5%. One lane clears the columns too, but eight lanes
+clearing at once compete for the same memory bandwidth.
 
 What the profiles changed, each measured on the 9700X (the C library corpus
 unless said otherwise, medians of 7 to 21 runs):
@@ -372,7 +412,86 @@ unless said otherwise, medians of 7 to 21 runs):
   one (`--lane-bytes 0`). A working lane per 1 MB still left it at 8.72 ms on 8
   lanes, against 7.53 on one, and the repository's walk at 6.09 against 5.46.
   At 4 MB per lane (and at 8 MB, which measured the same) they took 7.62 against
-  7.47 and 5.32 against 5.37 (both before the files' reads).
+  7.47 and 5.32 against 5.37 (both before the files' reads). Once a lane that
+  joins a round cost less (below), a lane per megabyte from 4 MB made the
+  repository's walk faster still, and left `sqlite3.c`'s rounds to lane 0.
+
+### The walks, round by round
+
+`benchmark-files --rounds` prints where each lane count's time went round by
+round (#262). On 2026-10-25 the repository's translation units, 53 with the
+benchmarks', walked 834 files of 27.0 MB in 7 rounds, two of them larger than
+4 MB. Before #262 the walk took 14.94 ms on one lane and 13.70 ms on 8, though
+12.52 ms on 3; now 9.08 ms on 8 (ms, medians of 21 runs on the 9700X; in
+parentheses, the lanes that prepared the round):
+
+| Round | Files | Bytes | 1 lane | 8 lanes, before | 8 lanes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| The roots' search | | | 0.21 | 0.22 | 0.23 |
+| 0 | 53 | 1.56 MB | 1.91 | 1.83 (1) | 1.82 (1) |
+| 1 | 265 | 16.66 MB | 7.91 | 6.74 (3) | 3.97 (8) |
+| 2 | 347 | 8.06 MB | 4.33 | 4.40 (1) | 2.53 (7) |
+| 3 to 6 | 169 | 0.73 MB | 0.55 | 0.47 | 0.48 |
+| The walk | 834 | 27.0 MB | 14.94 | 13.70 | 9.08 |
+
+The job's run of the final code, on the 839 files of the units after main's
+later changes, measured alike: 14.89 ms on one lane and 9.03 on 8, round 1 on
+8 lanes in 3.98 ms and round 2 on 7 in 2.45.
+
+Before, a lane per 4 MB left round 2 to lane 0, and round 1's 3 lanes took
+6.74 ms in a group of 8 against 5.94 in a group of 3. At that round every lane
+of the group laid out a table of its own, the 5 with no files in it too, and
+every table, array and token column started in fresh huge pages: the working
+lanes laid out their tables in 0.95 to 1.23 ms, against 0.40 in a group of 3,
+and lexed in 2.09 to 2.29 ms against 2.01 to 2.07. The changes, each measured
+against the others in the same runs (variants of `files_prepare` that the
+benchmark ran in turns, since removed):
+
+- **A lane per megabyte from 4 MB, and parts.** Rounds 1 and 2 now take 8 and
+  7 lanes. At 2 MB per lane instead, the walk took 10.23 and 10.28 ms on 7 and
+  8 lanes, against 9.06 and 9.05. A round of fewer working lanes than the
+  group's has them take parts from the run's own counter, as `lane_take` gives
+  them to all of a group's lanes, rather than a range each, so that a lane that
+  finishes its part early takes another. Below 4 MB a round stays on lane 0,
+  where a merge costs more than it saves:
+  `sqlite3.c`'s round of 3.1 MB took 1.60 ms on 2 of 8 lanes against 1.37 on
+  one.
+- **Base pages in groups of more than 4 lanes** ("Memory"). Round 1 lexed in
+  1.1 to 1.4 ms per lane on 8 lanes with them, against 2.1 to 2.6 with huge
+  pages, and the walk took 9.04 ms against 11.11 on 8 lanes and 9.03 against
+  10.52 on 7. On 2 and 3 lanes, where each lane's share fills more pages, they
+  made it slower (12.95 and 11.33 ms against 12.22 and 10.87), so groups of up
+  to 4 lanes keep huge pages.
+- **The lanes' tables reserved as the lanes start.** A lane lays its table out
+  at the first round of several lanes that it works on, and one that never
+  works on such a round never touches it. The walk measured the same (9.04 ms
+  against 9.06 on 8 lanes).
+- **Mapped files populated before they are lexed.** On several lanes the
+  probes map files without `MAP_POPULATE`, and the lexer took their pages'
+  faults: lane 0 lexed `sqlite3.c` in 2.38 ms on 8 lanes, against 2.05 on one
+  lane, which maps it with `MAP_POPULATE`. After `MADV_POPULATE_READ` (0.11 ms)
+  it lexes it in 2.22 ms. Populating at the probes instead made `sqlite3.c`'s
+  walk 0.1 ms faster and the repository's 0.3 to 0.5 ms slower on 4 to 8
+  lanes.
+- **The merge's misses** ("Interning from several lanes", steps 1, 5 and 6).
+  Before the changes above, the prefetches and the gather made the
+  repository's walk 13.30 ms on 2 lanes against 13.79, 12.01 on 3 against
+  12.45 and 13.32 on 8 against 13.66. On the C library corpus, the lookups on 2
+  lanes took 2.08 ms against 2.29 and the rewrite 3.65 against 4.40, though on 8
+  lanes the rewrite took 2.66 against 2.43; the run took 57.75 ms on 2 lanes
+  against 58.86, and the same on 6 and 8 lanes.
+
+Two others didn't pay. Starting each working lane on a copy of the shared table,
+so that its known names refine to their shared ids and only the round's new
+ones need the merge, made the walk slower on 2 to 8 lanes (11.86 ms on 8
+lanes against 11.00, before the base pages). Taking a wave's probes from a
+counter, rather than a range per lane, made the repository's walk 0.02 to
+0.19 ms faster on 2 to 8 lanes and `sqlite3.c`'s 0.01 to 0.14 ms slower.
+
+Now, round 1's 8 lanes lay out their tables in 0.38 ms and lex in 1.12 to
+1.44 ms each. Round 2's 7 lanes prepare in 1.00 to 1.11 ms and merge in
+1.08 ms, 0.76 of it in the additions: the shared table grows, and the lanes
+place its old spellings again ("Not yet").
 
 ## Correctness
 
@@ -423,13 +542,22 @@ the walk must do what it did. The checks:
   UCNs), prepared without following includes, and a translation unit that
   includes them all, which reads them from the cache. They make 165,562 ids, so
   the shared table grows during a merge. They run in parts, split once, and with
-  two lanes working and the others idle, and in two runs into one cache, which
-  must equal one run on one lane.
+  two lanes working and the others idle, in parts (from the run's counter) and
+  split once, and in two runs into one cache, which must equal one run on one
+  lane.
 - **Contexts:** a guarded header that includes itself through `./` and
   through `sub/..`, which the walk must take once rather than make paths of
   without end, and one header in two directories (a hard link) whose own
   `local.h` differ, which it must walk in both: 5 files in 3 rounds, and the
   unit opens nothing after the walk.
+- **Rounds:** the trace that `benchmark-files --rounds` prints, on two walks
+  of a chain of headers, each including the next, a file a round: of exactly
+  the 16 rounds the trace keeps apart (`BUSTER_FILES_TRACE_ROUNDS`), and of 21.
+  On every lane count it must keep each round's file, bytes and working lane,
+  the last kept round with every later one, and snapshots that go forward on
+  every traced lane (the TSC, each phase's ticks, the waves and the probes)
+  from the walk's start to its end, the one after the last kept round's (#422's
+  review: the end overwrote the last round's start).
 - **Special paths:** a FIFO that an `#include` under `#if 0` names, which the
   walk mustn't block opening, and that an active one names (an error, as the
   unit gives alone); and a quoted name of 2,400 bytes under `#if 0`, twice in a
@@ -486,7 +614,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler test-files -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h \
     src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 ./build/compiler benchmark-files --flat ~/azp-bench/c-tokenizer/corpus/libc
-./build/compiler benchmark-files path/to/sqlite3.c
+./build/compiler benchmark-files --rounds path/to/sqlite3.c
 # in musl-1.2.5, with its generated headers (docs/c-preprocessor.md):
 ../build/compiler benchmark-files -std=c99 -nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I./arch/x86_64 \
     -I./arch/generic -Iobj/src/internal -I./src/include -I./src/internal -Iobj/include -I./include \
@@ -496,24 +624,49 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 On the 9700X, run each under `EXCLUSIVE_OWNER=<name>
 ~/buster-fast-bench/exclusive.sh`, without `taskset`: the benchmark pins its
 lanes. `--read-limit N` sets the largest file the lanes read rather than map
-(16 KB), `--bytes map|read|populate` how they get the larger ones, and
-`--lane-bytes N` a round's bytes per working lane (4 MB).
+(16 KB), `--bytes map|read|populate` how they get the larger ones,
+`--shared-bytes N` the fewest bytes of a round of several lanes (4 MB),
+`--lane-bytes N` a round's bytes per working lane (1 MB), and `--rounds` prints
+where each lane count's time went round by round. The 9700X job runs the
+benchmark on the preprocessor oracle's frozen corpora (musl's 1,355 units,
+`sqlite3.c` and the C library corpus) where a pull request changes
+`c_files*.c`, and the tests on them in its test list.
 
 ## Not yet
 
 - **Memory reuse.** Clearing fresh pages is the largest single cost on many
   lanes. A process that compiles many translation units (#152) keeps its arenas
   and tables between them, and pays for most of that memory once.
-- **One big file on several lanes.** `sqlite3.c`'s 3.8 ms are one lane's.
+- **One big file on several lanes.** `sqlite3.c`'s 3.4 ms (3.7 on 8 lanes) are
+  one lane's.
   Refinement could take a file's token ranges on several lanes (each range's
   first gap needs the token before it, which `refine_tokens` doesn't take yet),
   and the merge already orders occurrences by file and lane-local id.
 - **Preparing where the bytes are.** The lanes that probe a round's files read
-  the small ones, and the lane that prepares the round lexes them from the
-  other cores' caches: the repository's walk, whose rounds lane 0 prepares
-  alone, is 8% slower on 8 lanes than on one. Reading each file on the lane
-  that prepares it, once the round is known, would keep it in that lane's
-  caches.
+  the small ones, and the lanes that prepare the round lex them from the other
+  cores' caches. Reading each file on the lane that prepares it, once the round
+  is known, would keep it in that lane's caches.
+- **The rounds lane 0 prepares alone, on many lanes.** Round 0 of the
+  repository's walk (53 files, 1.56 MB) took 1.91 ms on one lane, 1.39 on 2 and
+  3, and 1.82 on 8: lane 0's share of the probes took 0.36 ms on 3 lanes and
+  0.61 on 8, though it is smaller, and the other lanes' up to 0.73. What the
+  probes wait on there hasn't been measured. `sqlite3.c` itself, round 0 of its
+  walk, took 3.62 ms on one lane and 3.78 to 3.86 on 2 to 8: lane 0 prepared
+  it in 3.58 to 3.75 ms against 3.41 on one lane.
+- **The shared table's growth in a merge.** Of round 2's merge on 7 lanes,
+  1.08 ms, 0.76 are the additions: the shared table grows there, and the lanes
+  place all its old spellings again, a range each (on one lane, the growth is
+  part of lane 0's preparing). No lane uses the shared table while a round of
+  several lanes is prepared, and a round knows its bytes before then: a lane
+  could grow the table while the others prepare, where the bytes say the round
+  will need it.
+- **Five and six lanes.** The repository's walk took 10.42 and 10.61 ms on 5
+  and 6 lanes, against 10.21 on 4 and 9.14 on 7. On 5 and 6 lanes, each lane's
+  share of round 1 (2.8 to 3.3 MB) starts its own table at 16,384 buckets, whose
+  1 MB fills the table's base pages, with its spans and records past them in a
+  fresh huge page: lane 0 laid it out in 0.72 and 0.80 ms, against 0.27 on 4
+  lanes, in huge pages, and 0.35 on 7, whose tables of 8,192 buckets fit the
+  base pages. The base pages could follow the table's size.
 - **Searching earlier.** A file's literal includes need its kinds, starts and
   bytes, not its refined values: its searches could start while it is refined.
 - **`__has_include`.** A unit still probes the paths its `__has_include`
@@ -549,8 +702,8 @@ bounded by compile-time file/lane/ID limits, with runtime arena/count failures.
 Per-file token capacities and tails are the lexer/refinement contracts, not
 inferred from mapping size. Intern remap touches identifier values only.
 
-A round chooses working lanes from bytes (currently one per 4 MiB, limited by
-the group); small rounds use lane 0 and avoid merge entirely. Counter parts
+A round chooses working lanes from bytes (currently one per MiB from 4 MiB,
+limited by the group); smaller rounds use lane 0 and avoid merge entirely. Counter parts
 keep each lane's files in order, not costliest-first, because local IDs must
 preserve first occurrence. Internal 16/32/64-item vector work does not change
 round completion or search dependencies. Empty rounds terminate; inactive

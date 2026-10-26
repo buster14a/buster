@@ -415,6 +415,73 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
     return result;
 }
 
+// What pp_test_system_levels compared: the units, those whose runs couldn't say (inexact), and their output tokens at a
+// system level, all and those a macro made.
+static uint64_t pp_test_system_units;
+static uint64_t pp_test_system_inexact;
+static uint64_t pp_test_system_tokens;
+static uint64_t pp_test_system_made;
+static char pp_test_system_inexact_first[256];
+
+// The system levels a compile's checker judges by, from the runs the main loop kept (pp_system_levels), against their
+// twin by the expansion history (pp_system_levels_history), on run `a`, which has its history; and the runs, which both
+// kernels' runs `a` and `b` must keep alike. A unit whose runs can't say is counted, not compared. Returns whether they
+// agree.
+static bool pp_test_system_levels(const Preprocessor* a, const Preprocessor* b, const char* label)
+{
+    bool result = a->system_run_count == b->system_run_count && a->system_runs_inexact == b->system_runs_inexact;
+    for (uint32_t r = 0; result && r < a->system_run_count; r += 1)
+    {
+        const PPSystemRun* x = &a->system_runs[r];
+        const PPSystemRun* y = &b->system_runs[r];
+        result = x->token == y->token && x->range == y->range && x->from == y->from && x->level == y->level;
+    }
+    if (!result)
+    {
+        printf("%s: the kernels keep other system runs (%u and %u)\n", label, a->system_run_count, b->system_run_count);
+    }
+    const uint32_t count = a->output.count;
+    const bool compared = result && !a->system_runs_inexact;
+    uint8_t* levels = compared ? malloc((uint64_t)count * 2 + 2) : 0;
+    if (compared && levels == 0)
+    {
+        printf("%s: no memory to compare the system levels\n", label);
+        result = false;
+    }
+    if (levels != 0)
+    {
+        uint8_t* twin = levels + count + 1;
+        pp_system_levels(a, levels);
+        pp_system_levels_history(a, twin);
+        uint32_t i = 0;
+        while (i < count && levels[i] == twin[i])
+        {
+            i += 1;
+        }
+        if (i < count)
+        {
+            printf("%s: output token %u (kind %u, %s, location %u) is at system level %u by the runs and %u by the history\n", label, i,
+                   a->output.kinds[i], (a->output.flags[i] & BUSTER_PP_FROM_MACRO) ? "a macro made it" : "no macro made it", a->output.locations[i], levels[i],
+                   twin[i]);
+            result = false;
+        }
+        for (uint32_t t = 0; t < count; t += 1)
+        {
+            const bool system = levels[t] != BUSTER_PP_USER_FILE;
+            pp_test_system_tokens += system;
+            pp_test_system_made += system && (a->output.flags[t] & BUSTER_PP_FROM_MACRO);
+        }
+        free(levels);
+    }
+    pp_test_system_units += levels != 0;
+    if (a->system_runs_inexact && pp_test_system_inexact == 0)
+    {
+        snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", label);
+    }
+    pp_test_system_inexact += a->system_runs_inexact;
+    return result;
+}
+
 // Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
 // takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
 // the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
@@ -454,6 +521,7 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
+    result = result && pp_test_system_levels(&runs[0], &runs[1], label);
     for (uint32_t k = 0; k < 2; k += 1)
     {
         if (ready[k])
@@ -2384,6 +2452,102 @@ static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char
     free(text);
     free(wanted);
     return result;
+}
+
+// Output tokens' system levels written by hand: a case's main file, its header (as both sys/s.h, under -isystem, and
+// other.h, beside it), each output token's level (u: a user file's, s: a system header's, e: an extern "C" one's), which
+// both paths must give (pp_system_levels and its twin); or for a case whose runs can't say (`inexact`,
+// Preprocessor.system_runs_inexact), the levels the history gives, which the checker then judges by.
+typedef struct PPTestSystemCase PPTestSystemCase;
+struct PPTestSystemCase
+{
+    const char* name;
+    const char* source;
+    const char* header;
+    const char* levels;
+    bool inexact;
+};
+
+static const PPTestSystemCase pp_test_system_cases[] = {
+    // A system header's macros, a paste and a stringification in it, invoked in the main file, and the main file's
+    // macro in the header: each token is where its outermost invocation is.
+    { "macros across a system header", "#define USERMAC 1\n#include <s.h>\nSYSMAC SYSFN(a) CALLS USERMAC CAT(x, y) STR(q)\n",
+      "#define SYSMAC user_token\n#define SYSFN(x) [x]\n#define CALLS USERMAC\n#define CAT(a, b) a ## b\n#define STR(x) #x\n"
+      "int header = SYSMAC + USERMAC + CALLS + CAT(1, 2);\n",
+      "sssssssssssuuuuuuuu" },
+    { "line markers", "#define USER(x) x\n# 1 \"fake-system.h\" 3\n#define SYS(x) (x)\nSYS(1) USER(2)\n# 5 \"main.c\"\nSYS(3) USER(4)\n", "", "ssssuuuu" },
+    { "an extern C header's line marker", "# 1 \"c-header.h\" 3 4\n#define E(x) x\nE(1) e\n", "", "ee" },
+    { "#pragma GCC system_header", "#define MAINMAC main_value\n#include \"other.h\"\nint c = BEFORE;\n",
+      "#define BEFORE before_value\nint a = BEFORE;\n#pragma GCC system_header\nint b = BEFORE + MAINMAC;\n", "uuuuusssssssuuuuu" },
+    // A line marker read while the arguments of a system header's F are collected in the user's file: F's body is where
+    // the invocation starts, before the marker, and its argument where it is read, after it; the runs would have both
+    // after it, and the body's own place is the system header. The second F is all after the marker.
+    { "a line marker among an invocation's arguments", "# 1 \"sys.h\" 3\n#define F(x) [x]\n# 5 \"user.c\"\nF(\n# 10 \"s.h\" 3\na) F(b)\n", "",
+      "ususss", true },
+};
+
+// Each of pp_test_system_cases, preprocessed as a compile runs it with its history: both paths must give its levels, or
+// its runs must say they can't. Returns whether every case does.
+static bool pp_test_system_case_levels(const char* directory)
+{
+    uint32_t failures = 0;
+    char system[4096];
+    char header[4096];
+    char other[4096];
+    char path[4096];
+    snprintf(system, sizeof(system), "%s/sys", directory);
+    snprintf(header, sizeof(header), "%s/sys/s.h", directory);
+    snprintf(other, sizeof(other), "%s/other.h", directory);
+    snprintf(path, sizeof(path), "%s/system-levels.c", directory);
+    const bool made = mkdir(system, 0700) == 0 || errno == EEXIST;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pp_test_system_cases); c += 1)
+    {
+        const PPTestSystemCase* test = &pp_test_system_cases[c];
+        static InternTable table;
+        static Preprocessor pp;
+        Arena arena = arena_reserve(1ull << 20);
+        char* arguments[] = { (char*)"-std=c17", (char*)"-isystem", system, path };
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        bool result = made && arena.base != 0 && pp_test_write_file(header, test->header) && pp_test_write_file(other, test->header) &&
+                      pp_test_write_file(path, test->source) && pp_parse_options(4, arguments, &options, &arena, &input, &output, &markers);
+        const bool ready = result && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        result = ready && pp_run(&pp, path) && pp.system_runs_inexact == test->inexact;
+        const uint32_t count = pp.output.count;
+        uint8_t* levels = result ? malloc((uint64_t)count * 2 + 2) : 0;
+        result = levels != 0 && strlen(test->levels) == count;
+        if (result)
+        {
+            pp_system_levels(&pp, levels);
+            pp_system_levels_history(&pp, levels + count + 1);
+        }
+        for (uint32_t i = 0; result && i < count; i += 1)
+        {
+            const uint8_t wanted = test->levels[i] == 's' ? BUSTER_PP_SYSTEM_FILE : test->levels[i] == 'e' ? BUSTER_PP_EXTERN_C_FILE : BUSTER_PP_USER_FILE;
+            result = (test->inexact || levels[i] == wanted) && levels[count + 1 + i] == wanted;
+        }
+        free(levels);
+        if (!result)
+        {
+            printf("system levels: %s: %u output tokens, %s, not the levels written for it\n", test->name, count,
+                   pp.system_runs_inexact ? "runs that can't say" : "runs that can");
+        }
+        failures += !result;
+        if (ready)
+        {
+            pp_release(&pp);
+        }
+        intern_release(&table);
+        arena_release(&arena);
+    }
+    unlink(path);
+    unlink(header);
+    unlink(other);
+    rmdir(system);
+    printf("system levels: %u of %lu cases written by hand differ\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_system_cases));
+    return failures == 0;
 }
 
 static bool pp_test_case(const PPTestCase* test, const char* directory, bool with_clang)
@@ -6306,7 +6470,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
         }
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
+        printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
+               "by macros\n",
+               (unsigned long long)pp_test_system_units, (unsigned long long)pp_test_system_inexact, pp_test_system_inexact != 0 ? " (the first: " : "",
+               pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
+               (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
+        passed_all &= pp_test_system_case_levels(directory);
         passed_all &= pp_test_macro_batches(directory, with_clang);
         passed_all &= pp_test_semantic_pragmas(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
@@ -6322,6 +6492,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_trailing_splices();
         passed_all &= pp_test_scalar_reference(directory);
         passed_all &= pp_test_windows(fuzz.seed);
+        passed_all &= pp_test_window_units(directory, fuzz.seed);
         passed_all &= pp_test_directives(directory, with_clang, fuzz.seed, count);
         passed_all &= pp_test_id_order(directory, id_order);
         passed_all &= pp_test_assembly_printing(directory);
@@ -6354,6 +6525,11 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         uint64_t tokens = 0;
         const uint32_t failures = pp_test_files(passed_count, passed, file_count, files, with_clang, directory, &tokens);
         printf("files: %u of %d differ (%lu tokens)\n", failures, file_count, (unsigned long)tokens);
+        printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
+               "by macros\n",
+               (unsigned long long)pp_test_system_units, (unsigned long long)pp_test_system_inexact, pp_test_system_inexact != 0 ? " (the first: " : "",
+               pp_test_system_inexact_first, pp_test_system_inexact != 0 ? ")" : "", (unsigned long long)pp_test_system_tokens,
+               (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
     }
     if (valid && print_case)

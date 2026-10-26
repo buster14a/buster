@@ -9,9 +9,16 @@ the semantic driver:
 ```sh
 ./build/compiler check [--scalar] [--dump-typed] [--dump-static] [preprocessor options] file.c
 ./build/compiler [--scalar] -fsyntax-only [preprocessor options] file.c
-./build/compiler [--scalar] -c [-o file.o] [preprocessor options] file.c
-./build/compiler [--scalar] [--verify] [-o a.out] [preprocessor options] file.c
+./build/compiler [--scalar] [--lower-all] -c [-o file.o] [preprocessor options] file.c
+./build/compiler [--scalar] [--verify] [--lower-all] [-o a.out] [preprocessor options] file.c
 ```
+
+`-c` and the direct path lower only the definitions that the unit's roots reach,
+as clang does ([#129](https://github.com/buster14a/buster/issues/129),
+`check_program_select`, [the lowering guide](c-lowering.md)): an unreferenced
+static or inline function gets no code, and an object only such a function
+refers to no data. `--lower-all` lowers every definition that may be emitted,
+referenced or not, a test option for measuring what that saves.
 
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
@@ -94,7 +101,12 @@ plain-char semantics.
 The source adapter handles nested pointer, array and function declarators;
 prototype scopes and parameter adjustments; typedefs and local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
-bit-fields and flexible arrays; enumerations and source-point completion.
+bit-fields (with GNU attributes after a width, the member's, which the parser
+hangs on the member's end, outside the width's tree, so that the width is
+evaluated as any constant expression is) and flexible arrays (a struct whose only named
+member is one too, a GNU extension clang takes, with clang's layout);
+enumerations, C23's with a fixed underlying type among them, and source-point
+completion.
 It retains initializer lists, designators and ranges, strings and predefined
 function-name arrays, compound literals, GNU statement expressions, generic
 selection, `typeof`, and runtime array bounds. Increment/decrement and compound
@@ -102,6 +114,26 @@ assignments retain one destination evaluation and an explicit store conversion.
 `if`, loops, `switch`/cases, labels/goto, break/continue, returns and static
 assertions receive semantic checks. Assembly operands/constraints and source
 attribute applicability have separate bounded consumers.
+
+An enum with a fixed underlying type (`enum E : T`, C23's, which clang takes in
+every mode) is complete at its base, so that its own list may take `sizeof` of
+it. Its enumerators have the base's type in its list, and after it the enum's
+in C23 but still the base's before it, as clang 23 types them (two such enums'
+enumerators of one base are of one type before C23, and of two after it). Each
+value is representable in the base as clang's `isRepresentableIntegerValue` has
+it (a negative one by its significant bits, any other by its active bits, less a
+signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
+needs a pointer, is refused), and an integer type of any width but `_BitInt`
+takes it. GNU attributes among the base's specifiers are the base type's, as
+clang has them: ignored, but one that would make it a vector's (`vector_size`,
+`ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
+declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
+none. A declaration of it with a declarator (`enum E : int x;`) is refused at
+the `:`, and an enum without a base can't be given one, nor the other way round,
+each where clang reports it. An `aligned` attribute after its body, which clang
+applies after the base completed it, is refused as unsupported. (Attributes
+after a tag's name, before a `;`, make any tag's declaration a reference to the
+visible tag, as clang has it, not a declaration of it alone.)
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -115,7 +147,12 @@ composite declaration types, canonical object identities, linkage, storage
 duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
-does not silently change the type visible to an unprototyped call.
+does not silently change the type visible to an unprototyped call. A
+prototype's parameters, and the tags its list declares, end at its `)`. A
+definition's are declared again at its body's opening, as clang has them, since
+the body's scope is theirs too (C11 6.2.1p4): in
+`int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
+parameter's (#435).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -471,7 +508,11 @@ What the lowering covers past scalars (#145's programs):
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard.
+  them; a statement's assignment leaves no address to discard, and neither
+  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
+  value is used keeps its destination's address in a temporary too, pushed
+  again after the last `COPY`: whatever reads it takes its class from the entry
+  before it, which a `COPY`, of class `VOID`, can't give (#440).
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
@@ -481,13 +522,16 @@ What the lowering covers past scalars (#145's programs):
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
   where `abi_assign` puts them; a struct or union result lands in a frame object
   of the call site's own (`call_result_objects`), whose address is the call's
-  value.
+  value. That object is aligned to the result's canonical type at least, an
+  aligned typedef's smaller alignment left out: a callee takes a hidden result
+  pointer as so aligned (clang's stores through it may be `movaps`).
 - **Structs and unions by value (#137).** A parameter of one is a frame object
   of its size and alignment, which Tier 0's prologue fills. A function that
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
-  the bytes there and returns it. Those aligned past 16 bytes or larger than
-  64 KB are refused, and so are results in x87 registers (`long double`).
+  the bytes there and returns it, and one returned in x87 registers (a struct
+  of a `long double`, in st0) returns its bytes' address too. Those aligned past
+  16 bytes or larger than 64 KB are refused.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -497,6 +541,21 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area.
+- **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
+  in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
+  parameter of it is a frame object of 16 bytes aligned to 16, and every object
+  of it, a global's too, is read with `LOAD` from its address and written with
+  `STORE` or `SET` through it, the address evaluated first. `x op= v`, `++` and
+  `--` on one go through its address as on memory, a postfix one keeping the old
+  value in a frame object of its own. Its constants are each function's table
+  (`x87_constants`), +0.0 at place 0, which truth tests and conversions to
+  `_Bool` compare with. A function with an entry of the class or a long double
+  result says so (`Tier0Function.x87`), which the lowering notes as it writes
+  each entry. What would hold one of its values in a temporary (a
+  statement expression's value or the operands live around it, `?:` without its
+  middle operand, a builtin's operand) and the floating classification builtins
+  on it are refused by name.
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -523,12 +582,46 @@ What the lowering covers past scalars (#145's programs):
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the
   block's `STACK_SAVE`, where it needs no restore.
+- **Labels as values** (GNU C's, which Lua's interpreter dispatches with).
+  `&&label` is a `void *` address constant of the label's own object (its
+  token plus one, which no declaration has); a label its function doesn't
+  have, or `&&` outside a function's body, is an undeclared name at the
+  label's, where clang puts its errors. In `goto *expression` the `*` is
+  the goto's delimiter (the parser's child of the goto, with the whole
+  expression after it as its own child, a comma's or an assignment's too:
+  `goto *p ? &&a : &&b` goes to the conditional's value, as clang's does), and
+  the expression converts to `const void *` as an assignment would. Clang's
+  jump-scope rules for it: a function with a computed goto and no address of a
+  label refuses its first one, and every computed goto must be inside each
+  variable-length array's scope and each statement expression that holds a
+  label whose address its function takes, since it may go to any of them.
+  Those scopes nest, so the labels' innermost ones intersect in one interval,
+  which each goto must be in: a pass over the function, not one per pair. The
+  control stream marks each such label's place (`CHECK_CONTROL_LABEL`) and a
+  computed goto is `CHECK_CONTROL_JUMP_INDIRECT`, with no `STACK_RESTORE`: as
+  in clang's code, leaving an array's block that way doesn't release its
+  storage, which the function's return does. An address of a label is a
+  reference to its function in the selection. The lowering gives Tier 0 each
+  function's labels (`Tier0Function.label_entries`), and the emission defines
+  a local symbol at each one's first record after branch sizing
+  (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
+  table's pointers point at. Not yet: the difference of two labels' addresses
+  as a static initializer's constant (GNU's relative jump tables), which clang
+  folds and the checker refuses as not a constant.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
+- **Names.** A block-scope static is named as clang names it,
+  `function.name` (its function's asm label, if it has one, for the
+  function's name; an asm label of the static's own replaces both), and a
+  file-scope compound literal is `.compoundliteral`. A made name that a symbol
+  of the unit has already, made before it or given by the source (an
+  identifier or an asm label), gets `.N`, as LLVM makes one unique in its module
+  (`check_program_emit_made_name`).
+
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `long double`, `_Complex`,
-thread-locals, inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: `_Complex`, `__int128`,
+inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -600,7 +693,12 @@ comparison of distinct pointers or of a pointer with an integer, and a
 conditional of either. The warnings clang makes errors by default
 (`-Wint-conversion`, `-Wincompatible-pointer-types` and its function-pointer
 group, `-Wreturn-mismatch`) are errors, but in a system header, where clang
-suppresses them and converts as it would have.
+suppresses them and converts as it would have. A token is in a system header
+when its expansion location is (`check_input_system_tokens`): the preprocessor
+judges every output token from runs its main loop keeps (`pp_system_levels`),
+or with `--scalar` and for a unit whose runs can't say, by the expansion
+history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
+levels" has both.
 Floating results are compared field by field, never by `long double` padding.
 
 ## Corpus comparison and semantic mutations
@@ -660,11 +758,11 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-three differences left are in bases, and mutants aren't made of a unit whose
-base differs:
+differences left are in bases, and mutants aren't made of a unit whose base
+differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
+one: since the checker takes them (#133), Lua's 34 files agree with clang (the
+corpus comparison, without mutants, on a laptop's clang 23). Two are left:
 
-- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
-  checker doesn't take yet;
 - the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
   `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
   floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s

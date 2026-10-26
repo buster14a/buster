@@ -4,8 +4,9 @@
 [#113](https://github.com/buster14a/buster/issues/113). It retains file-scope
 declaration history, answers scalar and batched position queries, checks tag
 completion at a use's position, and extracts source-ordered body ranges from
-the validated parser output. It does not turn on deferred checking in the
-compiler. The sequential source checker landed in
+the validated parser output. The compiler's driver doesn't check bodies out of
+order; [the deferred bodies guide](c-deferred-bodies.md) has the reader that
+does, this index's consumer. The sequential source checker landed in
 [#312](https://github.com/buster14a/buster/pull/312), under #128 and #133.
 `c_check_environment.c` now connects that reader to the retained history
 handoff described below. The reader still visits function bodies in order.
@@ -289,16 +290,14 @@ publication and 59.635 afterward (3.5% higher); observed ranges and cycles are
 in that measurement guide. This is the cost of the available sequential reader
 plus retained history, separate from an actual deferred semantic checker.
 
-## Remaining acceptance for #113
+## The deferred consumer
 
-- Check every top-level initializer and its scope effects before deferring
-  bodies; keep body-local type construction private.
-- Implement source-ordered linkage/composite-type effects and connect actual
-  typed streams, IR, diagnostics and literal outputs to body result slots.
-- Compare real sequential and out-of-order checking, both resolver paths,
-  one and eight lanes, on all issue fixtures, SQLite, libc and c-testsuite.
-- Measure position-check cost with the parser on those frozen inputs on the
-  locked 9700X. Synthetic timings do not discharge that requirement.
+`c_check_deferred.c` ([the deferred bodies guide](c-deferred-bodies.md)) reads
+each body on a lane with its heads from this index at the body's opening, its
+types private to the lane, and merges the bodies in source order. Its tests
+compare the result with source order's on the issue's fixtures, SQLite, the
+libc corpus and c-testsuite, on 1 and 8 lanes through both resolutions; the
+guide has the position checks' cost on the 9700X, beside the parser's.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external

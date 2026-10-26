@@ -8,7 +8,8 @@
 // converted explicitly at pointer operations. ABI locations never enter the IR. An explicit semantic return type is
 // required because Tier0Function.result only describes the ABI. Frame objects become address-taken slots of their own
 // size and alignment, and COPY loads and stores of integer pieces. See docs/ir.md for limits and pending integration.
-// Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink/ir_typed_emit_function; ir_lower_typed_path.
+// Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink and count/fill replay in ir_lower_emit.c;
+// ir_lower_typed_path.
 
 typedef struct IrTypedPlan IrTypedPlan;
 struct IrTypedPlan
@@ -67,9 +68,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after STACK_RESTORE must be lowered (or refused, as the stack's kinds after COPY are) here before tier0_validate
-// accepts it.
-_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_STACK_RESTORE + 1, "ir_lower.c lowers or refuses every typed kind");
+// after JUMP_INDIRECT must be lowered (or refused, as JUMP_INDIRECT is) here before tier0_validate accepts it.
+_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_JUMP_INDIRECT + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -156,6 +156,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_GLOBAL:
                 case BUSTER_TYPED_GLOBAL_ADDRESS:
                 case BUSTER_TYPED_DUP:
+                case BUSTER_TYPED_STACK_SAVE:
                     stack[depth] = class;
                     depth += 1;
                     break;
@@ -163,6 +164,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_NOT:
                 case BUSTER_TYPED_CONVERT:
                 case BUSTER_TYPED_LOAD:
+                case BUSTER_TYPED_ALLOCA:
                     stack[depth - 1] = class;
                     break;
                 case BUSTER_TYPED_STORE_LOCAL:
@@ -172,6 +174,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_SET_LOCAL:
                 case BUSTER_TYPED_SET_GLOBAL:
                 case BUSTER_TYPED_DISCARD:
+                case BUSTER_TYPED_STACK_RESTORE:
                     depth -= 1;
                     break;
                 case BUSTER_TYPED_STORE:
@@ -354,7 +357,9 @@ struct IrTypedSink
     IrSizes sizes;
 };
 
-static uint32_t ir_typed_emit(IrTypedSink* sink, IrOp op, IrType type, uint32_t a, uint32_t b, uint32_t c, uint8_t alignment_log2)
+// Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
+// checks. This preserves the baseline leaf-inlining decisions without forcing the whole replay into its caller.
+static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink* sink, IrOp op, IrType type, uint32_t a, uint32_t b, uint32_t c, uint8_t alignment_log2)
 {
     const uint32_t id = (uint32_t)sink->sizes.instruction_count;
     if (sink->output != 0)
@@ -371,7 +376,7 @@ static uint32_t ir_typed_emit(IrTypedSink* sink, IrOp op, IrType type, uint32_t 
     return id;
 }
 
-static uint32_t ir_typed_constant(IrTypedSink* sink, IrType type, uint64_t bits)
+static __attribute__((always_inline)) inline uint32_t ir_typed_constant(IrTypedSink* sink, IrType type, uint64_t bits)
 {
     const uint32_t constant = (uint32_t)sink->sizes.constant_count;
     if (sink->output != 0)
@@ -392,7 +397,7 @@ static uint8_t ir_typed_alignment(uint8_t class)
     return bytes == 8 ? 3 : bytes == 4 ? 2 : bytes == 2 ? 1 : 0;
 }
 
-static uint32_t ir_typed_convert(IrTypedSink* sink, uint32_t value, uint8_t from_class, uint8_t to_class)
+static __attribute__((always_inline)) inline uint32_t ir_typed_convert(IrTypedSink* sink, uint32_t value, uint8_t from_class, uint8_t to_class)
 {
     const IrType from = (IrType)ir_typed_types[from_class];
     const IrType to = (IrType)ir_typed_types[to_class];
@@ -420,7 +425,7 @@ static uint32_t ir_typed_convert(IrTypedSink* sink, uint32_t value, uint8_t from
     return value;
 }
 
-static void ir_typed_spill(IrTypedSink* sink, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
+static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* sink, const uint32_t* stack, const uint8_t* classes, uint32_t depth, uint32_t local_count)
 {
     for (uint32_t d = 0; d < depth; d += 1)
     {
@@ -430,7 +435,7 @@ static void ir_typed_spill(IrTypedSink* sink, const uint32_t* stack, const uint8
     }
 }
 
-static uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t index, uint64_t scale)
+static __attribute__((always_inline)) inline uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t index, uint64_t scale)
 {
     const uint32_t base = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, base_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     if (scale != 1 && scale != 2 && scale != 4 && scale != 8)
@@ -453,7 +458,7 @@ static uint32_t ir_typed_address(IrTypedSink* sink, uint32_t base_bits, uint32_t
 }
 
 // A pointer `offset` bytes past `base` (a pointer), with no index.
-static uint32_t ir_typed_offset(IrTypedSink* sink, uint32_t base, uint64_t offset)
+static __attribute__((always_inline)) inline uint32_t ir_typed_offset(IrTypedSink* sink, uint32_t base, uint64_t offset)
 {
     uint32_t pointer = base;
     if (offset != 0)
@@ -475,7 +480,7 @@ static uint32_t ir_typed_offset(IrTypedSink* sink, uint32_t base, uint64_t offse
 // COPY's `bytes` (at most BUSTER_TIER0_MAX_COPY_BYTES) as a load and a store per piece, each the widest integer that
 // fits what remains: 32 pairs of i64 at most. The typed stream's ranges are the same or apart, so each piece's load
 // before its store reads the source's bytes either way. Their alignment is unknown, as LOAD's is.
-static void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
+static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -491,7 +496,7 @@ static void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t
     }
 }
 
-static uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments)
+static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
     const uint32_t count = input->call_argument_counts[call];
@@ -520,255 +525,19 @@ static uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uin
     return ir_typed_emit(sink, IR_CALL, result_type, input->call_targets[call], descriptor, BUSTER_IR_NONE, 0);
 }
 
-static IrSizes ir_typed_emit_function(const Tier0Function* input, IrType result_type, const IrTypedPlan* plan, const Arena* scratch, const uint8_t* ops, const uint8_t* types, uint32_t* stack, uint8_t* classes, IrFunction* output)
-{
-    IrTypedSink sink = {
-        .output = output,
-        .sizes = {
-            .block_count = (uint64_t)plan->block_count + 1,
-            .slot_count = (uint64_t)input->local_count + plan->maximum_spill_depth,
-            .parameter_count = input->parameter_count,
-        },
-    };
-    const uint32_t slots = input->local_count + plan->maximum_spill_depth;
-    // Block zero is a genuine preheader. A source backedge to entry zero goes
-    // to block one and never executes parameter initialization again.
-    if (output != 0)
-    {
-        output->block_offsets[0] = 0;
-        output->result_type = (uint8_t)result_type;
-    }
-    for (uint32_t s = 0; s < slots; s += 1)
-    {
-        ir_typed_emit(&sink, IR_STACK_ADDR, IR_PTR, s, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        if (output != 0)
-        {
-            const bool local = s < input->local_count;
-            const uint8_t class = local ? input->local_classes[s] : BUSTER_TYPED_CLASS_U64;
-            // tier0_validate established that an object is an address-taken VOID local aligned to at most 16.
-            const bool object = local && tier0_is_object(input, s);
-            output->slots[s] = (IrSlot){
-                .size = object ? input->local_sizes[s] : tier0_class_bytes(class),
-                .alignment = 1u << (object ? input->local_alignments[s] : ir_typed_alignment(class)),
-                .type = local ? ir_typed_types[class] : IR_VOID,
-                .flags = local ? ((input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
-            };
-        }
-    }
-    for (uint32_t p = 0; p < input->parameter_count; p += 1)
-    {
-        const uint8_t class = input->local_classes[p];
-        const IrType type = (IrType)ir_typed_types[class];
-        if (output != 0)
-        {
-            output->parameter_types[p] = (uint8_t)type;
-        }
-        const uint32_t parameter = ir_typed_emit(&sink, IR_PARAM, type, p, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(&sink, IR_STORE, IR_VOID, p, parameter, BUSTER_IR_NONE, ir_typed_alignment(class));
-    }
-    ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+// Expose the existing count/fill output contracts before the compiler makes inlining decisions. All construction
+// logic stays in one C body, and both scalar/vector paths use these same two instantiations.
+#define BUSTER_IR_TYPED_EMIT_NAME ir_typed_count_function
+#define BUSTER_IR_TYPED_EMIT_COUNT 1
+#include "ir_lower_emit.c"
+#undef BUSTER_IR_TYPED_EMIT_COUNT
+#undef BUSTER_IR_TYPED_EMIT_NAME
 
-    for (uint32_t b = 0; b < plan->block_count; b += 1)
-    {
-        if (output != 0)
-        {
-            output->block_offsets[b + 1] = (uint32_t)sink.sizes.instruction_count;
-        }
-        const uint32_t first = plan->block_firsts[b];
-        const uint32_t end = plan->block_firsts[b + 1];
-        uint32_t depth = plan->stack_depths[b];
-        memcpy(classes, scratch->base + plan->stack_offsets[b], depth);
-        // Values at the typed endpoint are discarded, so it needs no reloads.
-        if (first < input->count)
-        {
-            for (uint32_t d = 0; d < depth; d += 1)
-            {
-                stack[d] = ir_typed_emit(&sink, IR_LOAD, (IrType)ir_typed_types[classes[d]], input->local_count + d, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(classes[d]));
-            }
-        }
-        bool terminated = false;
-        for (uint32_t i = first; i < end; i += 1)
-        {
-            const uint8_t kind = input->kinds[i];
-            const uint8_t class = input->classes[i];
-            const IrType type = (IrType)types[i];
-            const uint64_t value = input->values[i];
-            switch (kind)
-            {
-            case BUSTER_TYPED_CONST:
-                stack[depth] = ir_typed_constant(&sink, type, value);
-                classes[depth] = class;
-                depth += 1;
-                break;
-            case BUSTER_TYPED_LOCAL:
-                stack[depth] = ir_typed_emit(&sink, IR_LOAD, type, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(class));
-                classes[depth] = class;
-                depth += 1;
-                break;
-            case BUSTER_TYPED_LOCAL_ADDRESS:
-                stack[depth] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                classes[depth] = class;
-                depth += 1;
-                break;
-            case BUSTER_TYPED_GLOBAL:
-            case BUSTER_TYPED_GLOBAL_ADDRESS:
-            {
-                const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                stack[depth] = ir_typed_emit(&sink, kind == BUSTER_TYPED_GLOBAL ? IR_LOAD : IR_PTRTOINT, type, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                classes[depth] = class;
-                depth += 1;
-                break;
-            }
-            case BUSTER_TYPED_DUP:
-                stack[depth] = stack[depth - 1];
-                classes[depth] = class;
-                depth += 1;
-                break;
-            case BUSTER_TYPED_NEG:
-            case BUSTER_TYPED_NOT:
-                stack[depth - 1] = ir_typed_emit(&sink, (IrOp)ops[i], type, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                break;
-            case BUSTER_TYPED_CONVERT:
-                stack[depth - 1] = ir_typed_convert(&sink, stack[depth - 1], classes[depth - 1], class);
-                classes[depth - 1] = class;
-                break;
-            case BUSTER_TYPED_LOAD:
-            {
-                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                stack[depth - 1] = ir_typed_emit(&sink, IR_LOAD, type, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                classes[depth - 1] = class;
-                break;
-            }
-            case BUSTER_TYPED_PTR_ADD:
-                depth -= 1;
-                stack[depth - 1] = ir_typed_address(&sink, stack[depth - 1], stack[depth], value);
-                classes[depth - 1] = class;
-                break;
-            case BUSTER_TYPED_STORE:
-            case BUSTER_TYPED_SET:
-            {
-                const uint32_t stored = stack[depth - 1];
-                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 2], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stored, BUSTER_IR_NONE, 0);
-                depth -= 2;
-                if (kind == BUSTER_TYPED_STORE)
-                {
-                    stack[depth] = stored;
-                    classes[depth] = class;
-                    depth += 1;
-                }
-                break;
-            }
-            case BUSTER_TYPED_STORE_LOCAL:
-            case BUSTER_TYPED_SET_LOCAL:
-            case BUSTER_TYPED_STORE_GLOBAL:
-            case BUSTER_TYPED_SET_GLOBAL:
-            {
-                const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-                const uint32_t address = local ? (uint32_t)value : ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_STORE, IR_VOID, address, stack[depth - 1], BUSTER_IR_NONE, local ? ir_typed_alignment(class) : 0);
-                if (kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL)
-                {
-                    depth -= 1;
-                }
-                break;
-            }
-            case BUSTER_TYPED_CALL:
-            {
-                depth -= input->call_argument_counts[value];
-                const uint32_t result = ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth);
-                if (class != BUSTER_TYPED_CLASS_VOID)
-                {
-                    stack[depth] = result;
-                    classes[depth] = class;
-                    depth += 1;
-                }
-                break;
-            }
-            case BUSTER_TYPED_DISCARD:
-                depth -= 1;
-                break;
-            case BUSTER_TYPED_COPY:
-                ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
-                depth -= 2;
-                break;
-            case BUSTER_TYPED_BRANCH_FALSE:
-            case BUSTER_TYPED_BRANCH_TRUE:
-            {
-                depth -= 1;
-                const uint32_t zero = ir_typed_constant(&sink, type, 0);
-                const uint32_t condition = ir_typed_emit(&sink, IR_ICMP, IR_I1, stack[depth], zero, IR_NE, 0);
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
-                const uint32_t target = plan->entry_blocks[value] + 1;
-                const uint32_t next = b + 2;
-                ir_typed_emit(&sink, IR_CBR, IR_VOID, condition, kind == BUSTER_TYPED_BRANCH_TRUE ? target : next, kind == BUSTER_TYPED_BRANCH_TRUE ? next : target, 0);
-                terminated = true;
-                break;
-            }
-            case BUSTER_TYPED_JUMP:
-            case BUSTER_TYPED_JUMP_VALUE:
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
-                ir_typed_emit(&sink, IR_BR, IR_VOID, plan->entry_blocks[value] + 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                terminated = true;
-                break;
-            case BUSTER_TYPED_RETURN:
-            {
-                const uint32_t returned = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_IR_NONE : stack[--depth];
-                ir_typed_emit(&sink, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                terminated = true;
-                break;
-            }
-            default:
-            {
-                const uint32_t right = stack[depth - 1];
-                const uint32_t left = stack[depth - 2];
-                const uint8_t operand_class = classes[depth - 2];
-                const uint8_t right_class = classes[depth - 1];
-                depth -= 1;
-                if (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE)
-                {
-                    uint32_t predicate = kind - BUSTER_TYPED_EQ;
-                    if (predicate >= IR_LT && !tier0_class_floating(operand_class) && !tier0_class_signed(operand_class))
-                    {
-                        predicate += IR_ULT - IR_LT;
-                    }
-                    const uint32_t comparison = ir_typed_emit(&sink, tier0_class_floating(operand_class) ? IR_FCMP : IR_ICMP, IR_I1, left, right, predicate, 0);
-                    stack[depth - 1] = ir_typed_emit(&sink, IR_ZEXT, IR_I32, comparison, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                }
-                else
-                {
-                    const bool shift = kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR;
-                    const uint32_t converted = shift ? ir_typed_convert(&sink, right, right_class, class) : right;
-                    stack[depth - 1] = ir_typed_emit(&sink, (IrOp)ops[i], type, left, converted, BUSTER_IR_NONE, 0);
-                }
-                classes[depth - 1] = class;
-                break;
-            }
-            }
-        }
-        if (!terminated)
-        {
-            if (first == input->count)
-            {
-                // The typed endpoint denotes an epilogue. An explicit semantic
-                // result type is required from the producer; nonvoid fallthrough
-                // returns undef, as the old stream leaves its result unspecified.
-                const uint32_t returned = result_type == IR_VOID ? BUSTER_IR_NONE : ir_typed_emit(&sink, IR_UNDEF, result_type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_emit(&sink, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-            }
-            else
-            {
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
-                ir_typed_emit(&sink, IR_BR, IR_VOID, b + 2, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-            }
-        }
-    }
-    if (output != 0)
-    {
-        output->block_offsets[plan->block_count + 1] = (uint32_t)sink.sizes.instruction_count;
-    }
-    return sink.sizes;
-}
+#define BUSTER_IR_TYPED_EMIT_NAME ir_typed_emit_function
+#define BUSTER_IR_TYPED_EMIT_COUNT 0
+#include "ir_lower_emit.c"
+#undef BUSTER_IR_TYPED_EMIT_COUNT
+#undef BUSTER_IR_TYPED_EMIT_NAME
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Entry points
@@ -860,11 +629,18 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_ALLOCA || kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_STACK_RESTORE)
+        else if (kind == BUSTER_TYPED_JUMP_INDIRECT)
         {
-            // A variable-length array's allocation and the stack's positions (#136), which this adapter doesn't
-            // lower yet and the plan and the emitter would take for a binary operation.
+            // An indirect jump to a label (#133), which this adapter doesn't lower yet and the plan and the emitter
+            // would take for a binary operation.
             check.error = IR_ERROR_OPCODE;
+            check.instruction = i;
+        }
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80)
+        {
+            // Typed long double (#136) isn't lowered by this adapter. Tier0 keeps its values in frame slots of its
+            // own; every such value has an entry of class F80, including a conversion's operand.
+            check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
     }
@@ -897,7 +673,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     if (check.error == IR_OK)
     {
         ir_typed_classify(input, ops, types, vector);
-        const IrSizes sizes = ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
+        const IrSizes sizes = ir_typed_count_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
         check.error = ir_create(output, &sizes, &candidate);
         if (check.error == IR_OK)
         {

@@ -890,7 +890,8 @@ static PreprocessorFuzzDifference pp_fuzz_kernels(PPFuzzState* state, const char
         char label[256];
         snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
         const bool recorded = pp_history_ensure(&runs[2]);
-        result = recorded && pp_same_streams(&runs[2], &runs[3], label) ? BUSTER_PPF_EQUAL : BUSTER_PPF_KERNEL_STREAMS;
+        result = recorded && pp_same_streams(&runs[2], &runs[3], label) && pp_test_system_levels(&runs[2], &runs[3], label) ? BUSTER_PPF_EQUAL :
+                                                                                                                       BUSTER_PPF_KERNEL_STREAMS;
         if (!recorded && !pp_test_quiet)
         {
             printf("%s: the deferred history couldn't be recorded\n", label);
