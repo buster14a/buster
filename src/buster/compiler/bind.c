@@ -202,7 +202,9 @@ struct Bind
     // pages that the caller's arena starts with, and made every link of the C driver fault and clear a huge page.
     BindOverride* overrides;
     uint32_t override_count;
-    // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
+    // By symbol of the runtime's link: the link's symbol it became, written as its object joins, before anything reads
+    // it (the object's fixups' targets are its own symbols). Nothing clears it: a link that joins the crt objects alone
+    // would otherwise touch an entry for every member's symbol (#490).
     SymbolId* symbols;
     // The runtime's members that the link needs, and those that joined it, a bit each.
     uint64_t* members_needed;
@@ -684,7 +686,8 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         const __m512i addends = _mm512_maskz_loadu_epi32(lanes, from->fixups.addend + begin.fixups + i);
         _mm512_mask_storeu_epi32(fixups->addend + fixup_first + i, lanes, _mm512_mask_add_epi32(addends, wide, addends, _mm512_set1_epi32((int)wide_delta)));
     }
-    for (uint32_t i = 0; i < fixup_count; i += 1)
+    // The piece's symbols have their link symbols unless the scratch above had no room (BIND_ERROR_FULL).
+    for (uint32_t i = 0; taken != 0 && i < fixup_count; i += 1)
     {
         fixups->target[fixup_first + i] = bind->symbols[from->fixups.target[begin.fixups + i]];
     }
@@ -1948,7 +1951,6 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     else
     {
         memset(bind->name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
-        memset(bind->symbols, 0, runtime->link.symbols.count * sizeof(SymbolId));
         memset(bind->members_needed, 0, words * sizeof(uint64_t));
         memset(bind->members_joined, 0, words * sizeof(uint64_t));
         memset(bind->signatures, 0, signature_words * sizeof(uint64_t));

@@ -206,6 +206,25 @@ static bool snapshot_test_objects_together(const Runtime* loaded, uint64_t* obje
     return result;
 }
 
+// Whether every fixup of each piece of a runtime targets one of the piece's own symbols: binding writes a piece's entries
+// of Bind.symbols as it joins, and reads them only for the piece's fixups, never clearing the rest (#490).
+static bool snapshot_test_fixups_in_pieces(const Runtime* runtime)
+{
+    bool result = true;
+    for (uint32_t piece = 0; result && piece < RUNTIME_OBJECTS + runtime->member_count; piece += 1)
+    {
+        const Link* link = runtime_piece_link(runtime, piece);
+        const ImportMark begin = runtime->pieces[piece].begin;
+        const ImportMark end = runtime->pieces[piece].end;
+        for (FixupId fixup = begin.fixups; result && fixup < end.fixups; fixup += 1)
+        {
+            const SymbolId target = link->fixups.target[fixup];
+            result = target >= begin.symbols && target < end.symbols;
+        }
+    }
+    return result;
+}
+
 // Whether a loaded runtime has the imported one's records: everything binding and a dynamic PIE read (see Runtime's
 // snapshot field), compared by value, the strings by their bytes, and every piece as it was written
 // (runtime_piece_current). Reports each part that differs.
@@ -221,6 +240,7 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         current = current && runtime_piece_current(loaded, piece);
     }
     snapshot_test_expect(tally, current, "every piece as it was written", index);
+    snapshot_test_expect(tally, snapshot_test_fixups_in_pieces(imported) && snapshot_test_fixups_in_pieces(loaded), "each piece's fixups target its own symbols", index);
     uint64_t together = 0;
     snapshot_test_expect(tally, snapshot_test_objects_together(loaded, &together), "the crt objects' records together after the directory", together);
     // The names run in its two parts: the crt objects' names (Runtime.names) and the members' (Runtime.member_names), each
