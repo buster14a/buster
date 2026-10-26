@@ -6089,23 +6089,30 @@ static bool pp_test_clang_command(const char* directory)
 // The modes pp_test_headers checks each header in, hosted and freestanding.
 static const char* const pp_test_header_modes[] = { "-std=c89", "-std=c99", "-std=c11", "-std=c17", "-std=c23", "-std=gnu89", "-std=gnu17", "-std=gnu23" };
 
-// What one mode and hosting's sets found.
-typedef struct PPTestHeaderCounts PPTestHeaderCounts;
-struct PPTestHeaderCounts
+// What a part of the checks that run in child processes (pp_test_children) found: a mode and hosting's header sets
+// (pp_test_header_set), or a range of the cases (pp_test_case_part) with what they added to the pp_test_system_
+// counters.
+typedef struct PPTestChildCounts PPTestChildCounts;
+struct PPTestChildCounts
 {
     uint32_t sets;
     uint32_t failures;
     uint32_t our_failures;
     uint32_t order_failures;
+    uint64_t system_units;
+    uint64_t system_inexact;
+    uint64_t system_tokens;
+    uint64_t system_made;
+    char system_inexact_first[256];
     bool result;
 };
 
 // Mode m's sets, hosted or freestanding: each header's macros and expansions with clang's headers and with ours, our
 // preprocessor on all of them, and the headers among the C library's and clang's (pp_test_header_orders). Its files go
 // in `directory`, which is the set's own; `empty` is an empty file and `links` clang's resource headers but ours.
-static PPTestHeaderCounts pp_test_header_set(const char* directory, const char* ours, const char* links, const char* empty, uint32_t m, uint32_t hosting)
+static PPTestChildCounts pp_test_header_set(const char* directory, const char* ours, const char* links, const char* empty, uint32_t m, uint32_t hosting)
 {
-    PPTestHeaderCounts counts = { 0 };
+    PPTestChildCounts counts = { 0 };
     char path[4096];
     snprintf(path, sizeof(path), "%s/headers.c", directory);
     bool result = true;
@@ -6257,38 +6264,118 @@ static uint32_t pp_test_cpus(void)
 }
 
 #define BUSTER_PP_TEST_HEADER_SETS (2 * BUSTER_ARRAY_LENGTH(pp_test_header_modes))
+#define BUSTER_PP_TEST_CHILDREN 64
+// The parts the cases run in: several per CPU, so that parts of slow cases don't leave the others idle.
+#define BUSTER_PP_TEST_CASE_PARTS 32
 
-// The sets of every mode and hosting, at most one per CPU at once (#465): each in a child process with a directory of
-// its own (directory/headers-N), its standard output and errors into a file that the parent prints in the sets' order,
-// and its counts through a pipe. Returns their counts added up.
-static PPTestHeaderCounts pp_test_header_sets(const char* directory, const char* ours, const char* links, const char* empty)
+// Cases [first, end) of pp_test_cases in `directory`, as run_preprocessor_fixture_tests runs them all: their failures,
+// and what they added to the pp_test_system_ counters.
+static PPTestChildCounts pp_test_case_part(const char* directory, bool with_clang, uint32_t first, uint32_t end)
+{
+    pp_test_system_units = 0;
+    pp_test_system_inexact = 0;
+    pp_test_system_tokens = 0;
+    pp_test_system_made = 0;
+    pp_test_system_inexact_first[0] = 0;
+    PPTestChildCounts counts = { .result = true };
+    for (uint32_t i = first; i < end; i += 1)
+    {
+        counts.failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
+    }
+    // What the cases leave, which run_preprocessor_fixture_tests removes from its own directory.
+    static const char* const names[] = { "case.c", "other.h", "predefines.h" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        char path[4200];
+        snprintf(path, sizeof(path), "%s/%s", directory, names[i]);
+        unlink(path);
+    }
+    counts.system_units = pp_test_system_units;
+    counts.system_inexact = pp_test_system_inexact;
+    counts.system_tokens = pp_test_system_tokens;
+    counts.system_made = pp_test_system_made;
+    snprintf(counts.system_inexact_first, sizeof(counts.system_inexact_first), "%s", pp_test_system_inexact_first);
+    return counts;
+}
+
+// Checks that run in child processes: which, and what their parts read.
+typedef enum PPTestChildWork
+{
+    PP_TEST_CHILD_HEADERS,
+    PP_TEST_CHILD_CASES,
+} PPTestChildWork;
+
+typedef struct PPTestChildren PPTestChildren;
+struct PPTestChildren
+{
+    PPTestChildWork work;
+    uint32_t parts;
+    const char* directory;
+    const char* ours;
+    const char* links;
+    const char* empty;
+    bool with_clang;
+};
+
+// Part `part` of the work, in `own`, a directory of its own.
+static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint32_t part, const char* own)
+{
+    PPTestChildCounts counts = { 0 };
+    const uint32_t cases = BUSTER_ARRAY_LENGTH(pp_test_cases);
+    switch (children->work)
+    {
+        case PP_TEST_CHILD_HEADERS:
+            counts = pp_test_header_set(own, children->ours, children->links, children->empty, part / 2, part % 2);
+            break;
+        case PP_TEST_CHILD_CASES:
+            counts = pp_test_case_part(own, children->with_clang, (uint32_t)((uint64_t)cases * part / children->parts),
+                                       (uint32_t)((uint64_t)cases * (part + 1) / children->parts));
+            break;
+    }
+    return counts;
+}
+
+// The work's parts, at most one per CPU at once (#465): each in a child process with a directory of its own
+// (directory/headers-N or directory/cases-N), its standard output and errors into a file that the parent prints in the parts' order, and its
+// counts through a pipe. Returns their counts added up, with the first part's system_inexact_first that has one.
+static PPTestChildCounts pp_test_children(const PPTestChildren* children)
 {
     const uint32_t cpus = pp_test_cpus();
-    const uint32_t processes = cpus < BUSTER_PP_TEST_HEADER_SETS ? cpus : BUSTER_PP_TEST_HEADER_SETS;
-    FILE* outputs[BUSTER_PP_TEST_HEADER_SETS] = { 0 };
-    int pipes[BUSTER_PP_TEST_HEADER_SETS];
-    pid_t children[BUSTER_PP_TEST_HEADER_SETS];
-    PPTestHeaderCounts total = { .result = true };
+    const uint32_t parts = children->parts < BUSTER_PP_TEST_CHILDREN ? children->parts : BUSTER_PP_TEST_CHILDREN;
+    const uint32_t processes = cpus < parts ? cpus : parts;
+    FILE* outputs[BUSTER_PP_TEST_CHILDREN] = { 0 };
+    int pipes[BUSTER_PP_TEST_CHILDREN];
+    pid_t children_pids[BUSTER_PP_TEST_CHILDREN];
+    PPTestChildCounts total = { .result = parts == children->parts };
     uint32_t started = 0;
-    for (uint32_t finished = 0; finished < BUSTER_PP_TEST_HEADER_SETS; finished += 1)
+    for (uint32_t finished = 0; finished < parts; finished += 1)
     {
-        while (started < BUSTER_PP_TEST_HEADER_SETS && started - finished < processes)
+        while (started < parts && started - finished < processes)
         {
             int fds[2] = { -1, -1 };
             fflush(stdout);
             fflush(stderr);
             outputs[started] = tmpfile();
-            children[started] = outputs[started] != 0 && pipe(fds) == 0 ? fork() : -1;
-            if (children[started] == 0)
+            children_pids[started] = outputs[started] != 0 && pipe(fds) == 0 ? fork() : -1;
+            if (children_pids[started] == 0)
             {
                 close(fds[0]);
                 char own[4200];
-                snprintf(own, sizeof(own), "%s/headers-%u", directory, started);
-                PPTestHeaderCounts counts = { 0 };
-                if (dup2(fileno(outputs[started]), STDOUT_FILENO) >= 0 && dup2(fileno(outputs[started]), STDERR_FILENO) >= 0 && mkdir(own, 0700) == 0)
+                snprintf(own, sizeof(own), "%s/%s-%u", children->directory, children->work == PP_TEST_CHILD_HEADERS ? "headers" : "cases", started);
+                PPTestChildCounts counts = { 0 };
+                const bool redirected = dup2(fileno(outputs[started]), STDOUT_FILENO) >= 0 && dup2(fileno(outputs[started]), STDERR_FILENO) >= 0;
+                if (redirected && mkdir(own, 0700) == 0)
                 {
-                    counts = pp_test_header_set(own, ours, links, empty, started / 2, started % 2);
-                    rmdir(own);
+                    counts = pp_test_child_part(children, started, own);
+                    if (rmdir(own) != 0)
+                    {
+                        printf("test-preprocessor: %s isn't empty after its part\n", own);
+                        counts.result = false;
+                    }
+                }
+                else if (redirected)
+                {
+                    printf("test-preprocessor: can't make %s\n", own);
                 }
                 fflush(stdout);
                 fflush(stderr);
@@ -6302,10 +6389,11 @@ static PPTestHeaderCounts pp_test_header_sets(const char* directory, const char*
             pipes[started] = fds[0];
             started += 1;
         }
-        PPTestHeaderCounts counts = { 0 };
+        PPTestChildCounts counts = { 0 };
         int status = 0;
-        const bool received = children[finished] > 0 && read(pipes[finished], &counts, sizeof(counts)) == (ssize_t)sizeof(counts);
-        const bool exited = children[finished] > 0 && waitpid(children[finished], &status, 0) == children[finished] && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        const bool received = children_pids[finished] > 0 && read(pipes[finished], &counts, sizeof(counts)) == (ssize_t)sizeof(counts);
+        const bool exited = children_pids[finished] > 0 && waitpid(children_pids[finished], &status, 0) == children_pids[finished] && WIFEXITED(status) &&
+                            WEXITSTATUS(status) == 0;
         if (pipes[finished] >= 0)
         {
             close(pipes[finished]);
@@ -6323,12 +6411,20 @@ static PPTestHeaderCounts pp_test_header_sets(const char* directory, const char*
         }
         if (!received || !exited)
         {
-            printf("headers: the sets of %s, %s didn't run to the end\n", pp_test_header_modes[finished / 2], finished % 2 != 0 ? "freestanding" : "hosted");
+            printf("test-preprocessor: part %u of %u of the %s didn't run to the end\n", finished, parts, children->work == PP_TEST_CHILD_HEADERS ? "header sets" : "cases");
         }
         total.sets += counts.sets;
         total.failures += counts.failures;
         total.our_failures += counts.our_failures;
         total.order_failures += counts.order_failures;
+        if (counts.system_inexact != 0 && total.system_inexact == 0)
+        {
+            snprintf(total.system_inexact_first, sizeof(total.system_inexact_first), "%s", counts.system_inexact_first);
+        }
+        total.system_units += counts.system_units;
+        total.system_inexact += counts.system_inexact;
+        total.system_tokens += counts.system_tokens;
+        total.system_made += counts.system_made;
         total.result = total.result && received && exited && counts.result;
     }
     return total;
@@ -6353,7 +6449,15 @@ static bool pp_test_headers(const char* directory)
         printf("headers: can't link clang's resource headers into %s\n", links);
     }
     result = linked;
-    const PPTestHeaderCounts counts = result ? pp_test_header_sets(directory, ours, links, empty) : (PPTestHeaderCounts){ 0 };
+    const PPTestChildren children = {
+        .work = PP_TEST_CHILD_HEADERS,
+        .parts = BUSTER_PP_TEST_HEADER_SETS,
+        .directory = directory,
+        .ours = ours,
+        .links = links,
+        .empty = empty,
+    };
+    const PPTestChildCounts counts = result ? pp_test_children(&children) : (PPTestChildCounts){ 0 };
     result = result && counts.result;
     const uint32_t sets = counts.sets;
     const uint32_t failures = counts.failures;
@@ -6991,11 +7095,21 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     }
     else if (passed_all && file_count == 0)
     {
-        uint32_t failures = 0;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_test_cases); i += 1)
-        {
-            failures += !pp_test_case(&pp_test_cases[i], directory, with_clang);
-        }
+        // The cases in parts that run at once (pp_test_children), each in a directory of its own, their output in the
+        // cases' order.
+        const PPTestChildren children = {
+            .work = PP_TEST_CHILD_CASES,
+            .parts = BUSTER_PP_TEST_CASE_PARTS,
+            .directory = directory,
+            .with_clang = with_clang,
+        };
+        const PPTestChildCounts cases = pp_test_children(&children);
+        pp_test_system_units += cases.system_units;
+        pp_test_system_inexact += cases.system_inexact;
+        pp_test_system_tokens += cases.system_tokens;
+        pp_test_system_made += cases.system_made;
+        snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", cases.system_inexact_first);
+        const uint32_t failures = cases.failures + !cases.result;
         printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
         printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
                "by macros\n",
