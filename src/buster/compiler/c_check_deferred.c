@@ -147,6 +147,20 @@ struct CheckDeferredLane
     uint64_t copy_ns;
 };
 
+// How the lanes take the bodies' parts, for benchmark-checker-deferred's --take: the measurements that chose the first
+// lane's take compare it with the two others.
+typedef enum CheckDeferredTake
+{
+    // The first lane reads the costliest part itself, and every lane takes the others from one counter, costliest
+    // first.
+    CHECK_DEFERRED_TAKE_FIRST,
+    // Every lane takes from one counter, costliest first, and the costliest part goes to whichever lane takes first.
+    CHECK_DEFERRED_TAKE_RACE,
+    // The first lane takes from the costliest end of the order and the others from the cheapest, each counting in a
+    // half of one word.
+    CHECK_DEFERRED_TAKE_ENDS,
+} CheckDeferredTake;
+
 struct CheckDeferred
 {
     uint32_t lanes;
@@ -201,6 +215,10 @@ struct CheckDeferred
     const uint32_t* cpus;
     // Every lane the bodies can take, however few tokens they have, as the tests and test-checker-corpus read them.
     bool every_lane;
+    // How the lanes take the parts, and CHECK_DEFERRED_TAKE_ENDS's word: the first lane's takes in its low half, the
+    // others' in its high half.
+    CheckDeferredTake take;
+    uint64_t ends;
     // For the tests (test-checker-deferred): the merge fails right after its replay into the caller's table, as one
     // that runs out of room there does, and the unit goes to source order; and with `hold_lanes`, every lane but the
     // first waits to take a part until the first has taken them all, so that the others must copy nothing.
@@ -743,11 +761,25 @@ static void check_deferred_lane(void* argument)
         // A test's wait, which yields: the tests may run more lanes than CPUs.
         sched_yield();
     }
-    // The costliest part, order[0], is the first lane's own: the last lane to wake would reach the counter first, and a
-    // woken lane reads a body at about half the first lane's speed. The counter gives out the others, costliest first.
-    for (uint64_t taken = index == 0 ? 0 : 1 + lane_take(parts - 1); taken < parts; taken = 1 + lane_take(parts - 1))
+    if (deferred->take == CHECK_DEFERRED_TAKE_ENDS)
     {
-        check_deferred_part(deferred, lane, index, order[taken]);
+        const uint64_t step = index == 0 ? 1 : UINT64_C(1) << 32;
+        for (uint64_t ends = __atomic_fetch_add(&deferred->ends, step, __ATOMIC_RELAXED); (ends & UINT32_MAX) + (ends >> 32) < parts;
+             ends = __atomic_fetch_add(&deferred->ends, step, __ATOMIC_RELAXED))
+        {
+            check_deferred_part(deferred, lane, index, order[index == 0 ? (ends & UINT32_MAX) : parts - 1 - (ends >> 32)]);
+        }
+    }
+    else
+    {
+        // The costliest part, order[0], is the first lane's own: the last lane to wake would reach the counter first,
+        // and a woken lane reads a body at about half the first lane's speed. The counter gives out the others,
+        // costliest first (all of them with CHECK_DEFERRED_TAKE_RACE).
+        const uint64_t own = deferred->take == CHECK_DEFERRED_TAKE_FIRST;
+        for (uint64_t taken = own != 0 && index == 0 ? 0 : own + lane_take(parts - own); taken < parts; taken = own + lane_take(parts - own))
+        {
+            check_deferred_part(deferred, lane, index, order[taken]);
+        }
     }
     if (index == 0)
     {
@@ -1353,12 +1385,14 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const bool fail_after_replay = deferred->fail_after_replay;
     const bool hold_lanes = deferred->hold_lanes;
     const bool every_lane = deferred->every_lane;
+    const CheckDeferredTake take = deferred->take;
     *deferred = (CheckDeferred){
         .lanes = lanes,
         .table = types,
         .timing = timing,
         .cpus = cpus,
         .every_lane = every_lane,
+        .take = take,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
     };
