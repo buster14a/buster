@@ -587,6 +587,25 @@ macro's expansion, an argument being expanded, or a directive's line):
   tokens (`pp_scan_arguments`) and writes them from there, never copying them
   into `pp->arguments`. Everything is checked before anything changes, and an
   invocation that isn't simple goes to `pp_expand_current`.
+- **Templates** (#117). In a vectorized run whose history is deferred, a simple
+  macro whose body has at most 16 tokens gets a template when it is compiled
+  (`PPTemplate`, `pp_compile_macro`): its tokens as the output stores them, each
+  parameter's index, and masks of its parameters, its names and the spaces
+  before its items. An expansion of at most 16 tokens is then built in registers
+  and stored at once (`pp_template_write`). Each segment (a run of the body, an
+  argument, or the body of a name that goes straight in) moves to its place with
+  one masked permute, and the spacing rules apply to the whole expansion as
+  masks. It goes into the output (`pp_emit_template`), or into the expansions
+  when a name in it must be read again (`pp_substitute_template`). Which of a
+  template's names are painted or go straight in is found once, and kept while
+  no macro is defined or undefined (`Preprocessor.macro_epoch`) and the names'
+  macros stay enabled (`pp_template_names`). A plan with a painted name isn't
+  kept, since it depends on the expansions under way. An expansion's size comes
+  from the template and its arguments' lengths (`pp_template_size`). The scalar
+  twins and a run that records the history go item by item as before, and make
+  no templates: that path is the templates' twin. `test-preprocessor` compares
+  each case's deferred run with its recorded one, and each fuzz case's deferred
+  run with its scalar twins' runs.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -2437,7 +2456,7 @@ What 2 ms would take, each estimated from the numbers above:
 | --- | ---: | --- |
 | No history in the main loop; a replay records it when a diagnostic or a consumer first needs it | 0.78 ms | A change to #108's contract |
 | The parser's input read from the file cache for file runs, rather than from the output | 0.5-0.8 ms | A change to the output's contract with the parser (#126, #335) |
-| A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor |
+| A leaner expansion engine: compiled bodies, one pass over a macro's items rather than three, no origins per token | about 1.2 ms | Large; inside the preprocessor. Its first step, templates for simple invocations, measured 0.1-0.2 ms (#444) |
 | Line counts by page while each window is in the caches | 0.5 ms, measured | Done (#439) |
 | Output columns that don't end in a mostly empty huge page | about 0.1 ms | |
 
@@ -2462,6 +2481,20 @@ went from 6.19-6.22 ms to 5.73-5.77 ms. As whole processes, `-E` of `sqlite3.c`
 took 19.86-19.94 ms and takes 19.38-19.47 ms, and `parse` 18.86-18.98 ms against
 18.10-18.38 ms. The instructions barely changed (118.16 and 118.02 per input
 token): what the old count cost was reading the file from memory again.
+
+The leaner engine's first step is in: templates for simple invocations
+("Templates" in "The main loop", #444, [the
+record](https://github.com/buster14a/buster-performance/blob/fd00c89eb172c310a42f0ad63b2dc2e0576125a3/docs/measurements/preprocessor-templates-117-2026-10-25/README.md)).
+With the history deferred, as compiles run it, `sqlite3.c`'s main loop took
+4.551-4.685 ms on main and takes 4.422-4.476 ms, and its directive tables and
+main loop together 4.889-5.025 ms against 4.761-4.817 ms. Its instructions per
+input token went from 109.51 to 106.38. `main.c`'s main loop took
+21.344-22.172 ms and takes 21.035-21.289 ms. With the history recorded, which
+takes the old paths, the times overlap. As whole processes, `parse` of
+`sqlite3.c` took 18.30-18.34 ms and takes 18.00-18.15 ms, and `-E` didn't
+change measurably. The first measurement found no gain in time:
+`sqlite3.c`'s 254 templates had crossed into a huge page, which the kernel
+cleared whole, 2 MB per run. They take base pages now.
 
 ## Assembly output spacing
 
@@ -2551,11 +2584,13 @@ spellings alone would miss this change (#272).
 
 - **The main loop**, against #117's 2 ms: "The main loop against #117's budget"
   above has where the time goes and the plan. History replay is in, for `-E`,
-  `parse` and the checker's driver ("Deferred history", "System levels"). Next,
-  the parser's input for file runs from the file cache (to agree with #126's
-  and #335's owners), and a leaner expansion engine. #110's object-macro
-  eligibility cache was measured and rejected (see "Object-macro eligibility
-  cache experiment" above).
+  `parse` and the checker's driver ("Deferred history", "System levels"), and
+  so are the line pages and the leaner engine's first step, templates for
+  simple invocations. Next, the parser's input for file runs from the file
+  cache (asked on #126), and more of the leaner engine: the general
+  invocations' substitution and buffers, and the directives' dispatch.
+  #110's object-macro eligibility cache was measured and rejected (see
+  "Object-macro eligibility cache experiment" above).
 - **Clearing pages.** In a single run, prefaulting the arenas on another core
   while the first files are lexed would hide most of the 13%. Across many
   translation units, the arenas are reused (#152).
