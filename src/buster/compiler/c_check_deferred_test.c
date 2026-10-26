@@ -12,10 +12,12 @@
 // tokens beyond twice the largest body's), and six of bodies of known tokens are read by the rule alone: on each side
 // of a second lane and of an eighth, and beside a largest body, which leaves the others fewer tokens. A unit that
 // merges, but the rule's sides, is checked again with its first lane taking every part, when no other lane may copy the
-// reader; with its merge failing after the replay, which must give source order's result; and with the allocation of
-// the deferred reader's state failing, which must count as a resource failure, not as a result that differs. Then
-// benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no input, which
-// must say so rather than read its columns.
+// reader; with its merge failing after the replay, which must give source order's result; on 8 lanes by a state that
+// read it before, on one lane and on eight, whose memory the reading takes over, poisoned or as it was left; and with the
+// allocation of the deferred reader's state failing, which must count as a resource failure, not as a result that
+// differs. Then benchmark-checker-deferred's --cpus parser, the difference report on a deferred path that made no
+// input, which must say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept
+// across readings and unmapped by check_deferred_release.
 //
 //   ./build/compiler test-checker-deferred [--keep]
 //
@@ -173,6 +175,65 @@ static bool check_deferred_test_no_input(void)
         close(null);
     }
     return quiet && strstr(text, "made no input") != NULL;
+}
+
+// The state's memory (c_check_deferred.c, check_deferred_lane_arenas): a lane's five arenas in one mapping, in order and
+// end to end with their capacities, writable to their last byte, kept with their pages when the state takes them back
+// for its next reading, and its own arena likewise; then every mapping unmapped by check_deferred_release, which leaves
+// the state as a zeroed one.
+static bool check_deferred_test_memory(void)
+{
+    static CheckDeferred state;
+    state = (CheckDeferred){ 0 };
+    const uint32_t lanes[] = { 0, 5, BUSTER_CHECK_DEFERRED_MAX_LANES - 1 };
+    const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32 };
+    uint8_t* mappings[BUSTER_ARRAY_LENGTH(lanes)] = { 0 };
+    bool valid = true;
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(lanes); l += 1)
+    {
+        CheckDeferredArenas* arenas = state.memory.lanes + lanes[l];
+        Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index };
+        valid &= check_deferred_lane_arenas(arenas);
+        mappings[l] = arenas->mapping;
+        uint64_t offset = 0;
+        for (uint32_t i = 0; valid && i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
+        {
+            valid = list[i]->base == arenas->mapping + offset && list[i]->capacity == capacities[i] && list[i]->length == 0 && list[i]->mapping_offset == 0;
+            uint8_t* first = valid ? arena_push(list[i], 64, 64) : 0;
+            valid = first == list[i]->base;
+            if (valid)
+            {
+                first[0] = (uint8_t)(i + 1);
+                list[i]->base[list[i]->capacity - 1] = (uint8_t)(i + 1);
+            }
+            offset += capacities[i];
+        }
+        valid = valid && offset == BUSTER_CHECK_DEFERRED_LANE_BYTES;
+        // Taken back for the next reading: the same mapping, empty, its pages as the last reading left them.
+        valid = valid && check_deferred_lane_arenas(arenas) && arenas->mapping == mappings[l];
+        for (uint32_t i = 0; valid && i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
+        {
+            valid = list[i]->length == 0 && list[i]->base[0] == i + 1 && list[i]->base[list[i]->capacity - 1] == i + 1;
+        }
+    }
+    check_deferred_arena(&state.memory.arena, UINT64_C(1) << 36);
+    uint8_t* own = state.memory.arena.base;
+    valid = valid && own != 0 && arena_push(&state.memory.arena, 4096, 64) == own;
+    check_deferred_arena(&state.memory.arena, UINT64_C(1) << 36);
+    valid = valid && state.memory.arena.base == own && state.memory.arena.length == 0;
+    check_deferred_release(&state);
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    unsigned char resident = 0;
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(lanes); l += 1)
+    {
+        // An address of no mapping: mincore refuses it with ENOMEM.
+        valid = valid && mappings[l] != 0 && mincore(mappings[l], page, &resident) != 0 && errno == ENOMEM;
+        valid = valid && mincore(mappings[l] + BUSTER_CHECK_DEFERRED_LANE_BYTES - page, page, &resident) != 0 && errno == ENOMEM;
+    }
+    valid = valid && own != 0 && mincore(own, page, &resident) != 0 && errno == ENOMEM;
+    static const CheckDeferredMemory zero;
+    valid = valid && memcmp(&state.memory, &zero, sizeof(zero)) == 0;
+    return valid;
 }
 
 // The lanes a unit's bodies run on, written again from the rule (docs/c-deferred-bodies.md, "How many lanes"): one, and
@@ -387,6 +448,33 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.equal ? "the scalar and vector paths differ" : "merged");
             }
         }
+        // A unit that merges, read on 8 lanes by a state that read it before: on one lane and on eight with every byte
+        // that reading pushed in the state's memory poisoned, and on eight with what it wrote there. A reading takes over
+        // the memory of the state's earlier ones, the lanes' among it, and must read as it does fresh.
+        for (uint32_t l = 0; valid && expected && size == 0 && l < 3; l += 1)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_reread = l == 0 ? 1 : 8;
+            check_corpus_deferred_poison = l < 2;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            const uint32_t first = check_corpus_deferred_reread;
+            check_corpus_deferred_reread = 0;
+            check_corpus_deferred_poison = false;
+            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body, 8, true);
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
+                                outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most && check_corpus_deferred_kept;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on 8 lanes after a reading on %u%s: %s\n", name, first, l < 2 ? " whose memory was poisoned" : "",
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
+                        !check_corpus_deferred_kept ? "the state's memory wasn't kept" : "not every lane, or its reader copied by too many of them or by none");
+            }
+        }
         // A unit that merges, with the allocation of the deferred reader's state failing: a resource failure, which
         // check_corpus_check_policy keeps through the input's result, and not a result that differs.
         if (valid && expected && size == 0)
@@ -427,6 +515,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
     if (!no_input)
     {
         fprintf(stderr, "test-checker-deferred: the difference report on a deferred path without an input didn't say so\n");
+    }
+    const bool memory = check_deferred_test_memory();
+    checks += 1;
+    failures += !memory;
+    if (!memory)
+    {
+        fprintf(stderr, "test-checker-deferred: the state's memory wasn't laid out, kept or released as it should be\n");
     }
     if (!keep && valid)
     {
