@@ -4,13 +4,15 @@
 // The C driver's unwind tables (#395, check_program_emit's), which test-check-debug --cross-check runs. A fixture's
 // `depth` counts the frames above it with glibc's backtrace() (libgcc's unwinder, which finds each function's FDE through
 // .eh_frame_hdr), called from main, from a function with a variable-length array (a frame pointer, rsp moved in its
-// body) that each of a computed goto's labels calls, and from one with values live across the call, called with a
-// positive and a negative argument so that both arms of its last ?: run:
+// body) that each of a computed goto's labels calls, from one with values live across the call, called with a
+// positive and a negative argument so that both arms of its last ?: run, and from one of 128-bit integers (Tier 0's
+// I128 and U128, in their frame slots), four of them live across the call, its division and remainder libgcc's calls,
+// called with shifts of 3 and of 64 so that its shifts' cmovne takes both values:
 //
 // - The driver's executable by each path, the same bytes: by default, and with -funwind-tables or -g after
 //   -fno-asynchronous-unwind-tables, the unwinder walks through every function to main and libc's start, which the
-//   program checks (it prints the five depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
-//   the first of them, and the program prints 1 1 1 1 -1.
+//   program checks (it prints the seven depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
+//   the first of them, and the program prints 1 1 1 1 -1 1 1.
 // - Its object (-c) by each path, the same bytes: an .eh_frame of one CIE and an FDE per function the object defines,
 //   each a relocation; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's line, into
 //   programs that walk alike. With -fno-asynchronous-unwind-tables, no .eh_frame.
@@ -56,6 +58,17 @@ static const char check_unwind_test_text[] =
     "    return sum - 14 * x - 105 + (x > 0 ? frames : -frames);\n"
     "}\n"
     "\n"
+    "__int128 wide(__int128 x, int shift)\n"
+    "{\n"
+    "    __int128 high = x << 64;\n"
+    "    __int128 product = high * 3;\n"
+    "    __int128 quotient = product / high;\n"
+    "    __int128 remainder = (product + 7) % high;\n"
+    "    unsigned __int128 shifted = (unsigned __int128)product >> shift;\n"
+    "    __int128 frames = depth();\n"
+    "    return quotient + remainder - 10 + (__int128)(shifted << shift) - product + frames;\n"
+    "}\n"
+    "\n"
     "int vla(int n)\n"
     "{\n"
     "    int values[n];\n"
@@ -83,8 +96,11 @@ static const char check_unwind_test_text[] =
     "    int shallow = jump(0);\n"
     "    long pressed = pressure(5);\n"
     "    long negative = pressure(-5);\n"
-    "    printf(\"%d %d %d %ld %ld\\n\", baseline, deep, shallow, pressed, negative);\n"
-    "    return baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) ? 0 : 1;\n"
+    "    __int128 short_shift = wide(5, 3);\n"
+    "    __int128 long_shift = wide(7, 64);\n"
+    "    printf(\"%d %d %d %ld %ld %ld %ld\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift);\n"
+    "    return baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&\n"
+    "           short_shift == baseline + 1 && long_shift == baseline + 1 ? 0 : 1;\n"
     "}\n";
 
 // An option set of the driver's: whether its output has unwind tables; whether the fixture's executables and objects
@@ -212,7 +228,7 @@ static bool check_unwind_test_compile(const char* compiler, const char* source, 
 }
 
 // Whether the program runs as its unwind tables (or their absence) make it: with them, it returns 0 having printed
-// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1.
+// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1.
 static bool check_unwind_test_run(const char* program, bool tables, Arena* arena)
 {
     char report[PATH_MAX + 8];
@@ -225,9 +241,13 @@ static bool check_unwind_test_run(const char* program, bool tables, Arena* arena
     int shallow = 0;
     long pressed = 0;
     long negative = 0;
-    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d %ld %ld", &baseline, &deep, &shallow, &pressed, &negative) == 5;
-    const bool walked = status == 0 && baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1);
-    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1;
+    long short_shift = 0;
+    long long_shift = 0;
+    const bool read = printed.pointer != 0 &&
+                      sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld", &baseline, &deep, &shallow, &pressed, &negative, &short_shift, &long_shift) == 7;
+    const bool walked = status == 0 && baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&
+                        short_shift == baseline + 1 && long_shift == baseline + 1;
+    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1;
     return read && (tables ? walked : stopped);
 }
 
@@ -404,7 +424,7 @@ static void check_unwind_test_policy(CheckDebugTestTally* tally, const char* sou
     const bool clang_counted = reference.pointer != 0 &&
                                check_unwind_test_census(reference, set->debug_frame ? ".debug_frame" : ".eh_frame", set->debug_frame ? UINT32_MAX : 0, &clang_cies,
                                                         &clang_fdes, &clang_functions, &clang_relocations);
-    const bool ours_right = counted && functions >= 5 &&
+    const bool ours_right = counted && functions >= 6 &&
                             (set->tables ? cies == 1 && fdes == functions && relocations == fdes : cies == 0 && fdes == 0 && relocations == 0);
     check_debug_test_expect(tally, ours_right, set->tables ? "the options give the object an FDE per function" : "the options give the object no .eh_frame", ours);
     check_debug_test_expect(tally, ours_right && clang_counted && clang_functions == functions && clang_fdes == fdes,
@@ -459,12 +479,12 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
             const bool census = object != 0 && files[0].pointer != 0 && check_unwind_test_census(files[0], ".eh_frame", 0, &cies, &fdes, &functions, &relocations);
             if (object != 0 && set->tables)
             {
-                check_debug_test_expect(tally, census && functions >= 5 && cies == 1 && fdes == functions && relocations == fdes,
+                check_debug_test_expect(tally, census && functions >= 6 && cies == 1 && fdes == functions && relocations == fdes,
                                         "the object's .eh_frame is one CIE and an FDE per function, each relocated", outputs[0]);
             }
             else if (object != 0)
             {
-                check_debug_test_expect(tally, census && functions >= 5 && cies == 0 && fdes == 0 && relocations == 0, "without unwind tables, the object has no .eh_frame",
+                check_debug_test_expect(tally, census && functions >= 6 && cies == 0 && fdes == 0 && relocations == 0, "without unwind tables, the object has no .eh_frame",
                                         outputs[0]);
             }
             // The object linked by cc through GNU ld and lld, and by link-foreign.
@@ -493,17 +513,19 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
         }
     }
     // gdb at every instruction of each function but main, of the -g executable: jump's two calls take both of its
-    // labels and pressure's both arms of its last ?:.
+    // labels and pressure's both arms of its last ?:; wide has no branch, and its first call runs all of it.
     const String8 file = debug_program[0] != 0 ? foreign_test_read(arena, debug_program) : (String8){ 0 };
     check_debug_test_expect(tally, file.pointer != 0, "the -g executable for gdb's steps", debug_program);
     static const char* const depth[] = { "depth", "main" };
     static const char* const pressure[] = { "pressure", "main" };
+    static const char* const wide[] = { "wide", "main" };
     static const char* const vla[] = { "vla", "jump", "main" };
     static const char* const jump[] = { "jump", "main" };
     if (file.pointer != 0)
     {
         check_unwind_test_gdb(tally, debug_program, file, depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, pressure, BUSTER_ARRAY_LENGTH(pressure), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, wide, BUSTER_ARRAY_LENGTH(wide), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, vla, BUSTER_ARRAY_LENGTH(vla), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, jump, BUSTER_ARRAY_LENGTH(jump), 2, arena);
     }

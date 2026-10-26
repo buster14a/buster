@@ -626,8 +626,9 @@ designs and the compilers already built this way.
   `llvm-dwarfdump --verify` and gdb, and the `-c -g` object, the executable's
   unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
   the same way; and the unwind tables (`c_check_unwind_test.c`): a fixture's
-  `backtrace()` through a variable-length array's function, a computed goto's
-  and one with values live across its call, by default and with each option
+  `backtrace()` through a variable-length array's function, a computed goto's,
+  one with values live across its call and one of 128-bit integers, by
+  default and with each option
   that keeps or drops the tables, by each path, as executables and as objects
   linked three ways; the options' rule against clang's objects of the fixture;
   and gdb's backtrace at every instruction of each function, whose steps must

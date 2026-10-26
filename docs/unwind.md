@@ -151,9 +151,11 @@ with a relocation per function.
 `test-check-debug --cross-check` (`c_check_unwind_test.c`) runs a fixture whose
 function counts the frames above it with glibc's `backtrace()`, from `main`,
 from a function with a variable-length array that each of a computed goto's
-labels calls, and from one with values live across the call (called with a
-positive and a negative argument, so that both arms of its last `?:` run): by
-default and with `-funwind-tables` or `-g` after
+labels calls, from one with values live across the call (called with a
+positive and a negative argument, so that both arms of its last `?:` run), and
+from one of 128-bit integers (Tier 0's `I128` and `U128`, in their frame slots,
+four of them live across the call, its division and remainder libgcc's calls):
+by default and with `-funwind-tables` or `-g` after
 `-fno-asynchronous-unwind-tables`, the unwinder walks through every function to
 libc's start (by each path, the same bytes); with
 `-fno-asynchronous-unwind-tables` alone, it stops at the first. The object has
