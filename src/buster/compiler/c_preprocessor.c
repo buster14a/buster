@@ -3042,24 +3042,25 @@ static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* ta
     return windows ? pp_prepare_windows(prepare, table, columns, arena, data, window, ticks) : pp_prepare_whole(prepare, table, columns, arena, data, ticks);
 }
 
-// The line ends in bytes [begin, end) of a file: "\n", "\r\n" (at its '\n') and a '\r' that no '\n' follows, 64 bytes at
-// a time with popcounts.
+// The line ends in bytes [begin, end) of a file: "\n", "\r\n" (at its '\n', so a '\r' at end - 1 that a '\n' follows
+// in the file isn't one) and a '\r' that no '\n' follows, 64 bytes at a time with popcounts.
 static uint32_t pp_count_lines(const PPFileData* data, uint32_t begin, uint32_t end)
 {
     uint32_t result = 0;
     for (uint32_t i = begin; i < end; i += 64)
     {
         const uint32_t remaining = end - i;
-        const __mmask64 valid = remaining >= 64 ? ~0ull : _bzhi_u64(~0ull, remaining);
+        const uint32_t loaded = remaining < 64 ? remaining : 64;
+        const __mmask64 valid = _bzhi_u64(~0ull, loaded);
         const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
         const uint64_t newlines = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
         const uint64_t returns = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
         if (BUSTER_UNLIKELY(returns != 0))
         {
-            // The byte after the block's last one, if the counted bytes go on past the block: a '\r' before a '\n'
-            // ends a line at the '\n'.
-            const uint64_t next_newline = remaining > 64 && data->bytes[i + 64] == '\n';
-            const uint64_t followed = (newlines >> 1) | (next_newline << 63);
+            // The file's byte after the loaded ones, in the next block or past the counted bytes' end: a '\r' before a
+            // '\n' ends a line at the '\n', which only a range that holds the '\n' counts.
+            const uint64_t next_newline = i + loaded < data->length && data->bytes[i + loaded] == '\n';
+            const uint64_t followed = (newlines >> 1) | (next_newline << (loaded - 1));
             result += (uint32_t)__builtin_popcountll(returns & ~followed);
         }
         // The masked load zeroed the bytes past the end.
@@ -3157,8 +3158,10 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
             result = cursor || data->line_pages == 0 ? data->line_cursor_line + pp_count_lines(data, data->line_cursor, offset) : pp_page_line(data, offset);
             data->line_cursor = offset;
             data->line_cursor_line = result;
+            // Back to the line's start: past a line end, as pp_count_lines counts them (a "\r\n" at its '\n').
             uint32_t line_start = offset;
-            while (column != 0 && line_start > 0 && data->bytes[line_start - 1] != '\n' && data->bytes[line_start - 1] != '\r')
+            while (column != 0 && line_start > 0 && data->bytes[line_start - 1] != '\n' &&
+                   (data->bytes[line_start - 1] != '\r' || (line_start < data->length && data->bytes[line_start] == '\n')))
             {
                 line_start -= 1;
             }

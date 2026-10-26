@@ -694,11 +694,14 @@ struct Tier0TestCode
     uint64_t deep;
 };
 
-// Whether two compilations of a function made the same code: records, branch columns, references and labels' records.
+// Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
+// the entries' first records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 {
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
-                a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep;
+                a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
+                (a->entry_records == 0) == (b->entry_records == 0);
+    same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
     same = same && memcmp(a->targets, b->targets, a->branch_count * sizeof(uint32_t)) == 0;
@@ -726,11 +729,19 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         const Tier0Check check = tier0_validate(function);
         result = tier0_test_expect(tally, check.error == TIER0_OK, "streams", "seed %" PRIu64 " function %u: entry %u breaks a rule: %s", seed, f, check.node,
                                    check.rule != 0 ? check.rule : "");
-        Tier0Code scalar = result ? tier0_compile_scalar(function, arena) : (Tier0Code){ 0 };
-        Tier0Code vector = result ? tier0_compile(function, arena) : (Tier0Code){ 0 };
+        // The entries' first records asked for (Tier0Function.entry_records); and a compile without them, which must
+        // make the same code and none of them.
+        Tier0Function wanted = *function;
+        wanted.entry_records = true;
+        Tier0Code scalar = result ? tier0_compile_scalar(&wanted, arena) : (Tier0Code){ 0 };
+        Tier0Code vector = result ? tier0_compile(&wanted, arena) : (Tier0Code){ 0 };
+        const Tier0Code plain = result ? tier0_compile(function, arena) : (Tier0Code){ 0 };
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        result = result && tier0_test_expect(tally, plain.error == TIER0_OK && plain.entry_records == 0 && plain.entry_count == 0 && plain.count == vector.count &&
+                                                    memcmp(plain.records, vector.records, (uint64_t)plain.count * sizeof(X86Instruction)) == 0,
+                                             "entries", "seed %" PRIu64 " function %u: a compile without the entries' first records differs or makes them", seed, f);
         code->records += scalar.count;
         code->entries += function->count;
         code->deferred += scalar.deferred;
@@ -740,6 +751,16 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
             result = tier0_test_expect(tally, valid == scalar.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
                                        scalar.count);
+        }
+        if (result)
+        {
+            // The entries' first records: one per entry and the epilogue's, ascending, within the records.
+            bool ascending = scalar.entry_count == function->count && scalar.entry_records[scalar.entry_count] <= scalar.count;
+            for (uint32_t e = 0; ascending && e < scalar.entry_count; e += 1)
+            {
+                ascending = scalar.entry_records[e] <= scalar.entry_records[e + 1];
+            }
+            result = tier0_test_expect(tally, ascending, "entries", "seed %" PRIu64 " function %u: the entries' first records aren't ascending within the records", seed, f);
         }
         if (result)
         {
