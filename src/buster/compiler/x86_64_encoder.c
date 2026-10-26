@@ -4992,7 +4992,8 @@ static __attribute__((unused)) uint32_t x86_fixup_distance_address16(uint32_t fo
 #define BUSTER_X86_ENCODER_FIXUP_STORE_ENDS 16
 #define BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked) ((uint64_t)(marked) + BUSTER_X86_ENCODER_FIXUP_STORE_ENDS)
 
-// Builds the templates. Returns false if a form doesn't fit in one (a broken form table).
+// Builds the templates, reusing their allocation on repeated calls. Returns false on allocation failure or if a form
+// doesn't fit in one (a broken form table). A failed allocation can be retried; a successful one lives for the process.
 static __attribute__((unused)) bool x86_encoder_initialize(void);
 // Encodes the instructions into `output`, which has room for `capacity` bytes (at least
 // BUSTER_X86_ENCODER_CAPACITY(count)), and stores each one's offset in `offsets` if it isn't null. If `fixup_ends` isn't
@@ -5554,8 +5555,7 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // The templates, with BUSTER_X86_TEMPLATE_PADDING unused entries on either side: the vectorized encoder loads 16 bytes
 // of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them. A
 // marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
-// record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
-// stay unmapped.
+// record has it: taking the flag off each form cost the loop 2.4% on Zen 5. The unused gap need not be touched.
 #define BUSTER_X86_TEMPLATE_PADDING 1
 // Keep each live span inside a fixed-size region, independent of the executable's other tables. On hosts using
 // transparent huge pages this can reduce first-touch work. Allocate only in units that actually initialize it.
