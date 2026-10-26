@@ -376,11 +376,19 @@ static uint8_t check_input_loop_unroll(CheckInputReader* reader, uint32_t cursor
 // Each loop hint's handled state (2 for valid hints, 1 for a pragma clang drops, 3 for clang's error, 0 for unsupported),
 // and for an error its message and the token it is reported at (BUSTER_CHECK_NONE for the pragma's own place), in
 // `messages` and `tokens`, which the caller zeroes and fills with BUSTER_CHECK_NONE. A misplaced pragma's hints are an
-// error, those this leaves unsupported too; a dropped one has none. Whether there was memory enough.
+// error, those this leaves unsupported too; a dropped one has none. An error in a later pragma before the same loop
+// outranks the earlier ones this leaves unsupported, which are then valid: their counts are still hints of their
+// categories, so that clang's answer is an error whatever their values, and at the later pragma when they are
+// constants (`unroll_count(N)` before `unroll(full)`). Whether there was memory enough.
 static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled, uint8_t* messages, uint32_t* tokens)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
+    const uint64_t mark = reader->scratch->length;
+    // The run's loop pragmas left unsupported so far.
+    uint32_t* unsupported = arena_push_array(reader->scratch, parser->tokens.pragma_count, sizeof(uint32_t), 4);
+    reader->output->resource |= unsupported == 0;
+    uint32_t unsupported_count = 0;
     uint32_t previous_end = 0;
     uint32_t previous_token = 0;
     uint32_t run = BUSTER_CHECK_NONE;
@@ -406,6 +414,7 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
             {
                 hints = (CheckLoopHints){ 0 };
                 run = token;
+                unsupported_count = 0;
             }
             // Whether the pragma is in a function's body: the bodies opened and not closed before it.
             while (scanned < token && scanned < count)
@@ -427,7 +436,18 @@ static bool check_input_loop_pragmas(CheckInputReader* reader, uint8_t* handled,
                 tokens[pragma] = bodies == 0 ? BUSTER_CHECK_NONE : token;
             }
             handled[pragma] = state;
+            for (uint32_t i = 0; state == 3 && i < unsupported_count; i += 1)
+            {
+                handled[unsupported[i]] = 2;
+            }
+            unsupported_count = state == 3 ? 0 : unsupported_count;
+            if (state == 0)
+            {
+                unsupported[unsupported_count] = pragma;
+                unsupported_count += 1;
+            }
         }
     }
+    arena_pop_to(reader->scratch, mark);
     return !reader->output->resource;
 }
