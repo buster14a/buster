@@ -189,13 +189,12 @@ struct CheckDeferred
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
-    // what a lane costs: its copy of the reader, summed over the lanes that copied it; the dispatch, from the call
-    // to the first lane's arrival at the partition (on more than one lane, lane_run's pinning and wake calls); and their
+    // what a lane costs: its copy of the reader, summed over the lanes that copied it; lane_run's dispatch, from its call
+    // to the first lane's arrival at the partition (the first lane's pinning, and the others' wake calls); and their
     // wake-up, from the first lane's arrival to the last one's: the first lane's wait at the partition's sync, without
     // the partition's own work, and none on one lane.
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
-    // One lane runs on the caller with its current affinity.
     const uint32_t* cpus;
     // Every lane the bodies can take, however few tokens they have, as the tests and test-checker-corpus read them.
     bool every_lane;
@@ -1207,8 +1206,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     return valid;
 }
 
-// This phase runs only for deferred input. Keep its merge and context state outside source order's common reader.
-static __attribute__((noinline)) void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
+static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     deferred->top.changes = 0;
@@ -1279,28 +1277,11 @@ static __attribute__((noinline)) void check_deferred_bodies(CheckDeferred* defer
     const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
     const uint32_t active = paid < most ? (uint32_t)paid : most;
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
-    bool ran = true;
-    if (valid && deferred->body_count != 0)
-    {
-        if (active == 1)
-        {
-            // No team or affinity work for the calling thread alone. Keep a caller's lane and unfinished take intact.
-            const Lane previous = lane_alone();
-            const uint64_t taken = thread_context.taken;
-            thread_context.taken = 0;
-            check_deferred_lane(&run);
-            thread_context.taken = taken;
-            lane_restore(previous);
-        }
-        else
-        {
-            ran = lane_run(active, check_deferred_lane, &run, deferred->cpus);
-        }
-    }
+    const bool ran = !valid || deferred->body_count == 0 || lane_run(active, check_deferred_lane, &run, deferred->cpus);
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
-    // The first lane reaches the partition after the call's dispatch, and the last one after the others' wake-up; a
+    // The first lane reaches the partition after lane_run's dispatch, and the last one after the others' wake-up; a
     // lane that didn't run arrived nowhere (0).
     const uint64_t first_arrival = deferred->lane_states[0].arrived_ns;
     uint64_t last_arrival = first_arrival;

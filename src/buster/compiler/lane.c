@@ -822,6 +822,21 @@ static bool lane_pin(uint32_t cpu)
     return result;
 }
 
+// The raw get-affinity syscall writes only the bytes it returns, not necessarily this layer's whole CPU mask.
+// Accept a singleton only within those complete words; a failed or unexpected-sized result requires pinning.
+static bool lane_affinity_is_cpu(const uint64_t* mask, long bytes, uint32_t cpu)
+{
+    const uint64_t words = (uint64_t)bytes / sizeof(*mask);
+    bool result = bytes > 0 && (uint64_t)bytes <= BUSTER_LANE_CPU_MASK_WORDS * sizeof(*mask) &&
+                  (uint64_t)bytes % sizeof(*mask) == 0 && cpu / 64 < words;
+    for (uint64_t word = 0; result && word < words; word += 1)
+    {
+        const uint64_t expected = word == cpu / 64 ? 1ull << (cpu % 64) : 0;
+        result = mask[word] == expected;
+    }
+    return result;
+}
+
 // Between whole operations there is no useful work to spin for. Park directly, with the same sleeper-bit protocol as
 // lane_wait, so a publish either sees and wakes this waiter or prevents it from sleeping on an obsolete value.
 static uint32_t lane_team_wait(uint32_t* word, uint32_t value)
@@ -976,8 +991,10 @@ static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* ar
         result = cpus[i] == team->cpus[i];
     }
     uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS];
-    const bool saved = result && cpus != 0 && syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
-    result = result && (cpus == 0 || (saved && lane_pin(cpus[0])));
+    const long affinity_bytes = result && cpus != 0 ? syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) : 0;
+    const bool saved = affinity_bytes > 0;
+    const bool singleton = count == 1 && saved && lane_affinity_is_cpu(affinity, affinity_bytes, cpus[0]);
+    result = result && (cpus == 0 || (saved && (singleton || lane_pin(cpus[0]))));
     if (result)
     {
         team->group = (LaneGroup){
@@ -1009,7 +1026,14 @@ static bool lane_team_run(LaneTeam* team, uint32_t count, void (*entry)(void* ar
         thread_context.taken = taken;
         thread_context.lane = previous;
     }
-    if (saved)
+    if (singleton)
+    {
+        // A callback may change its affinity. The original mask is this known singleton: restore it if it changed,
+        // or if the second query fails, without another buffer or a query on the multi-lane path.
+        const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity);
+        result = (lane_affinity_is_cpu(affinity, bytes, cpus[0]) || lane_pin(cpus[0])) && result;
+    }
+    else if (saved)
     {
         result = syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0 && result;
     }

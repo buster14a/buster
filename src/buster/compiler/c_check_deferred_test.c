@@ -15,7 +15,7 @@
 // reader; with its merge failing after the replay, which must give source order's result; and with the allocation of
 // the deferred reader's state failing, which must count as a resource failure, not as a result that differs. The many
 // bodies are read again with the reader timing what its lanes cost (CheckDeferred.timing), on one lane, which must
-// wait for no other, in another lane group with an unfinished take and CPUs it must not pin to, and on 8; the call's
+// wait for no other, in an already-pinned team with an unfinished take and a saved lane context, and on 8; the call's
 // dispatch and the wake-up must fall within the lanes' span, and the caller's context must be restored. Then
 // benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no input, which
 // must say so rather than read its columns.
@@ -264,35 +264,42 @@ static void check_deferred_many(char* text, uint64_t capacity, uint32_t count)
     }
 }
 
-typedef struct CheckDeferredTimed CheckDeferredTimed;
-struct CheckDeferredTimed
+// A command already pinned to its team's first CPU still gets its prior context, unfinished take and affinity back.
+static bool check_deferred_timed_pinned(const char* path, const PPOptions* options, CheckCorpusOutcome* outcome)
 {
-    const char* path;
-    const PPOptions* options;
-    CheckCorpusOutcome outcome;
-    bool restored;
-};
-
-// The one-lane reading must neither join the caller's group nor consume its unfinished take, and it must ignore CPUs:
-// UINT32_MAX cannot be pinned to, so a lane_run that still tries to pin would leave this unit to source order.
-static void check_deferred_timed_lane(void* argument)
-{
-    CheckDeferredTimed* timed = argument;
-    if (lane_index() == 0)
+    uint64_t affinity[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    uint64_t after[BUSTER_LANE_CPU_MASK_WORDS];
+    const bool saved = syscall(SYS_sched_getaffinity, 0, sizeof(affinity), affinity) > 0;
+    uint32_t cpu = 0;
+    while (saved && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && (affinity[cpu / 64] & (1ull << (cpu % 64))) == 0)
     {
+        cpu += 1;
+    }
+    bool result = saved && cpu < BUSTER_LANE_CPU_MASK_WORDS * 64;
+    if (result)
+    {
+        LaneTeam team = { 0 };
         const Lane previous = thread_context.lane;
         const uint64_t taken = thread_context.taken;
-        const uint32_t cpu = UINT32_MAX;
-        thread_context.taken = 3;
-        check_corpus_deferred_cpus = &cpu;
-        check_corpus_measure(timed->path, timed->options, false, true, &timed->outcome);
-        check_corpus_deferred_cpus = 0;
-        timed->restored = thread_context.lane.index == previous.index && thread_context.lane.count == previous.count &&
-                          thread_context.lane.group == previous.group && thread_context.taken == 3;
+        result = lane_pin(cpu) && lane_team_start(&team, 1, &cpu);
+        if (result)
+        {
+            LaneGroup group = { 0 };
+            thread_context.lane = (Lane){ .count = 1, .group = &group };
+            thread_context.taken = 3;
+            check_corpus_deferred_cpus = &cpu;
+            check_corpus_measure(path, options, false, true, outcome);
+            check_corpus_deferred_cpus = 0;
+            const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(after), after);
+            result = thread_context.lane.index == 0 && thread_context.lane.count == 1 && thread_context.lane.group == &group &&
+                     thread_context.taken == 3 && lane_affinity_is_cpu(after, bytes, cpu);
+        }
+        lane_team_stop(&team);
         thread_context.taken = taken;
         lane_restore(previous);
+        result = syscall(SYS_sched_setaffinity, 0, sizeof(affinity), affinity) == 0 && result;
     }
-    lane_sync();
+    return result;
 }
 
 static int run_checker_deferred_tests(int count, char** arguments)
@@ -461,21 +468,18 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.equal ? "the scalar and vector paths differ" : "merged, or another reason");
             }
         }
-        // The many bodies timed on one lane, alone and in another group with its counter in use, and on every one of 8:
+        // The many bodies timed on one lane, unpinned and in a pinned team with its counter in use, and on every one of 8:
         // no wake-up on one lane, the caller's context intact, and the call's dispatch and wake-up within the span.
         for (uint32_t l = 0; valid && f == listed && l < 3; l += 1)
         {
             check_corpus_deferred_lanes = l < 2 ? 1 : 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
             check_corpus_deferred_timing = true;
-            CheckCorpusOutcome outcome;
+            CheckCorpusOutcome outcome = { 0 };
             bool restored = true;
             if (l == 1)
             {
-                CheckDeferredTimed nested = { .path = path, .options = &options };
-                const bool ran = lane_run(2, check_deferred_timed_lane, &nested, 0);
-                outcome = nested.outcome;
-                restored = ran && nested.restored;
+                restored = check_deferred_timed_pinned(path, &options, &outcome);
             }
             else
             {
@@ -493,7 +497,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on %u lanes, timed: %s (span %" PRIu64 " ns, dispatch %" PRIu64 " ns, wake-up %" PRIu64 " ns)\n", name,
                         check_corpus_deferred_lanes, !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
-                        !restored ? "the caller's lane context changed" :
+                        !restored ? "the pinned caller's context, counter or affinity changed" :
                         "not on every lane, untimed, a wake-up on one lane, or the dispatch and the wake-up past the lanes' span",
                         outcome.deferred_lanes_ns, outcome.deferred_dispatch_ns, outcome.deferred_wake_ns);
             }

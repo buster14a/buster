@@ -1895,7 +1895,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
   per-operation worker scratch cleanup, caller context restoration, one-lane
-  operation, invalid/nested dispatch and startup failure cleanup;
+  operation, invalid/nested dispatch and startup failure cleanup; bounded
+  singleton-affinity masks at protected tails, already-pinned dispatch with
+  affinity writes refused, and restoration after a callback repins or its
+  final affinity query fails;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -4123,7 +4126,7 @@ fixtures of bodies of known tokens must take the rule's lanes on each side of
 its steps. Each that merges must give source order's result again with its
 merge failing after the replay, and count as a resource failure with its
 state's allocation failing; timed, one lane must wait for no other, preserve
-its caller's lane group and unfinished take without pinning, and eight
+an already-pinned caller's lane context, unfinished take and affinity, and eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N
@@ -4134,7 +4137,7 @@ left to source order by reason. `./build/compiler benchmark-checker-deferred
 times source order's reader against the deferred one on one lane and on up to
 N, with the parse, the top level, the bodies' walks, their position checks, the
 lanes' span and the merge apart, and what a lane costs: its copy of the reader,
-the dispatch and the other lanes' wake-up. Its passes take the six
+`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
 orders of its three readings in turn, so `--passes` is a multiple of six (24).
 `--every-lane` runs every lane the bodies can take, whatever
 their tokens; `--cpus` pins the command to the first

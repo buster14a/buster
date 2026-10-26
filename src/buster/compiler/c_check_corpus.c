@@ -628,7 +628,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); and with
-// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing).
+// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing), and with
+// check_corpus_deferred_cpus, dispatches on a team's supplied CPUs.
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
