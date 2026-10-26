@@ -1142,9 +1142,12 @@ A job waits for every older one and for its cores, then runs pinned to both
 threads of each, at niceness 19, with `CORES` set to its count, so tools that
 size themselves by the CPUs they may run on (`nproc`, `parallel`'s `--jobs`,
 lanes) fit the grant; pass `--jobs "$CORES"` or `--lanes "$CORES"` where a tool
-takes a count. Single-threaded commands don't queue. Ask for the cores the run
-can use, hold them per run rather than around a series, and let a nested
-`cores` inside a job run at once on the job's cores. `cores status` shows who
+takes a count. A single-threaded run that takes more than about 30 s (a fuzz
+campaign, a test or oracle without `--jobs`, a long benchmark) goes through
+`cores -n 1`, so that it neither shares a granted core's threads unseen nor
+fills the pool past what `cores status` shows; shorter commands don't queue.
+Ask for the cores the run can use, hold them per run rather than around a
+series, and let a nested `cores` inside a job run at once on the job's cores. `cores status` shows who
 holds and who waits; `cores away` and `cores here` are the owner's switch
 between lending every core and keeping two for interactive use. None of this
 replaces the 9700X's lock: benchmark timings still come from there.
