@@ -165,10 +165,11 @@ static __attribute__((noinline)) void check_program_emit_body_rows(CheckProgramR
 
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
-// `rows`, each source body's raw source rows too (c_check_debug.c), from `output`.
-static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
-                               const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                               CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify)
+// `rows`, each source body's raw source rows too (c_check_debug.c), from `output`. With `stage_clock` (the driver's
+// --time-stages), each pass's time is charged to its stage (c_check_clock.c).
+static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
+                                     const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
+                                     CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckClock* stage_clock)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -186,6 +187,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         valid = unwind_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_BACKEND_SETUP);
     if (valid)
     {
         valid = rows != NULL ? check_program_lower_sources(&result->lowered, program, scalar, output, scratch) :
@@ -198,6 +200,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->reason = result->lowered.reason;
         }
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
     {
         const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
@@ -330,6 +333,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
     }
     uint64_t references = 0;
+    check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     for (uint32_t b = 0; valid && b < count; b += 1)
     {
         const Tier0Function* function = &result->lowered.functions[b];
@@ -355,6 +359,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->token = program->bodies[b].declaration;
         }
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_TIER0);
     // A failure before the rows' room leaves `rows` to the failure's reset below.
     if (valid && rows != NULL)
     {
@@ -576,6 +581,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     valid = valid && (frames == 0 || frame_table != 0);
     // The labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols).
     uint32_t labels = 0;
+    check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -598,11 +604,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
         if (valid)
         {
+            check_clock_lap(stage_clock, CHECK_STAGE_CODE_ATOMS);
             const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
             const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
+            check_clock_lap(stage_clock, CHECK_STAGE_BRANCH_SIZING);
             const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                    scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, fixup_ends) :
                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, fixup_ends);
+            check_clock_lap(stage_clock, CHECK_STAGE_ENCODE);
             valid = length >= 0;
             if (valid && source_body && rows != NULL)
             {
@@ -621,6 +630,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 valid = valid && (analyzed != UNWIND_OK || memcmp(&proven, &frame_table[b], sizeof(proven)) == 0);
                 result->reason = valid ? result->reason : "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
             }
+            check_clock_lap(stage_clock, CHECK_STAGE_UNWIND);
             if (valid)
             {
                 const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length;
@@ -657,6 +667,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         }
         arena_pop_to(scratch, work_mark);
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
     if (valid && frames != 0)
@@ -677,6 +688,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_UNWIND);
     if (!valid)
     {
         const CheckProgramStatus status = result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
@@ -694,4 +706,12 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     arena_pop_to(scratch, temporary);
     return valid;
+}
+
+// check_program_emit_timed without a clock: every caller but the driver's.
+static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
+                               const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
+                               CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify)
+{
+    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, scalar, output, bytes, scratch, binding, rows, unwind, verify, NULL);
 }

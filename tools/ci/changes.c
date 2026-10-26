@@ -333,6 +333,12 @@ static const ChangesModule changes_modules[] = {
         .name = "files",
         .sources = "c_files[a-z_]*",
     },
+    // #518's attribution of sqlite3.c's compile: the driver's stage clock and measure-compile, which time the whole
+    // compiler, the same for every pull request but one that changes how it is timed. The daily run measures main.
+    {
+        .name = "compile_time",
+        .sources = "c_check_clock|compile_measure",
+    },
 };
 
 #define BUSTER_CHANGES_MODULE_COUNT (sizeof(changes_modules) / sizeof(changes_modules[0]))
@@ -1510,6 +1516,17 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "check_debug",
         .outputs_false = "checker",
         .measured = "backend check-debug",
+    },
+    {
+        .name = "the compile's attribution",
+        .files = "src/buster/compiler/compile_measure.c",
+        .outputs_true = "code compile_time",
+        .outputs_false = "checker files",
+    },
+    {
+        .name = "the compiler's code outside the attribution's sources",
+        .files = "src/buster/compiler/tier0.c src/buster/compiler/c_checker_driver_test.c",
+        .outputs_false = "compile_time",
     },
 };
 

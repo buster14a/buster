@@ -79,6 +79,7 @@ jobs:
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       check_debug: ${{ steps.files.outputs.check_debug }}
       files: ${{ steps.files.outputs.files }}
+      compile_time: ${{ steps.files.outputs.compile_time }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
@@ -1129,6 +1130,40 @@ jobs:
           test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-checker-deferred --passes 12 --lanes 8 --cpus "2,$others" "${source[@]}"
+
+      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
+        # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
+        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
+        # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
+        # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.compile_time != 'false'
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          reference=()
+          if tcc="$(command -v tcc)"; then
+              "$tcc" -v
+              reference=(--reference "$tcc")
+          else
+              echo "tcc isn't installed: measuring without the reference"
+          fi
+          taskset -c 2 ./build/compiler measure-compile --runs 11 "${reference[@]}" -- "${options[@]}"
+          # The counters of 11 default compiles, user and kernel apart, and the functions their samples fall in.
+          out="$RUNNER_TEMP/compile-time"
+          mkdir -p "$out"
+          events=task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u
+          if taskset -c 2 perf stat -r 11 -e "$events" -- ./build/compiler "${options[@]}" -o "$out/sqlite3.o"; then
+              if [ "${#reference[@]}" -ne 0 ]; then
+                  taskset -c 2 perf stat -r 11 -e "$events" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
+              fi
+              taskset -c 2 perf record -q -F 20000 -o "$out/perf.data" -- \
+                  bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
+              perf report -i "$out/perf.data" --stdio --no-children --sort dso --percent-limit 0.5 2> /dev/null | grep -v '^#' | sed '/^$/d'
+              perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 2> /dev/null | grep -v '^#' | sed '/^$/d' | head -n 80
+          else
+              echo "perf can't count here: the stage report above stands alone"
+          fi
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
