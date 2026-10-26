@@ -19,8 +19,12 @@
 // Named semantic symbols are selected from the final Link, after all maps. Each lane counts and then compacts its
 // ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
 // on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
+// On more than one lane the command starts one team once its options are valid (lane_team_start, #501): the
+// resolution, the conversion and the writer each run on its threads, which wait on futexes between them, rather than
+// on a group of their own, and the release stage stops it. Without its threads the link fails before resolving.
 // --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
-// resolution's phases (the slowest lane's), the conversion, the optional passes and the writer's phases (lane 0's).
+// team's start, the resolution's phases (the slowest lane's), the conversion, the optional passes and the writer's
+// phases (lane 0's).
 
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
@@ -508,6 +512,7 @@ static void foreign_driver_write_lane(void* argument)
 typedef enum ForeignDriverStage
 {
     FOREIGN_DRIVER_STAGE_ARGUMENTS,
+    FOREIGN_DRIVER_STAGE_LANES,
     FOREIGN_DRIVER_STAGE_INTERPRETER,
     FOREIGN_DRIVER_STAGE_RESOLVE,
     FOREIGN_DRIVER_STAGE_CONVERT,
@@ -556,13 +561,14 @@ static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slow
 
 // The report: the whole and its lanes, each stage, the resolution's phases (`resolve`, the slowest lane's time in each),
 // the conversion's (`convert`, foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first
-// part is the lanes' start and the symbol selection, up to executable_write's own start. `ends` holds each stage's end,
-// `begin` the start; a stage that didn't run ends where the one before did.
+// part is the lanes' dispatch and the symbol selection, up to executable_write's own start. `ends` holds each stage's
+// end, `begin` the start; a stage that didn't run ends where the one before did.
 static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends, uint64_t write_begin,
                                   const ExecutableResult* written)
 {
     static const char* const stages[FOREIGN_DRIVER_STAGES] = {
         "arguments",
+        "lanes",
         "interpreter",
         "resolve",
         "convert",
@@ -653,6 +659,17 @@ static int run_foreign_link(int argc, char** argv)
     const uint32_t cpus = foreign_driver_cpus();
     driver.lanes = driver.lanes < cpus ? driver.lanes : cpus;
     ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
+    // The command's lanes, which every stage's lane_run then takes (see the file's comment); one lane needs none.
+    LaneTeam team = { 0 };
+    if (succeeded && !driver.help && driver.lanes > 1)
+    {
+        succeeded = lane_team_start(&team, driver.lanes, 0);
+        if (!succeeded)
+        {
+            fprintf(stderr, "link-foreign: cannot start linker workers\n");
+        }
+    }
+    ends[FOREIGN_DRIVER_STAGE_LANES] = foreign_driver_now();
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
         succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
@@ -797,6 +814,7 @@ static int run_foreign_link(int argc, char** argv)
     // The resolution's lane states, which foreign_release frees, give their phases' times first.
     uint64_t resolve[FOREIGN_PHASES];
     foreign_driver_resolve_phases(&foreign, resolve);
+    lane_team_stop(&team);
     foreign_release(&foreign);
     runtime_release(&runtime);
     arena_release(&names);
