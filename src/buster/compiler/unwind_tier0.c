@@ -355,7 +355,7 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
     const uint32_t epilogue = (pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0)) + 1;
     // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
     // one of its pushes.
-    const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << 5)) != 0);
+    const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
     if (code == 0 || final_offsets == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
         (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || final_offsets[0] != 0)
     {
