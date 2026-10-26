@@ -42,19 +42,20 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
-- **`benchmark-backend`.**
+- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on the functions `-c` compiles
+  of C files, `sqlite3.c`'s among them ("Measurements", below).
 
 - **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
-**Waits for #133, #145 and #146:**
+**Measured on `sqlite3.c`,** which compiles now: Tier 0's own costs on its functions ("Measurements", below), and the
+whole compile's time and the generated code's run time and size against clang -O0's and tcc's ([#136's
+measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)).
 
-- the corpora and `sqlite3.c`;
-- `speedtest1`;
-- the whole compile's time against tcc's.
+**Still to do:** `speedtest1`, SQLite's own benchmark, which the frozen corpus doesn't have.
 
-Until then, generated programs (below) stand in for #142's random programs.
+Generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 

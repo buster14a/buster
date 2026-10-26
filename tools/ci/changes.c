@@ -362,6 +362,13 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .unit = "tier0_benchmark.c",
     },
     {
+        .name = "backend-source",
+        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
+                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
+                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|lane|"
+                   "x86_64_encoder|x86_semantics|x86_target",
+    },
+    {
         .name = "bind",
         .unit = "bind_benchmark.c",
     },
@@ -1509,7 +1516,13 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
         .outputs_false = "checker",
-        .measured = "backend check-debug",
+        .measured = "backend backend-source check-debug",
+    },
+    {
+        .name = "the backend's shared measurement measures both of its benchmarks",
+        .files = "src/buster/compiler/tier0_benchmark_measure.c",
+        .measured = "backend backend-source",
+        .unmeasured = "checker checker-source",
     },
 };
 

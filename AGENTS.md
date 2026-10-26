@@ -908,8 +908,10 @@ designs and the compilers already built this way.
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
   twin.
   `tier0_generate.c` makes random programs as typed streams and as C,
-  `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
-  `benchmark-backend`. `docs/tier0.md` has the contract, the design and the
+  `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
+  `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
+  the same measurement (`tier0_benchmark_measure.c`) on the functions `-c`
+  compiles of C files. `docs/tier0.md` has the contract, the design and the
   9700X measurements.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
@@ -1103,6 +1105,7 @@ git init -q --template= build/c-testsuite
 git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
 git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
+./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -4736,6 +4739,21 @@ one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
 each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode]
+[--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
+measures the same variants on real C. Each file is checked as the driver checks
+it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+their typed streams, with the symbols' access the emission gave them
+(`check_program_access`), make one corpus with the other files' functions, which
+both paths must agree on before the same medians are reported. A file the
+checker rejects, or whose checked program or emission refuses a feature by
+name, is left out with its reason; one that fails otherwise (it doesn't
+preprocess, a resource runs out, the paths disagree on a function) fails the
+command, and so does a run left with no function. `test-checker` checks these
+outcomes (`tier0_source_benchmark_test.c`). Run it under the 9700X's lock with
+`taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
+to one allowed CPU, where a pull request changes what it measures.
 
 ## Streaming tests
 

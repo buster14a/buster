@@ -3342,6 +3342,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
+static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 
@@ -3447,6 +3448,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_mutations(&test, clang);
             check_test_source_benchmark(&test);
             check_test_lowering_source_benchmark(&test);
+            check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
         check_test_types_close(&types);

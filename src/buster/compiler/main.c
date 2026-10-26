@@ -456,10 +456,13 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_deferred_benchmark.c"
 // #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
 #include "buster/compiler/c_lowering_source_benchmark.c"
+// #136's benchmark-backend-source: benchmark-backend's variants on the functions -c compiles of real units.
+#include "buster/compiler/tier0_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_debug_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
+#include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
@@ -1066,6 +1069,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
+    {
+        result = run_backend_source_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
