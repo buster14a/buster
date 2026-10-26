@@ -383,6 +383,43 @@ static void check_test_driver_libgcc(CheckTest* test, const char* executable, co
     unlink(outputs[1]);
 }
 
+// Split-stack code in the direct path (#483's review): a program that calls __splitstack_getcontext, whose member of
+// libgcc.a makes morestack.o join, which refers to the unwinder that GCC's driver takes from libgcc_s.so.1, as needed,
+// and the direct path doesn't link. Both paths must refuse it with the one error that names the member and
+// _Unwind_Resume, and write no executable.
+static void check_test_driver_split_stack(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "extern void __splitstack_getcontext(void* context[10]);\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    void* context[10];\n"
+                                  "    __splitstack_getcontext(context);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    static const char expected[] = "/libgcc.a(morestack.o): undefined reference to '_Unwind_Resume'; GCC's driver takes it from libgcc_s.so.1, which the direct "
+                                   "path doesn't link\n";
+    char source[256];
+    char output[256];
+    snprintf(source, sizeof(source), "%s/split-stack.c", directory);
+    snprintf(output, sizeof(output), "%s/split-stack", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "split-stack program written");
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", output, source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
+        char* text = NULL;
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        const size_t length = text != NULL ? strlen(text) : 0;
+        const bool worded = length > sizeof(expected) - 1 && strncmp(text, "error: /", 8) == 0 && strchr(text, '\n') == text + length - 1 &&
+                            strcmp(text + length - (sizeof(expected) - 1), expected) == 0;
+        check_test_expect(test, status == 1 && worded && access(output, F_OK) != 0,
+                          path == 0 ? "split-stack's API refused, naming libgcc.a(morestack.o) and _Unwind_Resume" : "split-stack's API refused, scalar");
+        free(text);
+    }
+    unlink(source);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -1578,6 +1615,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
+            check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);

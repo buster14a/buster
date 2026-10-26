@@ -468,6 +468,8 @@ static __attribute__((unused)) String8 runtime_member_name(const Runtime* runtim
 // libc's archive: libc_nonshared.a for a dynamic PIE and a shared library, libc.a for a static executable and a static
 // PIE. The archives keep the driver's order, in which it comes last.
 static __attribute__((unused)) const RuntimeArchive* runtime_libc_archive(const Runtime* runtime);
+// The archive that holds member `member` (an index among Runtime.members): the last whose first member it isn't before.
+static __attribute__((unused)) const RuntimeArchive* runtime_member_archive(const Runtime* runtime, uint32_t member);
 // Whether binding may read a piece of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m): always for one
 // runtime_import made; for one loaded from a snapshot, whether the piece's records and bytes hash as when the snapshot
 // was written (runtime_piece_hash).
@@ -878,7 +880,8 @@ static RuntimeError runtime_search(Runtime* runtime)
         runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
-    // A dynamic PIE's and a shared library's: libgcc.a, the first archive, then libc.so's script, which names the second.
+    // A dynamic PIE's and a shared library's: libgcc.a, the first archive, then libc.so's script, which names the
+    // second.
     if (result == RUNTIME_ERROR_NONE && !runtime_kind_is_static(runtime->kind))
     {
         runtime->archives[0].path = runtime_find_file(runtime, "libgcc.a", true);
@@ -2404,6 +2407,16 @@ static String8 runtime_member_name(const Runtime* runtime, uint32_t member)
 static const RuntimeArchive* runtime_libc_archive(const Runtime* runtime)
 {
     return runtime->archive_count != 0 ? &runtime->archives[runtime->archive_count - 1] : 0;
+}
+
+static const RuntimeArchive* runtime_member_archive(const Runtime* runtime, uint32_t member)
+{
+    uint32_t archive = 0;
+    for (uint32_t a = 1; a < runtime->archive_count; a += 1)
+    {
+        archive = runtime->archives[a].first_member <= member ? a : archive;
+    }
+    return &runtime->archives[archive];
 }
 
 // A run of a piece's bytes that its hash takes: one table's column over the piece's records, or the piece's names' or

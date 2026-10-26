@@ -693,6 +693,19 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     fprintf(stderr, "error: %.*s: undefined reference to '%.*s%s%.*s'\n", (int)path.length, path.pointer, (int)references->length[bind.reference],
                             (const char*)references->name[bind.reference], version.length != 0 ? "@" : "", (int)version.length, version.pointer);
                 }
+                else if (bind.error == BIND_ERROR_MEMBER_UNDEFINED)
+                {
+                    // A member that joined refers to a name nothing defines, as GNU ld words it, with the archive's
+                    // path and the member's name: on GCC's link line only libgcc_s.so.1 could define it, which the
+                    // driver names as needed and the direct path doesn't link (morestack.o's unwinder, for split-stack
+                    // code).
+                    const bool known = bind.member != UINT32_MAX;
+                    const String8 archive = known ? runtime_member_archive(&runtime, bind.member)->path : (String8){ 0 };
+                    const String8 member = known ? runtime_member_name(&runtime, bind.member) : (String8){ 0 };
+                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, which the direct path doesn't link\n",
+                            (int)archive.length, archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer,
+                            known ? ")" : "", name);
+                }
                 else if (bind.error == BIND_ERROR_LIBRARY_VERSION)
                 {
                     // A version a loaded library needs of another that that one doesn't define, as glibc's loader words it: the
