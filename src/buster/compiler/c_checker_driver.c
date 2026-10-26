@@ -262,13 +262,14 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
                 flags &= flags - 1;
             }
-            // Packed addresses are sparse and already source ordered. Keep them out of the dense 16-bit
-            // warning columns: adding this diagnostic must not double those columns for every translation unit.
-            while (!pp->fatal && packed < input->packed_member_count && input->packed_members[packed].token <= token)
+            // Addresses are sparse and ordered by the '&' event. A generic selection can put the diagnosed
+            // member after another address in its control expression, so its location is not the iteration key.
+            // Keep these records out of the dense 16-bit warning columns.
+            while (!pp->fatal && packed < input->packed_member_count && input->packed_members[packed].address <= token)
             {
                 const CheckInputPackedMember* member = input->packed_members + packed;
-                if (show_warnings && !member->suppressed && member->token == token &&
-                    (repair == NULL || check_repair_warning_token(repair, token)))
+                if (show_warnings && !member->suppressed && member->address == token &&
+                    (repair == NULL || check_repair_warning_token(repair, member->token)))
                 {
                     check_driver_packed_report(parser, pp, input, member);
                 }

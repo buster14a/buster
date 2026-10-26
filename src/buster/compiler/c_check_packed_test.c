@@ -278,6 +278,7 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         { "int f(struct P*p){return __builtin_constant_p(take(&p->w));}\n", 0 },
         { "unsigned long f(struct P*p){return __builtin_object_size(give(&p->w),0);}\n", 0 },
         { "int*f(struct P*p){return &_Generic(0,int:p->w);}\n", 1 },
+        { "int*f(struct P*p){return &_Generic(&p->w,int*:p->w);}\n", 2 },
         { "int*f(struct P*p){return &__builtin_choose_expr(1,p->w,p->w);}\n", 1 },
         { "void*f(struct P*p){return _Generic(0,int:&p->w);}\n", 0 },
         { "void*f(struct P*p){return __builtin_choose_expr(1,&p->w,(int*)0);}\n", 0 },
