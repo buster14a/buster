@@ -867,7 +867,11 @@ designs and the compilers already built this way.
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
   them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. Values past the
+  parameters objects and its constants an optional column. The 128-bit
+  integers (I128 and U128, `__int128`'s) live in the same slots, each entry of
+  them deferred too, their halves through scratch registers; a front end
+  divides them, converts them to and from floating values and passes them
+  through calls and 16-byte objects, as clang's code does. Values past the
   depth tables (15 integer, 14 with a frame pointer, and 16 floating ones)
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
@@ -4126,7 +4130,7 @@ or the bodies: a lane's copy of the reader and its wake-up must be paid for by
 its share of the walks, and a woken lane reads at about half the first lane's
 speed.
 
-`./build/compiler test-checker-deferred [--keep]` checks 43 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 50 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
@@ -4398,13 +4402,13 @@ and a callee per signature as `X86Instruction` records through `x86_encode`,
 and the program runs: each side checks every argument, result, hidden pointer,
 `al` and `va_arg` value against the bytes, both ways. Two compiled runs
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
-side: a world of what its C passes (integers to 64 bits, enums, pointers,
-`float`, `double`, `long double` and the records, arrays and aligned typedefs of
-them, aligned to 16 at most, with C23's enums of a fixed underlying type,
-structs whose only named member is a flexible array member and bit-fields'
-attributes after their widths), and
-signatures within Tier 0's depths (13 integer arguments, long doubles among them,
-and 15 floating ones); our
+side: a world of what its C passes (integers to 64 bits, `__int128` and
+`unsigned __int128`, enums, pointers, `float`, `double`, `long double` and the
+records, arrays and aligned typedefs of them, aligned to 16 at most, with C23's
+enums of a fixed underlying type, structs whose only named member is a
+flexible array member and bit-fields' attributes after their widths), and
+signatures within Tier 0's depths (13 integer arguments, long doubles and
+128-bit integers among them, and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
@@ -4559,8 +4563,25 @@ must truncate and leave the control word as it was; and
 `--count` random programs of statements writing long doubles and what converts
 from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
-both ways and calls of C functions, against the check's own stack machine. The
-programs must reach every kind and conversion of the class.
+both ways, calls of C functions and frame objects (`LOCAL`, `STORE_LOCAL` and
+`SET_LOCAL` of the class on objects of 16 bytes and more), against the check's
+own stack machine. The programs that compiled, ran and matched must reach every
+kind and conversion of the class. Then the `int128`
+check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
+U128, against clang's `__int128`: each break of the classes' rules refused at
+its entry; a stack of a memory class's values up to the last 16-byte slot,
+which runs, and one past it, which both paths refuse (for long double too);
+functions of 128-bit parameters and results in register pairs and on the
+stack, called from C, and calling C; each class's compares and shifts on every
+pair of ten boundary values, against C's own operators too; and `--count`
+random programs over every kind of the classes, frame objects as the x87
+check's, shifts by constant and variable counts and conversions to and from the
+other integers, under live values where
+`MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
+past the slots fails it, and only the entries that ran in the programs both
+paths compiled, that ran and matched the check's stack machine count toward its
+coverage, which must reach each class's every kind, conversion and save and
+both arms of a `?:`.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines

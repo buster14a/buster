@@ -113,6 +113,9 @@ struct CheckConstantInput
     uint32_t bind_cursor;
     uint32_t pending_tag;
     uint32_t failure;
+    // The reader's prototype depth when the evaluation began, which it gives back when it ends, whether or not its
+    // binding reached every list's `)` (check_constant_prototype_open).
+    uint32_t prototype_depth;
     CheckValue* values;
     CheckValue* proof_values;
     uint8_t* proof_active;
@@ -1236,12 +1239,16 @@ static void check_constant_source_regions(CheckConstantInput* input)
 // A tag that a prototype's list names first has the prototype's scope (C11 6.2.1p4) and ends at the list's `)`, as
 // check_input_declarator ends a declarator's (#437): `typeof(int (*)(struct Z *))`'s Z isn't a later `struct Z`. The
 // binding mark at the `(` waits at its `)`, since binding may yield inside the list for a tag's body and resume there.
+// The list is a scope a level deeper than the one around it, as a declarator's is (check_input_declaration_depth), so
+// that what a definition in it declares, read while binding waits, makes a tag of its own and conflicts with no name
+// outside the list (`int f(int K, int a[sizeof(void (*)(enum E { K }))])`, #438).
 static void check_constant_prototype_open(CheckConstantInput* input, uint32_t token)
 {
     const uint32_t close = input->reader->parser->tree.parents[token];
     if (!input->cached && close > token && close < input->end)
     {
         input->prototype_marks[close - input->first] = c_bindings_mark(&input->reader->bindings) + 1;
+        input->reader->prototype_depth += 1;
     }
 }
 
@@ -1251,6 +1258,7 @@ static bool check_constant_prototype_close(CheckConstantInput* input, uint32_t t
     const uint32_t mark = input->prototype_marks[token - input->first];
     const bool valid = mark == 0 || c_bindings_mark(&reader->bindings) == mark - 1 || c_bindings_restore(&reader->bindings, mark - 1, token);
     reader->output->resource |= !valid;
+    reader->prototype_depth -= mark != 0;
     return valid;
 }
 
@@ -3187,6 +3195,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         .bind_cursor = first,
         .pending_tag = BUSTER_CHECK_NONE,
         .failure = BUSTER_CHECK_NONE,
+        .prototype_depth = reader->prototype_depth,
         .cached = cached,
         .failed_token = failed_token,
     };
@@ -3328,6 +3337,12 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
                             check_constant_evaluate(input);
         valid = valid && check_constant_range_value(input, input->first, input->end, value) && check_constant_resolve(input, value, 0, value);
     }
+    // A job that waits for a definition keeps the depth of the lists open around it, at which its caller reads the
+    // definition; one that ended, or failed, gives its own back.
+    if (*nested_tag == BUSTER_CHECK_NONE)
+    {
+        input->reader->prototype_depth = input->prototype_depth;
+    }
     return valid;
 }
 
@@ -3362,6 +3377,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
         const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
         reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
     }
+    reader->prototype_depth = input.prototype_depth;
     arena_pop_to(reader->scratch, mark);
     return valid;
 }
