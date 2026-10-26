@@ -26,8 +26,9 @@
 //
 // check_debug_build makes the driver's debug.c unit from them: a function per source body, named by its identifier, at
 // its declaration's line, in a file table whose first file is the translation unit's, and the sections executable_write
-// attaches (ExecutableOptions.debug), placing each function at its symbol's address. Every vector load is masked to its
-// column, and every store whole into the rows' slack (BUSTER_CHECK_DEBUG_SLACK).
+// attaches (ExecutableOptions.debug), placing each function at its symbol's address, and object_build (-c's
+// ObjectOptions.debug), relocating them against the functions' sections. Every vector load is masked to its column, and
+// every store whole into the rows' slack (BUSTER_CHECK_DEBUG_SLACK).
 
 // Room past a pass's rows for the vector paths' whole stores.
 #define BUSTER_CHECK_DEBUG_SLACK 16
@@ -530,13 +531,21 @@ static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, 
     return kept;
 }
 
-// The C driver's DWARF for its executable: the debug.c unit, its sections and what executable_write takes.
+_Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO &&
+                   BUSTER_OBJECT_DEBUG_ABBREV == DEBUG_SECTION_ABBREV && BUSTER_OBJECT_DEBUG_LINE == DEBUG_SECTION_LINE &&
+                   BUSTER_OBJECT_DEBUG_ADDR == DEBUG_SECTION_ADDR && BUSTER_OBJECT_DEBUG_RNGLISTS == DEBUG_SECTION_RNGLISTS &&
+                   BUSTER_OBJECT_DEBUG_FIELDS == BUSTER_DEBUG_SECTIONS - 1,
+               "the object writer takes debug.c's sections in its order, and the fields of all but .debug_info");
+
+// The C driver's DWARF for its executable or its object: the debug.c unit, its sections and what executable_write and
+// object_build take.
 typedef struct CheckDebug CheckDebug;
 struct CheckDebug
 {
     DebugUnit unit;
     DebugOutput output;
     ExecutableDebug attach;
+    ObjectDebug object;
     // The rows each pass made and kept, for the tests and the benchmark.
     uint32_t raw_rows;
 };
@@ -557,8 +566,8 @@ static uint32_t check_debug_file(const Preprocessor* pp, uint32_t key, String8* 
 
 // The driver's unit from check_program_emit's raw rows: each source body a function, its rows' lines (check_debug_lines),
 // the rows it keeps (check_debug_keep) and its declaration's line, in the file of its declaration; its sections and their
-// attachment written into `arena`, which must last through executable_write. False when memory runs out or debug.c
-// refuses the unit (a name or a file debug.c can't write).
+// attachments written into `arena`, which must last through executable_write or object_build. False when memory runs out
+// or debug.c refuses the unit (a name or a file debug.c can't write).
 static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, const CheckProgramRows* rows, const Parser* parser, Preprocessor* pp,
                               bool exact, Arena* arena, Arena* scratch)
 {
@@ -631,9 +640,10 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         .row_count = kept,
     };
     uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS) : 0;
     debug->output = (DebugOutput){ .line_addresses = addresses, .address_capacity = count };
     // Measured first (DEBUG_ERROR_CAPACITY gives each section's size), then written.
-    valid = valid && addresses != 0 && debug_write(&debug->unit, &debug->output, exact) == DEBUG_ERROR_CAPACITY;
+    valid = valid && addresses != 0 && fields != 0 && debug_write(&debug->unit, &debug->output, exact) == DEBUG_ERROR_CAPACITY;
     for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         DebugSection* written = &debug->output.sections[section];
@@ -649,9 +659,21 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             .line_addresses = addresses,
             .function_count = count,
         };
+        // The fields of .debug_abbrev, .debug_line, .debug_addr and .debug_rnglists, in that order.
+        for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            fields[field] = debug->output.fields[DEBUG_SECTION_ABBREV + field];
+        }
+        debug->object = (ObjectDebug){
+            .functions = symbols,
+            .line_addresses = addresses,
+            .function_count = count,
+            .fields = fields,
+        };
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             debug->attach.sections[section] = (String8){ .pointer = (char*)debug->output.sections[section].bytes, .length = debug->output.sections[section].size };
+            debug->object.sections[section] = debug->attach.sections[section];
         }
     }
     else
