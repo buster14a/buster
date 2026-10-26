@@ -224,6 +224,15 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
 - **Placement.** Branchy scalar loops run slower at some 64-byte offsets, in states that differ between processes, and
   stack slots or rows that share their low 12 bits with stores alias. A difference that comes and goes between builds of
   the same source is probably one of these (dataflow.md, "Where the scalar twin's code falls").
+- **The stack's page offset.** Address space randomization starts each process's stack at another offset in its page,
+  so a loop whose stack slots alias the data it stores runs fast in some processes of one build and slow in others.
+  `benchmark-checker-source`'s body checking on `sqlite3.c` ran 3 to 13% slower with the stack 208 to 656 bytes into its
+  page, and 4% at 2,832, with as many more store-to-load conflicts (`ls_bad_status2.stli_other`): about one process in
+  four, in main and #424's head alike, while the whole driver's `-fsyntax-only` moved by at most 1.5% (#445, [the
+  record](https://github.com/buster14a/buster-performance/tree/24f54c2f6a214c67bd83d791b4ff3acebef0c4a8/docs/measurements/checker-source-slow-state-445-2026-10-26)).
+  Compare such a stage's medians over many processes, or put the stack at the same place in every process:
+  `setarch -R` and an environment of a chosen length, as the record's `procbench` does (`norandom`, `pad=N`), and
+  compare builds at several offsets.
 - **Two threads.** Two lexer processes on one core's two hardware threads had 1.22 times the throughput of one: one
   thread uses about 80% of what the core does for that mix, so SMT is no lever.
 - **A phase's cost is in context.** The difference between runs that stop after a phase and before it is the phase's
