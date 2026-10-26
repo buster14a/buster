@@ -705,28 +705,30 @@ static uint64_t pp_window_test_cut_fixtures(uint64_t* checks)
     failures += bytes == 0;
     free(bytes);
     // The short tail after a long line: the window starts in a PROT_NONE page, and its line end and tail are in the
-    // readable page after it, past that page's first chunk (whose look-behind would read the page before).
+    // readable bytes after it, past their first chunk (whose look-behind would read the page before).
     const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, 3 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool guarded = mapping != MAP_FAILED && mprotect(mapping, page_bytes, PROT_NONE) == 0 && mprotect(mapping + 2 * page_bytes, page_bytes, PROT_NONE) == 0;
+    const uint64_t readable = (tail + 200 + page_bytes - 1) / page_bytes * page_bytes;
+    uint8_t* mapping = mmap(0, readable + 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = mapping != MAP_FAILED && mprotect(mapping, page_bytes, PROT_NONE) == 0 &&
+                         mprotect(mapping + page_bytes + readable, page_bytes, PROT_NONE) == 0;
     if (guarded)
     {
-        uint8_t* page = mapping + page_bytes;
-        memset(page, 'x', page_bytes);
-        const uint64_t place = page_bytes - 1 - (tail - 101);
-        page[place] = '\n';
-        const uint64_t cut = pp_window_cut(mapping, 0, 2 * page_bytes, tail);
+        uint8_t* after = mapping + page_bytes;
+        memset(after, 'x', readable);
+        after[readable - 1 - (tail - 101)] = '\n';
+        const uint64_t end = page_bytes + readable;
+        const uint64_t cut = pp_window_cut(mapping, 0, end, tail);
         *checks += 1;
-        if (cut != 2 * page_bytes && !pp_test_quiet)
+        if (cut != end && !pp_test_quiet)
         {
             printf("windows: the cut of a short tail after a long line is at %lu, not at the window's end\n", (unsigned long)cut);
         }
-        failures += cut != 2 * page_bytes;
+        failures += cut != end;
     }
     failures += !guarded;
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, 3 * page_bytes);
+        munmap(mapping, readable + 2 * page_bytes);
     }
     return failures;
 }

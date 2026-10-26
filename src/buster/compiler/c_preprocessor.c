@@ -391,7 +391,7 @@ static __attribute__((unused)) void pp_release(Preprocessor* pp);
 #define BUSTER_PP_WINDOW_BYTES (128u << 10)
 // The longest part of a line that a window's end may cut before the window is cut before the line instead
 // (pp_window_cut): longer than any but a few lines, so that a window of ordinary lines ends where it would.
-#define BUSTER_PP_WINDOW_TAIL_BYTES (4u << 10)
+#define BUSTER_PP_WINDOW_TAIL_BYTES (16u << 10)
 // The pages of a file prepared a window at a time whose line ends it counts while each window is in the caches
 // (PPFileData.line_pages): __LINE__ and diagnostics count lines from the page's start at most, whose bytes left the
 // caches long before, rather than from the last place asked about.
@@ -2629,32 +2629,38 @@ static uint32_t pp_directive_places_scalar(const uint64_t* words, uint32_t word_
     return count;
 }
 
-// pp_directive_places_scalar a word at a time: the places of its set bits compressed out of a vector of 0 to 63
-// (vpcompressb), widened to dwords, offset by the word's first token and stored under a mask of their count, without a
-// branch on the word's bits, which a bit at a time mispredicted: sqlite3.c's places took 45 us so on the 9700X (#451).
-// A word of more than 16 (16 directives in 64 tokens, null ones) takes the bit-at-a-time loop for all of its places.
-// Writes `places` only below the count it returns.
+// pp_directive_places_scalar eight words at a time: a group of no directive is skipped, and each word of the others has
+// the places of its set bits compressed out of a vector of 0 to 63 (vpcompressb), widened to dwords, offset by the
+// word's first token and stored under a mask of their count, without a branch on the word's bits, which a bit at a time
+// mispredicted: sqlite3.c's places took 45 us so on the 9700X (#451). The groups' branch keeps a file of few directives
+// in long lines from paying a word's compress for each 64 tokens. A word of more than 16 (16 directives in 64 tokens,
+// null ones) takes the bit-at-a-time loop for all of its places. Writes `places` only below the count it returns.
 static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, uint32_t* places)
 {
     const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37,
                                               36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9,
                                               8, 7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t count = 0;
-    for (uint32_t w = 0; w < word_count; w += 1)
+    for (uint32_t group = 0; group < word_count; group += 8)
     {
-        const uint64_t bits = words[w];
-        const uint32_t here = (uint32_t)__builtin_popcountll(bits);
-        const __m128i set = _mm512_castsi512_si128(_mm512_maskz_compress_epi8(bits, positions));
-        _mm512_mask_storeu_epi32(places + count, (__mmask16)_bzhi_u32(0xFFFF, here), _mm512_add_epi32(_mm512_cvtepu8_epi32(set), _mm512_set1_epi32((int)(64 * w))));
-        if (BUSTER_UNLIKELY(here > 16))
+        const uint32_t size = word_count - group < 8 ? word_count - group : 8;
+        const __m512i eight = _mm512_maskz_loadu_epi64((__mmask8)_bzhi_u32(0xFF, size), words + group);
+        for (uint32_t w = group; _mm512_test_epi64_mask(eight, eight) != 0 && w < group + size; w += 1)
         {
-            pp_directive_places_scalar(words + w, 1, places + count);
-            for (uint32_t i = 0; i < here; i += 1)
+            const uint64_t bits = words[w];
+            const uint32_t here = (uint32_t)__builtin_popcountll(bits);
+            const __m128i set = _mm512_castsi512_si128(_mm512_maskz_compress_epi8(bits, positions));
+            _mm512_mask_storeu_epi32(places + count, (__mmask16)_bzhi_u32(0xFFFF, here), _mm512_add_epi32(_mm512_cvtepu8_epi32(set), _mm512_set1_epi32((int)(64 * w))));
+            if (BUSTER_UNLIKELY(here > 16))
             {
-                places[count + i] += 64 * w;
+                pp_directive_places_scalar(words + w, 1, places + count);
+                for (uint32_t i = 0; i < here; i += 1)
+                {
+                    places[count + i] += 64 * w;
+                }
             }
+            count += here;
         }
-        count += here;
     }
     return count;
 }
