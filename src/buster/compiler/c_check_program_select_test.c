@@ -244,7 +244,7 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
                 arena_pop_to(&scratch, 0);
                 if (clang != 0)
                 {
-                    check_test_expect(test, check_test_program_execute(&code.link, source, clang, &scratch),
+                    check_test_expect(test, check_test_program_execute(&code.link, source, clang, false, &scratch),
                                       "selected real program agrees with independent Clang execution");
                 }
             }

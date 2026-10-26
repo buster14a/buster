@@ -9,7 +9,9 @@
 //     class, an integer of a class I8 to U64 converted from one, a compare's result), from 128-bit inputs and integers of
 //     every class, through constants, arithmetic, shifts by constant and variable counts, ?:, DUP, STORE's kept value and
 //     conversions both ways, under live values (an output's address, an integer added after) at the depths of MUL's rax
-//     and rdx and a shift's rcx, against this file's own stack machine over the same stream (tier0_test_int128_interpret);
+//     and rdx and a shift's rcx, and through frame objects (LOCAL, STORE_LOCAL and SET_LOCAL of the classes on objects of
+//     16 bytes and more, aligned to 8 and to 16), against this file's own stack machine over the same stream
+//     (tier0_test_int128_interpret);
 //   - boundaries: each 128-bit class's compares and shifts right (and left, by a variable count) on pairs of boundary
 //     values, against the interpreter and against C's own operators;
 //   - functions of 128-bit parameters and results, which the convention passes as two INTEGER eightbytes in registers or
@@ -25,7 +27,9 @@
 
 #define BUSTER_TIER0_TEST_INT128_PROGRAMS 300
 #define BUSTER_TIER0_TEST_INT128_STATEMENTS 8
-#define BUSTER_TIER0_TEST_INT128_OUTPUTS (2 * BUSTER_TIER0_TEST_INT128_STATEMENTS)
+// The programs' frame objects, locals 3 to 6 after their three pointer parameters, which their last outputs copy out.
+#define BUSTER_TIER0_TEST_INT128_OBJECTS 4
+#define BUSTER_TIER0_TEST_INT128_OUTPUTS (2 * BUSTER_TIER0_TEST_INT128_STATEMENTS + BUSTER_TIER0_TEST_INT128_OBJECTS)
 #define BUSTER_TIER0_TEST_INT128_IN 8
 #define BUSTER_TIER0_TEST_INT128_INTS 16
 #define BUSTER_TIER0_TEST_INT128_ENTRIES 4096
@@ -236,10 +240,10 @@ static uint32_t tier0_test_int128_other(uint32_t class)
 }
 
 // A leaf of `class`: an input, a constant (a low half past a sign-extended imm32 now and then), an integer of any class
-// converted, or an input of the other class converted.
+// converted, an input of the other class converted, or a frame object's value (whichever class wrote it: its 16 bytes).
 static void tier0_test_int128_leaf(Tier0TestInt128Program* program, uint32_t class, uint64_t* state)
 {
-    const uint32_t choice = tier0_generate_below(state, 8);
+    const uint32_t choice = tier0_generate_below(state, 10);
     if (choice < 3)
     {
         tier0_test_int128_element(program, 0, tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_IN), 16);
@@ -255,11 +259,15 @@ static void tier0_test_int128_leaf(Tier0TestInt128Program* program, uint32_t cla
         tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, tier0_test_int128_integers[tier0_generate_below(state, 8)], 0);
         tier0_test_int128_emit(program, BUSTER_TYPED_CONVERT, class, 0);
     }
-    else
+    else if (choice < 8)
     {
         tier0_test_int128_element(program, 0, tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_IN), 16);
         tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, tier0_test_int128_other(class), 0);
         tier0_test_int128_emit(program, BUSTER_TYPED_CONVERT, class, 0);
+    }
+    else
+    {
+        tier0_test_int128_emit(program, BUSTER_TYPED_LOCAL, class, 3 + tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_OBJECTS));
     }
 }
 
@@ -357,7 +365,13 @@ static void tier0_test_int128_run_tasks(Tier0TestInt128Program* program, Tier0Te
                 tier0_test_int128_push(program, tasks, tier0_test_int128_expression(compared, quarter));
                 tier0_test_int128_push(program, tasks, tier0_test_int128_expression(compared, quarter));
             }
-            else if (choice < 90)
+            else if (choice < 86)
+            {
+                // The value stored into a frame object, and kept (STORE_LOCAL).
+                tier0_test_int128_push(program, tasks, tier0_test_int128_entry(BUSTER_TYPED_STORE_LOCAL, class, 3 + tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_OBJECTS)));
+                tier0_test_int128_push(program, tasks, tier0_test_int128_expression(class, budget));
+            }
+            else if (choice < 93)
             {
                 // Through an integer class and back: its low bits, extended by its signedness.
                 const uint32_t through = tier0_test_int128_integers[tier0_generate_below(state, 8)];
@@ -375,15 +389,31 @@ static void tier0_test_int128_run_tasks(Tier0TestInt128Program* program, Tier0Te
     }
 }
 
-// A program: each statement into its output slots (2s and 2s + 1, 16 bytes each), then RETURN.
+// A program: its frame objects given values first (a constant's or an input's, by SET_LOCAL), each statement into its
+// output slots (2s and 2s + 1, 16 bytes each) or a frame object, then each object copied out into its own output slot
+// (after the statements'), then RETURN.
 static void tier0_test_int128_program(Tier0TestInt128Program* program, uint64_t* state)
 {
     memset(program, 0, sizeof(*program));
     const uint32_t statements = 1 + tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_STATEMENTS);
     Tier0TestInt128Tasks tasks;
+    for (uint32_t k = 0; k < BUSTER_TIER0_TEST_INT128_OBJECTS; k += 1)
+    {
+        const uint32_t class = tier0_generate_chance(state, 50) ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_U128;
+        if (tier0_generate_chance(state, 50))
+        {
+            tier0_test_int128_emit(program, BUSTER_TYPED_CONST, class, tier0_test_int128_random64(state));
+        }
+        else
+        {
+            tier0_test_int128_element(program, 0, tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_IN), 16);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, class, 0);
+        }
+        tier0_test_int128_emit(program, BUSTER_TYPED_SET_LOCAL, class, 3 + k);
+    }
     for (uint32_t s = 0; s < statements && !program->overflow; s += 1)
     {
-        const uint32_t root = tier0_generate_below(state, 10);
+        const uint32_t root = tier0_generate_below(state, 11);
         const uint32_t budget = 2 + tier0_generate_below(state, 11);
         const uint32_t class = tier0_generate_chance(state, 50) ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_U128;
         tasks.count = 0;
@@ -425,7 +455,7 @@ static void tier0_test_int128_program(Tier0TestInt128Program* program, uint64_t*
             tier0_test_int128_push(program, &tasks, tier0_test_int128_expression(class, budget));
             program->outputs[2 * s] = BUSTER_TYPED_CLASS_I64;
         }
-        else
+        else if (root < 10)
         {
             tier0_test_int128_push(program, &tasks, tier0_test_int128_entry(BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I32, 0));
             tier0_test_int128_push(program, &tasks, tier0_test_int128_entry(BUSTER_TYPED_EQ + tier0_generate_below(state, 6), BUSTER_TYPED_CLASS_I32, 0));
@@ -433,7 +463,22 @@ static void tier0_test_int128_program(Tier0TestInt128Program* program, uint64_t*
             tier0_test_int128_push(program, &tasks, tier0_test_int128_expression(class, budget / 2 + 1));
             program->outputs[2 * s] = BUSTER_TYPED_CLASS_I32;
         }
+        else
+        {
+            // A frame object's new value (SET_LOCAL), which the statements after it and its own output slot read: the
+            // output's address goes unused.
+            tier0_test_int128_emit(program, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_int128_push(program, &tasks, tier0_test_int128_entry(BUSTER_TYPED_SET_LOCAL, class, 3 + tier0_generate_below(state, BUSTER_TIER0_TEST_INT128_OBJECTS)));
+            tier0_test_int128_push(program, &tasks, tier0_test_int128_expression(class, budget));
+        }
         tier0_test_int128_run_tasks(program, &tasks, state);
+    }
+    for (uint32_t k = 0; k < BUSTER_TIER0_TEST_INT128_OBJECTS; k += 1)
+    {
+        tier0_test_int128_element(program, 2, 2 * BUSTER_TIER0_TEST_INT128_STATEMENTS + k, 16);
+        tier0_test_int128_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U128, 3 + k);
+        tier0_test_int128_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U128, 0);
+        program->outputs[2 * BUSTER_TIER0_TEST_INT128_STATEMENTS + k] = BUSTER_TYPED_CLASS_U128;
     }
     tier0_test_int128_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
 }
@@ -446,11 +491,17 @@ static bool tier0_test_int128_has(const Tier0Function* function)
 }
 
 // The program as Tier 0 takes it: three pointer parameters (the 128-bit inputs, the integers and the output) in their
-// registers.
+// registers, and its frame objects, of 16, 24, 16 and 32 bytes aligned to 16, 8, 8 and 16.
 static Tier0Function tier0_test_int128_function(const Tier0TestInt128Program* program, const Tier0TestInt128Abi* abi)
 {
-    static const uint8_t local_classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
-    static const uint8_t local_flags[3] = { 0, 0, 0 };
+    static const uint8_t local_classes[3 + BUSTER_TIER0_TEST_INT128_OBJECTS] = {
+        BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
+    };
+    static const uint8_t local_flags[3 + BUSTER_TIER0_TEST_INT128_OBJECTS] = {
+        0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+    };
+    static const uint32_t local_sizes[3 + BUSTER_TIER0_TEST_INT128_OBJECTS] = { 0, 0, 0, 16, 24, 16, 32 };
+    static const uint8_t local_alignments[3 + BUSTER_TIER0_TEST_INT128_OBJECTS] = { 0, 0, 0, 4, 3, 3, 4 };
     Tier0Function function;
     memset(&function, 0, sizeof(function));
     function.kinds = program->kinds;
@@ -459,7 +510,9 @@ static Tier0Function tier0_test_int128_function(const Tier0TestInt128Program* pr
     function.count = program->count;
     function.local_classes = local_classes;
     function.local_flags = local_flags;
-    function.local_count = 3;
+    function.local_sizes = local_sizes;
+    function.local_alignments = local_alignments;
+    function.local_count = 3 + BUSTER_TIER0_TEST_INT128_OBJECTS;
     function.parameter_count = 3;
     function.parameters = abi->locations + abi->first[BUSTER_TIER0_TEST_INT128_BODY];
     function.result = abi->calls[BUSTER_TIER0_TEST_INT128_BODY].result;
@@ -498,6 +551,7 @@ static bool tier0_test_int128_compare(uint32_t kind, bool is_signed, Tier0TestWi
 // Returns whether it ran to its RETURN.
 static bool tier0_test_int128_interpret(const Tier0TestInt128Program* program, const uint64_t parameters[3], uint8_t* visited)
 {
+    Tier0TestWide objects[BUSTER_TIER0_TEST_INT128_OBJECTS] = { 0 };
     memset(visited, 0, program->count);
     Tier0TestInt128Value stack[64];
     uint32_t depth = 0;
@@ -518,6 +572,16 @@ static bool tier0_test_int128_interpret(const Tier0TestInt128Program* program, c
         {
             stack[depth].wide = class == BUSTER_TYPED_CLASS_I128 ? (Tier0TestWide)(__int128)(int64_t)value : (Tier0TestWide)value;
             depth += 1;
+        }
+        else if (kind == BUSTER_TYPED_LOCAL && wide)
+        {
+            stack[depth].wide = objects[value - 3];
+            depth += 1;
+        }
+        else if (kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+        {
+            objects[value - 3] = stack[depth - 1].wide;
+            depth -= kind == BUSTER_TYPED_SET_LOCAL ? 1 : 0;
         }
         else if (kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL)
         {
@@ -601,6 +665,10 @@ static bool tier0_test_int128_interpret(const Tier0TestInt128Program* program, c
         {
             next = (uint32_t)value;
         }
+        else if (kind == BUSTER_TYPED_DISCARD)
+        {
+            depth -= 1;
+        }
         else if (kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_STORE)
         {
             uint8_t* address = (uint8_t*)(uintptr_t)stack[depth - 2].bits;
@@ -675,8 +743,9 @@ static void tier0_test_int128_run_body(const void* code, Tier0TestInt128Shared* 
 // count (of programs whose native run matched it), not a ?:'s arm it skipped. For each 128-bit class apart (index 0
 // I128, 1 U128: their signed and unsigned code differs), in bitmaps of their own so that no bit of one stands for
 // another's: each kind of entry of the class (CONST, DUP, NEG, NOT, LOAD, STORE, SET, ADD to XOR but division, the
-// shifts, JUMP_VALUE, and each compare of two values of it), each conversion to it by its source class and from it by
-// its destination class, MUL's and the shifts' saves of rax, rdx and rcx, and both arms of a ?: of the class.
+// shifts, JUMP_VALUE, LOCAL, STORE_LOCAL and SET_LOCAL on frame objects, and each compare of two values of it), each
+// conversion to it by its source class and from it by its destination class, MUL's and the shifts' saves of rax, rdx and
+// rcx, and both arms of a ?: of the class.
 typedef struct Tier0TestInt128Reach Tier0TestInt128Reach;
 struct Tier0TestInt128Reach
 {
@@ -770,7 +839,7 @@ static Tier0TestInt128Reach tier0_test_int128_wanted(void)
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_NOT, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET,
         BUSTER_TYPED_ADD,   BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_AND, BUSTER_TYPED_OR,   BUSTER_TYPED_XOR,   BUSTER_TYPED_SHL,
         BUSTER_TYPED_SHR,   BUSTER_TYPED_EQ,  BUSTER_TYPED_NE,  BUSTER_TYPED_LT,  BUSTER_TYPED_LE,   BUSTER_TYPED_GT,    BUSTER_TYPED_GE,
-        BUSTER_TYPED_JUMP_VALUE,
+        BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_SET_LOCAL,
     };
     Tier0TestInt128Reach wanted = { 0 };
     for (uint32_t index = 0; index < 2; index += 1)
@@ -1467,8 +1536,8 @@ struct Tier0TestInt128Break
 
 // Each break of the stream's rules for the 128-bit integers, at its entry, then the valid ones beside them: a value local
 // of the class, a global read or stored as one, division, a conversion to and from a floating class, a branch on one, a
-// return of one, a call's argument and result of one, a shift by one, and an entry of the class in a function without
-// int128.
+// return of one, a call's argument and result of one, a shift by one, an entry of the class in a function without
+// int128, and LOCAL or SET_LOCAL of one on a value local, on an object smaller than 16 bytes and on a va_list.
 static void tier0_test_int128_rules(Tier0TestTally* tally, const Tier0TestInt128Abi* abi)
 {
     static const Tier0TestInt128Break breaks[] = {
@@ -1485,6 +1554,10 @@ static void tier0_test_int128_rules(Tier0TestTally* tally, const Tier0TestInt128
         { "a call's result of it", 2 },
         { "a shift by it", 2 },
         { "an entry of the class without int128", 0 },
+        { "LOCAL of a value local", 0 },
+        { "LOCAL of an object of 8 bytes", 0 },
+        { "SET_LOCAL into a va_list", 1 },
+        { "valid: LOCAL, STORE_LOCAL and SET_LOCAL of objects of 16 and 24 bytes", UINT32_MAX },
         { "valid: NOT, AND, a shift by a U8, conversions and a compare", UINT32_MAX },
     };
     const uint32_t s = BUSTER_TYPED_CLASS_I128;
@@ -1574,6 +1647,38 @@ static void tier0_test_int128_rules(Tier0TestTally* tally, const Tier0TestInt128
         case 12:
             tier0_test_int128_put(&written, BUSTER_TYPED_CONST, s, 1);
             tier0_test_int128_put(&written, BUSTER_TYPED_DISCARD, s, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 13:
+        case 14:
+            // A U64's local, and an object with room for half the value.
+            tier0_test_int128_local(&written, 0, b == 13 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_VOID);
+            written.local_sizes[0] = b == 13 ? 0 : 8;
+            written.local_alignments[0] = b == 13 ? 0 : 3;
+            tier0_test_int128_put(&written, BUSTER_TYPED_LOCAL, s, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_DISCARD, s, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 15:
+            // A va_list's descriptor, which only LOCAL_ADDRESS reaches.
+            tier0_test_int128_local(&written, 0, BUSTER_TYPED_CLASS_U64);
+            written.local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VA_LIST;
+            tier0_test_int128_put(&written, BUSTER_TYPED_CONST, s, 1);
+            tier0_test_int128_put(&written, BUSTER_TYPED_SET_LOCAL, s, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
+        case 16:
+            tier0_test_int128_local(&written, 0, BUSTER_TYPED_CLASS_VOID);
+            tier0_test_int128_local(&written, 1, BUSTER_TYPED_CLASS_VOID);
+            written.local_sizes[1] = 24;
+            written.local_alignments[1] = 3;
+            tier0_test_int128_put(&written, BUSTER_TYPED_CONST, s, 5);
+            tier0_test_int128_put(&written, BUSTER_TYPED_SET_LOCAL, s, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_LOCAL, u, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_STORE_LOCAL, u, 1);
+            tier0_test_int128_put(&written, BUSTER_TYPED_LOCAL, u, 1);
+            tier0_test_int128_put(&written, BUSTER_TYPED_ADD, u, 0);
+            tier0_test_int128_put(&written, BUSTER_TYPED_DISCARD, u, 0);
             tier0_test_int128_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
             break;
         default:

@@ -258,6 +258,9 @@ int run_bind_benchmark(int argc, char** argv);
 #include "buster/compiler/executable.c"
 #include "buster/compiler/executable_test.c"
 #include "buster/compiler/debug_executable_test.c"
+// The object writer's DWARF checks (ObjectOptions.debug), which test-object-writer runs: they need debug.c's units and
+// the executable tests' ELF reading.
+#include "buster/compiler/object_debug_test.c"
 int run_executable_benchmark(int argc, char** argv);
 
 // A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.

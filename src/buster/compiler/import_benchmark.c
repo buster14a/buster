@@ -802,14 +802,15 @@ int run_import_benchmark(int argc, char** argv)
                benchmark->capacity.symbols, benchmark->capacity.fixups);
         result = import_benchmark_case(benchmark, &arena);
     }
-    // The files: the runtime's libc.so.6 and libc_nonshared.a, then the ones the arguments name.
+    // The files: the runtime's libc.so.6 and libc_nonshared.a (libgcc.a is the static runtime's row's too), then the ones
+    // the arguments name.
     const int cycles_counter = result ? import_benchmark_counter(PERF_COUNT_HW_CPU_CYCLES) : -1;
     const int instructions_counter = result ? import_benchmark_counter(PERF_COUNT_HW_INSTRUCTIONS) : -1;
     if (result)
     {
         result = import_benchmark_file(IMPORT_BENCHMARK_LIBRARY, "libc.so.6", runtime.libc_bytes, cycles_counter, instructions_counter, &arena) &&
                  import_benchmark_index("libc.so.6", runtime.libc_bytes, cycles_counter, instructions_counter, &arena);
-        result = result && import_benchmark_file(IMPORT_BENCHMARK_ARCHIVE, "libc_nonshared.a", runtime.archives[0].bytes, cycles_counter, instructions_counter, &arena);
+        result = result && import_benchmark_file(IMPORT_BENCHMARK_ARCHIVE, "libc_nonshared.a", runtime_libc_archive(&runtime)->bytes, cycles_counter, instructions_counter, &arena);
         result = result && import_benchmark_script(runtime.libc_script, cycles_counter, instructions_counter, &arena);
         result = result && import_benchmark_runtime_import(RUNTIME_KIND_DYNAMIC, cycles_counter, instructions_counter);
     }
