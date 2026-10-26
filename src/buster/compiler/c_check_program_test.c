@@ -167,6 +167,11 @@ static const char check_test_program_harness[] =
     "unsigned long fp_bits(double d){union{double d;unsigned long u;}x={d};return x.u;}\n"
     "unsigned fp_bitsf(float f){union{float f;unsigned u;}x={f};return x.u;}\n"
     "int set_math_errno(int n){errno=n;return 0;}int get_math_errno(void){return errno;}\n"
+    // _BitInt values (#148) taken and returned in their classes' registers, as clang extends them, one stored through a
+    // pointer, and a function of the program's called with them.
+    "unsigned _BitInt(5) external_bit_int(_BitInt(5) a,unsigned _BitInt(13) b,_BitInt(40) c,unsigned _BitInt(5)*p){*p=(unsigned _BitInt(5))b;"
+    "return (unsigned _BitInt(5))a+(unsigned _BitInt(5))(c>>35);}\n"
+    "int external_bit_apply(unsigned _BitInt(13)(*f)(_BitInt(5),unsigned _BitInt(27)),int n){return (int)f((_BitInt(5))(n%16),(unsigned _BitInt(27))(n*1000003));}\n"
     // A result through a hidden pointer, which clang takes as aligned to the union's 16: w is the pointer's bytes
     // (clang -O0 returns in place), and a misaligned one shows in the first byte.
     "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
@@ -695,9 +700,56 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+// _BitInt values narrower than their classes (#148): kept extended from their widths, a narrow one's operations computed
+// in 32 bits, against clang -O0. Unsigned ones are spelled out, since a typedef of one loses its unsignedness on main.
+#define BUSTER_CHECK_TEST_BIT_INTS \
+    "typedef _BitInt(5) S5;typedef _BitInt(13) S13;typedef _BitInt(40) S40;\n#define U5 unsigned _BitInt(5)\n" \
+    "#define U13 unsigned _BitInt(13)\n#define U27 unsigned _BitInt(27)\n#define U40 unsigned _BitInt(40)\n" \
+    "static S5 table[3]={-3,7,-16};U5 u5(int n){return (U5)n;}S5 s5(int n){return (S5)(n%16);}"
+
+static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "int tested(int n){U5 a=u5(n*3),b=u5(n+29);U5 c=a+b,d=a*b,e=a-b,f=~a,g=a<<2,h=a>>1,i=a/(U5)(b|1u),j=a%(U5)(b|1u);"
+        "S5 p=s5(n),q=s5(n+3);S5 r=-p,s=p&q,t=p^q,v=(S5)(p|q),k=p>>1;"
+        "U13 big=(U13)(n*1000);big*=7;big<<=3;big-=(U13)n;big++;--big;big^=0x155;U27 m=(U27)n*1000003u;m+=(U27)0x7ffffff;"
+        "U40 w=(U40)n*(U40)123456789;w+=w;w>>=3;S40 x=(S40)n*(S40)1000000;"
+        "unsigned acc=(unsigned)c+3u*d+5u*e+7u*f+11u*g+13u*h+17u*(unsigned)(int)r+19u*(unsigned)(int)s+23u*i+29u*j;"
+        "acc=acc*31u+(unsigned)(int)t+(unsigned)(int)v*3u+(unsigned)(int)k*5u+big*3u+m%1000u+(unsigned)(w%1000)+(unsigned)(x%997);"
+        "return (int)(acc%1000003)+(a<b)+(p<q)*2+(big>4000)*4+(w>=x)*8+(a==0)*16+!p*32;}",
+        "bit-int-arithmetic", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "struct F{S5 x:3;U13 y:9;S40 z:20;};"
+        "int tested(int n){U5 a=u5(n*3);S5 p=s5(n);int sw=0;"
+        "switch(a){case 3:sw=1;break;case 30:sw=2;break;case 9 ... 12:sw=4;break;default:sw=3;}"
+        "switch(p){case -1:sw+=10;break;case -16 ... -10:sw+=20;break;default:sw+=30;}"
+        "struct F fs={0};fs.x=(S5)(n&3);fs.y=(U13)(n*37);fs.z=(S40)(n-7)*1000;fs.y+=300;fs.x-=1;"
+        "S13 dst=0;int o=__builtin_mul_overflow(n*1000,7,&dst);U5 small=0;int o2=__builtin_add_overflow(n,20,&small);"
+        "S5 kk=(S5)-3;S5 z=(S5)(kk+(S5)1);"
+        "return sw+(int)fs.x*100+(int)fs.y*1000+(int)(fs.z%1000)*7+o*13+o2*17+(int)dst*3+(int)small*19+(int)table[n&1]*23+(int)z*29;}",
+        "bit-int-switches-fields-and-overflow-destinations", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "unsigned _BitInt(5) external_bit_int(_BitInt(5),unsigned _BitInt(13),_BitInt(40),unsigned _BitInt(5)*);"
+        "int external_bit_apply(unsigned _BitInt(13)(*)(_BitInt(5),unsigned _BitInt(27)),int);"
+        "U13 mine(S5 a,U27 b){return (U13)(b%8000)+(U13)a;}"
+        "int tested(int n){union{unsigned char c;U5 v;}pu;pu.c=(unsigned char)(0xe0|n);union{unsigned char c;S5 v;}ps;ps.c=(unsigned char)(0xa0+n);"
+        "union{unsigned long l;U40 v;S40 s;}pw;pw.l=0xfedcba9876543210UL+(unsigned long)n;"
+        "static S5 t2[2]={-3,9};static U13 t3[2]={8000,3};static S40 t4=-5;"
+        "const unsigned char*b=(const unsigned char*)t2;const unsigned char*c=(const unsigned char*)t3;const unsigned char*d=(const unsigned char*)&t4;"
+        "union{S5 v;unsigned char c;}u1;u1.v=s5(n);union{U13 v;unsigned short s;}u2;u2.v=(U13)(n*1000);u2.v+=7000;"
+        "U5 q=0;U5 r=external_bit_int(s5(n),(U13)(n*700),(S40)n*1073741824,&q);"
+        "return (int)pu.v+(int)ps.v*7+(int)(pw.v%1009)+(int)(pw.s%1013)*3+b[n&1]+c[n&3]*3+d[n&7]*5+u1.c*11+u2.s*13+"
+        "(int)r*100+(int)q+external_bit_apply(mine,n)*1000;}",
+        "bit-int-memory-and-calls", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_long_double_builtins(test, clang);
+    check_test_program_bit_ints(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);

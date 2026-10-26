@@ -73,14 +73,17 @@ class and a new temporary-local range. It leaves one result on the typed value
 stack and preserves values already below it. Overflow stores the converted
 low result through the supplied pointer before producing the boolean. Runtime
 descriptors currently represent ordinary signed/unsigned 8-, 16-, 32- and
-64-bit integers, unsigned one-bit booleans in byte storage, and 128-bit
-integers (`BUSTER_CBUILTIN_LOWER_WIDE`, signed or not: a width's seven bits
-stop at 127). Boolean stores retain the low mathematical bit; they do not use
-the ordinary nonzero-to-true cast. A 128-bit operand's slot is an address-taken
-frame object (class VOID) holding its 16 bytes, which the recipe reads as two
-64-bit limbs, and a 128-bit destination takes its two limbs in two stores.
-Other bit-precise memory representations return an explicit unsupported
-status.
+64-bit integers, unsigned one-bit booleans in byte storage, `_BitInt`s of the
+other widths to 64 bits, and 128-bit integers (`BUSTER_CBUILTIN_LOWER_WIDE`,
+signed or not: a width's seven bits stop at 127). Boolean stores retain the low
+mathematical bit; they do not use the ordinary nonzero-to-true cast. A
+`_BitInt`'s slot is the narrowest class of 8, 16, 32 or 64 bits that holds it,
+its value extended from its width there, as clang stores it and the source
+producer keeps it, and a `_BitInt` destination takes its value extended so,
+by a pair of shifts. A 128-bit operand's slot is an address-taken frame object
+(class VOID) holding its 16 bytes, which the recipe reads as two 64-bit limbs,
+and a 128-bit destination takes its two limbs in two stores. Wider bit-precise
+types return an explicit unsupported status.
 
 The caller supplies mutually disjoint kind, class, value, local-class and
 local-flag columns, writable to their declared capacities and disjoint from
