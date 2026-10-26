@@ -46,10 +46,11 @@ static bool x86_target_test_templates(void)
         if (passed && encoder == X86_ENCODER_MODE_64)
         {
             // An isolated opcode change proves that the shared home uses the supplied table, not its own copy.
+            // NOP's template keeps an optional REX slot before its opcode.
             descriptions[X86_FORM_NOP].opcode = 0x91;
             passed &= x86_build_nonlegacy_templates(encoder, descriptions, copied);
-            passed &= copied[X86_FORM_NOP].template.bytes[0] == 0x91 && copied[X86_FORM_NOP].bytes[0] == 0x91;
-            passed &= copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].template.bytes[0] == 0x91 && copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].bytes[0] == 0x91;
+            passed &= copied[X86_FORM_NOP].template.bytes[1] == 0x91 && copied[X86_FORM_NOP].bytes[1] == 0x91;
+            passed &= copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].template.bytes[1] == 0x91 && copied[BUSTER_X86_FORM_FIXUP + X86_FORM_NOP].bytes[1] == 0x91;
             passed &= x86_form_descriptions[X86_FORM_NOP].opcode == 0x90;
             descriptions[X86_FORM_NOP].opcode = x86_form_descriptions[X86_FORM_NOP].opcode;
         }
