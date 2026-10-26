@@ -3518,7 +3518,10 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
-  its error, three columns before it (clang reads one past an identifier's first character silently);
+  its error, three columns before it (clang reads one past an identifier's first character silently); one in an
+  identifier of 40,000, each an error within 10 s (`pp_test_named_ucn_scaling`); and one, or a trigraph's `??/`,
+  across the edges of the 64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by
+  both kernels, whole and a window at a time (`pp_test_named_ucn_boundaries`);
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that

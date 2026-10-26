@@ -4382,6 +4382,95 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
     return failures == 0;
 }
 
+// #455's review: a named UCN at each place where the vector kernels' search (pp_scan_named_ucn_chunks) changes what it
+// reads: its backslash in the last byte of a 64-byte chunk and of a bitmap word's 4 KB and in the first, and with
+// trigraphs its ??/ across those (its '/' a chunk's or a word's first byte). Lines of "x" before it put it there, and
+// after it more of them make the file four windows of 4 KB, which the vectorized kernels prepare a window at a time
+// (PPOptions.window_bytes), so that it falls at windows' ends too; then whole, and by the scalar kernels. Each run
+// must give the one error, at the UCN's place.
+static bool pp_test_named_ucn_boundaries(const char* directory)
+{
+    static const uint32_t places[] = { 0, 1, 62, 63, 64, 65, 126, 127, 4030, 4031, 4094, 4095, 4096, 4097, 8190, 8191, 8192, 8193, 12286, 12287, 12288 };
+    static char source[20480];
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/case.c", directory);
+    uint32_t failures = 0;
+    uint32_t runs = 0;
+    for (uint32_t trigraphs = 0; trigraphs < 2; trigraphs += 1)
+    {
+        for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(places); p += 1)
+        {
+            const uint32_t at = places[p];
+            uint32_t length = 0;
+            for (uint32_t line = 0; line < at / 2; line += 1)
+            {
+                source[length] = 'x';
+                source[length + 1] = '\n';
+                length += 2;
+            }
+            if (at % 2 != 0)
+            {
+                source[length] = ' ';
+                length += 1;
+            }
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%sN{GREEK SMALL LETTER ALPHA}\n", trigraphs != 0 ? "?" "?/" : "\\");
+            while (length < 16384 + 64)
+            {
+                source[length] = 'x';
+                source[length + 1] = '\n';
+                length += 2;
+            }
+            bool result = pp_test_write_bytes(path, source, length);
+            char standard[] = "-std=gnu17";
+            char iso[] = "-std=c17";
+            char* arguments[] = { trigraphs != 0 ? iso : standard, path, 0 };
+            for (uint32_t run = 0; result && run < 3; run += 1)
+            {
+                Arena arena = arena_reserve(1ull << 20);
+                PPOptions options;
+                const char* input;
+                const char* output;
+                bool markers;
+                result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+                char* diagnostics = 0;
+                size_t size = 0;
+                FILE* stream = result ? open_memstream(&diagnostics, &size) : 0;
+                options.scalar = run == 2;
+                options.window_bytes = run == 0 ? 4096 : 0;
+                options.diagnostics = stream;
+                static InternTable table;
+                static Preprocessor pp;
+                const bool ready = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+                const bool ran = ready && pp_run(&pp, path);
+                const uint32_t errors = ready ? pp.errors : 0;
+                if (ready)
+                {
+                    pp_release(&pp);
+                    intern_release(&table);
+                }
+                result = stream != 0 && fclose(stream) == 0 && ready && !ran;
+                uint64_t found[2];
+                uint32_t count = 0;
+                result = result && pp_test_named_places(diagnostics, "error: \\N{...} escapes are not supported", 0, found, BUSTER_ARRAY_LENGTH(found), &count);
+                result = result && errors == 1 && count == 1 && found[0] == ((uint64_t)(at / 2 + 1) << 32 | (at % 2 + 1));
+                if (!result)
+                {
+                    printf("named UCNs: at byte %u%s (%s): %u errors, not one at %u:%u:\n%s", at, trigraphs != 0 ? " as a trigraph" : "",
+                           run == 0 ? "vectorized kernels, windows of 4 KB" : run == 1 ? "vectorized kernels, whole" : "scalar kernels", errors, at / 2 + 1,
+                           at % 2 + 1, diagnostics != 0 ? diagnostics : "");
+                }
+                free(diagnostics);
+                arena_release(&arena);
+                runs += 1;
+            }
+            failures += !result;
+        }
+    }
+    unlink(path);
+    printf("named UCNs: %u of %lu places at chunks', words' and windows' edges fail (%u runs)\n", failures, (unsigned long)(2 * BUSTER_ARRAY_LENGTH(places)), runs);
+    return failures == 0;
+}
+
 // An identifier of BUSTER_PP_TEST_NAMED_UCNS named UCNs in a row (#455's review): each an error, by both kernels (the
 // vectorized ones prepare its file of about 1.1 MB a window at a time, and the scalar ones whole, both recording the
 // errors after its refinement, when an identifier's value is its id), in time in proportion to its length. Finding each UCN's identifier's end from its start took time in
@@ -6819,6 +6908,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_raw_recovery_failures();
         passed_all &= pp_test_named_ucns(directory, with_clang);
         passed_all &= pp_test_named_ucn_scaling(directory);
+        passed_all &= pp_test_named_ucn_boundaries(directory);
         passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
