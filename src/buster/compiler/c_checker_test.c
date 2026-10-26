@@ -1893,9 +1893,10 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     for (uint32_t p = 0; p < 2; p += 1)
     {
         ready = ready && parse_initialize(&parsers[p], &parser_options[p], pp_options.language) && check_test_types_open(&types[p]);
-        input_storage[p] = arena_reserve(UINT64_C(1) << 24);
-        output_storage[p] = arena_reserve(UINT64_C(1) << 24);
-        scratch[p] = arena_reserve(UINT64_C(1) << 24);
+        // Room for check_test_initializer_nesting's 300,000 levels; only what a fixture uses is touched.
+        input_storage[p] = arena_reserve(UINT64_C(1) << 28);
+        output_storage[p] = arena_reserve(UINT64_C(1) << 28);
+        scratch[p] = arena_reserve(UINT64_C(1) << 28);
         ready = ready && input_storage[p].base != 0 && output_storage[p].base != 0 && scratch[p].base != 0;
     }
     ready = ready && pp_run_source(&pp, path, (const uint8_t*)fixture->source, (uint32_t)strlen(fixture->source));
@@ -3755,6 +3756,103 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
     }
 }
 
+// #480's fifth review: an inferred array's struct element in d parentheses, or after d ?:'s, has its type read from the
+// tree's links in one pass, not from a scan of what's left at each level. Against clang at depths it parses (its
+// brackets stop at 256), then alone, timed: 60,000 parentheses and 40,000 ?:'s must check within 20 times what a tenth
+// of them takes, plus 0.2 s, as linear work does. The scans took 0.62 s for 30,000 parentheses on the laptop and 1.16 s
+// for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times doesn't allow.
+static bool check_test_nesting_source(Arena* text, uint32_t form, uint32_t depth, const char* path)
+{
+    const char literal[] = "(struct S){ .x = 1 }";
+    const uint64_t capacity = (uint64_t)depth * 8 + 512;
+    char* source = BUSTER_ARENA_PUSH_ARRAY(text, char, capacity);
+    uint64_t length = 0;
+    if (source != 0)
+    {
+        length += (uint64_t)snprintf(source, capacity, "struct S { int x; int y; };\nvoid f(struct S s) {\n    struct S a[] = { ");
+        for (uint32_t level = 0; level < depth; level += 1)
+        {
+            memcpy(source + length, form == 0 ? "(" : "0 ? s : ", form == 0 ? 1 : 8);
+            length += form == 0 ? 1 : 8;
+        }
+        memcpy(source + length, literal, sizeof(literal) - 1);
+        length += sizeof(literal) - 1;
+        for (uint32_t level = 0; form == 0 && level < depth; level += 1)
+        {
+            source[length++] = ')';
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, ", %s };\n    _Static_assert(sizeof a == 2 * sizeof(struct S), \"two elements\");\n}\n", literal);
+    }
+    const bool valid = source != 0 && length < capacity && parse_test_write(path, source, length);
+    return valid;
+}
+
+static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* test, const char* clang)
+{
+    static const uint32_t compared[] = {
+        64,
+        200,
+    };
+    static const uint32_t timed[] = {
+        60000,
+        40000,
+    };
+    char directory[] = "/tmp/buster-checker-nesting-XXXXXX";
+    const bool created = mkdtemp(directory) != 0;
+    check_test_expect(test, created, "initializer nesting fixtures' directory");
+    for (uint32_t form = 0; created && form < 2; form += 1)
+    {
+        const char* name = form == 0 ? "a struct element in nested parentheses" : "a struct element after nested ?:'s";
+        const char* levels = form == 0 ? "parentheses" : "?:'s";
+        // Depths clang parses, against its answer, and then a tenth of the timed depth and the timed depth itself.
+        double seconds[2] = { 0 };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compared) + 2; c += 1)
+        {
+            const bool timing = c >= BUSTER_ARRAY_LENGTH(compared);
+            const uint32_t depth = !timing ? compared[c] : c == BUSTER_ARRAY_LENGTH(compared) ? timed[form] / 10 : timed[form];
+            char path[96];
+            snprintf(path, sizeof(path), "%s/%u.c", directory, form * 8 + c);
+            char* paths[] = {
+                path,
+            };
+            const char* arguments[] = {
+                "-std=gnu17",
+            };
+            Arena text = arena_reserve((uint64_t)depth * 8 + 4096);
+            ParseTestClang outcome = { 0 };
+            bool ready = check_test_nesting_source(&text, form, depth, path);
+            ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
+            char description[200];
+            snprintf(description, sizeof(description), "%u %s around an inferred array's struct element: %s", depth, levels,
+                     timing ? "the fixture is written" : "clang accepts it");
+            check_test_expect(test, ready && !outcome.rejected, description);
+            if (ready)
+            {
+                const CheckSourceFixture fixture = {
+                    .name = name,
+                    .source = (const char*)text.base,
+                };
+                struct timespec start;
+                struct timespec stop;
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                check_test_source(test, &fixture, path, &outcome);
+                clock_gettime(CLOCK_MONOTONIC, &stop);
+                seconds[timing ? c - BUSTER_ARRAY_LENGTH(compared) : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : 0;
+            }
+            unlink(path);
+            arena_release(&text);
+        }
+        char description[200];
+        snprintf(description, sizeof(description), "%u %s checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", timed[form], levels, seconds[1],
+                 timed[form] / 10, seconds[0]);
+        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+    }
+    if (created)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_type_capacity(CheckTest* test)
 {
     static InternTable identifiers;
@@ -3966,6 +4064,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&output);
             arena_release(&storage);
             check_test_sources(&test, clang);
+            check_test_initializer_nesting(&test, clang);
             check_test_source_extensions(&test, clang);
             check_test_overloads(&test, clang);
             check_test_overload_sources(&test, clang);
