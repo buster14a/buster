@@ -24,8 +24,15 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 2. **The file scope's history.** `c_environment_build` (#319's index,
    [the environment guide](c-environments.md)) indexes the top level's
    file-scope declarations by name and activation position.
-3. **The lanes.** The reader runs no more lanes than bodies.
-   `lane_parts_by_cost` cuts the bodies into parts by token count and each
+3. **The lanes.** The reader runs one lane, and one more per
+   `BUSTER_CHECK_DEFERRED_LANE_TOKENS` (12,288) of the bodies' tokens beyond
+   twice the largest body's, with no more lanes than it is given or than
+   bodies: a lane costs its copy of the reader and its wake-up, which its share
+   of the walks must pay for, and a lane woken for the bodies reads them at
+   about half the first lane's speed, so the lane that takes the largest body
+   may take twice as long as the first would ("How many lanes", below).
+   `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
+   and `test-checker-corpus` do. `lane_parts_by_cost` cuts the bodies into parts by token count and each
    lane takes parts with `lane_take`, costliest first. A lane copies the top
    level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
@@ -141,21 +148,38 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 39 fixtures of the
-  issue's cases, each written to a file and checked as `test-checker-corpus`
-  checks one: on the scalar path, the vector path, and the vector path with
-  every body read apart, on 1, 2, 3 and 8 lanes through the stacks, the batch
-  and the direct binding resolution. The deferred result must be the vector
-  path's column for column, and each fixture says whether the reader merges it.
-  A merged unit's bodies must run on no more lanes than they are
-  (`CheckDeferred.active`), and its reader be copied by one of them at least and
-  by no more (`CheckDeferred.copies`). Each fixture that merges runs again on 8
-  lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
+- `./build/compiler test-checker-deferred [--keep]`: 45 fixtures, 39 of the
+  issue's cases and 6 of the lanes' rule, each written to a file and checked as
+  `test-checker-corpus` checks one: on the scalar path, the vector path, and the
+  vector path with every body read apart, on 1, 2, 3 and 8 lanes through the
+  stacks, the batch and the direct binding resolution, the issue's cases on
+  every lane their bodies can take (`CheckDeferred.every_lane`). The
+  deferred result must be the vector path's column for column, and each fixture
+  says whether the reader merges it. A merged unit's bodies must run on the
+  rule's lanes (`CheckDeferred.active`), and its reader be copied by one of them
+  at least and by no more (`CheckDeferred.copies`). Each of the issue's cases
+  runs again on 8 lanes by the reader's own rule, which reads most of them on
+  one. The rule's fixtures are functions of empty statements whose bodies have
+  known tokens, read by the rule alone, whose bodies, tokens, largest body and
+  lanes must be the ones they were made with: on each side of a second lane
+  (`BUSTER_CHECK_DEFERRED_LANE_TOKENS` tokens beyond twice the largest body's,
+  and one fewer) and of an eighth (seven times as many, and one fewer), and a
+  largest body of four times as many beside four bodies of as many, a token
+  fewer, which take one lane, and beside five, which take two. Mutants of the
+  rule fail: main's cap of as many lanes as bodies and a lane too many 54
+  checks each, the largest body counted once 33, a ceiling's division 17, and
+  `every_lane` not read 186. Each of the issue's cases that merges runs again
+  on 8 lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
   no other lane may copy the reader; on 1 and 8 lanes with its merge failing
   right after the replay (`CheckDeferred.fail_after_replay`), which must give
   source order's result; and with the allocation of the reader's state failing
   (`check_corpus_deferred_fail_state`), which must count as a resource failure
-  (`test-checker-corpus`'s `resources`), not as a result that differs. Then
+  (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
+  bodies are read again with the reader timing what its lanes cost
+  (`CheckDeferred.timing`), on one lane and on every one of 8: one lane must
+  wait for no other, and `lane_run`'s dispatch and the wake-up must fall within
+  the lanes' span. A copy whose wake-up counts from `lane_run`'s call, and one
+  whose dispatch is the lanes' span, each fail it. Then
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
   refused without a write past the room, and so are malformed lists.
@@ -179,7 +203,10 @@ passes every checker test.
   five tags' fixtures, and one without the table's reset 19 fixtures.
 - `./build/compiler test-checker-corpus --deferred N [--deferred-bindings
   stacks|batch|direct] ...` adds the deferred reader on N lanes as a third path
-  to each file's comparison, which must give the vector path's columns; a
+  to each file's comparison, on every lane the bodies can take up to N
+  (`CheckDeferred.every_lane`: how many lanes read the bodies doesn't change
+  the merge's result, which the comparison checks on as many as it can), which
+  must give the vector path's columns; a
   difference counts as a path difference and prints the first differing
   column. The summary gives the units merged and left to source order, their
   bodies, the differences, and the units left to source order by reason.
@@ -203,16 +230,34 @@ c-testsuite, SQLite and Lua.
 ## Measurements
 
 `./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [preprocessor options] file...` preprocesses each file once, then per
-pass parses it and checks it by source order's `check_input` and by the
-deferred reader on one lane and on `--lanes` (8), in turns that rotate. It
-reports medians in nanoseconds per token: the parse; source order's reading;
-and each deferred reading's whole, its top level, the history's index, the
-bodies' walks and their position checks (summed over the lanes), the lanes'
-span, the merge and the rest (the phases after the merge); the position checks
-per body too, and the lanes that copied the reader (`copies`). `--cpus` pins the
-command to the first CPU, where the parse,
-source order and the top level run, and its lanes to the list.
+LIST] [--every-lane] [preprocessor options] file...` preprocesses each file
+once, then per pass parses it and checks it by source order's `check_input` and
+by the deferred reader on one lane and on up to `--lanes` (8), in their six
+orders, one a pass in turn: in any six passes in a row, each reading comes
+first, after the parse, twice, and after each other reading twice, so
+`--passes` is a multiple of six, 24 by default. A deferred reading ran up to 3%
+faster after the deferred reader's own than after source order's. The three
+orders that rotated before put the reading on `--lanes` after the one on one
+lane in two passes of three, and the six in 21 passes, as #448's review
+counted, put it there 8 times and after source order's 6. It reports the
+bodies, their tokens and the largest body's, and medians
+in nanoseconds per token: the parse; source order's reading; and each deferred
+reading's whole, its top level, the history's index, the bodies' walks and
+their position checks (summed over the lanes), the lanes' span, the merge and
+the rest (the phases after the merge); the position checks per body too, the
+lanes the bodies ran on (`active`: as many as the rule gives them, or with
+`--every-lane` every lane they can take) and those that copied the reader
+(`copies`); and what a lane costs, in nanoseconds: a copy of the reader
+(`copy`); `lane_run`'s dispatch, from its call to the first lane's arrival at
+the partition (`dispatch`: the first lane's pinning and the others' wake
+calls); and the others' wake-up, from the first lane's arrival there to the
+last one's (`wake`, none on one lane), which is the first lane's wait at the
+partition's sync. Before #448's review, `wake` was the first lane's whole time
+in `lane_parts_by_cost`, its share of the boundaries and its order of the parts
+with its wait, and left the dispatch out. `--cpus` pins the command to the
+first CPU, where the parse, source order and the top level run, and its lanes
+to the list. The measurements before "How many lanes" were made with the three
+rotating orders.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
 `--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes
@@ -254,6 +299,88 @@ their own, nor `sqlite3.c`. Where the bodies are small, eight lanes still cost
 more than one (`00213.c`'s five bodies: 365 against 225 ns/token): a lane's copy
 and wake-up outweigh what a small body gives it.
 
+### How many lanes
+
+A lane costs its copy of the top level's reader and its wake-up, which only its
+share of the bodies' walks can pay for. On the 9700X, with `--cpus
+2,0,1,3,4,5,6,7` and the frozen corpus's options, each unit and lane count in a
+process of its own, the reader on 2 to 8 lanes against one lane, on 35 units:
+six of c-testsuite's programs, the frozen `sqlite3.c`, and 28 synthetic units
+of 2 to 70 bodies after `stdio.h`, `stdlib.h` and `string.h`, after thirty of
+the C library's headers or after none ([the record](https://github.com/buster14a/buster-performance/tree/8f57e7f6bf92fd7a9420079fc09c73a4a8985264/docs/measurements/deferred-lane-rule-113-2026-10-25)):
+
+- **A lane's copy** takes 30 to 70 µs when one lane makes it after the three
+  headers (95 to 110 µs after thirty, 350 µs on `sqlite3.c`), 50 to 120 µs on
+  average when two lanes copy at once, and 175 to 295 µs when eight do (360 to
+  405 µs, and 845 µs).
+- **The wake-up:** `lane_run`'s dispatch, from its call to the first lane's
+  arrival at the partition, takes 0.6 to 7.5 µs on one lane, where it pins the
+  first lane (more after a larger unit), and 1.1 to 10.7 µs on two lanes and
+  3.0 to 15.1 µs on eight, where it wakes the others too. The first lane then
+  waits at the partition for the last of the others: 15 to 24 µs on two lanes
+  (2 µs on the two units whose readings take under a millisecond, in five
+  rounds of their six) and 13 to 21 µs on eight. `lane_run` wakes the others
+  before the first lane enters, so on eight lanes their wake-up runs partly
+  during the dispatch: the last lane arrives 16 to 36 µs after `lane_run`'s
+  call on eight lanes, and 18 to 35 µs on two (3 µs on those two units). Before
+  #448's review, the wait's figure was the first lane's whole time in
+  `lane_parts_by_cost`, which counts the partition's own work too: 0.1 to 0.5
+  µs on one lane, which waits for no one, and on eight lanes within 1 µs of the
+  wait on the synthetic units but 6.7 µs above it on `sqlite3.c`'s 2,608
+  bodies (the record's log 9: six units, three rounds, each run a process).
+- **A woken lane's walk** of a body token takes 1.8 to 2 times the first
+  lane's (15 ns on the synthetic units). The first lane's CPU, 2, has the
+  performance governor and energy preference; the others, powersave and
+  `balance_performance`. So the lane that takes the largest body may take
+  twice as long as the first would: two equal bodies of 12,485 and 24,965
+  tokens each read 3.1 and 1.6% slower on two lanes than on one, where sixteen
+  bodies of 993 tokens (16,091 in all) read 0.8% faster, and 3.7% faster
+  without headers.
+
+The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+of the bodies' tokens beyond twice the largest body's: 12,288, between the
+most of those tokens on which a second lane lost (7,553: +1.5%, and +1.1%
+after thirty headers; 10,185: +0.3%) and the fewest on which it paid (13,902:
+−3.7%; 14,105: −0.8%, and +0.2% after thirty headers). The lanes it takes
+read within 1% of the grid's best on every unit but six. It forgoes the gains
+of four, which read faster on two lanes than on one: `00204.c` (2,114 tokens
+beyond twice its largest body) by 3.5%, sixteen bodies without headers (3,710)
+by 3.8%, and one body of 19,973 tokens beside fifteen of 1,981 (9,945) by
+3.3%, of 9,989 beside fifteen of 993 (5,109) by 1.3%. And it takes part of two
+gains: sixteen bodies of 1,981 tokens read 4.9% faster on four lanes and 3.6%
+on its three, and one of 9,989 beside fifteen of 1,981 4.9% faster on three
+and 3.8% on its two.
+
+Then the rule against main's, each on eight lanes against one lane in the same
+process, the medians of five rounds (main's rule is the same binary's with
+`--every-lane`), in nanoseconds per token:
+
+| Unit | Bodies' tokens beyond twice the largest's | The rule's lanes | Main's rule, 8 against 1 | The rule, 8 against 1 | Main's rule on 8 | The rule on 8 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `00213.c` (5 bodies) | 0 | 1 | +51.8% | +0.3% | 346.00 | 219.52 |
+| `00200.c` (2) | 0 | 1 | +18.7% | +0.0% | 80.80 | 66.94 |
+| `00182.c` (11) | 346 | 1 | +23.2% | −0.0% | 109.44 | 86.08 |
+| `00204.c` (108) | 2,114 | 1 | +9.7% | +0.1% | 103.60 | 91.91 |
+| `sqlite3.c` (2,608) | 497,917 | 8 | −12.5% | −12.8% | 105.62 | 105.24 |
+| two bodies of 12,485 tokens | 203 | 1 | +10.7% | +0.6% | 80.69 | 71.70 |
+| sixteen of 993 | 14,105 | 2 | +4.4% | −0.3% | 76.09 | 71.64 |
+| sixteen of 1,981 | 27,937 | 3 | −1.8% | −3.9% | 69.98 | 67.89 |
+| one of 19,973, fifteen of 4,009 | 40,365 | 4 | −6.2% | −7.9% | 70.83 | 69.01 |
+| sixteen of 4,009 | 56,329 | 5 | −7.8% | −7.6% | 67.33 | 67.15 |
+| sixteen of 8,013 | 112,385 | 8 | −10.8% | −10.7% | 69.35 | 69.45 |
+
+Of all 35 units, the rule's reading on eight lanes came within +0.7% of its
+reading on one, and within +0.3% on all but three, which it reads on one lane
+both times; main's was up to 52% slower. The rule's eight lanes cost no more than
+main's on any unit beyond the runs' spread (+0.1% on the units both read on
+eight lanes), and on `00182.c` and `00204.c`, 21% and 11% less. On
+c-testsuite's 220 programs, in one round, main's rule read 71 more than 2%
+slower on eight lanes than on one, 50 more than 5% (`00215.c` 80%). The rule
+reads every one of them on one lane, so its two readings are the same work:
+they came within 0.9% of each other on the 62 programs of 1,000 tokens or
+more, and within the noise of readings of tens of microseconds on the others
+(a standard deviation of 2.9% under 100 tokens).
+
 ## What is left
 
 The top level, the merge and the phases after it are sequential, so the lanes
@@ -261,6 +388,20 @@ shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading.
 (above) send their unit to source order. Intrinsic declarations, block-scope
 declarations with linkage and transparency made in a body are the next to
 merge.
+
+A lane's cost decides how many lanes pay. Its copy grows with the lanes that
+copy at once: each lane maps and advises five arenas at every reading and
+faults their pages in afresh, and on the laptop perf shows the lanes' `mmap`
+and `madvise` calls waiting on each other for the address space's lock. Arenas
+kept across readings would spare that. And the costliest part goes to
+whichever lane takes first, which may be a woken one: two lanes read
+`00200.c`, a body of 20,420 tokens beside one of 30, 19% slower than one did.
+That is why the rule counts the largest body twice. Leaving the largest bodies
+to the first lane would let a unit of one large body beside many smaller ones
+take the lanes it pays for, which the rule now forgoes. A unit the rule reads
+on one lane still goes through `lane_run`, which pins its lane and puts its
+affinity back: 0.6 to 7.5 µs of the dispatch on the 9700X, which a direct call
+would spare.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external

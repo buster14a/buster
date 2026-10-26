@@ -4050,26 +4050,40 @@ A unit it can't merge yet (a body with a declaration with linkage, a
 transparent union or an intrinsic, a completion of its parameter-list tag, an
 error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
 
+The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+of the bodies' tokens beyond twice the largest body's, no more than its lanes
+or the bodies: a lane's copy of the reader and its wake-up must be paid for by
+its share of the walks, and a woken lane reads at about half the first lane's
+speed.
+
 `./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
-left to source order as each fixture says, on no more lanes than bodies, its
-reader copied only by lanes that take a part. Each that merges must give source
-order's result again with its merge failing after the replay, and count as a
-resource failure with its state's allocation failing; and the benchmark's
+left to source order as each fixture says, on every lane its bodies can take
+and by the lanes' rule, its reader copied only by lanes that take a part. Six
+fixtures of bodies of known tokens must take the rule's lanes on each side of
+its steps. Each that merges must give source order's result again with its
+merge failing after the replay, and count as a resource failure with its
+state's allocation failing; timed, one lane must wait for no other and eight
+lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
-comparison and tallies the units left to source order by reason.
-`./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [-E's options] file...` times source order's reader against the deferred
-one on one lane and on N, with the parse, the top level, the bodies' walks,
-their position checks, the lanes' span and the merge apart; `--cpus` pins the
-command to the first CPU and a lane team to the list (on the 9700X, `--cpus
-2,0,1,3,4,5,6,7` under its lock). The 9700X job runs the fixtures, c-testsuite
-and the frozen SQLite source with `--deferred 8`, and the benchmark where the
-checker changes. [docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
+comparison, on every lane the bodies can take up to N, and tallies the units
+left to source order by reason. `./build/compiler benchmark-checker-deferred
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [-E's options] file...`
+times source order's reader against the deferred one on one lane and on up to
+N, with the parse, the top level, the bodies' walks, their position checks, the
+lanes' span and the merge apart, and what a lane costs: its copy of the reader,
+`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
+orders of its three readings in turn, so `--passes` is a multiple of six (24).
+`--every-lane` runs every lane the bodies can take, whatever
+their tokens; `--cpus` pins the command to the first
+CPU and a lane team to the list (on the 9700X, `--cpus 2,0,1,3,4,5,6,7` under
+its lock). The 9700X job runs the fixtures, c-testsuite and the frozen SQLite
+source with `--deferred 8`, and the benchmark where the checker changes.
+[docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
 the design, the corpora and the measurements.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
