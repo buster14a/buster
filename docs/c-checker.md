@@ -179,10 +179,18 @@ does, each rule checked against clang's answers on probes of it:
   (`nounroll 4`, `unroll (4) x`) is no hint. A count here is an integer
   literal, alone or before a token no expression goes on with (`unroll 4)`,
   `unroll_count(4, x)`, as clang reads them): another constant expression
-  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed, but
-  where it is an error whatever its value (beside `unroll(full)`, before a
-  statement that isn't a loop) the answer is the error. Tier 0 has no loop
-  transformation for the hints to steer, so nothing keeps them.
+  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed. In a
+  function, clang checks a count before it reads the next option or pragma,
+  and places the hints and checks them against each other only after the
+  statement they precede, so the first error is the count's when it isn't a
+  valid one (`int N`, `4 / 0`, an enumerator of 0), and a later pragma's or
+  the place's only when it is (#480's fourth review): such a count leaves the
+  loop's pragmas unsupported. Where both errors would be on its own pragma (a
+  second count of its category, or one that a state before it rules out), and
+  at file scope, where clang reads no count, the answer is the error. An error
+  in the statement comes before the places' and the conflicts' in clang's
+  output, which these reports at the pragma don't follow yet (#503). Tier 0
+  has no loop transformation for the hints to steer, so nothing keeps them.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
