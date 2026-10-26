@@ -2750,7 +2750,15 @@ round, as it joins `libc_nonshared.a`'s:
   (`Runtime.reference_members`), since a member joins only for a strong
   reference to a name it defines. A name that the link defines or a library
   exports counts a member that doesn't join. A link of one member's name
-  needs 72 symbols of room on average, and 266 at most.
+  needs 72 symbols of room on average, and 266 at most. The room reads only
+  what the snapshot's directory holds, which loading hashes whole: the global
+  names, the pieces' references and marks, and each piece's atoms' room
+  (`RuntimePiece.atom_room`), which the import sums. It reads no piece's
+  records, which binding checks only as it joins the piece: a damaged one
+  can't size the link (an alignment past 63 would make an undefined shift, a
+  size an arena past any), and its join fails as damaged
+  (`BIND_ERROR_SNAPSHOT`), on which the C driver discards the snapshot and
+  imports the runtime again.
 - **The overrides.** `bind_begin`'s room for the runtime's definitions that
   take the program's over was one per global name, 3,387 of 12 bytes with
   `libgcc.a`'s names, which put the arrays after it past the 64 KB of base
@@ -2792,12 +2800,18 @@ name; its rules refuse references to `__morestack` and
 and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
 library and as a PIE, by both paths, where cc's links with GNU ld and lld
 need `libgcc_s.so.1`, load into a harness that doesn't and run.
-`test-dynamic` writes the libgcc program as a PIE among its cases, and links
-a shared library whose code, cc's, calls seven of `libgcc.a`'s functions; and
-`test-checker-driver --executable` compiles and links a C program of 128-bit
-division and conversions by both paths into the same bytes, which needs
-`libc.so.6` alone and prints what the test's own code computes, and refuses a
-call of `__splitstack_getcontext` with the one error and no executable.
+`test-snapshot` damages a byte of the pieces' records at 123 places of each
+kind's snapshot, and each damaged copy must give a link of every member's
+names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
+program as a PIE among its cases, and links a shared library whose code, cc's,
+calls seven of `libgcc.a`'s functions; and `test-checker-driver --executable`
+compiles and links a C program of 128-bit division and conversions by both
+paths into the same bytes, which needs `libc.so.6` alone and prints what the
+test's own code computes, links it again over a snapshot whose `__udivti3`
+member's first atom has an alignment of 2^255 and a size of 2^64 - 1 (which
+must import the runtime again, silently, and leave the first link's snapshot),
+and refuses a call of `__splitstack_getcontext` with the one error and no
+executable.
 
 #### The unwind tables
 

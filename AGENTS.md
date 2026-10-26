@@ -656,7 +656,9 @@ designs and the compilers already built this way.
   `runtime_open_shared`) maps and uses in place when this executable wrote
   it, it is of the kind, its directory hashes right and every file the import
   probed is as it was, and otherwise rebuilds and renames into place. Binding checks each piece of it (a crt object or a member) when
-  it first reads it (`runtime_piece_current`). `snapshot_test.c` holds its tests (`main.c` includes it;
+  it first reads it (`runtime_piece_current`), and a link's room
+  (`bind_capacity_needed`) reads only the directory: the pieces' marks and
+  atoms' rooms (`RuntimePiece.atom_room`), never their records. `snapshot_test.c` holds its tests (`main.c` includes it;
   `./build/compiler test-snapshot` runs them) and `snapshot_benchmark.c`
   provides `benchmark-snapshot`.
 - `src/buster/compiler/link_benchmark.c` provides `benchmark-link`, the whole
@@ -3000,7 +3002,9 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   each of their regions), each copy of which must load with every piece
   current but the one whose records hold the byte, by the test's own reading
   of the layout (none for a byte of padding or of a column no piece's hash
-  covers). Then a program bound against a snapshot with a damaged piece, by
+  covers), and give a link of every member's names the room
+  (`bind_capacity_needed`) the whole snapshot gives it, which reads only the
+  directory. Then a program bound against a snapshot with a damaged piece, by
   each path: `crt1.o`'s (or `Scrt1.o`'s, or `rcrt1.o`'s), `crtend.o`'s (or
   `crtendS.o`'s), or a member the program joins must fail the binding with
   `BIND_ERROR_SNAPSHOT`, and a member it doesn't join must bind as against
