@@ -636,10 +636,10 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
-        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80)
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80 || input->classes[i] == BUSTER_TYPED_CLASS_I128 || input->classes[i] == BUSTER_TYPED_CLASS_U128)
         {
-            // Typed long double (#136) isn't lowered by this adapter. Tier0 keeps its values in frame slots of its
-            // own; every such value has an entry of class F80, including a conversion's operand.
+            // Typed long double and the 128-bit integers (#136) aren't lowered by this adapter. Tier0 keeps their values
+            // in frame slots of its own; every such value has an entry of its class, including a conversion's operand.
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }

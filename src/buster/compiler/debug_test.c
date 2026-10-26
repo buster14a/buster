@@ -2,10 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-debug: independent line-machine decoding, scalar/vector bytes, guarded tails, input and capacity failures,
-// late-address patching, units written after others. --cross-check additionally asks readelf, gdb and perf to consume
-// an original fixed-layout three-function ELF with these five debug sections, as one unit and as two (its first
-// function's and the other two's, the second written at the first's sizes), linked by GNU ld and by the native writer,
-// which takes the two units in one descriptor. GNU as supplies that fixture's CFI, not this module: this checks debug
+// late-address patching, units written after others and where their fields are. --cross-check additionally asks
+// readelf, gdb and perf to consume an original fixed-layout three-function ELF with these five debug sections, as one
+// unit and as two (its first function's and the other two's, the second written at the first's sizes), linked by GNU
+// ld, by the native writer, which takes the two units in one descriptor, and by GNU ld and lld from the object writer's
+// object of the fixture's code with the units relocated (ObjectOptions.debug), whose links' debug sections must be GNU
+// ld's link's of the fixture, byte for byte. GNU as supplies that fixture's CFI, not this module: this checks debug
 // consumption and integration with an unwinder, not a native code-generator unwind producer.
 // benchmark-debug times validation, sizing and writing together, plus final address patching, into reused buffers.
 
@@ -13,6 +15,15 @@
 
 static bool debug_test_native_write(const char* object_path, const char* executable_path, const DebugUnit* unit, const DebugOutput* output);
 static bool debug_test_native_units(const char* object_path, const char* executable_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count);
+static bool debug_test_object_write(const char* object_path, const char* output_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count);
+static bool debug_test_same_debug(const char* a, const char* b);
+
+// How debug_test_consumers makes the consumers' executable: GNU ld from GNU as's fixture, the native writer from the
+// fixture's code, or GNU ld or lld from the object writer's object of it.
+#define BUSTER_DEBUG_TEST_GNU_LD 0
+#define BUSTER_DEBUG_TEST_NATIVE 1
+#define BUSTER_DEBUG_TEST_OBJECT_GNU_LD 2
+#define BUSTER_DEBUG_TEST_OBJECT_LLD 3
 
 static uint64_t debug_test_leb(const uint8_t* bytes, uint64_t size, uint64_t* position, bool sign, bool* valid)
 {
@@ -430,7 +441,10 @@ static bool debug_test_bases(void)
         memcpy(&alone_value, alone.sections[DEBUG_SECTION_INFO].bytes + places[i], 4);
         memcpy(&based_value, based.sections[DEBUG_SECTION_INFO].bytes + places[i], 4);
         valid &= alone_value == alone_values[i] && based_value == values[i];
+        // debug_write says where they are, by the section each points into, whatever the bases.
+        valid &= alone.fields[DEBUG_SECTION_ABBREV + i] == places[i] && based.fields[DEBUG_SECTION_ABBREV + i] == places[i];
     }
+    valid &= alone.fields[DEBUG_SECTION_INFO] == 0 && based.fields[DEBUG_SECTION_INFO] == 0;
     // Past DWARF32: each section's base at which its contribution would end at the limit is refused, with nothing
     // written, and one byte lower is taken.
     for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
@@ -445,7 +459,7 @@ static bool debug_test_bases(void)
     }
     free(alone_bytes);
     free(based_bytes);
-    printf("debug bases: a unit after others differs from it alone only by its four offsets, %s\n", valid ? "pass" : "FAIL");
+    printf("debug bases: a unit after others differs from it alone only by its four offsets, where debug_write says, %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -542,8 +556,13 @@ static bool debug_test_profile(const char* output)
     return found;
 }
 
-static bool debug_test_consumers(bool keep, bool native, bool split)
+// The consumers' checks of the fixture, as one unit or as two (`split`), its executable made `way`
+// (BUSTER_DEBUG_TEST_*): the object writer's object's links must hold GNU ld's link's of the fixture's debug sections.
+static bool debug_test_consumers(bool keep, uint32_t way, bool split)
 {
+    static const char* const made_by[] = { "GNU ld", "Buster", "Buster's object, GNU ld", "Buster's object, lld" };
+    const bool native = way == BUSTER_DEBUG_TEST_NATIVE;
+    const bool object_way = way == BUSTER_DEBUG_TEST_OBJECT_GNU_LD || way == BUSTER_DEBUG_TEST_OBJECT_LLD;
     char directory[] = "/tmp/buster-debug-XXXXXX";
     bool valid = mkdtemp(directory) != 0;
     uint8_t* bytes = malloc(BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
@@ -667,8 +686,20 @@ static bool debug_test_consumers(bool keep, bool native, bool split)
         const char leaf[] = "// original debugger fixture\n\n\nvoid debug_leaf(void) {\n // counted loop\n}\n";
         valid &= debug_test_write_file(path, leaf, sizeof(leaf) - 1);
     }
+    char ours[512];
+    char reference[512];
+    snprintf(ours, sizeof(ours), "%s/ours.o", directory);
+    snprintf(reference, sizeof(reference), "%s/reference", directory);
     char* assemble[] = { "as", "--64", "-o", object, assembly, 0 };
     char* link[] = { "ld", "--section-start=.text=0x401000", "--eh-frame-hdr", "-o", executable, object, 0 };
+    // The object writer's object: GNU ld links the fixture as the reference, and the linker the way names links ours.
+    // lld's segments, packed in the file, would each have a base of their own (address less file offset), which perf's
+    // libdw module reporting can't map ("Native executable attachment"): its image base and separate loadable segments
+    // give them one.
+    char* link_reference[] = { "ld", "--section-start=.text=0x401000", "--eh-frame-hdr", "-o", reference, object, 0 };
+    char* link_ours_gnu[] = { "ld", "--section-start=.text=0x401000", "--eh-frame-hdr", "-o", executable, ours, 0 };
+    char* link_ours_lld[] = { "ld.lld", "--image-base=0x400000", "-z", "separate-loadable-segments", "--section-start=.text=0x401000", "--eh-frame-hdr", "-o", executable, ours, 0 };
+    char** link_ours = way == BUSTER_DEBUG_TEST_OBJECT_LLD ? link_ours_lld : link_ours_gnu;
     char* read[] = { "readelf", "--debug-dump=info,decodedline,addr,Ranges", executable, 0 };
     char* gdb[] = { "gdb", "-nx", "-batch", "-ex", "set debuginfod enabled off", "-ex", "break leaf.c:5", "-ex", "run", "-ex", "bt", executable, 0 };
     // A bounded sample rate and ring hold this short loop's stack snapshots without overflowing when pinned to one CPU.
@@ -679,9 +710,21 @@ static bool debug_test_consumers(bool keep, bool native, bool split)
     if (valid)
     {
         valid &= object_test_run(assemble, out, err) == 0;
-        valid &= native && split ? debug_test_native_units(object, executable, parts, outputs, 2) :
-                 native          ? debug_test_native_write(object, executable, &unit, &output) :
-                                   object_test_run(link, out, err) == 0;
+        if (object_way)
+        {
+            valid &= debug_test_object_write(object, ours, split ? parts : &unit, split ? outputs : &output, split ? 2 : 1) &&
+                     object_test_run(link_reference, out, err) == 0 && object_test_run(link_ours, out, err) == 0;
+            const bool same = valid && debug_test_same_debug(reference, executable);
+            valid &= same;
+            printf("debug object (%s, %s): the link's debug sections are GNU ld's link's of the fixture: %s\n", made_by[way], split ? "two units" : "one unit",
+                   same ? "pass" : "FAIL");
+        }
+        else
+        {
+            valid &= native && split ? debug_test_native_units(object, executable, parts, outputs, 2) :
+                     native          ? debug_test_native_write(object, executable, &unit, &output) :
+                                       object_test_run(link, out, err) == 0;
+        }
         valid &= object_test_run(read, out, err) == 0;
         String8 readout = object_test_read_file(&arena, out);
         valid &= readout.pointer != 0 && strstr(readout.pointer, "debug_leaf") != 0 && strstr(readout.pointer, "leaf.c") != 0;
@@ -690,8 +733,7 @@ static bool debug_test_consumers(bool keep, bool native, bool split)
         const bool gdb_ok = debug_test_frame(backtrace.pointer, "#0 ", "debug_leaf", "leaf.c:5") &&
                             debug_test_frame(backtrace.pointer, "#1 ", "debug_outer", "start.c:11") && debug_test_frame(backtrace.pointer, "#2 ", "_start", "start.c:1");
         valid &= gdb_ok;
-        printf("debug gdb (%s output, %s): source breakpoint and three-frame backtrace: %s\n", native ? "Buster" : "GNU ld", split ? "two units" : "one unit",
-               gdb_ok ? "pass" : "FAIL");
+        printf("debug gdb (%s output, %s): source breakpoint and three-frame backtrace: %s\n", made_by[way], split ? "two units" : "one unit", gdb_ok ? "pass" : "FAIL");
         if (!gdb_ok && backtrace.pointer != 0)
         {
             printf("%s\n", backtrace.pointer);
@@ -701,8 +743,7 @@ static bool debug_test_consumers(bool keep, bool native, bool split)
         String8 profile = object_test_read_file(&arena, out);
         const bool perf_ok = scripted && debug_test_profile(profile.pointer);
         valid &= perf_ok;
-        printf("debug perf (%s output, %s): sampled DWARF call chains and source lines: %s\n", native ? "Buster" : "GNU ld", split ? "two units" : "one unit",
-               perf_ok ? "pass" : "FAIL");
+        printf("debug perf (%s output, %s): sampled DWARF call chains and source lines: %s\n", made_by[way], split ? "two units" : "one unit", perf_ok ? "pass" : "FAIL");
     }
     arena_release(&arena);
     free(bytes);
@@ -749,12 +790,12 @@ static int run_debug_tests(int argc, char** argv)
         valid &= !debug_test_profile("debug_leaf\nleaf.c:5\n\ndebug_outer\n_start\n\n");
         valid &= !debug_test_profile("debug_leaf\nleaf.c:50\ndebug_outer\n_start\n\n");
         valid &= !debug_test_frame("#2 _start () at start.c:11\n", "#2 ", "_start", "start.c:1");
-        if (cross_check)
+        for (uint32_t split = 0; cross_check && split < 2; split += 1)
         {
-            valid &= debug_test_consumers(keep, false, false);
-            valid &= debug_test_consumers(keep, true, false);
-            valid &= debug_test_consumers(keep, false, true);
-            valid &= debug_test_consumers(keep, true, true);
+            for (uint32_t way = BUSTER_DEBUG_TEST_GNU_LD; way <= BUSTER_DEBUG_TEST_OBJECT_LLD; way += 1)
+            {
+                valid &= debug_test_consumers(keep, way, split == 1);
+            }
         }
     }
     else
