@@ -958,8 +958,11 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, const CheckIn
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, base));
     const TypeId element_type = kind == BUSTER_TYPE_KIND_COMPLEX ? type_element(reader->types, base) : base;
     const uint8_t element_kind = type_kind(reader->types, type_strip_aligned(reader->types, element_type));
-    const uint32_t index = type_resolved_index(reader->types, element_type);
-    const bool unsign = (reader->types->types.flags[index] & BUSTER_TYPE_FLAG_UNSIGNED) != 0;
+    // The base's signedness, which the mode keeps: an enum's underlying type's, and plain char's as the table says
+    // (TypeTable.char_unsigned). A builtin type's flags don't say it.
+    uint32_t width = 0;
+    bool is_signed = true;
+    const bool unsign = check_action_integer_type(reader->types, element_type, &width, &is_signed) && !is_signed;
     TypeId result = 0;
     if (element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_ENUM)
     {

@@ -1714,7 +1714,8 @@ static bool abi_is_illegal_vector(const AbiTable* abi, const TypeTable* table, u
 }
 
 // Whether clang extends the value (Extend): bool, the character and short types, enums of them, and _BitInts narrower
-// than int; how, by their signedness (char is signed on x86-64).
+// than int; how, by their signedness (plain char is signed on x86-64, unless the table says otherwise:
+// TypeTable.char_unsigned, -funsigned-char).
 static uint32_t abi_extension(const TypeTable* table, uint32_t index)
 {
     uint32_t value = index;
@@ -1727,7 +1728,8 @@ static uint32_t abi_extension(const TypeTable* table, uint32_t index)
     uint32_t result = 0;
     if (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[value] < 4)
     {
-        const bool is_unsigned = code == BUSTER_TYPE_CODE_BOOL || code == BUSTER_TYPE_CODE_UCHAR || code == BUSTER_TYPE_CODE_USHORT;
+        const bool is_unsigned = code == BUSTER_TYPE_CODE_BOOL || code == BUSTER_TYPE_CODE_UCHAR || code == BUSTER_TYPE_CODE_USHORT ||
+                                 (code == BUSTER_TYPE_CODE_CHAR && table->char_unsigned);
         result = is_unsigned ? BUSTER_ABI_PASS_ZERO : BUSTER_ABI_PASS_SIGN;
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[value] < 32)

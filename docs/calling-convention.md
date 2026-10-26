@@ -1663,8 +1663,9 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   `i64`s to clang 23, and the module makes it a `PAIR` at every width.
   `abi_wide_alignment` could walk them as it walks large records, with the
   levels waiting for what it reads.
-- **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it;
-  `-funsigned-char` would need a setting the type table doesn't have yet.
+- **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it, or
+  as unsigned where the type table says so (`TypeTable.char_unsigned`, from
+  `-funsigned-char`). The cross-check's worlds keep signed char.
 
 ## Boundary audit #298
 

@@ -34,16 +34,16 @@ static const char* const check_input_messages[] =
     "object has incomplete type",
 };
 
-// The type/action tables currently describe one C LP64 model: signed plain char, 32-bit wchar_t, x87 long double
-// stored in 16 bytes, and arithmetic evaluated in its source format. Refuse preprocessing options that advertise
-// a different model before applying those fixed tables to the source.
+// The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
+// arithmetic evaluated in its source format, with plain char signed or unsigned as the options say
+// (TypeTable.char_unsigned). Refuse preprocessing options that advertise a different model before applying those fixed
+// tables to the source.
 static bool check_input_target_supported(const PPOptions* options)
 {
     const PredefinesOptions* target = &options->predefines;
     const bool source_evaluation = target->fp_eval_method == BUSTER_PREDEFINES_EVAL_SOURCE ||
                                    (target->fp_eval_method == BUSTER_PREDEFINES_EVAL_DEFAULT && predefines_eval_method(target) == 0);
-    return !options->assembly && !target->char_unsigned && !target->short_wchar &&
-           target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
+    return !options->assembly && !target->short_wchar && target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
 }
 
 // CheckInputReader.enum_fixed: an enum without a fixed underlying type (or another tag), one with it whose enumerators
@@ -1231,8 +1231,9 @@ static CheckLiteral check_input_literal(CheckInputReader* reader, uint32_t token
     }
     else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
     {
-        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ? check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023) :
-                 check_literal_number(bytes, length, reader->scratch);
+        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ?
+                     check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned) :
+                     check_literal_number(bytes, length, reader->scratch);
     }
     reader->output->resource |= result.resource;
     arena_pop_to(reader->scratch, mark);
@@ -4006,6 +4007,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                             CheckDeferred* deferred)
 {
     *input = (CheckInput){ 0 };
+    // Plain char's signedness, which every phase after the reader reads from the table too.
+    types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     uint32_t size_queries = 0;
