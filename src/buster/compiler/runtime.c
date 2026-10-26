@@ -193,12 +193,16 @@ struct RuntimeBinding
 };
 
 // The records one of the runtime's objects (a crt object, or an archive's member) added to its link: the counts of
-// each table before it and after it, the ranges a link the runtime joins copies (bind.c).
+// each table before it and after it, the ranges a link the runtime joins copies (bind.c); and the room its atoms' bytes
+// take in a link, each with its alignment, which the import sums. A snapshot keeps the pieces in its directory, which
+// loading checks whole, so that a link's room (bind_capacity_needed) reads none of a piece's records, which binding
+// checks only as it joins the piece (runtime_piece_current).
 typedef struct RuntimePiece RuntimePiece;
 struct RuntimePiece
 {
     ImportMark begin;
     ImportMark end;
+    uint64_t atom_room;
 };
 
 // The names a program's are bound against (bind.c): each distinct name of a global or weak symbol of the runtime's
@@ -1756,10 +1760,20 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
         result = runtime_groups(runtime);
     }
     // The room a link that binds against the runtime needs for its names' and atoms' bytes, summed once here rather than
-    // by each link (bind_capacity).
+    // by each link (bind_capacity), and each piece's atoms' (RuntimePiece.atom_room).
     for (NameId name = 1; result == RUNTIME_ERROR_NONE && name < runtime->link.names.count; name += 1)
     {
         runtime->name_room += (uint64_t)runtime->link.names.length[name] + 1;
+    }
+    for (uint32_t p = 0; result == RUNTIME_ERROR_NONE && p < RUNTIME_OBJECTS + runtime->member_count; p += 1)
+    {
+        const LinkAtoms* atoms = &runtime->link.atoms;
+        RuntimePiece* piece = &runtime->pieces[p];
+        piece->atom_room = 0;
+        for (AtomId atom = piece->begin.atoms; atom < piece->end.atoms; atom += 1)
+        {
+            piece->atom_room += atoms->bytes[atom] != 0 ? atoms->size[atom] + ((uint64_t)1 << atoms->alignment_log2[atom]) - 1 : 0;
+        }
     }
     for (AtomId atom = 1; result == RUNTIME_ERROR_NONE && atom < runtime->link.atoms.count; atom += 1)
     {

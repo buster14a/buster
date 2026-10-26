@@ -269,9 +269,10 @@ static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime
 // strong reference to a name it defines, from the link, a crt object or another member that joins, so the closure of the
 // names' members and the crt objects' references' over the members' references (Runtime.reference_members) bounds them:
 // a name the link defines or a library exports counts a member that may not join. Its bitset and queue are pushed onto
-// `scratch` while it runs. A loaded runtime's pieces are read before binding checks them (runtime_piece_current): a
-// damaged one can only make the room wrong, and its join then fails as damaged (BIND_ERROR_SNAPSHOT) before it can fail
-// for room.
+// `scratch` while it runs. It reads only what a snapshot's directory holds, which loading checks whole (the global
+// names, the pieces' references, marks and atoms' rooms): none of a piece's records, which binding checks as it joins
+// the piece (runtime_piece_current), so that a damaged piece can't size a link wrong, or past what an arena takes, before
+// its join fails as damaged (BIND_ERROR_SNAPSHOT) and the caller opens the runtime again.
 static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes,
                                                                  uint64_t* atom_bytes);
 // Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
@@ -1843,10 +1844,10 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
     return result;
 }
 
-// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed).
+// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed), from its marks and
+// its atoms' room alone (RuntimePiece).
 static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapacity* capacity, uint64_t* name_bytes, uint64_t* atom_bytes)
 {
-    const LinkAtoms* atoms = &runtime->link.atoms;
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     capacity->names += end.names - begin.names;
@@ -1856,10 +1857,7 @@ static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapa
     capacity->wide_addends += end.wide_addends - begin.wide_addends;
     capacity->priorities += end.priorities - begin.priorities;
     *name_bytes += end.name_bytes - begin.name_bytes;
-    for (AtomId atom = begin.atoms; atom < end.atoms; atom += 1)
-    {
-        *atom_bytes += atoms->bytes[atom] != 0 ? atoms->size[atom] + ((uint64_t)1 << atoms->alignment_log2[atom]) - 1 : 0;
-    }
+    *atom_bytes += runtime->pieces[piece].atom_room;
 }
 
 static LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes, uint64_t* atom_bytes)

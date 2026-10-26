@@ -316,34 +316,36 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     unlink(plain_output);
 }
 
-// libgcc.a in the direct path's executables (#136): a program whose 128-bit integers' division, remainder and
-// conversions to and from double and long double call libgcc.a's functions (#133's lowering), __fixdfti among them,
-// whose member calls __fixunsdfti, which the program calls too. Linked by both paths into the same bytes, needing
-// libc.so.6 alone (the members join the executable), it must print what this executable computes of the same
-// expressions.
+// A program whose 128-bit integers' division, remainder and conversions to and from double and long double call
+// libgcc.a's functions (#133's lowering), __fixdfti among them, whose member calls __fixunsdfti, which the program calls
+// too.
+static const char check_test_libgcc_program[] = "#include <stdio.h>\n"
+                                                "static volatile unsigned __int128 dividend = ((unsigned __int128)1 << 100) + 12345;\n"
+                                                "static volatile unsigned __int128 divisor = 1000003;\n"
+                                                "static volatile __int128 negative = -((__int128)1 << 90) - 7;\n"
+                                                "static volatile double value = 1e30;\n"
+                                                "int main(void)\n"
+                                                "{\n"
+                                                "    unsigned __int128 q = dividend / divisor, r = dividend % divisor;\n"
+                                                "    __int128 s = negative / 77, t = negative % 77;\n"
+                                                "    unsigned __int128 back = (unsigned __int128)value;\n"
+                                                "    __int128 signed_back = (__int128)-value;\n"
+                                                "    printf(\"%llx %llx %llx %lld %.17g %.17g %.21Lg\\n\", (unsigned long long)(q >> 64), (unsigned long long)q,\n"
+                                                "           (unsigned long long)r, (long long)t, (double)back, (double)signed_back, (long double)s);\n"
+                                                "    return 0;\n"
+                                                "}\n";
+
+// libgcc.a in the direct path's executables (#136): the libgcc program (check_test_libgcc_program), linked by both
+// paths into the same bytes, needing libc.so.6 alone (the members join the executable), must print what this
+// executable computes of the same expressions.
 static void check_test_driver_libgcc(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "static volatile unsigned __int128 dividend = ((unsigned __int128)1 << 100) + 12345;\n"
-                                  "static volatile unsigned __int128 divisor = 1000003;\n"
-                                  "static volatile __int128 negative = -((__int128)1 << 90) - 7;\n"
-                                  "static volatile double value = 1e30;\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    unsigned __int128 q = dividend / divisor, r = dividend % divisor;\n"
-                                  "    __int128 s = negative / 77, t = negative % 77;\n"
-                                  "    unsigned __int128 back = (unsigned __int128)value;\n"
-                                  "    __int128 signed_back = (__int128)-value;\n"
-                                  "    printf(\"%llx %llx %llx %lld %.17g %.17g %.21Lg\\n\", (unsigned long long)(q >> 64), (unsigned long long)q,\n"
-                                  "           (unsigned long long)r, (long long)t, (double)back, (double)signed_back, (long double)s);\n"
-                                  "    return 0;\n"
-                                  "}\n";
     char source[256];
     char outputs[2][256];
     snprintf(source, sizeof(source), "%s/libgcc.c", directory);
     snprintf(outputs[0], sizeof(outputs[0]), "%s/libgcc", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/libgcc-scalar", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, check_test_libgcc_program, sizeof(check_test_libgcc_program) - 1);
     check_test_expect(test, written, "libgcc program written");
     char* text = NULL;
     bool linked = written;
@@ -418,6 +420,134 @@ static void check_test_driver_split_stack(CheckTest* test, const char* executabl
         free(text);
     }
     unlink(source);
+}
+
+// A file's bytes, read whole into memory aligned to 64 bytes, as a snapshot's view takes them (snapshot_view), which the
+// caller frees, and their count in *length; NULL if the file can't be read.
+static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* length)
+{
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat status;
+    const bool known = file >= 0 && fstat(file, &status) == 0 && status.st_size > 0;
+    const uint64_t bytes = known ? (uint64_t)status.st_size : 0;
+    uint8_t* result = known ? aligned_alloc(64, (bytes + 63) / 64 * 64) : NULL;
+    uint64_t done = 0;
+    bool reading = result != NULL;
+    while (reading && done < bytes)
+    {
+        const ssize_t got = read(file, result + done, bytes - done);
+        reading = got > 0;
+        done += reading ? (uint64_t)got : 0;
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    if (result != NULL && done != bytes)
+    {
+        free(result);
+        result = NULL;
+    }
+    *length = result != NULL ? bytes : 0;
+    return result;
+}
+
+// Runs the executable at `path` and captures up to `capacity` - 1 bytes of its output into `captured`, NUL-terminated:
+// whether it ran and exited with status 0.
+static bool check_test_driver_capture(const char* path, char* captured, size_t capacity)
+{
+    FILE* output = popen(path, "r");
+    const size_t got = output != NULL ? fread(captured, 1, capacity - 1, output) : 0;
+    captured[got] = 0;
+    return output != NULL && pclose(output) == 0;
+}
+
+// A damaged snapshot in the direct path (#483's review): the C runtime's snapshot in a cache directory of the test's own
+// (XDG_CACHE_HOME), written by the driver's first link of the libgcc program, then the first atom's alignment and size
+// of the member that defines __udivti3 changed in the file, to 2^255 and 2^64 - 1: records that only that member's piece
+// hash covers, which the room the driver gives the link (bind_capacity_needed) mustn't read. Binding finds the piece
+// damaged as it joins it (BIND_ERROR_SNAPSHOT), and the driver discards the snapshot and imports the runtime again: the
+// second link must succeed without a word on its errors, its executable print what the first one's does, and the
+// snapshot be the first link's again.
+static void check_test_driver_damaged_snapshot(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char name[] = "__udivti3";
+    static const uint8_t ones[8] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+    char cache[256];
+    char place[320];
+    char snapshot[512];
+    char source[256];
+    char output[256];
+    snprintf(cache, sizeof(cache), "%s/cache", directory);
+    snprintf(place, sizeof(place), "%s/buster", cache);
+    snprintf(snapshot, sizeof(snapshot), "%s/%s", place, snapshot_name(RUNTIME_KIND_DYNAMIC));
+    snprintf(source, sizeof(source), "%s/damaged.c", directory);
+    snprintf(output, sizeof(output), "%s/damaged", directory);
+    const char* previous = getenv("XDG_CACHE_HOME");
+    char* saved = previous != NULL ? strdup(previous) : NULL;
+    const bool written = mkdir(cache, 0700) == 0 && setenv("XDG_CACHE_HOME", cache, 1) == 0 &&
+                         parse_test_write(source, check_test_libgcc_program, sizeof(check_test_libgcc_program) - 1);
+    check_test_expect(test, written, "a damaged snapshot's cache and program written");
+    char* const arguments[] = { (char*)executable, "-o", output, source, NULL };
+    char* text = NULL;
+    const int first = written ? check_test_driver_spawn(arguments, &text) : -1;
+    free(text);
+    char before[256];
+    const bool ran = first == 0 && check_test_driver_capture(output, before, sizeof(before));
+    check_test_expect(test, ran, "the libgcc program linked, writing the snapshot");
+    uint64_t length = 0;
+    uint8_t* good = ran ? check_test_driver_read_aligned(snapshot, &length) : NULL;
+    // The places of the member's first atom's alignment and size in the file, by the layout of a view of a copy, which the
+    // test's own reading of it (snapshot_test_piece_at) must find the piece's records.
+    uint8_t* copy = good != NULL ? aligned_alloc(64, (length + 63) / 64 * 64) : NULL;
+    Runtime view = { 0 };
+    if (copy != NULL)
+    {
+        memcpy(copy, good, length);
+        snapshot_view(&view, copy, length);
+    }
+    const SnapshotHeader* header = (const SnapshotHeader*)copy;
+    const uint32_t entry = copy != NULL ? runtime_find_global_name(&view.global_names, (const uint8_t*)name, sizeof(name) - 1, link_hash((const uint8_t*)name, sizeof(name) - 1)) : 0;
+    const uint32_t member = entry != 0 ? view.global_names.member[entry - 1] : 0;
+    const uint32_t piece = member != 0 ? RUNTIME_OBJECTS + member - 1 : UINT32_MAX;
+    const AtomId atom = piece != UINT32_MAX ? view.pieces[piece].begin.atoms : 0;
+    const uint64_t alignment = piece != UINT32_MAX ? header->regions[SNAPSHOT_REGION_ATOM_ALIGNMENT].offset + atom * sizeof(*view.link.atoms.alignment_log2) : 0;
+    const uint64_t size = piece != UINT32_MAX ? header->regions[SNAPSHOT_REGION_ATOM_SIZE].offset + atom * sizeof(*view.link.atoms.size) : 0;
+    const bool placed = piece != UINT32_MAX && view.pieces[piece].end.atoms > atom && snapshot_test_piece_at(header, &view, alignment) == piece &&
+                        snapshot_test_piece_at(header, &view, size) == piece;
+    check_test_expect(test, placed, "the __udivti3 member's first atom's alignment and size in the snapshot");
+    const int file = placed ? open(snapshot, O_WRONLY | O_CLOEXEC) : -1;
+    const bool damaged = file >= 0 && snapshot_test_pwrite(file, ones, 1, alignment) && snapshot_test_pwrite(file, ones, sizeof(ones), size);
+    if (file >= 0)
+    {
+        close(file);
+    }
+    check_test_expect(test, damaged, "the member's records damaged in the snapshot");
+    const int second = damaged ? check_test_driver_spawn(arguments, &text) : -1;
+    check_test_expect(test, second == 0 && text != NULL && text[0] == 0, "a damaged piece: the link imports the runtime again, without a word");
+    free(text);
+    char after[256];
+    check_test_expect(test, second == 0 && check_test_driver_capture(output, after, sizeof(after)) && strcmp(before, after) == 0, "the program runs as before");
+    uint64_t again_length = 0;
+    uint8_t* again = second == 0 ? check_test_driver_read_aligned(snapshot, &again_length) : NULL;
+    check_test_expect(test, again != NULL && again_length == length && memcmp(again, good, length) == 0, "the snapshot written again as the first link wrote it");
+    free(again);
+    free(copy);
+    free(good);
+    if (saved != NULL)
+    {
+        setenv("XDG_CACHE_HOME", saved, 1);
+    }
+    else
+    {
+        unsetenv("XDG_CACHE_HOME");
+    }
+    free(saved);
+    unlink(snapshot);
+    rmdir(place);
+    rmdir(cache);
+    unlink(source);
+    unlink(output);
 }
 
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
@@ -1616,6 +1746,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
+            check_test_driver_damaged_snapshot(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
