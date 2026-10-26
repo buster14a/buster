@@ -6,6 +6,81 @@
 // and the declaration's alignment; a packed attribute alone does not establish misalignment. The sparse records
 // survive sizeof/typeof's discarded graph nodes. c_check_packed_diagnostic.c applies consuming conversions later.
 
+typedef struct CheckInputPackedNames CheckInputPackedNames;
+struct CheckInputPackedNames
+{
+    uint32_t* tokens;
+    uint32_t* parents;
+    uint32_t* ends;
+};
+
+// Construct the cold tag-to-source handoff once, on the first anonymous diagnostic. Re-scanning every earlier
+// token for each anonymous local would make a file of such functions quadratic. All three columns have tag_count
+// logical entries, initialized to NONE, and live only until the packed-address pass releases its scratch mark.
+static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedNames* names, uint32_t* stack)
+{
+    const uint32_t tags = reader->types->tags.count;
+    bool valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL;
+    if (!valid && !reader->output->resource)
+    {
+        names->tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
+        names->parents = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
+        names->ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
+        valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL;
+        reader->output->resource |= !valid;
+        if (valid)
+        {
+            memset(names->tokens, 0xff, (uint64_t)tags * sizeof(uint32_t));
+            memset(names->parents, 0xff, (uint64_t)tags * sizeof(uint32_t));
+            memset(names->ends, 0xff, (uint64_t)tags * sizeof(uint32_t));
+            uint32_t depth = 0;
+            const uint32_t count = reader->parser->tokens.count;
+            for (uint32_t first = 0; first < count; first += 16)
+            {
+                const uint32_t width = count - first < 16 ? count - first : 16;
+                uint32_t present = 0;
+                if (reader->parser->options.scalar)
+                {
+                    for (uint32_t i = 0; i < width; i += 1)
+                    {
+                        present |= (uint32_t)(reader->tag_types[first + i] != 0) << i;
+                    }
+                }
+                else
+                {
+                    const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
+                    const __m512i values = _mm512_maskz_loadu_epi32(active, reader->tag_types + first);
+                    present = _mm512_mask_cmpneq_epi32_mask(active, values, _mm512_setzero_si512());
+                }
+                while (present != 0)
+                {
+                    const uint32_t token = first + (uint32_t)__builtin_ctz(present);
+                    const TypeId type = reader->tag_types[token];
+                    const uint8_t kind = type_kind(reader->types, type);
+                    if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+                    {
+                        const uint32_t tag = reader->types->types.index[type_index(type)];
+                        const uint32_t body = check_input_tag_body(reader->parser, token, count);
+                        if (names->tokens[tag] == BUSTER_CHECK_NONE && body < count && reader->parser->tokens.kinds[body] == PARSE_KIND_L_BRACE)
+                        {
+                            while (depth != 0 && names->ends[stack[depth - 1]] < token)
+                            {
+                                depth -= 1;
+                            }
+                            names->tokens[tag] = token;
+                            names->parents[tag] = depth != 0 ? stack[depth - 1] : BUSTER_CHECK_NONE;
+                            names->ends[tag] = reader->parser->tree.parents[body];
+                            stack[depth++] = tag;
+                        }
+                    }
+                    present &= present - 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 static void check_input_packed_unwrap(const CheckInputReader* reader, uint32_t* first, uint32_t* end)
 {
     const Parser* parser = reader->parser;
@@ -116,27 +191,15 @@ static bool check_input_packed_anonymous(const TypeTable* types, uint32_t tag, u
 
 // Named records use their identifier; anonymous records/fields need their lexical record contexts and presumed
 // declaration point. Build that cold text in the source arena rather than reserving a string per type or token.
-static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, bool field, uint32_t* contexts)
+static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, bool field, uint32_t* contexts, CheckInputPackedNames* names)
 {
     const TypeTable* types = reader->types;
     const Parser* parser = reader->parser;
     String8 result = check_input_packed_identifier(reader, types->tags.name[tag]);
-    if (result.length == 0)
+    if (result.length == 0 && check_input_packed_names(reader, names, contexts))
     {
-        uint32_t token = BUSTER_CHECK_NONE;
-        uint32_t closing = BUSTER_CHECK_NONE;
-        for (uint32_t i = 0; token == BUSTER_CHECK_NONE && i < parser->tokens.count; i += 1)
-        {
-            if (reader->tag_types[i] == types->tags.type[tag])
-            {
-                const uint32_t body = check_input_tag_body(parser, i, parser->tokens.count);
-                if (body < parser->tokens.count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE)
-                {
-                    token = i;
-                    closing = parser->tree.parents[body];
-                }
-            }
-        }
+        const uint32_t token = names->tokens[tag];
+        const uint32_t closing = names->ends[tag];
         for (uint32_t i = closing < parser->tokens.count ? closing + 1 : parser->tokens.count;
              !field && result.length == 0 && i < parser->tokens.count && parser->tokens.kinds[i] != PARSE_KIND_SEMI; i += 1)
         {
@@ -150,20 +213,16 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
         {
             uint32_t depth = 0;
             uint64_t capacity = 128;
-            for (uint32_t i = 0; i < token; i += 1)
+            for (uint32_t parent = names->parents[tag]; parent != BUSTER_CHECK_NONE && depth < types->tags.count; parent = names->parents[parent])
             {
-                const TypeId type = reader->tag_types[i];
-                const uint8_t kind = type_kind(types, type);
-                if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
-                {
-                    const uint32_t body = check_input_tag_body(parser, i, parser->tokens.count);
-                    if (body < token && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && parser->tree.parents[body] > token)
-                    {
-                        const uint32_t context = types->types.index[type_index(type)];
-                        contexts[depth++] = context;
-                        capacity += check_input_packed_identifier(reader, types->tags.name[context]).length + 32;
-                    }
-                }
+                contexts[depth++] = parent;
+                capacity += check_input_packed_identifier(reader, types->tags.name[parent]).length + 32;
+            }
+            for (uint32_t i = 0; i < depth / 2; i += 1)
+            {
+                const uint32_t temporary = contexts[i];
+                contexts[i] = contexts[depth - 1 - i];
+                contexts[depth - 1 - i] = temporary;
             }
             const uint32_t source = parser->tokens.sources[token];
             pp_history_ensure(reader->pp);
@@ -207,7 +266,7 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
     return result;
 }
 
-static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain)
+static void check_input_packed_address(CheckInputReader* reader, uint32_t address, uint32_t* chain, CheckInputPackedNames* names)
 {
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
@@ -293,8 +352,8 @@ static void check_input_packed_address(CheckInputReader* reader, uint32_t addres
             const uint32_t name = types->members.name[packed_member];
             const TypeId field_type = type_strip_aligned(types, types->members.type[packed_member]);
             const String8 member_name = name != 0 ? check_input_packed_identifier(reader, name) :
-                check_input_packed_name(reader, types->types.index[type_index(field_type)], true, chain);
-            const String8 record_name = check_input_packed_name(reader, packed_record, false, chain);
+                check_input_packed_name(reader, types->types.index[type_index(field_type)], true, chain, names);
+            const String8 record_name = check_input_packed_name(reader, packed_record, false, chain, names);
             reader->output->packed_members[reader->output->packed_member_count++] = (CheckInputPackedMember)
             {
                 .address = address,
@@ -374,14 +433,15 @@ static void check_input_packed_members(CheckInputReader* reader)
         uint32_t* chain = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, count);
         reader->output->resource |= reader->output->packed_members == 0 || chain == 0;
         const uint32_t end = count < reader->expression_limit ? count : reader->expression_limit;
+        CheckInputPackedNames names = { 0 };
         for (uint32_t token = 0; !reader->output->resource && token < end; token += 64)
         {
             const uint32_t width = end - token < 64 ? end - token : 64;
             uint64_t addresses = check_input_packed_candidates(reader->parser, token, width);
-            while (addresses != 0)
+            while (!reader->output->resource && addresses != 0)
             {
                 const uint32_t address = token + (uint32_t)__builtin_ctzll(addresses);
-                check_input_packed_address(reader, address, chain);
+                check_input_packed_address(reader, address, chain, &names);
                 addresses &= addresses - 1;
             }
         }

@@ -846,6 +846,9 @@ object can strengthen a direct `.` access. `#pragma pack` alone does not trigger
 this warning, nor do array decay, an address of an array element, or the complex
 bases Clang currently excludes (a call, subscript or explicit dereference).
 Anonymous members participate in both layout and the choice of packed culprit.
+The first anonymous diagnostic builds a temporary tag-to-source/context map;
+later addresses reuse it, so formatting many anonymous locals stays linear in
+the source size plus the emitted names.
 
 `c_check_packed_diagnostic.c` cancels a pending warning when a source conversion
 permits the culprit's reduced alignment, including integer and incomplete-pointer

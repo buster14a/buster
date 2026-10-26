@@ -176,6 +176,17 @@ static void check_test_packed_bounds(CheckTest* test)
         input = (CheckInput){ .packed_member_count = 1, .graph = { .count = 1 } };
         check_test_expect(test, !check_input_packed_finalize(&input, &parser, &types, NULL, &scratch) && input.resource && scratch.length == 0,
                           "packed conversion-context allocation failure is explicit");
+        for (uint32_t limit = 0; limit < 3 * sizeof(uint32_t) * types.tags.count; limit += 1)
+        {
+            scratch.length = 0;
+            scratch.capacity = limit;
+            input = (CheckInput){ 0 };
+            CheckInputPackedNames names = { 0 };
+            uint32_t stack[2] = { 0 };
+            check_test_expect(test, !check_input_packed_names(&reader, &names, stack) && input.resource &&
+                                  !check_input_packed_names(&reader, &names, stack),
+                              "anonymous-name handoff refuses every partial allocation and a repeated query");
+        }
         scratch.capacity = scratch_capacity;
         arena_release(&scratch);
         arena_release(&arena);
