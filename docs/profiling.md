@@ -232,7 +232,7 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
   slots that share their low 12 bits with the data the loop stores (4 KiB aliasing), though the record doesn't identify
   the loads and stores. With randomization, 8 of 32 processes of a campaign were over 2% slower, in main and #424's head
   alike, while the whole driver's `-fsyntax-only` moved by at most 1.5% over its own 64-offset sweep (#445, [the
-  record](https://github.com/buster14a/buster-performance/tree/26e69897d31a61408cad68301b3f63a3577be533/docs/measurements/checker-source-slow-state-445-2026-10-26)).
+  record](https://github.com/buster14a/buster-performance/tree/e0f03a362c29568db3230b265600b2085afe6ce0/docs/measurements/checker-source-slow-state-445-2026-10-26)).
   Compare such a stage's medians over many processes, or place the stack alike in every process: `setarch -R` with the
   same argument and environment bytes (both executables at paths of the same length, and an environment of a chosen
   length, as the record's `procbench` gives them with `norandom` and `pad=N`), each process's offset checked
