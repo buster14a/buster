@@ -14,7 +14,8 @@
 //
 // Entry points: refine_tokens (AVX-512) and refine_tokens_scalar (the reference, token by token, which test-refinement
 // compares it with), refine_tokens_blocks (refine_tokens a range of blocks at a time, for a file the preprocessor lexes
-// a window at a time, with a RefineProgress from refine_progress_begin carried from range to range),
+// a window at a time, with a RefineProgress from refine_progress_begin carried from range to range), refine_tokens_chunks
+// (refine_tokens, leaving the source's backslash chunks in a RefineProgress for the caller),
 // refine_identifier_key (an identifier's lookup key), refine_identifier_end (an identifier's physical end, which
 // refinement overwrote with its id) and refine_gap_is_splices.
 //
@@ -54,7 +55,7 @@
 // refine_chunks_have_backslash, refine_step_splices, refine_pass_a, refine_key, refine_probe, refine_batch_specials,
 // refine_intern_deferred, refine_intern_batch_fused (the fused variant's pass B), RefineHashes, refine_hash_batch,
 // refine_pass_b, refine_pass_c, the instantiations, RefineProgress, refine_progress_words, refine_progress_begin,
-// refine_tokens_with, refine_tokens_whole, RefineVariant, refine_tokens_variant, refine_tokens and refine_tokens_blocks).
+// refine_tokens_with, refine_tokens_whole, RefineVariant, refine_tokens_variant, refine_tokens, refine_tokens_chunks and refine_tokens_blocks).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -116,7 +117,8 @@ static uint32_t refine_encode_utf8(uint32_t code_point, uint8_t* out)
 
 // The lookup key of the identifier token at [start, end): its characters after translation phases 1 and 2 (trigraphs
 // if enabled, line splices removed), with each UCN as the UTF-8 of its code point, as clang interns them, so that
-// fo\<newline>o is foo and é is é. A named UCN (\N{...}) stays as written: this table has no character names.
+// fo\<newline>o is foo and é is é. A named UCN (\N{...}) stays as written, without its line splices: this table has no
+// character names, and the preprocessor refuses an identifier with one (#452).
 // `out` needs end - start bytes, which is enough: removing splices and encoding a UCN only make the spelling shorter.
 static uint32_t refine_identifier_key(const uint8_t* source, uint64_t length, uint32_t start, uint32_t end, uint32_t flags, uint8_t* out)
 {
@@ -1114,6 +1116,26 @@ static __attribute__((unused)) bool refine_tokens(InternTable* table, const uint
                           uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags)
 {
     return refine_tokens_variant(REFINE_VARIANT_BATCH_64, table, source, length, kinds, starts, ends, count, values, space, flags);
+}
+
+// refine_tokens with its source's backslash chunks (refine_scan_chunks) left for the caller in `progress`
+// (refine_progress_begin's, with room for refine_progress_words of the source's length): the words before
+// progress->scanned, which the preprocessor's search for named UCNs reads (#452). An instantiation per trigraph setting.
+#define BUSTER_REFINE_CHUNKS_INSTANTIATE(name, trigraphs) \
+    __attribute__((noinline)) static bool name(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, \
+                                               const uint32_t* ends, uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, RefineProgress* progress) \
+    { \
+        return refine_tokens_with(table, source, length, kinds, starts, ends, count, values, space, flags, trigraphs, 64, false, true, 0, count, progress); \
+    }
+
+BUSTER_REFINE_CHUNKS_INSTANTIATE(refine_tokens_chunks_plain, false)
+BUSTER_REFINE_CHUNKS_INSTANTIATE(refine_tokens_chunks_trigraphs, true)
+
+static __attribute__((unused)) bool refine_tokens_chunks(InternTable* table, const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts,
+                                                         const uint32_t* ends, uint64_t count, uint32_t* values, uint64_t* space, uint32_t flags, RefineProgress* progress)
+{
+    return ((flags & C_TOKENIZER_TRIGRAPHS) != 0 ? refine_tokens_chunks_trigraphs : refine_tokens_chunks_plain)(table, source, length, kinds, starts, ends, count, values,
+                                                                                                                  space, flags, progress);
 }
 
 // refine_tokens_blocks' instantiations, a function per trigraph setting: pass B in batches of 64, and pass A without

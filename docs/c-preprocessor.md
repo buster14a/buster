@@ -2579,8 +2579,31 @@ spellings alone would miss this change (#272).
   (`HandleMacroAnnotationPragma`); we read them all as written, so a `(` or a
   message from a macro is an error here. #109's generator writes them
   literally.
-- In `#if`, a character constant's `\N{name}` escape is refused (there is no
-  table of Unicode's names).
+- Named universal character names (`\N{name}`) are refused: buster has no
+  table of Unicode's character names, which reading one needs (#452, the
+  owner's choice for now; support, from a table generated from the Unicode
+  Character Database, is planned). clang reads them in C as its extension (its
+  `-pedantic` warns that they are one). In `#if`, a character constant's
+  `\N{name}` escape is an error, and so is each named UCN that the lexer reads
+  in a token: an identifier, a pp-number or an unknown token (a name not
+  written in capital letters, digits, spaces and hyphens, which is none of
+  Unicode's). That error is at the UCN's backslash, where clang's `-pedantic`
+  warning is (clang reads one past an identifier's first character without
+  one), and is diagnosed where clang's lexer would read the UCN, as an
+  invalid raw string literal's delimiter is: in active text, a directive's
+  line, a macro's definition (once) and an unused argument, but not in a
+  skipped group. One in a literal or a comment is no error here, as in clang's
+  `-E`, which keeps the literal as written; the checker refuses a literal with
+  one. Each file's preparation finds the candidates (a backslash followed by
+  `N`, or by a line splice) in the 64-byte chunks that refinement's scan marks
+  as holding a backslash (`refine_tokens_chunks`, `pp_scan_named_ucn_chunks`),
+  while they are in the caches, so that a chunk without one costs nothing
+  more; the scalar kernels' twin reads every byte (`pp_scan_named_ucns`). Only
+  a file with a candidate reads its bytes again and records the errors with
+  its raw string literals' (`pp_record_named_ucns`), finding each identifier's
+  end once. A first version, a scan of every byte of its own, added about
+  1 ms (3%) to `main.c`'s preprocessing on the 9700X (the refine phase
+  5.5 to 6.5 ms).
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.

@@ -779,6 +779,8 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             {
                 const uint32_t tag = reader->types->types.index[type_index(type)];
                 reader->tag_completions[tag] = BUSTER_CHECK_NONE;
+                // A deferred body's tag takes an index that an earlier body on its lane may have had (c_check_deferred.c).
+                reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_NONE;
                 if (fixed)
                 {
                     // Complete here: at the `{` or the `;` after the base.
