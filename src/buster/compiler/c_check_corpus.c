@@ -636,6 +636,7 @@ static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_timing;
+static const uint32_t* check_corpus_deferred_cpus;
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
@@ -704,6 +705,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
                     path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
                     path->deferred->timing = check_corpus_deferred_timing;
+                    path->deferred->cpus = check_corpus_deferred_cpus;
                 }
                 path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
                                                                                 &path->scratch, path->deferred_lanes, path->deferred_bindings);
@@ -2025,7 +2027,7 @@ struct CheckCorpusOutcome
     uint64_t binding_fallback_uses;
     // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens and the
     // largest one's, the lanes they ran on and those that copied its reader, and whether it gave the vector path's result
-    // exactly; and with check_corpus_deferred_timing, the lanes' span, lane_run's dispatch and the other lanes' wake-up
+    // exactly; and with check_corpus_deferred_timing, the lanes' span, the call's dispatch and the other lanes' wake-up
     // (CheckDeferred's), in nanoseconds.
     bool deferred;
     bool deferred_equal;

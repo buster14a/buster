@@ -15,7 +15,8 @@
 // reader; with its merge failing after the replay, which must give source order's result; and with the allocation of
 // the deferred reader's state failing, which must count as a resource failure, not as a result that differs. The many
 // bodies are read again with the reader timing what its lanes cost (CheckDeferred.timing), on one lane, which must
-// wait for no other, and on 8, and lane_run's dispatch and the wake-up must fall within the lanes' span. Then
+// wait for no other, in another lane group with an unfinished take and CPUs it must not pin to, and on 8; the call's
+// dispatch and the wake-up must fall within the lanes' span, and the caller's context must be restored. Then
 // benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no input, which
 // must say so rather than read its columns.
 //
@@ -244,6 +245,37 @@ static void check_deferred_many(char* text, uint64_t capacity, uint32_t count)
     }
 }
 
+typedef struct CheckDeferredTimed CheckDeferredTimed;
+struct CheckDeferredTimed
+{
+    const char* path;
+    const PPOptions* options;
+    CheckCorpusOutcome outcome;
+    bool restored;
+};
+
+// The one-lane reading must neither join the caller's group nor consume its unfinished take, and it must ignore CPUs:
+// UINT32_MAX cannot be pinned to, so a lane_run that still tries to pin would leave this unit to source order.
+static void check_deferred_timed_lane(void* argument)
+{
+    CheckDeferredTimed* timed = argument;
+    if (lane_index() == 0)
+    {
+        const Lane previous = thread_context.lane;
+        const uint64_t taken = thread_context.taken;
+        const uint32_t cpu = UINT32_MAX;
+        thread_context.taken = 3;
+        check_corpus_deferred_cpus = &cpu;
+        check_corpus_measure(timed->path, timed->options, false, true, &timed->outcome);
+        check_corpus_deferred_cpus = 0;
+        timed->restored = thread_context.lane.index == previous.index && thread_context.lane.count == previous.count &&
+                          thread_context.lane.group == previous.group && thread_context.taken == 3;
+        thread_context.taken = taken;
+        lane_restore(previous);
+    }
+    lane_sync();
+}
+
 static int run_checker_deferred_tests(int count, char** arguments)
 {
     bool keep = false;
@@ -410,21 +442,31 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.equal ? "the scalar and vector paths differ" : "merged, or another reason");
             }
         }
-        // The many bodies with the reader timing what its lanes cost (CheckDeferred.timing), on one lane and on every one
-        // of 8: no wake-up on one lane, which has no other to wait for, and lane_run's dispatch and the wake-up within
-        // the lanes' span.
-        for (uint32_t l = 0; valid && f == listed && l < 2; l += 1)
+        // The many bodies timed on one lane, alone and in another group with its counter in use, and on every one of 8:
+        // no wake-up on one lane, the caller's context intact, and the call's dispatch and wake-up within the span.
+        for (uint32_t l = 0; valid && f == listed && l < 3; l += 1)
         {
-            check_corpus_deferred_lanes = l == 0 ? 1 : 8;
+            check_corpus_deferred_lanes = l < 2 ? 1 : 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
             check_corpus_deferred_timing = true;
             CheckCorpusOutcome outcome;
-            check_corpus_measure(path, &options, false, true, &outcome);
+            bool restored = true;
+            if (l == 1)
+            {
+                CheckDeferredTimed nested = { .path = path, .options = &options };
+                const bool ran = lane_run(2, check_deferred_timed_lane, &nested, 0);
+                outcome = nested.outcome;
+                restored = ran && nested.restored;
+            }
+            else
+            {
+                check_corpus_measure(path, &options, false, true, &outcome);
+            }
             check_corpus_deferred_timing = false;
             const bool timed = outcome.deferred_active == check_corpus_deferred_lanes && outcome.deferred_lanes_ns != 0 &&
-                               (l != 0 || outcome.deferred_wake_ns == 0) &&
+                               (l == 2 || outcome.deferred_wake_ns == 0) &&
                                outcome.deferred_dispatch_ns + outcome.deferred_wake_ns <= outcome.deferred_lanes_ns;
-            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && timed;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && timed && restored;
             checks += 1;
             failures += !passed;
             if (!passed)
@@ -432,6 +474,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on %u lanes, timed: %s (span %" PRIu64 " ns, dispatch %" PRIu64 " ns, wake-up %" PRIu64 " ns)\n", name,
                         check_corpus_deferred_lanes, !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
+                        !restored ? "the caller's lane context changed" :
                         "not on every lane, untimed, a wake-up on one lane, or the dispatch and the wake-up past the lanes' span",
                         outcome.deferred_lanes_ns, outcome.deferred_dispatch_ns, outcome.deferred_wake_ns);
             }

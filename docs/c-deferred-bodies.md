@@ -177,8 +177,11 @@ passes every checker test.
   (`test-checker-corpus`'s `resources`), not as a result that differs. The 400
   bodies are read again with the reader timing what its lanes cost
   (`CheckDeferred.timing`), on one lane and on every one of 8: one lane must
-  wait for no other, and `lane_run`'s dispatch and the wake-up must fall within
-  the lanes' span. A copy whose wake-up counts from `lane_run`'s call, and one
+  wait for no other, and the dispatch and the wake-up must fall within
+  the lanes' span. The one-lane reading also runs inside another lane group
+  with an unfinished `lane_take` counter and a CPU it cannot pin to: it must
+  give source order's result, restore the caller's group and counter, and
+  attempt no pinning. A copy whose wake-up counts from `lane_run`'s call, and one
   whose dispatch is the lanes' span, each fail it. Then
   `benchmark-checker-deferred`'s `--cpus` parser, into room for 64 CPUs that
   ends at a `PROT_NONE` page: lists of 1 to 64 are read whole, one of 65 is
@@ -248,16 +251,21 @@ the rest (the phases after the merge); the position checks per body too, the
 lanes the bodies ran on (`active`: as many as the rule gives them, or with
 `--every-lane` every lane they can take) and those that copied the reader
 (`copies`); and what a lane costs, in nanoseconds: a copy of the reader
-(`copy`); `lane_run`'s dispatch, from its call to the first lane's arrival at
-the partition (`dispatch`: the first lane's pinning and the others' wake
-calls); and the others' wake-up, from the first lane's arrival there to the
+(`copy`); the dispatch, from the entry's call to the first lane's arrival at
+the partition (`dispatch`: on more than one lane, `lane_run`'s first-lane
+pinning and the others' wake calls); and the others' wake-up, from the first lane's arrival there to the
 last one's (`wake`, none on one lane), which is the first lane's wait at the
 partition's sync. Before #448's review, `wake` was the first lane's whole time
 in `lane_parts_by_cost`, its share of the boundaries and its order of the parts
 with its wait, and left the dispatch out. `--cpus` pins the command to the
 first CPU, where the parse, source order and the top level run, and its lanes
-to the list. The measurements before "How many lanes" were made with the three
-rotating orders.
+to the list. A one-lane reading calls its lane entry directly in a saved
+one-lane context (`lane_alone` and `lane_restore`), with its own `lane_take`
+counter, on the caller's current CPU affinity. It does no affinity system
+calls or team dispatch; `dispatch` still measures the time to the entry's
+arrival and `wake` is zero. More than one lane still uses `lane_run` with
+the supplied CPUs. The measurements before "How many lanes" were made with
+the three rotating orders.
 
 On the 9700X, on the frozen `sqlite3.c` (706,237 tokens, 2,608 bodies) with
 `--cpus 2,0,1,3,4,5,6,7`, the medians of 9 passes, ranges over three processes
@@ -398,10 +406,7 @@ whichever lane takes first, which may be a woken one: two lanes read
 `00200.c`, a body of 20,420 tokens beside one of 30, 19% slower than one did.
 That is why the rule counts the largest body twice. Leaving the largest bodies
 to the first lane would let a unit of one large body beside many smaller ones
-take the lanes it pays for, which the rule now forgoes. A unit the rule reads
-on one lane still goes through `lane_run`, which pins its lane and puts its
-affinity back: 0.6 to 7.5 µs of the dispatch on the 9700X, which a direct call
-would spare.
+take the lanes it pays for, which the rule now forgoes.
 
 The implementation, fixtures and documentation are original project work.
 Clang is run externally as an oracle; no compiler implementation or external
