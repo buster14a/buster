@@ -1492,12 +1492,12 @@ static void changes_test_workflow(ChangesTest* test, Text workflow, const char* 
         changes_scan_names(step->body, "contains(env.MEASURE, ',", true, ",')", &names);
         TextList commands = { 0 };
         changes_step_commands(step->body, &commands);
+        // A step finds its benchmarks by their literal commands alone: one it ran through a wrapper, or with the
+        // command split over lines, wouldn't run when changed.
         for (uint32_t j = 0; j < names.count; j += 1)
         {
-            if (list_contains(&commands, names.items[j]))
-            {
-                changes_expect(test, changes_measures(&result, text_terminated(names.items[j])), "the edited step's benchmark runs", step->name);
-            }
+            changes_expect(test, list_contains(&commands, names.items[j]), text_concat(text_concat(text_c("the step runs ./build/compiler benchmark- or measure-"), names.items[j]), text_c(" literally")).data, step->name);
+            changes_expect(test, changes_measures(&result, text_terminated(names.items[j])), "the edited step's benchmark runs", step->name);
         }
     }
     changes_expect(test, gated >= 20, "the workflow has its gated steps", (Text){ 0 });

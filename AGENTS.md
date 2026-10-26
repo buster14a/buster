@@ -1130,7 +1130,9 @@ there at a time, so everything takes one lock:
   before it decides, and fails the job (so that `test` runs everything) when
   its tables and the workflow disagree: an output a step reads that it doesn't
   write, a `MEASURE` name that isn't a benchmark or a benchmark no step runs, a
-  gated step that doesn't run when changed alone, a pattern alternative or a
+  step whose `MEASURE` name its own `./build/compiler benchmark-NAME` (or
+  `measure-NAME`) doesn't spell out on one line (the selector finds a step's
+  benchmarks by those commands), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
   `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
