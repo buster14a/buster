@@ -846,6 +846,10 @@ object can strengthen a direct `.` access. `#pragma pack` alone does not trigger
 this warning, nor do array decay, an address of an array element, or the complex
 bases Clang currently excludes (a call, subscript or explicit dereference).
 Anonymous members participate in both layout and the choice of packed culprit.
+The reader counts actual layout witnesses before reserving their retained
+storage. It bounds chain scratch by the largest candidate expression, and
+builds conversion context only when a witness exists. An unused packed type
+plus ordinary local addresses needs no diagnostic records or scratch.
 The first anonymous diagnostic builds a temporary tag-to-source/context map;
 later addresses reuse it, so formatting many anonymous locals stays linear in
 the source size plus the emitted names.
@@ -870,7 +874,7 @@ The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
 or fixtures were imported. `test-checker-driver` runs the original probes through
 both checker schedules and, with `--executable`, both production command routes;
 it compares warning decisions, complete messages and presumed line/column pairs
-with Clang, and covers guarded classifier tails and allocation failure.
+with Clang, and covers guarded classifier/interval tails and allocation failure.
 
 ## Corpus comparison and semantic mutations
 

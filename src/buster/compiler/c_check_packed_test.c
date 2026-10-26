@@ -99,6 +99,60 @@ static uint32_t check_test_packed_diagnostics(const char* path, CheckPackedTestD
     return count;
 }
 
+static void check_test_packed_intervals(CheckTest* test)
+{
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* memory = mmap(NULL, page * 5, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_READ | PROT_WRITE) == 0 &&
+                       mprotect(memory + page * 3, page, PROT_READ | PROT_WRITE) == 0;
+    check_test_expect(test, ready, "packed interval guard allocation");
+    for (uint32_t count = 0; ready && count <= 129; count += 1)
+    {
+        uint32_t* events = (uint32_t*)(memory + page * 2 - count * sizeof(uint32_t));
+        uint8_t* analyzed = memory + page * 4 - count;
+        const uint32_t starts[][3] = { { 0, 0, 0 }, { 1, 7, 15 }, { 0, 15, 31 }, { 1, 16, 31 } };
+        const uint32_t ends[][3] = { { 0, 0, 0 }, { count != 0 ? count - 1 : 0, 17, 32 }, { 17, 32, 33 }, { 16, 31, 33 } };
+        for (uint32_t pattern = 0; pattern < BUSTER_ARRAY_LENGTH(starts); pattern += 1)
+        {
+            memset(events, 0, (uint64_t)count * sizeof(uint32_t));
+            for (uint32_t interval = 0; interval < 3; interval += 1)
+            {
+                const uint32_t first = starts[pattern][interval];
+                const uint32_t end = ends[pattern][interval] < count ? ends[pattern][interval] : count;
+                if (first < end)
+                {
+                    events[first] += 1;
+                    if (end < count)
+                    {
+                        events[end] -= 1;
+                    }
+                }
+            }
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                memset(analyzed - 1, 0xa5, (uint64_t)count + 1);
+                check_input_packed_analyzed(events, analyzed, count, scalar != 0);
+                bool same = analyzed[-1] == 0xa5;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    // Independent point membership, not another difference/prefix implementation.
+                    bool expected = true;
+                    for (uint32_t interval = 0; interval < 3; interval += 1)
+                    {
+                        expected &= !(i >= starts[pattern][interval] && i < ends[pattern][interval]);
+                    }
+                    same &= analyzed[i] == expected;
+                }
+                check_test_expect(test, same, "packed interval scan matches independent membership at guarded lane boundaries");
+            }
+        }
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, page * 5);
+    }
+}
+
 static void check_test_packed_bounds(CheckTest* test)
 {
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
@@ -154,10 +208,32 @@ static void check_test_packed_bounds(CheckTest* test)
         munmap(memory, page * 5);
     }
     const uint8_t packed[] = { 0, 1 };
-    uint8_t kind = PARSE_KIND_AMP;
-    uint8_t role = PARSE_ROLE_PREFIX;
-    Parser parser = { .tokens = { .kinds = &kind, .count = 1 }, .tree = { .roles = &role } };
+    uint8_t kinds[] = { PARSE_KIND_AMP, PARSE_KIND_IDENTIFIER, PARSE_KIND_PERIOD, PARSE_KIND_IDENTIFIER };
+    uint8_t roles[] = { PARSE_ROLE_PREFIX, PARSE_ROLE_OPERAND, PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_MEMBER };
+    uint32_t ends[] = { 3, 1, 3, 3 };
+    Parser parser = { .tokens = { .kinds = kinds, .count = 4 }, .tree = { .roles = roles } };
     TypeTable types = { .tags = { .packed = (uint8_t*)packed, .count = 2 } };
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        Arena arena = arena_reserve(4096);
+        Arena scratch = arena_reserve(4096);
+        const uint64_t arena_capacity = arena.capacity;
+        const uint64_t scratch_capacity = scratch.capacity;
+        arena.capacity = scratch.capacity = 0;
+        ends[0] = 1;
+        parser.options.scalar = scalar != 0;
+        CheckInput input = { 0 };
+        CheckInputReader reader = { .output = &input, .parser = &parser, .types = &types, .arena = &arena, .scratch = &scratch, .ends = ends, .expression_limit = 4 };
+        check_input_packed_members(&reader);
+        check_test_expect(test, !input.resource && input.packed_member_count == 0 && input.packed_members == NULL &&
+                              arena.length == 0 && scratch.length == 0,
+                          "unused packed type plus ordinary address needs no diagnostic storage or scratch");
+        arena.capacity = arena_capacity;
+        scratch.capacity = scratch_capacity;
+        arena_release(&scratch);
+        arena_release(&arena);
+    }
+    ends[0] = 3;
     for (uint32_t failure = 0; failure < 2; failure += 1)
     {
         Arena arena = arena_reserve(4096);
@@ -167,8 +243,15 @@ static void check_test_packed_bounds(CheckTest* test)
         arena.capacity = failure == 0 ? 0 : arena.capacity;
         scratch.capacity = failure == 1 ? 0 : scratch.capacity;
         CheckInput input = { 0 };
-        CheckInputReader reader = { .output = &input, .parser = &parser, .types = &types, .arena = &arena, .scratch = &scratch, .expression_limit = 1 };
-        check_input_packed_members(&reader);
+        CheckInputReader reader = { .output = &input, .parser = &parser, .types = &types, .arena = &arena, .scratch = &scratch, .ends = ends, .expression_limit = 4 };
+        if (failure == 0)
+        {
+            check_input_packed_storage(&reader, 1);
+        }
+        else
+        {
+            check_input_packed_members(&reader);
+        }
         check_test_expect(test, input.resource && input.packed_member_count == 0 && scratch.length == 0,
                           "packed witness allocation failure is explicit and restores scratch");
         arena.capacity = arena_capacity;
@@ -176,7 +259,7 @@ static void check_test_packed_bounds(CheckTest* test)
         input = (CheckInput){ .packed_member_count = 1, .graph = { .count = 1 } };
         check_test_expect(test, !check_input_packed_finalize(&input, &parser, &types, NULL, &scratch) && input.resource && scratch.length == 0,
                           "packed conversion-context allocation failure is explicit");
-        for (uint32_t limit = 0; limit < 2 * sizeof(uint32_t) + sizeof(uint8_t); limit += 1)
+        for (uint32_t limit = 0; limit < (parser.tokens.count + 1) * sizeof(uint32_t) + parser.tokens.count; limit += 1)
         {
             scratch.length = 0;
             scratch.capacity = limit;
@@ -184,15 +267,14 @@ static void check_test_packed_bounds(CheckTest* test)
             check_input_packed_contexts(&reader);
             check_test_expect(test, input.resource, "packed lexical-context handoff refuses every partial allocation");
         }
-        for (uint32_t limit = 0; limit < 4 * sizeof(uint32_t) * types.tags.count; limit += 1)
+        for (uint32_t limit = 0; limit < 5 * sizeof(uint32_t) * types.tags.count; limit += 1)
         {
             scratch.length = 0;
             scratch.capacity = limit;
             input = (CheckInput){ 0 };
             CheckInputPackedNames names = { 0 };
-            uint32_t stack[2] = { 0 };
-            check_test_expect(test, !check_input_packed_names(&reader, &names, stack) && input.resource &&
-                                  !check_input_packed_names(&reader, &names, stack),
+            check_test_expect(test, !check_input_packed_names(&reader, &names) && input.resource &&
+                                  !check_input_packed_names(&reader, &names),
                               "anonymous-name handoff refuses every partial allocation and a repeated query");
         }
         scratch.capacity = scratch_capacity;
@@ -204,6 +286,7 @@ static void check_test_packed_bounds(CheckTest* test)
 static void check_test_packed_members(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_packed_bounds(test);
+    check_test_packed_intervals(test);
     const char* prefix =
         "struct __attribute__((packed)) P { char c; int w; int a[2]; };\n"
         "struct __attribute__((packed)) F { int w; };\n"
