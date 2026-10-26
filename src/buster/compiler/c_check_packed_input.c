@@ -12,27 +12,30 @@ struct CheckInputPackedNames
     uint32_t* tokens;
     uint32_t* parents;
     uint32_t* ends;
+    uint32_t* typedefs;
 };
 
 // Construct the cold tag-to-source handoff once, on the first anonymous diagnostic. Re-scanning every earlier
-// token for each anonymous local would make a file of such functions quadratic. All three columns have tag_count
-// logical entries, initialized to NONE, and live only until the packed-address pass releases its scratch mark.
+// token for each anonymous local would make a file of such functions quadratic. The columns have tag_count logical
+// entries (NONE for absent source/context, zero for no associated typedef) and live until this pass releases scratch.
 static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedNames* names, uint32_t* stack)
 {
     const uint32_t tags = reader->types->tags.count;
-    bool valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL;
+    bool valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL && names->typedefs != NULL;
     if (!valid && !reader->output->resource)
     {
         names->tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
         names->parents = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
         names->ends = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
-        valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL;
+        names->typedefs = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, tags);
+        valid = names->tokens != NULL && names->parents != NULL && names->ends != NULL && names->typedefs != NULL;
         reader->output->resource |= !valid;
         if (valid)
         {
             memset(names->tokens, 0xff, (uint64_t)tags * sizeof(uint32_t));
             memset(names->parents, 0xff, (uint64_t)tags * sizeof(uint32_t));
             memset(names->ends, 0xff, (uint64_t)tags * sizeof(uint32_t));
+            memset(names->typedefs, 0, (uint64_t)tags * sizeof(uint32_t));
             uint32_t depth = 0;
             const uint32_t count = reader->parser->tokens.count;
             for (uint32_t first = 0; first < count; first += 16)
@@ -74,6 +77,50 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
                         }
                     }
                     present &= present - 1;
+                }
+            }
+            // Field declarators are not ordinary binding declarations. Their zero-initialized kind byte is
+            // also TYPEDEF, so only the reader's retained DECLARE events certify an associated typedef name.
+            const CBindings* bindings = &reader->bindings;
+            for (uint32_t first = 0; first < bindings->count; first += 64)
+            {
+                const uint32_t width = bindings->count - first < 64 ? bindings->count - first : 64;
+                uint64_t selected = 0;
+                if (reader->parser->options.scalar)
+                {
+                    for (uint32_t i = 0; i < width; i += 1)
+                    {
+                        selected |= (uint64_t)(bindings->operation[first + i] == C_BINDING_DECLARE && bindings->kind[first + i] == C_BINDING_TYPEDEF) << i;
+                    }
+                }
+                else
+                {
+                    const __mmask64 active = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+                    const __m512i operations = _mm512_maskz_loadu_epi8(active, bindings->operation + first);
+                    const __m512i kinds = _mm512_maskz_loadu_epi8(active, bindings->kind + first);
+                    selected = _mm512_mask_cmpeq_epi8_mask(active, operations, _mm512_set1_epi8(C_BINDING_DECLARE)) &
+                               _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_BINDING_TYPEDEF));
+                }
+                while (selected != 0)
+                {
+                    const uint32_t event = first + (uint32_t)__builtin_ctzll(selected);
+                    const uint32_t token = bindings->declaration[event];
+                    const TypeId type = token < count ? type_strip_aligned(reader->types, reader->declared_types[token]) : 0;
+                    const uint8_t kind = type_kind(reader->types, type);
+                    if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+                    {
+                        const uint32_t tag = reader->types->types.index[type_index(type)];
+                        bool associated = names->ends[tag] < token && names->typedefs[tag] == 0;
+                        for (uint32_t at = names->ends[tag] + 1; associated && at < token; at += 1)
+                        {
+                            associated = reader->parser->tokens.kinds[at] != PARSE_KIND_SEMI;
+                        }
+                        if (associated)
+                        {
+                            names->typedefs[tag] = reader->parser->tokens.names[token];
+                        }
+                    }
+                    selected &= selected - 1;
                 }
             }
         }
@@ -199,15 +246,9 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
     if (result.length == 0 && check_input_packed_names(reader, names, contexts))
     {
         const uint32_t token = names->tokens[tag];
-        const uint32_t closing = names->ends[tag];
-        for (uint32_t i = closing < parser->tokens.count ? closing + 1 : parser->tokens.count;
-             !field && result.length == 0 && i < parser->tokens.count && parser->tokens.kinds[i] != PARSE_KIND_SEMI; i += 1)
+        if (!field)
         {
-            if (reader->output->declarations[i] == i && reader->declaration_kinds[i] == C_BINDING_TYPEDEF &&
-                type_unqualified(reader->declared_types[i]) == types->tags.type[tag])
-            {
-                result = check_input_packed_identifier(reader, parser->tokens.names[i]);
-            }
+            result = check_input_packed_identifier(reader, names->typedefs[tag]);
         }
         if (result.length == 0 && token < parser->tokens.count)
         {
