@@ -611,7 +611,9 @@ What the lowering covers past scalars (#145's programs):
   objects of their own and passed by their addresses. Those functions' symbols,
   and `__errno_location`'s, are the runtime's (`CheckProgramLowered.runtime_symbols`):
   the unit's own declaration's where its program has one with linkage, else
-  one of the lowering's own after the helpers' (`check_lower_runtime`). A shift
+  one of the lowering's own after the helpers' (`check_lower_runtime`). The
+  direct path's executables take them from `libgcc.a`'s members, which their
+  runtime joins as GCC's driver links them (`runtime.c`, `bind.c`). A shift
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
   and a builtin of 128-bit operands are refused by name.
