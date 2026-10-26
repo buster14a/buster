@@ -30,6 +30,8 @@ struct CheckDeferredFixture
     const char* source;
     // Whether the unit is merged (false: it does what only source order can merge).
     bool merged;
+    // The fixture's -std= option, -std=gnu17 when 0.
+    char* standard;
 };
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
@@ -59,9 +61,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "enum-completed-between-bodies", "enum E;\nint f(void) { enum E* e = 0; return e != 0; }\nenum E { A, B };\nint g(void) { enum E e = B; return e; }\n", true },
     { "typedef-of-a-later-completion",
       "struct S;\nint f(void) { typedef struct S T; T* t = 0; return t != 0; }\nstruct S { int x; };\nint g(void) { typedef struct S T; T t = { 2 }; return t.x; }\n", true },
-    // A tag first named in a file-scope declarator (a prototype's parameter, a sizeof in an array's bound, a
-    // definition's parameter) ends with the declarator in source order's reader, which the history doesn't say: a later
-    // body that names the tag makes one of its own. The last declares the tag first, which every body sees.
+    // A tag first named in a file-scope declarator's parameter list (a prototype's, a definition's) ends with the list in
+    // source order's reader, whose scope is deeper than the file scope the history holds: a later body that names the
+    // tag makes one of its own. One that an array's bound names is the file scope's, which later bodies see, as is the
+    // last fixture's, which the file scope declares first.
     { "tag-in-a-prototype", "void g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
     { "tag-in-a-prototype-then-passed", "void g(struct S *p);\nvoid f(void) { struct S *q = 0; g(q); }\n", true },
     { "tag-in-a-prototype-two-bodies", "void g(struct S *p);\nint f1(void) { struct S *q = 0; return q != 0; }\nint f2(void) { struct S *r = 0; return r != 0; }\n", true },
@@ -109,6 +112,36 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
     { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
     { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
+    // Structs, unions and enums defined in a parameter list (#438): a definition's tags and enumeration constants, which
+    // its body declares again at its opening, whether it names them or not; and a prototype's, which end with it.
+    { "parameter-list-definitions-in-its-body",
+      "int f(struct S { int x; } s, enum E { K = 7 } e) { struct S t = s; enum E k = K; return t.x + k + e; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-constant-shadows-the-file-scope", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return K + e; }\nint g(void) { return K; }\n", true },
+    { "parameter-list-constant-its-body-doesnt-name", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return e; }\nint g(void) { return K; }\n", true },
+    { "prototype-list-constant-ends-with-it", "void g(enum E { K = 7 } e);\nint f(void) { int K = 3; return K; }\n", true },
+    { "definition-in-an-array-bound", "int a[sizeof(struct V { int x; })];\nint f(void) { struct V v = { 2 }; return v.x; }\n", true },
+    // A definition in a prototype that a parameter's bound holds ends at that prototype's `)`, and one in a body's
+    // bound after a statement expression is read before the walk reaches the expression (#460's review).
+    { "bound-prototype-constant-isnt-the-bodys", "int K = 3;\nint f(int a[sizeof(void (*)(enum E { K = 7 }))]) { return K; }\nint g(void) { return K; }\n", true },
+    { "body-bound-definition-after-a-statement-expression",
+      "int f(int m) { int a[({ m; }) + sizeof(struct S { int x; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\nint g(void) { return 2; }\n", true },
+    // C23's enums with a fixed underlying type in bodies, beside plain enums, structs and unions. A body's tags take the
+    // indices after the top level's, as the tags of the bodies its lane read before it did, and none may keep another's
+    // fixed base (lanes once shared the top level's enum_fixed). Both orders, many bodies, and a file-scope one shadowed.
+    { "fixed-enum-then-plain-enum", "int f(void) { enum E : int { A = 1 }; return A; }\nint g(void) { enum F { B = 2 }; return (int)sizeof(enum F) + B; }\n", true,
+      "-std=gnu23" },
+    { "plain-enum-then-fixed-enum", "int f(void) { enum F { B = 2 }; return B; }\nint g(void) { enum E : long { A = 1 }; return (int)sizeof(enum E) + A; }\n", true,
+      "-std=gnu23" },
+    { "fixed-enums-in-many-bodies",
+      "int f0(void) { enum E0 : char { A0 = 1 }; return A0; }\nint f1(void) { enum E1 { B1 = 2 }; return (int)sizeof(enum E1) + B1; }\n"
+      "int f2(void) { enum E2 : long long { A2 = 3 }; return (int)sizeof(enum E2) + A2; }\n"
+      "int f3(void) { struct S3 { int x; } s = { 4 }; return s.x + (int)sizeof(struct S3); }\n"
+      "int f4(void) { enum E4 : short; enum E4 : short { A4 = 5 }; return (int)sizeof(enum E4) + A4; }\n"
+      "int f5(void) { enum E5 { B5 = 6 } e = B5; return e; }\nint f6(void) { union U6 { int i; char c; } u = { 7 }; return u.i + (int)sizeof(union U6); }\n"
+      "int f7(void) { enum E7 : unsigned { A7 = 8 }; enum F7 { B7 = 9 }; return A7 + B7 + (int)sizeof(enum F7); }\n", true, "-std=gnu23" },
+    { "fixed-enum-at-file-scope-and-in-a-body",
+      "enum T : unsigned char { X = 1 };\nint f(void) { enum T t = X; return t + (int)sizeof t; }\n"
+      "int g(void) { enum T : short { Y = 2 }; return Y + (int)sizeof(enum T); }\nint h(void) { enum T u = X; return u; }\n", true, "-std=gnu23" },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
@@ -285,7 +318,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         char path[256];
         snprintf(path, sizeof(path), "%s/%s.c", directory, name);
         valid = parse_test_write(path, source, strlen(source));
-        char* options_text[2] = { "-std=gnu17", path };
+        char* options_text[2] = { f < listed && check_deferred_fixtures[f].standard != 0 ? check_deferred_fixtures[f].standard : "-std=gnu17", path };
         PPOptions options;
         const char* input = 0;
         const char* output = 0;

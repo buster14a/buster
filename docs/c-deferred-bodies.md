@@ -52,9 +52,10 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      at a time (`c_environment_lookup_batch`), and its label head none. A
      declaration the history gives that a restore ended at or before the
      opening gives way to the latest of the name's earlier ones still active
-     (`check_deferred_visible`): a tag first named in a file-scope declarator
-     (`void g(struct S *p);`) ends with it in source order's reader, though
-     its event's depth is 0, which keeps it in the history;
+     (`check_deferred_visible`). Only a declarator that fails ends one, and its
+     unit is source order's: a tag first named in a file-scope prototype
+     (`void g(struct S *p);`) is of the prototype's scope, a level deeper than
+     the file scope the history holds (#438);
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
      transparency after it withdrawn (`type_tag_withdraw`). The withdrawals
@@ -99,6 +100,15 @@ cells: `check_input_vla_parameters` read the body column of every VLA's
 declaration. It now reads only the body's own parameters', the only ones that
 can match. With that, ThreadSanitizer reports nothing on the fixtures,
 c-testsuite, SQLite and Lua.
+
+A lane also kept the top level's `enum_fixed`, which says per tag whether an
+enum has a fixed underlying type (C23's `enum E : T`), until the lane-arenas
+work found it: a body's tags take the indices after the top level's, as the
+tags of the bodies its lane read before it did, so a plain enum, struct or
+union there took an earlier body's fixed enum's state, and lanes wrote the one
+array at once. No fixture had such an enum in a body before. Each lane now
+reads with its own copy (`check_deferred_lane_prepare`), and every tag's state
+is set where it is made (`check_input_tag_identity`).
 
 ## The type table's changes
 
@@ -148,7 +158,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 45 fixtures, 39 of the
+- `./build/compiler test-checker-deferred [--keep]`: 56 fixtures, 50 of the
   issue's cases and 6 of the lanes' rule, each written to a file and checked as
   `test-checker-corpus` checks one: on the scalar path, the vector path, and the
   vector path with every body read apart, on 1, 2, 3 and 8 lanes through the
@@ -195,7 +205,10 @@ passes every checker test.
   tags first named in a prototype's parameter, a sizeof in an array's bound
   and a definition's parameter, and one declared before its prototype; a
   definition's parameter-list tag used in its body, which merges, and
-  completed there, which goes to source order;
+  completed there, which goes to source order; C23's enums with a fixed
+  underlying type in bodies beside plain enums, structs and unions, read with
+  `-std=gnu23`: a fixed one before a plain one and after it, eight bodies of
+  them, and a file-scope one shadowed in a body;
   errors in a body, at the top level, in the syntax and in a later phase; and
   400 bodies that call each other. Mutants that skip a lane's withdrawals
   when it moves back, or its restores when it moves on, fail 12 and 9 checks;
