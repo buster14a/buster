@@ -389,6 +389,9 @@ static __attribute__((unused)) void pp_release(Preprocessor* pp);
 // The bytes of the windows pp_prepare_windows lexes and refines a file of at least two of them in: a window's source and
 // columns, about 280 KB, fit the 9700X's 1 MB L2 cache beside the intern table's lines that refinement reads.
 #define BUSTER_PP_WINDOW_BYTES (128u << 10)
+// The longest part of a line that a window's end may cut before the window is cut before the line instead
+// (pp_window_cut): longer than any but a few lines, so that a window of ordinary lines ends where it would.
+#define BUSTER_PP_WINDOW_TAIL_BYTES (4u << 10)
 // The pages of a file prepared a window at a time whose line ends it counts while each window is in the caches
 // (PPFileData.line_pages): __LINE__ and diagnostics count lines from the page's start at most, whose bytes left the
 // caches long before, rather than from the last place asked about.
@@ -2194,12 +2197,22 @@ static bool pp_note_directives(Arena* arena, PPFileData* data)
 
 // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
 // pp_pair_conditionals_scalar for the scalar kernels and for files the vectorized pairing leaves to it), then the
-// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table.
+// notes (pp_note_directives) where there can be any, in `arena` with the rest of the table. The name's kind and value
+// and the line's word of the directive BUSTER_PP_DIRECTIVE_AHEAD on are prefetched: in a large file they have left the
+// caches, a window at a time (#451) more than whole.
+#define BUSTER_PP_DIRECTIVE_AHEAD 16
 static bool pp_finish_directives(bool vectorized, Arena* arena, PPFileData* data, const uint64_t* lines)
 {
     bool elifdef = false;
     for (uint32_t d = 0; d < data->directive_count; d += 1)
     {
+        if (d + BUSTER_PP_DIRECTIVE_AHEAD < data->directive_count)
+        {
+            const uint32_t ahead = data->directive_hash[d + BUSTER_PP_DIRECTIVE_AHEAD] + 1;
+            _mm_prefetch((const char*)(data->kinds + ahead), _MM_HINT_T0);
+            _mm_prefetch((const char*)(data->values + ahead), _MM_HINT_T0);
+            _mm_prefetch((const char*)(lines + ahead / 64), _MM_HINT_T0);
+        }
         const uint32_t hash = data->directive_hash[d];
         const uint32_t end = pp_next_line(lines, data->token_count, hash);
         uint8_t kind = PP_DIRECTIVE_NULL;
@@ -2599,21 +2612,62 @@ static uint32_t pp_scan_directives_window(const uint8_t* kinds, uint32_t begin, 
 // The windows' scans start at refinement's block boundaries, a word of 64 tokens apart.
 _Static_assert(BUSTER_REFINE_BLOCK_TOKENS % 64 == 0, "pp_scan_directives_window takes whole words of 64 tokens");
 
+// The places of the tokens whose bits are set in `words`, a word per 64 tokens, `word_count` of them (the directives'
+// '#' tokens that pp_scan_directives_window found), into `places` in order, a bit at a time: pp_directive_places' exact
+// twin. Returns how many.
+static uint32_t pp_directive_places_scalar(const uint64_t* words, uint32_t word_count, uint32_t* places)
+{
+    uint32_t count = 0;
+    for (uint32_t w = 0; w < word_count; w += 1)
+    {
+        for (uint64_t bits = words[w]; bits != 0; bits &= bits - 1)
+        {
+            places[count] = 64 * w + (uint32_t)__builtin_ctzll(bits);
+            count += 1;
+        }
+    }
+    return count;
+}
+
+// pp_directive_places_scalar a word at a time: the places of its set bits compressed out of a vector of 0 to 63
+// (vpcompressb), widened to dwords, offset by the word's first token and stored under a mask of their count, without a
+// branch on the word's bits, which a bit at a time mispredicted: sqlite3.c's places took 45 us so on the 9700X (#451).
+// A word of more than 16 (16 directives in 64 tokens, null ones) takes the bit-at-a-time loop for all of its places.
+// Writes `places` only below the count it returns.
+static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count, uint32_t* places)
+{
+    const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37,
+                                              36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9,
+                                              8, 7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t count = 0;
+    for (uint32_t w = 0; w < word_count; w += 1)
+    {
+        const uint64_t bits = words[w];
+        const uint32_t here = (uint32_t)__builtin_popcountll(bits);
+        const __m128i set = _mm512_castsi512_si128(_mm512_maskz_compress_epi8(bits, positions));
+        _mm512_mask_storeu_epi32(places + count, (__mmask16)_bzhi_u32(0xFFFF, here), _mm512_add_epi32(_mm512_cvtepu8_epi32(set), _mm512_set1_epi32((int)(64 * w))));
+        if (BUSTER_UNLIKELY(here > 16))
+        {
+            pp_directive_places_scalar(words + w, 1, places + count);
+            for (uint32_t i = 0; i < here; i += 1)
+            {
+                places[count + i] += 64 * w;
+            }
+        }
+        count += here;
+    }
+    return count;
+}
+
 // pp_directive_table for a file prepared a window at a time, whose `count` directives pp_scan_directives_window found
 // in the words of `directives`, and its lines in those of `lines`: the directives' '#' tokens out of their words into
-// the table.
+// the table (pp_directive_places).
 static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
 {
     bool result = pp_directive_arrays(arena, data, count);
-    const uint32_t word_count = (data->token_count + 63) / 64;
-    uint32_t directive = 0;
-    for (uint32_t w = 0; result && w < word_count; w += 1)
+    if (result)
     {
-        for (uint64_t bits = directives[w]; bits != 0; bits &= bits - 1)
-        {
-            data->directive_hash[directive] = 64 * w + (uint32_t)__builtin_ctzll(bits);
-            directive += 1;
-        }
+        pp_directive_places(directives, (data->token_count + 63) / 64, data->directive_hash);
     }
     result = result && pp_finish_directives(true, arena, data, lines);
     data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
@@ -3017,33 +3071,53 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
     return result;
 }
 
-// Whether bytes [at, end) of a file hold a line end that isn't a line splice's: a '\n' or '\r' that doesn't follow a
-// backslash, nor a '\n' a '\r' after one, 64 bytes at a time. A window without one, whose line goes on through splices
-// alone (a macro defined over many lines), keeps no token when lexed (pp_prepare_windows), so it is doubled unlexed:
-// x86_64_encoder.c's BUSTER_X86_VECTOR_FORMS, 157 KB on 1,695 lines, had the lexer go over 241 KB of the file's 582 KB
-// twice. A splice the lexer takes otherwise (with blanks after the backslash, or a trigraph's) counts as a line end here,
-// and its window is lexed; the check only spares work, and the tokens are the same either way.
-static bool pp_window_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t end)
+// Where a window [at, end) of a file, not its last, is lexed to (pp_prepare_windows), from its last two line ends that
+// aren't line splices': a '\n' that doesn't follow a backslash, nor a '\r' after one, and a '\r' that doesn't follow a
+// backslash and isn't the start of a "\r\n" in the window, 64 bytes at a time from its end. The lexer drops the tokens
+// from the last line it lexes on, which the next window lexes again, so:
+// - with no line end, `at`: the window's line goes on through splices alone (a macro defined over many lines) and would
+//   keep no token, so it is doubled unlexed;
+// - past the last line end when what follows it, which the window's end cuts and the next window would lex again, is
+//   longer than `longest_tail` (BUSTER_PP_WINDOW_TAIL_BYTES) and than the line that ends there, which is lexed again
+//   instead: the start of a line longer than most, which x86_64_encoder.c's BUSTER_X86_VECTOR_FORMS (157 KB on 1,695
+//   lines) had 110 KB of lexed twice (#451);
+// - `end` otherwise, with one line end or a short line after the last, which the next window lexes again.
+// A splice the lexer takes otherwise (with blanks after the backslash, or a trigraph's) counts as a line end here; the
+// cut only spares work, and the tokens are the same wherever it falls.
+static uint64_t pp_window_cut(const uint8_t* bytes, uint64_t at, uint64_t end, uint64_t longest_tail)
 {
-    bool result = false;
-    // Bit 0 of each: the byte before the chunk is a backslash, or a '\r' after one.
-    uint64_t backslash_before = 0;
-    uint64_t spliced_return_before = 0;
-    for (uint64_t i = at; !result && i < end; i += 64)
+    // The last line end and the one before it, from the end: UINT64_MAX until found.
+    uint64_t last = UINT64_MAX;
+    uint64_t before = UINT64_MAX;
+    uint64_t chunk_end = end;
+    while (before == UINT64_MAX && chunk_end > at)
     {
-        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, (uint32_t)(end - i));
-        const __m512i chunk = _mm512_maskz_loadu_epi8(valid, bytes + i);
+        const uint64_t base = chunk_end - at >= 64 ? chunk_end - 64 : at;
+        const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)(chunk_end - base));
+        const __m512i chunk = _mm512_maskz_loadu_epi8(valid, bytes + base);
         const uint64_t newlines = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\n'));
         const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\r'));
         const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, chunk, _mm512_set1_epi8('\\'));
+        // The window's bytes around the chunk: a backslash, or a '\r' after one, right before it, and a '\n' right after.
+        const uint64_t backslash_before = base > at && bytes[base - 1] == '\\';
+        const uint64_t spliced_return_before = base > at + 1 && bytes[base - 1] == '\r' && bytes[base - 2] == '\\';
+        const uint64_t newline_after = chunk_end < end && bytes[chunk_end] == '\n';
         const uint64_t after_backslash = (backslashes << 1) | backslash_before;
         const uint64_t spliced_returns = returns & after_backslash;
         const uint64_t spliced_newlines = newlines & (after_backslash | (spliced_returns << 1) | spliced_return_before);
-        result = ((newlines & ~spliced_newlines) | (returns & ~spliced_returns)) != 0;
-        backslash_before = backslashes >> 63;
-        spliced_return_before = spliced_returns >> 63;
+        const uint64_t crlf_returns = returns & ((newlines >> 1) | (newline_after << (chunk_end - base - 1)));
+        uint64_t ends = (newlines & ~spliced_newlines) | (returns & ~spliced_returns & ~crlf_returns);
+        while (ends != 0 && before == UINT64_MAX)
+        {
+            const uint32_t bit = 63 - (uint32_t)__builtin_clzll(ends);
+            before = last != UINT64_MAX ? base + bit : before;
+            last = last == UINT64_MAX ? base + bit : last;
+            ends &= ~(1ull << bit);
+        }
+        chunk_end = base;
     }
-    return result;
+    const uint64_t tail = last != UINT64_MAX ? end - 1 - last : 0;
+    return last == UINT64_MAX ? at : before != UINT64_MAX && tail > longest_tail && last - before < tail ? last + 1 : end;
 }
 
 // The line ends in the 64-byte block at `base` of a file that lie in [begin, end), as pp_count_lines counts them but for a
@@ -3115,8 +3189,8 @@ static void pp_count_page_lines(const PPFileData* data, uint64_t begin, uint64_t
 
 // pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
 // a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
-// again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it:
-// pp_window_has_line_end), and each completed block of
+// again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it;
+// a window that ends inside a long line is cut before it: pp_window_cut), and each completed block of
 // BUSTER_REFINE_BLOCK_TOKENS refined at once (refine_tokens_blocks), while the lexer's columns and the source are still
 // in the caches: a whole file lexed before its refinement had refinement read them from memory again
 // (docs/c-refinement.md). The records are pp_prepare_whole's, byte for byte. The leading-space words, whose place after
@@ -3175,9 +3249,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     {
         const uint64_t end = length - at <= size ? length : at + size;
         last = end == length;
-        const int64_t lexed = last || pp_window_has_line_end(data->bytes, at, end)
-                                  ? c_tokenize_lines(data->bytes, end, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags)
-                                  : 0;
+        const uint64_t cut = last ? end : pp_window_cut(data->bytes, at, end, BUSTER_PP_WINDOW_TAIL_BYTES);
+        const int64_t lexed = cut > at ? c_tokenize_lines(data->bytes, cut, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags)
+                                       : 0;
         int64_t kept = last ? lexed : 0;
         for (int64_t i = lexed - 1; !last && kept == 0 && i > 0; i -= 1)
         {

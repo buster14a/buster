@@ -15,8 +15,9 @@
 // count from the pages and give the scalar twins' output. Files made by hand check the line ends at a query's end
 // (pp_test_line_ends, #441): a "\r\n" counts at its '\n', so a query that ends at the '\n' counts no line end there.
 //
-// Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the line ends' scan
-// (pp_window_has_line_end) against a byte-at-a-time one, line ends at a query's end, and pp_test_windows.
+// Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the windows' cut
+// (pp_window_cut) against a byte-at-a-time one, the directives' places (pp_directive_places) against their twin, line
+// ends at a query's end, and pp_test_windows.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -561,64 +562,122 @@ static bool pp_test_window_units(const char* directory, uint64_t seed)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The line ends' scan
+// The windows' cut
 
-// pp_window_has_line_end a byte at a time.
-static bool pp_window_test_has_line_end(const uint8_t* bytes, uint64_t at, uint64_t end)
+// pp_window_cut a byte at a time: its line ends, and where the window is cut from the last two.
+static uint64_t pp_window_test_cut(const uint8_t* bytes, uint64_t at, uint64_t end, uint64_t longest_tail)
 {
-    bool result = false;
+    uint64_t last = UINT64_MAX;
+    uint64_t before = UINT64_MAX;
     for (uint64_t p = at; p < end; p += 1)
     {
         const bool after_backslash = p > at && bytes[p - 1] == '\\';
         const bool after_spliced_return = p > at + 1 && bytes[p - 1] == '\r' && bytes[p - 2] == '\\';
-        result |= (bytes[p] == '\r' && !after_backslash) || (bytes[p] == '\n' && !after_backslash && !after_spliced_return);
+        const bool crlf = p + 1 < end && bytes[p + 1] == '\n';
+        const bool line_end = (bytes[p] == '\r' && !after_backslash && !crlf) || (bytes[p] == '\n' && !after_backslash && !after_spliced_return);
+        before = line_end ? last : before;
+        last = line_end ? p : last;
     }
-    return result;
+    const uint64_t tail = last != UINT64_MAX ? end - 1 - last : 0;
+    return last == UINT64_MAX ? at : before != UINT64_MAX && tail > longest_tail && last - before < tail ? last + 1 : end;
 }
 
-// pp_window_has_line_end against the byte-at-a-time scan: random bytes of backslashes, line ends, blanks and letters, of
-// 0 to 300 bytes, each scanned from four starts to its end at a PROT_NONE page (a read past the end faults). Returns the
-// differences and adds the checks to `checks`.
+// pp_window_cut against the byte-at-a-time cut: random bytes of backslashes, line ends ("\r\n" among them), blanks and
+// letters, of 0 to 300 bytes and some of up to 12 KB, each cut from four starts to its end with the longest tail of 0,
+// 3, 40 and BUSTER_PP_WINDOW_TAIL_BYTES bytes, ending at a PROT_NONE page (a read past the end faults) and starting at
+// the end of one (a read before the first start faults). Returns the differences and adds the checks to `checks`.
 static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
 {
-    static const uint8_t alphabet[] = { '\\', '\\', '\r', '\n', '\n', ' ', 'a', '\t' };
+    static const uint64_t tails[] = { 0, 3, 40, BUSTER_PP_WINDOW_TAIL_BYTES };
+    static const uint8_t alphabet[] = { '\\', '\\', '\r', '\r', '\n', '\n', ' ', 'a', '\t' };
     const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + page_bytes, page_bytes, PROT_NONE) != 0;
-    for (uint32_t length = 0; failures == 0 && length <= 300; length += 1)
+    // Room for the longest inputs, between two guard pages.
+    const uint64_t room = (12288 + page_bytes - 1) / page_bytes * page_bytes;
+    uint8_t* mapping = mmap(0, room + 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping, page_bytes, PROT_NONE) != 0 || mprotect(mapping + page_bytes + room, page_bytes, PROT_NONE) != 0;
+    for (uint32_t length = 0; failures == 0 && length <= 12288; length += length < 300 ? 1 : 997)
     {
         for (uint32_t trial = 0; trial < 24; trial += 1)
         {
-            uint8_t* bytes = mapping + page_bytes - length;
-            // Mostly bytes that aren't line ends, so that a scan goes through several chunks before it finds one.
-            const uint64_t density = 1 + pp_window_test_random(random) % 64;
+            // Every other trial ends at the guard page after the bytes, and the others start at the end of the one before.
+            uint8_t* bytes = trial % 2 == 0 ? mapping + page_bytes + room - length : mapping + page_bytes;
+            // Mostly bytes that aren't line ends, so that a scan goes through several chunks before it finds one; for the
+            // longer inputs, fewer still, so that the last line or the tail after it can pass the longest tail.
+            const uint64_t density = 1 + pp_window_test_random(random) % (length < 300 ? 64 : 4096);
             for (uint32_t i = 0; i < length; i += 1)
             {
                 const uint64_t r = pp_window_test_random(random);
                 bytes[i] = r % density == 0 ? alphabet[(r >> 8) % sizeof(alphabet)] : (r >> 16) % 3 == 0 ? (uint8_t)'\\' : (uint8_t)'x';
-                // A splice's newline after most backslashes.
-                if (bytes[i] == '\\' && i + 1 < length && (r >> 24) % 2 == 0)
+                // A splice's newline after most backslashes, and a '\n' after most '\r's.
+                if ((bytes[i] == '\\' || bytes[i] == '\r') && i + 1 < length && (r >> 24) % 2 == 0)
                 {
                     i += 1;
-                    bytes[i] = (r >> 25) % 4 == 0 ? (uint8_t)'\r' : (uint8_t)'\n';
+                    bytes[i] = bytes[i - 1] == '\\' && (r >> 25) % 4 == 0 ? (uint8_t)'\r' : (uint8_t)'\n';
                 }
             }
             for (uint32_t at = 0; at < 4 && at <= length; at += 1)
             {
-                const bool vector = pp_window_has_line_end(mapping, page_bytes - length + at, page_bytes);
-                const bool scalar = pp_window_test_has_line_end(mapping, page_bytes - length + at, page_bytes);
-                *checks += 1;
-                if (vector != scalar && failures < 4 && !pp_test_quiet)
+                for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(tails); t += 1)
                 {
-                    printf("windows: the line ends' scan of %u bytes from %u gives %d, a byte at a time %d\n", length, at, vector, scalar);
+                    const uint64_t vector = pp_window_cut(bytes, at, length, tails[t]);
+                    const uint64_t scalar = pp_window_test_cut(bytes, at, length, tails[t]);
+                    *checks += 1;
+                    if (vector != scalar && failures < 4 && !pp_test_quiet)
+                    {
+                        printf("windows: the cut of %u bytes from %u, the longest tail %lu, is at %lu, a byte at a time at %lu\n", length, at, (unsigned long)tails[t],
+                               (unsigned long)vector, (unsigned long)scalar);
+                    }
+                    failures += vector != scalar;
                 }
-                failures += vector != scalar;
             }
         }
     }
     if (mapping != MAP_FAILED)
     {
-        munmap(mapping, 2 * page_bytes);
+        munmap(mapping, room + 2 * page_bytes);
+    }
+    return failures;
+}
+
+// pp_directive_places against its twin: 0 to 300 words of every density (none, sparse, runs, more than 16 bits, all
+// ones), each output ending at a PROT_NONE page exactly where its places end, so that a store past them faults. Returns
+// the differences and adds the checks to `checks`.
+static uint64_t pp_window_test_places(uint64_t* random, uint64_t* checks)
+{
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    // Room for 300 words of 64 places each, and a guard page.
+    const uint64_t room = (300 * 64 * sizeof(uint32_t) + page_bytes - 1) / page_bytes * page_bytes;
+    uint8_t* mapping = mmap(0, room + page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t failures = mapping == MAP_FAILED || mprotect(mapping + room, page_bytes, PROT_NONE) != 0;
+    static uint64_t words[300];
+    static uint32_t expected[300 * 64];
+    for (uint32_t word_count = 0; failures == 0 && word_count <= 300; word_count += word_count < 40 ? 1 : 13)
+    {
+        for (uint32_t trial = 0; trial < 16; trial += 1)
+        {
+            const uint32_t density = (uint32_t)(pp_window_test_random(random) % 6);
+            for (uint32_t w = 0; w < word_count; w += 1)
+            {
+                const uint64_t r = pp_window_test_random(random);
+                const uint64_t s = pp_window_test_random(random);
+                words[w] = density == 0 ? 0 : density == 1 ? (r % 8 == 0 ? 1ull << (s % 64) : 0) : density == 2 ? r & s & pp_window_test_random(random)
+                         : density == 3 ? r : density == 4 ? (r % 4 == 0 ? ~0ull : r % 4 == 1 ? 0 : r) : ~0ull >> (s % 64);
+            }
+            const uint32_t count = pp_directive_places_scalar(words, word_count, expected);
+            uint32_t* places = (uint32_t*)(mapping + room) - count;
+            const uint32_t vector = pp_directive_places(words, word_count, places);
+            const bool same = vector == count && memcmp(places, expected, (uint64_t)count * sizeof(uint32_t)) == 0;
+            *checks += 1;
+            if (!same && failures < 4 && !pp_test_quiet)
+            {
+                printf("windows: the places of %u words of density %u: %u places, %u a bit at a time, or they differ\n", word_count, density, vector, count);
+            }
+            failures += !same;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, room + page_bytes);
     }
     return failures;
 }
@@ -848,6 +907,8 @@ static bool pp_test_windows(uint64_t seed)
     uint64_t random = seed ^ 0x116116116ull;
     uint64_t line_end_checks = 0;
     const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks);
+    uint64_t place_checks = 0;
+    const uint64_t place_failures = pp_window_test_places(&random, &place_checks);
     uint64_t failures = 0;
     uint64_t windowed = 0;
     uint64_t tokens = 0;
@@ -886,7 +947,8 @@ static bool pp_test_windows(uint64_t seed)
         pp_window_test_release(&runs[k]);
     }
     free(text.bytes);
-    printf("windows: %lu of %u sources differ (%lu windowed preparations, %lu tokens); the line ends' scan: %lu of %lu checks fail\n", (unsigned long)failures,
-           BUSTER_PP_WINDOW_TEST_SOURCES, (unsigned long)windowed, (unsigned long)tokens, (unsigned long)line_end_failures, (unsigned long)line_end_checks);
-    return initialized && failures == 0 && line_end_failures == 0;
+    printf("windows: %lu of %u sources differ (%lu windowed preparations, %lu tokens); the windows' cut: %lu of %lu checks fail; the directives' "
+           "places: %lu of %lu checks fail\n", (unsigned long)failures, BUSTER_PP_WINDOW_TEST_SOURCES, (unsigned long)windowed, (unsigned long)tokens,
+           (unsigned long)line_end_failures, (unsigned long)line_end_checks, (unsigned long)place_failures, (unsigned long)place_checks);
+    return initialized && failures == 0 && line_end_failures == 0 && place_failures == 0;
 }
