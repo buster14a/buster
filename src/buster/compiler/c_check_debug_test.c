@@ -33,6 +33,7 @@
 //   sections are the -g executable's but at their relocations' fields (zero in the object), and which llvm-dwarfdump
 //   --verify finds no error in; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's
 //   line, into programs that run, whose DWARF llvm-dwarfdump and gdb read as they read the -g executable's.
+// - Unwind tables, with --cross-check: c_check_unwind_test.c's.
 
 typedef struct CheckDebugTestTally CheckDebugTestTally;
 struct CheckDebugTestTally
@@ -449,7 +450,7 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
     ready = ready && check_program(&unit->program, parser, &unit->input, &unit->stream, &unit->types, program_options, &unit->output, &unit->scratch) &&
             check_program_select(&unit->selected, &unit->program, &unit->data, scalar, &unit->output, &unit->scratch) &&
             check_program_emit(&unit->code, &unit->selected.program, parser, identifiers, unit->selected.data.capacity, scalar, &unit->output, &unit->bytes,
-                               &unit->scratch, NULL, &unit->rows, true);
+                               &unit->scratch, NULL, &unit->rows, false, true);
     unit->ready = ready;
 }
 
@@ -1042,6 +1043,41 @@ static bool check_debug_test_same_unit(String8 object, String8 executable)
     return result;
 }
 
+// link-foreign (this executable, as a process of its own) on GCC's driver's line for a PIE of `object`, into `program`:
+// whether it linked, its errors in `errors`.
+static bool check_debug_test_link_foreign(const char* object, const char* program, const char* errors, Arena* arena)
+{
+    ForeignTestSystem system;
+    foreign_test_system(&system);
+    ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+    char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 8);
+    bool linked = false;
+    if (system.found && line != 0 && arguments != 0)
+    {
+        *line = (ForeignTestLine){ 0 };
+        foreign_test_pie_begin(line, &system);
+        foreign_test_add(line, (char*)object, true, true);
+        foreign_test_pie_end(line, &system);
+        static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-o" };
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+        {
+            arguments[count] = (char*)head[i];
+            count += 1;
+        }
+        arguments[count] = (char*)program;
+        count += 1;
+        for (uint32_t i = 0; i < line->our_count; i += 1)
+        {
+            arguments[count] = line->ours[i];
+            count += 1;
+        }
+        arguments[count] = 0;
+        linked = object_test_run(arguments, "/dev/null", errors) == 0;
+    }
+    return linked;
+}
+
 // The driver with -c -g (#395), by each path, and what llvm-dwarfdump and gdb read of its object linked by cc, through
 // GNU ld and lld, and by link-foreign, from GCC's driver's line: the unit -g's executable has (check_debug_test_driver
 // made it, dbg_rows), relocated, in programs that run and read alike.
@@ -1092,33 +1128,7 @@ static void check_debug_test_objects(CheckDebugTestTally* tally, const char* dir
         }
         else
         {
-            ForeignTestSystem system;
-            foreign_test_system(&system);
-            ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
-            char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 8);
-            if (system.found && line != 0 && arguments != 0)
-            {
-                *line = (ForeignTestLine){ 0 };
-                foreign_test_pie_begin(line, &system);
-                foreign_test_add(line, objects[0], true, true);
-                foreign_test_pie_end(line, &system);
-                static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-o" };
-                uint32_t count = 0;
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
-                {
-                    arguments[count] = (char*)head[i];
-                    count += 1;
-                }
-                arguments[count] = program;
-                count += 1;
-                for (uint32_t i = 0; i < line->our_count; i += 1)
-                {
-                    arguments[count] = line->ours[i];
-                    count += 1;
-                }
-                arguments[count] = 0;
-                linked = object_test_run(arguments, "/dev/null", errors) == 0;
-            }
+            linked = check_debug_test_link_foreign(objects[0], program, errors, arena);
         }
         check_debug_test_expect(tally, linked, l == 0 ? "cc links the object through GNU ld" : l == 1 ? "cc links the object through lld" : "link-foreign links the object", errors);
         char* run[] = { program, 0 };
@@ -1148,6 +1158,9 @@ static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* di
     check_debug_test_expect(tally, status == 1 && message.pointer != 0 && strstr(message.pointer, "usage: compiler") != 0,
                             "the driver refuses a link with -g whose options fail before they're parsed, with the usage message", errors);
 }
+
+// The unwind tables' checks (c_check_unwind_test.c, after this file).
+static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena);
 
 static int run_check_debug_tests(int argc, char** argv)
 {
@@ -1201,6 +1214,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_test_driver(&tally, directory, &arena);
             check_debug_test_objects(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
+            check_unwind_test_driver(&tally, directory, &arena);
         }
         if (!keep && tally.failures == 0)
         {

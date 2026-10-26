@@ -119,6 +119,8 @@
 #define BUSTER_BIND_TEST_ARENA_BYTES (1ull << 32)
 #define BUSTER_BIND_TEST_BIND_BYTES (1ull << 30)
 #define BUSTER_BIND_TEST_PATH_BYTES 4096
+// What a dirty arena holds where binding pushes its arrays (bind_test_dirty_arena).
+#define BUSTER_BIND_TEST_DIRTY_BYTE 0xa5
 
 typedef struct BindTestTally BindTestTally;
 struct BindTestTally
@@ -173,9 +175,24 @@ struct BindTestProgram
     bool bound;
 };
 
+// Fills the arena's next `bytes` bytes with BUSTER_BIND_TEST_DIRTY_BYTE and pops them again, so that what binding pushes
+// there holds the pattern where a fresh mapping holds zeros, as an arena that held other data would.
+static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
+{
+    const uint64_t length = arena->length;
+    uint8_t* filled = arena_push(arena, bytes, 64);
+    if (filled != 0)
+    {
+        memset(filled, BUSTER_BIND_TEST_DIRTY_BYTE, bytes);
+        arena_pop_to(arena, length);
+    }
+    return filled != 0;
+}
+
 // Generates the program with room for the runtime, joins the runtime's first objects after its symbols, adds its atoms,
-// and binds the rest, numbering the runtime's units after the program's.
-static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+// and binds the rest, numbering the runtime's units after the program's; with `dirty`, over binding's arena dirtied that
+// far (bind_test_dirty_arena).
+static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty)
 {
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
@@ -183,12 +200,18 @@ static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, Lin
     test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
     test->bind = (Bind){ 0 };
     bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
+    result = result && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
     result = result && bind_begin(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
     result = result && link_program_generate_atoms(&test->program);
     result = result && bind_end(&test->bind, &test->program.link);
     result = result && link_program_generate_end(&test->program);
     test->bound = result;
     return result;
+}
+
+static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+{
+    return bind_test_program_dirtied(test, runtime, options, path, 0);
 }
 
 static void bind_test_release(BindTestProgram* test)
@@ -234,6 +257,25 @@ static bool bind_test_same_links(const Link* a, const Link* b)
         result = a->priorities.atom[entry] == b->priorities.atom[entry] && a->priorities.priority[entry] == b->priorities.priority[entry];
     }
     return result;
+}
+
+// The bytes to dirty for a binding again: as far as `used`, what the clean binding pushed on its arena, and as far again.
+static uint64_t bind_test_dirty_bytes(uint64_t used)
+{
+    return 2 * used + 4096;
+}
+
+// Whether the dirty arena's pattern reached Bind.symbols: an entry of a piece that didn't join keeps it, since binding
+// writes only the entries of the pieces that join.
+static bool bind_test_kept_pattern(const Bind* bind, const Runtime* runtime)
+{
+    const SymbolId pattern = 0x01010101u * BUSTER_BIND_TEST_DIRTY_BYTE;
+    bool kept = false;
+    for (SymbolId symbol = 1; !kept && symbol < runtime->link.symbols.count; symbol += 1)
+    {
+        kept = bind->symbols[symbol] == pattern;
+    }
+    return kept;
 }
 
 // Whether two bindings ended alike: the error and its name, the imports, the exports and the members that joined.
@@ -591,6 +633,21 @@ static void bind_test_structure(BindTestTally* tally, const BindTestProgram* tes
     bind_test_expect(tally, eh_last == base + RUNTIME_OBJECT_END, ".eh_frame: crtendS.o's last", eh_last);
 }
 
+// Binds the program again by the clean binding's path, over binding's arena dirtied as far as bind_test_dirty_bytes
+// says, which must give the clean binding's link and binding: binding reads no entry of the arrays it pushes before
+// writing it, Bind.symbols's among them, which it doesn't clear (each piece's join writes its symbols' entries before
+// that piece's fixups read them, #490's review).
+static void bind_test_dirty(BindTestTally* tally, const BindTestProgram* clean, const Runtime* runtime, LinkProgramOptions options)
+{
+    BindTestProgram dirty;
+    const bool bound = bind_test_program_dirtied(&dirty, runtime, options, clean->bind.path, bind_test_dirty_bytes(clean->arena.length));
+    bind_test_expect(tally, bound == clean->bound && bind_test_same_links(&clean->program.link, &dirty.program.link) && bind_test_same_binds(&clean->bind, &dirty.bind),
+                     clean->bind.path == BIND_PATH_VECTOR ? "the vector path over a dirty arena as over a clean one" : "the exact path over a dirty arena as over a clean one",
+                     0);
+    bind_test_expect(tally, !bound || bind_test_kept_pattern(&dirty.bind, runtime), "the dirty arena's pattern in Bind.symbols", 0);
+    bind_test_release(&dirty);
+}
+
 // Binds the program by both paths, which must agree, and checks the vector path's link. The vector path's program is
 // left in `kept` for the cross-check, released by the caller.
 static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkProgramOptions options, const char* name, BindTestProgram* kept, Arena* arena)
@@ -607,6 +664,8 @@ static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkPr
     }
     bind_test_expect(tally, bind_test_same_links(&kept->program.link, &exact.program.link), "the paths' links the same", 0);
     bind_test_expect(tally, bind_test_same_binds(&kept->bind, &exact.bind), "the paths' imports, exports and members the same", 0);
+    bind_test_dirty(tally, kept, runtime, options);
+    bind_test_dirty(tally, &exact, runtime, options);
     if (vector_bound)
     {
         bind_test_structure(tally, kept, runtime, arena);
@@ -1818,8 +1877,8 @@ struct BindTestAtexit
 
 // The program's symbols, then the runtime's first objects, its code, and the rest; without `bound`, only the program,
 // for a link of its own objects by cc. program->bound also needs link_check to accept the link, as the object writer
-// does of the links the cross-check writes.
-static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
+// does of the links the cross-check writes. With `dirty`, binding's arena is dirtied that far (bind_test_dirty_arena).
+static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
 {
     BindTestLink* test = &program->test;
     bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -1827,6 +1886,7 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
     program->handler = built ? bind_test_symbol(test, "buster_handler", BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
     program->atexit = built ? bind_test_symbol(test, "atexit", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE) : 0;
     built = program->main != 0 && program->handler != 0 && program->atexit != 0;
+    built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
     built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
     // main: sub rsp, 8; lea rdi, [rip + handler]; call atexit; add rsp, 8; mov eax, 3; ret.
     const X86Instruction main_code[] = {
@@ -1896,6 +1956,11 @@ static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, Bi
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
+static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
+{
+    bind_test_atexit_dirtied(program, runtime, path, bound, 0);
+}
+
 // The index of the runtime's first member named `name` (libc_nonshared.a's, or the static runtimes' archives'), or the
 // member count.
 static uint32_t bind_test_member(const Runtime* runtime, const char* name)
@@ -1946,6 +2011,21 @@ static bool bind_test_atexit_program(const Runtime* runtime)
     bind_test_atexit_checks(&tally, &vector, runtime);
     bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
                      "the paths agree", 0);
+    // Each path again over binding's arena dirtied (bind_test_dirty), with the member that joins.
+    const BindTestAtexit* cleans[] = {
+        &vector,
+        &exact,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
+    {
+        BindTestAtexit dirty;
+        bind_test_atexit_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
+                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
+                         "the path over a dirty arena as over a clean one", c);
+        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
+        bind_test_link_end(&dirty.test);
+    }
     bind_test_link_end(&vector.test);
     bind_test_link_end(&exact.test);
     return bind_test_report(&tally);
@@ -1980,8 +2060,8 @@ struct BindTestLibgcc
 };
 
 // As bind_test_atexit: the program's symbols, then the runtime's first objects, its code, and the rest; without
-// `bound`, only the program, for a link of its own objects by cc.
-static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
+// `bound`, only the program, for a link of its own objects by cc; with `dirty`, over binding's arena dirtied that far.
+static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
 {
     BindTestLink* test = &program->test;
     bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -1992,6 +2072,7 @@ static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, Bi
         program->calls[c] = built ? bind_test_symbol(test, bind_test_libgcc_names[c], BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) : 0;
         built = built && program->calls[c] != 0;
     }
+    built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
     built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
     // main: push rbx (which aligns the stack for the calls); __udivti3 of 100 in rsi:rdi by 7 in rcx:rdx, the quotient's
     // low half in eax, kept in ebx; __fixunsdfti of 3.0 and __fixdfti of -2.0 in xmm0, each low half in eax added to
@@ -2117,6 +2198,11 @@ static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, Bi
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
 
+static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
+{
+    bind_test_libgcc_dirtied(program, runtime, path, bound, 0);
+}
+
 // The members of libgcc.a that joined must be those the three names have, and no others, each defining its name,
 // hidden, as libgcc.a's helpers are; nothing is imported from libc.so.6 for them.
 static void bind_test_libgcc_checks(BindTestTally* tally, const BindTestLibgcc* program, const Runtime* runtime)
@@ -2166,6 +2252,21 @@ static bool bind_test_libgcc_program(const Runtime* runtime)
     bind_test_libgcc_checks(&tally, &vector, runtime);
     bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
                      "the paths agree", 0);
+    // Each path again over binding's arena dirtied (bind_test_dirty), with the members that join, in one round.
+    const BindTestLibgcc* cleans[] = {
+        &vector,
+        &exact,
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
+    {
+        BindTestLibgcc dirty;
+        bind_test_libgcc_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
+                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
+                         "the path over a dirty arena as over a clean one", c);
+        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
+        bind_test_link_end(&dirty.test);
+    }
     bind_test_link_end(&vector.test);
     bind_test_link_end(&exact.test);
     return bind_test_report(&tally);
@@ -3769,6 +3870,8 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
             bind_test_expect(&tally, vector_bound && exact_bound && generated, link_test_program_names[i], vector.bind.error);
             bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link), "the paths' links the same", i);
             bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", i);
+            bind_test_dirty(&tally, &vector, runtime, options[i]);
+            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound && generated)
             {
                 bind_test_static_expected(runtime, &own.link, expected, arena);
@@ -4385,6 +4488,8 @@ static bool bind_test_shared_programs(const Runtime* runtime, uint64_t seed)
             bind_test_expect(&tally, vector_bound && exact_bound, link_test_program_names[i], vector.bind.error);
             bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link) && bind_test_same_binds(&vector.bind, &exact.bind),
                              "the paths' links and bindings the same", i);
+            bind_test_dirty(&tally, &vector, runtime, options[i]);
+            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound)
             {
                 bind_test_shared_structure(&tally, &vector.program.link, &vector.bind);

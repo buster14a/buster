@@ -338,6 +338,14 @@ struct Runtime
     const uint8_t* snapshot_data;
     const uint8_t* piece_hashes;
     const uint64_t* piece_data;
+    // A loaded runtime's members' records, which its snapshot keeps apart from the crt objects', whose records `link`,
+    // `symbol_names` and `names` hold then (snapshot.c): the columns binding reads, placed so that the runtime's ids index
+    // them (`member_link`'s counts and other columns are `link`'s), its symbols' global names, and the names run's second
+    // part, placed so that the pieces' marks' name_bytes index it. runtime_piece_link and runtime_symbol_link choose; an
+    // imported runtime's `link` holds every piece's records.
+    Link member_link;
+    uint32_t* member_symbol_names;
+    const uint8_t* member_names;
     // When it failed: the file that didn't import or couldn't be read, or the name that wasn't found, the importer's
     // result and errno.
     char failed_file[BUSTER_RUNTIME_PATH_BYTES];
@@ -487,6 +495,15 @@ static __attribute__((unused)) uint64_t runtime_name_filter_bits(uint64_t hash);
 static __attribute__((unused)) const uint8_t* runtime_name_bytes(const Runtime* runtime, NameId name);
 static __attribute__((unused)) const uint8_t* runtime_atom_bytes(const Runtime* runtime, AtomId atom);
 static __attribute__((unused)) String8 runtime_member_name(const Runtime* runtime, uint32_t member);
+// The link whose columns hold piece `piece`'s records (a crt object, or RUNTIME_OBJECTS + m for member m), by the
+// runtime's ids: Runtime.member_link for a loaded runtime's member, Runtime.link otherwise. And its symbols' global names'
+// entries plus 1 (Runtime.symbol_names), and the names run that its marks' name_bytes index.
+static __attribute__((unused)) const Link* runtime_piece_link(const Runtime* runtime, uint32_t piece);
+static __attribute__((unused)) const uint32_t* runtime_piece_symbol_names(const Runtime* runtime, uint32_t piece);
+static __attribute__((unused)) const uint8_t* runtime_piece_names(const Runtime* runtime, uint32_t piece);
+// runtime_piece_link and runtime_piece_symbol_names of the piece that holds symbol `symbol`.
+static __attribute__((unused)) const Link* runtime_symbol_link(const Runtime* runtime, SymbolId symbol);
+static __attribute__((unused)) const uint32_t* runtime_symbol_names(const Runtime* runtime, SymbolId symbol);
 // libc's archive: libc_nonshared.a for a dynamic PIE and a shared library, libc.a for a static executable and a static
 // PIE. The archives keep the driver's order, in which it comes last.
 static __attribute__((unused)) const RuntimeArchive* runtime_libc_archive(const Runtime* runtime);
@@ -2489,16 +2506,50 @@ static bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t 
 // ---------------------------------------------------------------------------------------------------------------------
 // Bytes and pieces
 
+// The records of the crt objects in each table, from record 0: a loaded runtime's records from these on are the
+// members', in Runtime.member_link.
+static ImportMark runtime_object_records(const Runtime* runtime)
+{
+    return runtime->pieces[RUNTIME_OBJECTS - 1].end;
+}
+
 static const uint8_t* runtime_name_bytes(const Runtime* runtime, NameId name)
 {
-    const uintptr_t value = (uintptr_t)runtime->link.names.bytes[name];
+    const Link* link = runtime->snapshot != 0 && name >= runtime_object_records(runtime).names ? &runtime->member_link : &runtime->link;
+    const uintptr_t value = (uintptr_t)link->names.bytes[name];
     return value != 0 ? (const uint8_t*)(value + runtime->byte_delta) : 0;
 }
 
 static const uint8_t* runtime_atom_bytes(const Runtime* runtime, AtomId atom)
 {
-    const uintptr_t value = (uintptr_t)runtime->link.atoms.bytes[atom];
+    const Link* link = runtime->snapshot != 0 && atom >= runtime_object_records(runtime).atoms ? &runtime->member_link : &runtime->link;
+    const uintptr_t value = (uintptr_t)link->atoms.bytes[atom];
     return value != 0 ? (const uint8_t*)(value + runtime->byte_delta) : 0;
+}
+
+static const Link* runtime_piece_link(const Runtime* runtime, uint32_t piece)
+{
+    return runtime->snapshot != 0 && piece >= RUNTIME_OBJECTS ? &runtime->member_link : &runtime->link;
+}
+
+static const uint32_t* runtime_piece_symbol_names(const Runtime* runtime, uint32_t piece)
+{
+    return runtime->snapshot != 0 && piece >= RUNTIME_OBJECTS ? runtime->member_symbol_names : runtime->symbol_names;
+}
+
+static const uint8_t* runtime_piece_names(const Runtime* runtime, uint32_t piece)
+{
+    return runtime->snapshot != 0 && piece >= RUNTIME_OBJECTS ? runtime->member_names : runtime->names.base;
+}
+
+static const Link* runtime_symbol_link(const Runtime* runtime, SymbolId symbol)
+{
+    return runtime->snapshot != 0 && symbol >= runtime_object_records(runtime).symbols ? &runtime->member_link : &runtime->link;
+}
+
+static const uint32_t* runtime_symbol_names(const Runtime* runtime, SymbolId symbol)
+{
+    return runtime->snapshot != 0 && symbol >= runtime_object_records(runtime).symbols ? runtime->member_symbol_names : runtime->symbol_names;
 }
 
 static String8 runtime_member_name(const Runtime* runtime, uint32_t member)
@@ -2554,7 +2605,8 @@ static RuntimeSlice runtime_slice(const void* column, uint64_t element, uint64_t
 // 9700X, and faulted their pages in). Returns how many slices.
 static uint32_t runtime_piece_slices(const Runtime* runtime, uint32_t piece, RuntimeSlice* slices)
 {
-    const Link* link = &runtime->link;
+    const Link* link = runtime_piece_link(runtime, piece);
+    const uint32_t* symbol_names = runtime_piece_symbol_names(runtime, piece);
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     const bool first = piece == 0;
@@ -2589,8 +2641,8 @@ static uint32_t runtime_piece_slices(const Runtime* runtime, uint32_t piece, Run
         runtime_slice(link->fixups.wide_addends, sizeof(*link->fixups.wide_addends), wide, end.wide_addends),
         runtime_slice(link->priorities.atom, sizeof(*link->priorities.atom), priorities, end.priorities),
         runtime_slice(link->priorities.priority, sizeof(*link->priorities.priority), priorities, end.priorities),
-        runtime_slice(runtime->symbol_names, sizeof(*runtime->symbol_names), symbols, end.symbols),
-        runtime_slice(runtime->names.base, 1, name_bytes, end.name_bytes),
+        runtime_slice(symbol_names, sizeof(*symbol_names), symbols, end.symbols),
+        runtime_slice(runtime_piece_names(runtime, piece), 1, name_bytes, end.name_bytes),
         runtime_slice(runtime->snapshot_data, 1, runtime->piece_data[piece], runtime->piece_data[piece + 1]),
     };
     memcpy(slices, all, sizeof(all));

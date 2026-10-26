@@ -788,7 +788,8 @@ without it, made private (mode 0700) when it is missing. Each holds its
 kind, which the loader checks: the other kind's file at its name is stale.
 
 - **The file** is the runtime's records as the compiler lays them out in
-  memory, each region at a multiple of 64 bytes, in two parts:
+  memory, each region of the directory at a multiple of 64 bytes and each
+  of the pieces' records at its elements' alignment, in two parts:
   - **the directory,** what every link reads: a header (the counts, the paths
     and each region's place), then from the second page the probes,
     `libc.so.6`'s versions, the members, the strings, the pieces (the crt
@@ -796,8 +797,18 @@ kind, which the loader checks: the other kind's file at its name is stale.
     piece's hash, the global names with their index and filter, the exports,
     and the pieces' references and COMDAT groups;
   - **the pieces' records,** of which a link reads those of the pieces it
-    joins: the link's columns, the bindings and the symbols' global names,
-    then the data, the names run and each piece's atoms' bytes.
+    joins. Every link joins the crt objects, and most join no member, so
+    their records come first and together (#490, format 6): each column
+    binding reads (the link's and the symbols' global names) over the crt
+    objects' records, from each table's record 0; then the data, the crt
+    objects' names, every piece's atoms' bytes and the members' names; then
+    the same columns over the members' records; then the columns nothing
+    reads of a loaded runtime (the atoms' addresses, the symbols' GOT slots,
+    dynamic indices, versions and references, and the bindings), whole. A
+    loaded runtime's `link` points at the crt objects' regions, and its
+    `member_link` at the members', placed so that the runtime's ids index
+    both; binding reads each piece through `runtime_piece_link` and each
+    symbol through `runtime_symbol_link`.
 
   The dynamic runtime's is 198 KB on the 9700X: 2,685 global names with their
   index and filter, and `libc.so.6`'s 2,630 exports and the loader's 38. The
@@ -2784,7 +2795,40 @@ took 2.349 ms against 2.329 (+0.9%), its peak resident set 31,768 KB against
 2.433 ms and 33,844 KB. The direct path couldn't link a 128-bit integer's
 division or a complex product without `libgcc.a` at all, so the constant is the
 price of linking them; laying the crt objects' records out apart from the
-members' should take back most of `bind_begin`'s part (#490).
+members' takes back `bind_begin`'s part (#490, below).
+
+**The crt objects' records apart (#490).** With each column whole, the crt
+objects' records were the starts of 24 columns spread over 260 KB of the
+mapping, and their atoms' bytes came after the 30 KB names run: a link that
+joined no member faulted four 64 KB windows of the mapping that the
+directory's hash hadn't (a file's read fault maps a window around its page).
+Format 6 puts them in one span of 3.5 KB right after the directory, in the
+window the hash faults last ("The file", above); `bind_begin` no longer clears
+an entry of `Bind.symbols` for every member's symbol, which each piece's join
+writes before anything reads it; and the pieces' regions are aligned to their
+elements, not to 64 bytes. On the 9700X, the branch's final head against main
+(35f26f68) and against main before `libgcc.a` (ff8936be), ten rounds in turn
+([the record](https://github.com/buster14a/buster-performance/tree/3de2d80081d62ab317eb564b93ed260e8301bfd6/docs/measurements/snapshot-crt-region-490-2026-10-26)):
+
+| | before `libgcc.a` | main | this |
+| --- | ---: | ---: | ---: |
+| `bind_begin`, 1 worker, PIE | 0.7 µs | 3.8 µs, 4 faults | 0.8 µs, 0 faults |
+| `bind_begin`, 1 worker, static | 15.0 µs | 15.3 µs, 21 faults | 1.0 µs, 0 faults |
+| link, 1 worker, PIE | 19.4 µs | 24.1 µs | 21.4 µs |
+| link, 1 worker, static | 379.1 µs | 377.6 µs | 367.7 µs |
+| `runtime_open`, dynamic | 9.88 µs | 11.82 µs | 11.79 µs |
+| dynamic snapshot | 197,828 bytes | 3,283,511 bytes | 3,282,344 bytes |
+| C driver's hello world | 2.319 ms, 560 faults | 2.354 ms, 573 faults | 2.352 ms, 567 faults |
+
+Main with its mapping populated before use (a diagnostic switch) took 0.9 µs
+in `bind_begin` and no fault there: the faults were its 3 µs. A static link's
+`bind_begin` took as long before `libgcc.a` (15.0 µs), its crt objects' records
+spread over the columns of 2,618 members. Counted step by step in diagnostic
+builds, the hello world's link takes 42 faults against 50 on main and 38 before
+`libgcc.a`; the four more come with the larger runtime (the closure's scratch,
+the global names' table that `bind_begin` clears, `dynamic_inputs`' arrays),
+and the rest of the process varies with each build's code (the same front end
+faulted 528 to 533 times in three builds).
 
 `test-import` checks the archives' order, `__udivti3` a member's of
 `libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;
@@ -2802,7 +2846,7 @@ for `morestack.o`'s unwinder without `libgcc_s.so.1`) within
 a PIE, by both paths (refused without `libgcc_s.so.1`), where cc's links with
 GNU ld and lld need `libgcc_s.so.1`, load into a harness that doesn't and
 run.
-`test-snapshot` damages a byte of the pieces' records at 123 places of each
+`test-snapshot` damages a byte of the pieces' records at 171 places of each
 kind's snapshot, and each damaged copy must give a link of every member's
 names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
 program as a PIE among its cases, and links a shared library whose code, cc's,
@@ -2838,7 +2882,7 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   a link's version index names one library's. Its exports are global names
   numbered after the loader's (`runtime_export_library`), and the snapshot
   keeps its versions, its exports' versions and types, its path and its
-  soname as it keeps the loader's (format 6).
+  soname as it keeps the loader's (format 7, after #490's 6).
 - **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
   -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
   which exports most of the members' names too (`__udivti3`), so binding

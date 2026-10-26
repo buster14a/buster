@@ -4,7 +4,9 @@
 // The available backend chain, with opt-in CFI charged to its producer: frozen typed functions -> Tier0 -> sizing ->
 // encoding -> optional frame analysis and batch CFI emission. Every path uses identical vector code generation. Input
 // generation, ABI assignment and one-time initialization are outside timing; per-function allocation/cleanup is inside.
-// This does not measure source mapping, file output, parsing, or overlap between compilation and writing.
+// This does not measure source mapping, file output, parsing, or overlap between compilation and writing. The fourth
+// path is the C driver's (#395): the frame Tier 0 published (unwind_tier0_frame) rather than the analysis, and the
+// vector writer's batch with one shared CIE.
 
 typedef struct UnwindBenchmarkResult UnwindBenchmarkResult;
 struct UnwindBenchmarkResult
@@ -40,7 +42,8 @@ static UnwindBenchmarkResult unwind_benchmark_chain(const Tier0Function* functio
             if (result.valid && way != 0)
             {
                 const UnwindError error = way == 1 ? unwind_tier0_scalar(&code, offsets, (uint32_t)length, &descriptions[function]) :
-                                                    unwind_tier0(&code, offsets, (uint32_t)length, &descriptions[function]);
+                                          way == 2 ? unwind_tier0(&code, offsets, (uint32_t)length, &descriptions[function]) :
+                                                     unwind_tier0_frame(&code, offsets, (uint32_t)length, &descriptions[function]);
                 result.valid &= error == UNWIND_OK;
             }
             if (result.valid)
@@ -66,7 +69,7 @@ static UnwindBenchmarkResult unwind_benchmark_chain(const Tier0Function* functio
 static int run_unwind_benchmark(int argc, char** argv)
 {
     uint32_t count = 256;
-    uint32_t only = 7;
+    uint32_t only = 15;
     uint32_t after_scalar = 0;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
@@ -74,7 +77,7 @@ static int run_unwind_benchmark(int argc, char** argv)
         if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             i += 1;
-            only = strcmp(argv[i], "baseline") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : strcmp(argv[i], "vector") == 0 ? 4 : 0;
+            only = strcmp(argv[i], "baseline") == 0 ? 1 : strcmp(argv[i], "scalar") == 0 ? 2 : strcmp(argv[i], "vector") == 0 ? 4 : strcmp(argv[i], "published") == 0 ? 8 : 0;
             valid = only != 0;
         }
         else if ((strcmp(argv[i], "--functions") == 0 || strcmp(argv[i], "--after-scalar") == 0) && i + 1 < argc)
@@ -105,15 +108,18 @@ static int run_unwind_benchmark(int argc, char** argv)
     Arena input = arena_reserve(1ull << 32);
     Arena temporary = arena_reserve(64ull << 20);
     Tier0Function* functions = BUSTER_ARENA_PUSH_ARRAY(&input, Tier0Function, count);
-    UnwindFunction* descriptions[2];
-    UnwindOutput output[2] = { 0 };
-    for (uint32_t way = 0; way < 2; way += 1)
+    // The scalar path's descriptions and pairs, the vector path's, the published path's with one CIE, and the exact
+    // writer's of the same with one CIE, which the published path's must be.
+    UnwindFunction* descriptions[4];
+    UnwindOutput output[4] = { 0 };
+    for (uint32_t way = 0; way < 4; way += 1)
     {
         descriptions[way] = BUSTER_ARENA_PUSH_ARRAY(&input, UnwindFunction, count);
         output[way].capacity = (uint64_t)count * 192;
         output[way].bytes = arena_push(&input, output[way].capacity, 64);
         output[way].location_capacity = count;
         output[way].locations = BUSTER_ARENA_PUSH_ARRAY(&input, uint32_t, count);
+        output[way].shared = way >= 2;
         valid &= descriptions[way] != 0 && output[way].bytes != 0 && output[way].locations != 0;
     }
     valid &= functions != 0 && temporary.base != 0;
@@ -142,16 +148,19 @@ static int run_unwind_benchmark(int argc, char** argv)
         }
         first += options.functions;
     }
-    UnwindBenchmarkResult controls[3] = { 0 };
-    for (uint32_t way = 0; valid && way < 3; way += 1)
+    UnwindBenchmarkResult controls[4] = { 0 };
+    for (uint32_t way = 0; valid && way < 4; way += 1)
     {
-        const uint32_t index = way == 2 ? 1 : 0;
+        const uint32_t index = way == 0 ? 0 : way - 1;
         controls[way] = unwind_benchmark_chain(functions, count, way, &temporary, descriptions[index], &output[index], true);
         valid &= controls[way].valid && controls[way].records == controls[0].records && controls[way].bytes == controls[0].bytes && controls[way].hash == controls[0].hash;
     }
     valid = valid && output[0].size == output[1].size && memcmp(output[0].bytes, output[1].bytes, output[0].size) == 0 &&
             memcmp(output[0].locations, output[1].locations, (uint64_t)count * sizeof(uint32_t)) == 0 &&
-            memcmp(descriptions[0], descriptions[1], (uint64_t)count * sizeof(UnwindFunction)) == 0;
+            memcmp(descriptions[0], descriptions[1], (uint64_t)count * sizeof(UnwindFunction)) == 0 &&
+            memcmp(descriptions[0], descriptions[2], (uint64_t)count * sizeof(UnwindFunction)) == 0;
+    valid = valid && unwind_write(descriptions[2], count, &output[3], true) == UNWIND_OK && output[2].size == output[3].size &&
+            memcmp(output[2].bytes, output[3].bytes, output[2].size) == 0 && memcmp(output[2].locations, output[3].locations, (uint64_t)count * sizeof(uint32_t)) == 0;
     if (valid)
     {
         const struct perf_event_attr attribute = {
@@ -165,16 +174,16 @@ static int run_unwind_benchmark(int argc, char** argv)
         };
         const int counter = (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
         bool cycles_available = counter >= 0;
-        uint64_t samples[3][21] = { 0 };
-        uint64_t cycles[3][21] = { 0 };
+        uint64_t samples[4][21] = { 0 };
+        uint64_t cycles[4][21] = { 0 };
         for (uint32_t pass = 0; valid && pass < 21; pass += 1)
         {
-            for (uint32_t order = 0; valid && order < 3; order += 1)
+            for (uint32_t order = 0; valid && order < 4; order += 1)
             {
-                const uint32_t way = (order + pass) % 3;
+                const uint32_t way = (order + pass) % 4;
                 if ((only & (1u << way)) != 0)
                 {
-                    const uint32_t index = way == 2 ? 1 : 0;
+                    const uint32_t index = way == 0 ? 0 : way - 1;
                     const uint64_t until = debug_benchmark_time() + (uint64_t)after_scalar * 1000000;
                     // The same light scalar-emission workload precedes every compared path. Calling the scalar
                     // CFI chain here would still run vector Tier0/sizing/encoding and would not isolate this state.
@@ -215,11 +224,11 @@ static int run_unwind_benchmark(int argc, char** argv)
         }
         if (valid)
         {
-            printf("unwind chain: %u functions, %" PRIu64 " typed entries, %" PRIu64 " records, %" PRIu64 " code bytes, %" PRIu64 " CFI bytes; peak temporary %" PRIu64
-                   " bytes; descriptions %zu bytes/function; 21 passes, scalar-emitter conditioning %u ms\n", count, entries, controls[0].records, controls[0].bytes, output[0].size,
-                   controls[0].peak, sizeof(UnwindFunction), after_scalar);
-            const char* names[] = { "without CFI", "scalar CFI", "vector CFI" };
-            for (uint32_t way = 0; way < 3; way += 1)
+            printf("unwind chain: %u functions, %" PRIu64 " typed entries, %" PRIu64 " records, %" PRIu64 " code bytes, %" PRIu64 " CFI bytes (%" PRIu64
+                   " with one CIE); peak temporary %" PRIu64 " bytes; descriptions %zu bytes/function; 21 passes, scalar-emitter conditioning %u ms\n", count, entries,
+                   controls[0].records, controls[0].bytes, output[0].size, output[2].size, controls[0].peak, sizeof(UnwindFunction), after_scalar);
+            const char* names[] = { "without CFI", "scalar CFI", "vector CFI", "published CFI" };
+            for (uint32_t way = 0; way < 4; way += 1)
             {
                 if ((only & (1u << way)) != 0)
                 {
