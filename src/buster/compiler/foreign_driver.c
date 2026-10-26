@@ -20,8 +20,9 @@
 // ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
 // on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
 // On more than one lane the command starts one team once its options are valid (lane_team_start, #501): the
-// resolution, the conversion and the writer each run on its threads, which wait on futexes between them, rather than
-// on a group of their own, and the release stage stops it. Without its threads the link fails before resolving.
+// resolution, the conversion and the writer each run on its threads, which wait on futexes between them and keep
+// their scratch arenas from one to the next (lane_team_keep_scratch), rather than on a group of their own, and the
+// release stage stops it. Without its threads the link fails before resolving.
 // --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
 // team's start, the resolution's phases (the slowest lane's), the conversion, the optional passes and the writer's
 // phases (lane 0's).
@@ -670,7 +671,12 @@ static int run_foreign_link(int argc, char** argv)
             *team = (LaneTeam){ 0 };
         }
         succeeded = team != 0 && lane_team_start(team, driver.lanes, 0);
-        if (!succeeded)
+        if (succeeded)
+        {
+            // The stages follow one another: each finds the scratch pages the last one touched (#501).
+            lane_team_keep_scratch(team);
+        }
+        else
         {
             fprintf(stderr, "link-foreign: cannot start linker workers\n");
         }

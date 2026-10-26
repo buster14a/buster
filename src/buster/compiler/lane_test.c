@@ -43,7 +43,8 @@
 //     by decreasing bit width of cost and then by index. The loops follow each other with a sync between them, as the
 //     counter must reset itself.
 //   - Teams: one group kept across operations with different active lane counts, with the same thread identities,
-//     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs.
+//     published inputs and completed outputs, no work on inactive lanes, and worker scratch released between runs, or
+//     with lane_team_keep_scratch kept, emptied, and released when the team stops.
 //     One-lane teams start no thread. Invalid and nested dispatches run nothing, including through lane_alone, and a
 //     forked child refuses the inherited team without waiting for workers that exist only in its parent.
 //
@@ -65,6 +66,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 
@@ -1123,6 +1125,8 @@ struct LaneTeamTest
     uint32_t parts[BUSTER_LANE_TEST_TEAM_PARTS];
     uint32_t forbidden_calls;
     uint32_t invalid_indices;
+    // Whether the team keeps its workers' scratch arenas (lane_team_keep_scratch).
+    bool keep;
 };
 
 // A refused operation must not enter even its calling lane. Atomic so a broken refusal reports duplicated work
@@ -1163,10 +1167,12 @@ static void lane_test_team_main(void* argument)
             failures += test->inputs[i] != lane_test_value(test->round, i) ? 1 : 0;
         }
         // Leave the workers' allocations live at return, to require cleanup before their next operation. The
-        // calling lane instead preserves a scratch allocation owned by the command around all its operations.
+        // calling lane instead preserves a scratch allocation owned by the command around all its operations, and a
+        // team that keeps its workers' arenas gives each worker those of its last operation, emptied.
         for (uint32_t i = 0; index != 0 && i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
         {
-            failures += thread_context.scratch[i].base != 0 || thread_context.scratch[i].length != 0 ? 1 : 0;
+            const uint8_t* kept = test->keep ? test->scratch_bases[index][i] : 0;
+            failures += thread_context.scratch[i].base != kept || thread_context.scratch[i].length != 0 ? 1 : 0;
         }
         Scratch first = scratch_begin(0);
         Scratch second = scratch_begin(first.arena);
@@ -1364,6 +1370,41 @@ static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
     return failures;
 }
 
+// A team that keeps its workers' scratch arenas (lane_team_keep_scratch, #501): across operations of changing lane
+// counts each worker finds the arenas of its last operation, emptied (lane_test_team_main), and once the team has
+// stopped, the arenas are unmapped: mincore refuses each one's first page.
+static uint64_t lane_test_team_keep(uint32_t threads_before)
+{
+    static const uint32_t counts[] = { 8, 2, 8, 1, 3, 8 };
+    LaneTeam team = { 0 };
+    LaneTeamTest test = {
+        .caller = (pid_t)syscall(SYS_gettid),
+        .keep = true,
+    };
+    const bool started = lane_team_start(&team, BUSTER_LANE_TEST_MAX_LANES, 0);
+    uint64_t failures = started ? 0 : 1;
+    if (started)
+    {
+        lane_team_keep_scratch(&team);
+        for (uint32_t round = 0; round < BUSTER_ARRAY_LENGTH(counts); round += 1)
+        {
+            failures += lane_test_team_operation(&test, counts[round], BUSTER_LANE_TEST_TEAM_ROUNDS + 4 + round, 0);
+        }
+    }
+    lane_team_stop(&team);
+    failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    for (uint32_t index = 1; index < BUSTER_LANE_TEST_MAX_LANES; index += 1)
+    {
+        for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
+        {
+            unsigned char vector = 0;
+            const uint8_t* base = test.scratch_bases[index][i];
+            failures += base == 0 || mincore((void*)base, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 || errno != ENOMEM ? 1 : 0;
+        }
+    }
+    return failures;
+}
+
 static uint64_t lane_test_teams(void)
 {
     lane_test_watched_check = "team lifetime";
@@ -1443,12 +1484,13 @@ static uint64_t lane_test_teams(void)
     lane_team_stop(&team);
     failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
     failures += lane_test_team_affinity(&team, threads_before);
+    failures += lane_test_team_keep(threads_before);
     failures += thread_context.lane.index != previous.index || thread_context.lane.count != previous.count || thread_context.lane.group != previous.group ? 1 : 0;
     failures += retained_value == 0 || *retained_value != BUSTER_LANE_TEST_GOLDEN_RATIO ? 1 : 0;
     failures += test.forbidden_calls != 0 || test.invalid_indices != 0 ? 1 : 0;
     scratch_end(retained);
     alarm(0);
-    printf("teams: %u operations with changing lane counts, %lu wrong\n", BUSTER_LANE_TEST_TEAM_ROUNDS + 6, (unsigned long)failures);
+    printf("teams: %u operations with changing lane counts, %lu wrong\n", BUSTER_LANE_TEST_TEAM_ROUNDS + 12, (unsigned long)failures);
     return failures;
 }
 
