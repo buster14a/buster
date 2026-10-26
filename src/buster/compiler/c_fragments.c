@@ -571,6 +571,9 @@ struct CFragmentSyntax
     bool emitted;
     bool reduced;
     bool type_group;
+    // An operator with a child in the tree that carries no fragment (a builtin's keyword, a GNU designator's bracket
+    // before a prefix operator's operand): the checker's reader takes its operands from the tree (c_check_fragments.c).
+    bool raw_operands;
 };
 
 typedef struct CFragmentExpression CFragmentExpression;
@@ -1024,7 +1027,38 @@ static void c_fragment_sink_reduce(CFragmentSink* sink, uint32_t token, uint32_t
                 c_fragment_sink_publish(sink, token, &handle);
             }
         }
+        else if (handle.positions == 0 && parent < sink->token_count && sink->kinds[parent] < C_FRAGMENT_KIND_COUNT &&
+                 c_fragment_arities[sink->kinds[parent]] != 0 && sink->syntax[parent].type_root != token)
+        {
+            // An operator's child that carries no fragment, but for a cast's type name, its reference.
+            sink->syntax[parent].raw_operands = true;
+        }
     }
 }
+
+// The experiment's switch for a whole unit (#106, #107): test-fragments and benchmark-parser --expressions set it around
+// one unit's parse_translation_unit and check_input. The scalar parse then fills `sink` with the unit's fragments (in
+// `arena`, of `payload` operator bytes), and the checker reads each expression's operands from them, as a flat prefix
+// array (`flat`, variant B) or straight from the fragments (variant C), decoded by the vpexpandb interleave or its
+// scalar twin (`vector`). The checker's reader index and frames go in `arena` too, and the index's preparation in
+// `temporary`. Only the fragments' unit has it; it is null anywhere else.
+typedef struct CFragmentRequest CFragmentRequest;
+struct CFragmentRequest
+{
+    CFragmentSink sink;
+    Arena* arena;
+    Arena* temporary;
+    uint32_t payload;
+    bool flat;
+    bool vector;
+    // test-fragments' check of each operator's operands against its children's in the tree, as they are taken.
+    bool verify;
+    // The sink was initialized and the parse filled it: set by parse_translation_unit.
+    bool filled;
+    // The checker's reader of the unit's fragments, its result and statistics (c_check_fragments.c): set by check_input.
+    struct CheckFragments* consumer;
+};
+
+static CFragmentRequest* c_fragment_request;
 
 #endif

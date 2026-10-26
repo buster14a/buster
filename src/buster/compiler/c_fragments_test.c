@@ -13,6 +13,7 @@
 #include "c_fragments_coverage_test.c"
 #include "c_fragment_reader.c"
 #include "c_fragment_reader_test.c"
+#include "c_check_fragments_test.c"
 
 typedef struct CFragmentTestFrame CFragmentTestFrame;
 struct CFragmentTestFrame
@@ -51,6 +52,8 @@ struct CFragmentTestTotals
     uint64_t inclusive_arena_peak;
     CFragmentStatistics statistics;
     CFragmentReaderTestStatistics readers;
+    // #106's checker identity, for each file once (in the dataset's first totals): c_check_fragments_test.c.
+    CheckFragmentsTestTotals semantic;
 };
 
 static bool c_fragment_test_tree_initialize(CFragmentTestTree* tree, Arena* arena, uint32_t count)
@@ -542,6 +545,10 @@ static uint32_t c_fragment_test_file(const char* path, const PPOptions* options,
             }
             arena_release(&arena);
         }
+        if (parsed && baseline_good)
+        {
+            failures += check_fragments_test_unit(&pp, path, &totals[0].semantic);
+        }
     }
     else
     {
@@ -735,6 +742,7 @@ static void c_fragment_test_print_totals(const char* dataset, const CFragmentTes
                (unsigned long long)readers->frame_peak, (unsigned long long)readers->frame_backing_peak, (unsigned long long)readers->visits_backing_peak,
                (unsigned long long)readers->event_peak, (unsigned long long)readers->cursor_peak, (unsigned long long)readers->test_arena_peak);
     }
+    check_fragments_test_print(dataset, &totals[0].semantic);
 }
 
 // Corpus acceptance uses explicit files, so directory traversal cannot silently omit unreadable entries.
@@ -768,6 +776,8 @@ static int run_fragment_tests(int argument_count, char** arguments)
     uint32_t file_count = 0;
     int option_count = 0;
     bool fixtures = true;
+    bool checker_fixtures = false;
+    const char* clang = "clang";
     bool valid = options_arguments != 0 && files != 0;
     for (int k = 0; valid && k < argument_count; k += 1)
     {
@@ -775,6 +785,15 @@ static int run_fragment_tests(int argument_count, char** arguments)
         if (strcmp(argument, "--no-fixtures") == 0)
         {
             fixtures = false;
+        }
+        else if (strcmp(argument, "--checker-fixtures") == 0)
+        {
+            checker_fixtures = true;
+        }
+        else if (strcmp(argument, "--clang") == 0 && k + 1 < argument_count)
+        {
+            k += 1;
+            clang = arguments[k];
         }
         else if (strcmp(argument, "--files-from") == 0 && k + 1 < argument_count)
         {
@@ -820,7 +839,7 @@ static int run_fragment_tests(int argument_count, char** arguments)
         }
     }
     Arena arena = arena_reserve(1ull << 26);
-    valid &= fixtures || file_count != 0;
+    valid &= fixtures || checker_fixtures || file_count != 0;
     PPOptions options;
     const char* input;
     const char* output;
@@ -844,11 +863,15 @@ static int run_fragment_tests(int argument_count, char** arguments)
         {
             failures += c_fragment_test_file(files[f], &options, 1, totals, -1, 0);
         }
+        if (checker_fixtures)
+        {
+            failures += (uint32_t)check_fragments_test_checker_fixtures(clang);
+        }
         rmdir(directory);
     }
     else
     {
-        fprintf(stderr, "usage: test-fragments [--no-fixtures] [--files-from FILE] [-E options] [file...]\n");
+        fprintf(stderr, "usage: test-fragments [--no-fixtures] [--checker-fixtures [--clang PATH]] [--files-from FILE] [-E options] [file...]\n");
         failures += 1;
     }
     if (fixtures)

@@ -1860,6 +1860,10 @@ static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, u
     return line;
 }
 
+#if BUSTER_PARSE_FRAGMENT_SINK
+static uint32_t check_fragments_test_fixture(Preprocessor* pp, const char* name);
+#endif
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -1984,6 +1988,10 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                    check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "source paths produce different typed streams");
         }
+#if BUSTER_PARSE_FRAGMENT_SINK
+        // The fragments' unit (test-fragments --checker-fixtures) checks the fixture with the fragment readers too (#106).
+        check_test_expect(test, check_fragments_test_fixture(&pp, fixture->name) == 0, "the fragment readers' checker results differ from the postorder reader's");
+#endif
     }
     for (uint32_t p = 0; p < 2; p += 1)
     {

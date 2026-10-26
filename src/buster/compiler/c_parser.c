@@ -11899,6 +11899,24 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     return result;
 }
 
+#if BUSTER_PARSE_FRAGMENT_SINK
+// parse_translation_unit's scalar parse in the fragments' unit: with the experiment's request set (c_fragment_request),
+// it fills the request's sink too, from the unit's tokens. A sink that can't be initialized leaves the request unfilled.
+static ParseScalarResult parse_scalar_unit(const Parser* parser, ParseTree* tree, Arena* scratch, ParseMeanings* meanings, ParseDiagnostic* diagnostics, uint32_t* diagnostic_count)
+{
+    CFragmentRequest* request = c_fragment_request;
+    const ParseTokens* tokens = &parser->tokens;
+    CFragmentSink* sink = 0;
+    if (request != 0)
+    {
+        request->filled = c_fragment_sink_initialize(&request->sink, request->arena, tokens->kinds, tokens->names, tokens->sources, tokens->count, request->payload);
+        sink = request->filled ? &request->sink : 0;
+    }
+    return parse_scalar_fragments(tokens->kinds, tokens->names, tokens->flags, tokens->count, parser->language, meanings, tree, scratch, diagnostics,
+                                  parser->diagnostic_capacity, diagnostic_count, sink);
+}
+#endif
+
 // Parses the unit the preprocessor `pp` produced (pp_run's output). Returns false if it has errors or the parser ran out
 // of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
 BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp)
@@ -11994,8 +12012,12 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         parser->tree.parents = parser->tree.roles != 0 ? parse_column(parser, 6, parser->tokens.count, 4) : 0;
         parser->tree.depths = parser->tree.parents != 0 ? parse_column(parser, 7, parser->tokens.count, 4) : 0;
         const ParseScalarResult parsed = parser->tree.depths != 0 ?
+#if BUSTER_PARSE_FRAGMENT_SINK
+            parse_scalar_unit(parser, &parser->tree, &parser->scratch, &parser->meanings, parser->diagnostics, &parser->diagnostic_count) :
+#else
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
                          &parser->scratch, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
+#endif
             (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
         parser->errors = parsed.errors + parsed.out_of_memory;
         parser->fatal = parsed.out_of_memory ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_NONE;

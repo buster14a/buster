@@ -198,9 +198,6 @@ int run_files_benchmark(int argc, char** argv);
 #include "buster/compiler/c_fragment_interleave_test.c"
 #include "buster/compiler/c_parser.c"
 #include "buster/compiler/c_parser_test.c"
-#if BUSTER_PARSE_FRAGMENT_SINK
-#include "buster/compiler/c_fragments_test.c"
-#endif
 #include "buster/compiler/c_gnu_test.c"
 #include "buster/compiler/c_gnu_benchmark.c"
 int run_parser_benchmark(int argc, char** argv);
@@ -462,6 +459,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
+// The fragment experiment's tests (#105, #106), for test-fragments: the fragments' unit alone has the sink, and its
+// semantic identity test checks units through c_check_corpus.c's paths.
+#if BUSTER_PARSE_FRAGMENT_SINK
+#include "buster/compiler/c_fragments_test.c"
+#endif
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
