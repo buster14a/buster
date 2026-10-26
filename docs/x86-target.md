@@ -133,8 +133,11 @@ fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
 policy-owned Tier 0 consumer checks every compiled template and generated
 records from both paths, including floating values, calls, aggregate objects,
 indirect/TLS accesses and dynamic frames. The selector fixtures stay in the
-backend translation unit; the frontend calls their test entry point without
-duplicating the implementation. These are bounded selector tests, separate
+backend translation unit, and the entire command runs there so it reaches only
+one copy of mutable encoder state. The command also compares every matcher's
+admitted form with the uncached syntax predicate and scalar ISA policy over
+all six profiles, every individual feature removal and an all-feature target.
+These are bounded selector tests, separate
 from full source/corpus acceptance.
 
 Target feature macros are compared with both Clang and GCC for all six profiles,

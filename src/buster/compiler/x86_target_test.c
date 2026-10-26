@@ -8,7 +8,7 @@
 
 #include "buster/compiler/x86_target_policy_test.c"
 
-// The backend unit owns the selector fixtures, so this call does not duplicate them in the frontend unit.
+// The complete command runs in the backend unit, alongside its selector fixtures and mutable encoder state.
 bool run_x86_target_selection_tests(void);
 
 static bool x86_target_test_cpuid(void)
