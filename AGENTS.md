@@ -1441,12 +1441,14 @@ A test goes in its list as a heading and the step's commands, in the order of
 the tests' times in the job, the longest first, so that they start first: put a
 new one where its time puts it, and give independent commands a heading each
 rather than one between them. One that needs the machine to itself doesn't
-belong there. On the 9700X its tests' times in the job come to 310 s, and the
-step's bound through the runner is the longest one's and the sum's over 8 jobs,
-about 39 s; with the longest started among the last, the step took 64 s, and
-with them first but the checker's four commands as one heading, 50 s, as they
-slow each other (that heading took 33 to 37 s started late, 50 s started with
-the others). To run the list as the job does (on the 9700X, under its lock, as
+belong there. With the longest started among the last, the step took 64 s,
+and with them first but the checker's four commands as one heading, 50 s, as
+they slow each other (that heading took 33 to 37 s started late, 50 s started
+with the others). Since #465 the step is bound by the machine's CPU rather
+than by its longest test: on the 9700X its tests took 622 s of CPU (their times
+in the job 404 s) in a step of 52.5 s, so a test that splits its work among
+processes shortens itself but lengthens the others. What shortens the step is
+less work: the clang processes the tests start as oracles are most of it. To run the list as the job does (on the 9700X, under its lock, as
 one run):
 
 ```sh
@@ -4000,8 +4002,7 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   its own), which the vector path must build without its fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
-  `;`, at every block alignment (in 32 parts at once, each a child process:
-  `test_process.c`, #465), and nine kinds of nesting 100,000 levels deep
+  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;

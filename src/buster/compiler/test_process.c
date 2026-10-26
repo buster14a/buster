@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Tests' parts in child processes (#465): a test that checks many independent things (cases, files, header sets,
-// inputs) runs them in parts, at most one per CPU at once, and prints each part's standard output and errors on its
-// own, in the parts' order, as if it had run them one after another. A part's result, a struct of counts, comes back
+// Tests' parts in child processes (#465): a test that checks many independent things (cases, files, header sets)
+// runs them in parts, at most one per CPU at once, and prints each part's standard output and errors on its own,
+// in the parts' order, as if it had run them one after another. A part's result, a struct of counts, comes back
 // through a pipe.
 //
 // The calls take the place of fork(): test_process_start returns in both processes, true in the child, which does its

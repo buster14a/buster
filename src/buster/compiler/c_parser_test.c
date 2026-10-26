@@ -2752,22 +2752,22 @@ static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOption
     return failures;
 }
 
-// What a part of the alignments checked: its inputs, and those where the paths or a kernel and its twin differ.
-typedef struct ParseTestAlignmentCounts ParseTestAlignmentCounts;
-struct ParseTestAlignmentCounts
+// Every block alignment: each snippet's source, and `file`'s -E text if given, after 0 to 63 file-scope `;`.
+static uint32_t parse_test_alignments(const char* file, const PPOptions* options, const char* directory)
 {
-    uint32_t inputs;
-    uint32_t failures;
-};
-
-// Sources [first, end) of parse_test_alignments' (the snippets, then `file_text` if it isn't null), each after 0 to 63
-// file-scope `;`, written to `path` in turn.
-static ParseTestAlignmentCounts parse_test_alignment_part(const char* file_text, const PPOptions* options, const char* path, uint32_t first, uint32_t end)
-{
-    ParseTestAlignmentCounts counts = { 0 };
+    uint32_t failures = 0;
     ParseTestKernelTally tally = { 0 };
+    uint32_t inputs = 0;
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/aligned.c", directory);
+    size_t file_length = 0;
+    char* file_text = file != 0 ? parse_test_preprocessed(file, options, &file_length) : 0;
+    PPOptions plain = *options;
+    plain.no_standard_includes = true;
+    plain.include_count = 0;
+    plain.macro_count = 0;
     const uint32_t snippets = sizeof(parse_test_snippets) / sizeof(parse_test_snippets[0]);
-    for (uint32_t i = first; i < end; i += 1)
+    for (uint32_t i = 0; i <= snippets; i += 1)
     {
         const char* source = i < snippets ? parse_test_snippets[i].source : file_text;
         const size_t length = source != 0 ? strlen(source) : 0;
@@ -2782,62 +2782,17 @@ static ParseTestAlignmentCounts parse_test_alignment_part(const char* file_text,
             memcpy(text + 2 * shift, source, length);
             parse_test_write(path, text, 2 * shift + length);
             ParseTestOutcome ours;
-            counts.failures += parse_test_check_file(path, options, &ours, &tally) != 0;
-            counts.inputs += 1;
+            const PPOptions* used = i < snippets ? &plain : &plain;
+            failures += parse_test_check_file(path, used, &ours, &tally) != 0;
+            inputs += 1;
         }
         free(text);
     }
-    remove(path);
-    return counts;
-}
-
-#define BUSTER_PARSE_TEST_ALIGNMENT_PARTS 32
-
-// Every block alignment: each snippet's source, and `file`'s -E text if given, after 0 to 63 file-scope `;`. The
-// sources go in BUSTER_PARSE_TEST_ALIGNMENT_PARTS parts, at most one per CPU at once (test_process.c, #465), each with a
-// file of its own, their output in the sources' order.
-static uint32_t parse_test_alignments(const char* file, const PPOptions* options, const char* directory)
-{
-    size_t file_length = 0;
-    char* file_text = file != 0 ? parse_test_preprocessed(file, options, &file_length) : 0;
-    PPOptions plain = *options;
-    plain.no_standard_includes = true;
-    plain.include_count = 0;
-    plain.macro_count = 0;
-    const uint32_t sources = sizeof(parse_test_snippets) / sizeof(parse_test_snippets[0]) + 1;
-    const uint32_t parts = BUSTER_PARSE_TEST_ALIGNMENT_PARTS;
-    const uint32_t cpus = test_process_cpus();
-    const uint32_t running = cpus < parts ? cpus : parts;
-    TestProcess processes[BUSTER_PARSE_TEST_ALIGNMENT_PARTS];
-    ParseTestAlignmentCounts total = { 0 };
-    uint32_t started = 0;
-    for (uint32_t finished = 0; finished < parts; finished += 1)
-    {
-        while (started < parts && started - finished < running)
-        {
-            if (test_process_start(&processes[started]))
-            {
-                char path[4200];
-                snprintf(path, sizeof(path), "%s/aligned-%u.c", directory, started);
-                const ParseTestAlignmentCounts counts = parse_test_alignment_part(file_text, &plain, path, (uint32_t)((uint64_t)sources * started / parts),
-                                                                                  (uint32_t)((uint64_t)sources * (started + 1) / parts));
-                test_process_exit(&processes[started], &counts, sizeof(counts));
-            }
-            started += 1;
-        }
-        ParseTestAlignmentCounts counts;
-        const bool ran = test_process_finish(&processes[finished], &counts, sizeof(counts));
-        if (!ran)
-        {
-            printf("alignments: part %u of %u didn't run to the end\n", finished, parts);
-        }
-        total.inputs += counts.inputs;
-        total.failures += counts.failures + !ran;
-    }
     free(file_text);
-    printf("alignments: %u inputs (the snippets%s at 64 alignments), %u where the paths or a kernel and its twin differ\n", total.inputs, file != 0 ? " and the file" : "",
-           total.failures);
-    return total.failures;
+    remove(path);
+    printf("alignments: %u inputs (the snippets%s at 64 alignments), %u where the paths or a kernel and its twin differ\n", inputs, file != 0 ? " and the file" : "",
+           failures);
+    return failures;
 }
 
 // Deep nesting, 100,000 levels: parentheses in an initializer and in a function, blocks, declarator groups, subscripts,
