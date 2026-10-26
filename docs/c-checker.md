@@ -726,6 +726,28 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **Switches (#136's item 7).** A switch's value goes in a temporary, and each
+  case compares it, as clang -O0's code does for a sparse switch, unless clang
+  would build a jump table: then the switch dispatches through one
+  (`check_lower_switch_table`). LLVM's rule at -O0
+  (`SwitchLowering::findJumpTables`) takes a switch's whole range or nothing:
+  four clusters or more (runs of consecutive values that go to one place;
+  `case 1: case 2:` with nothing between them is one, as it is LLVM's one
+  block) whose cases hold at least a tenth of the range's values (its
+  jump-table density). The class must be one of 32 or 64 bits, and the range
+  at most 65,536 values (`BUSTER_CHECK_LOWER_MAX_TABLE`; LLVM's limit is
+  UINT_MAX). The dispatch, at the switch's first case: a value whose
+  difference from the lowest case's, unsigned, is past the last entry goes to
+  the default or the switch's end, and any other to the table's address plus
+  the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
+  label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
+  record as it does `&&label`'s) with the entry's offset as its addend, as
+  clang's `.long .LBB - .LJTI` entries are. The tables' and the labels' symbols
+  are the lowering's own, numbered after the runtime functions' at the
+  lowering's end, when those are all known. Deciding takes a merge sort of
+  the switch's cases, scalar: a pass over a few cases per switch.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
