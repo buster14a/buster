@@ -1041,9 +1041,10 @@ static bool object_debug_contribution(String8 section, uint64_t at, uint32_t hea
 // empty and within DWARF32's offsets; the units' function counts adding up to the functions; each unit's contributions,
 // one after another in each section and filling it:
 //   - .debug_info's, by its unit_length, its header DWARF 5, DW_UT_compile and 8-byte addresses, holding its four fields
-//     in order, the abbreviation offset's 8 bytes in, each the place of the unit's own contribution to the section it
-//     points into: its abbreviation table's start, its line program's, its address table's past its 8-byte header and
-//     its range lists' past their 12-byte header;
+//     where debug.c writes them: the abbreviation offset 8 bytes in, and the compile unit DIE's line program, address
+//     base and range lists one after another past its abbreviation code (1), its three strings and its language; each
+//     the place of the unit's own contribution to the section it points into: its abbreviation table's start, its line
+//     program's, its address table's past its 8-byte header and its range lists' past their 12-byte header;
 //   - its abbreviation table, read declaration by declaration to its zero code;
 //   - its line program and range lists, by their unit_lengths, their headers DWARF 5 with 8-byte addresses and no
 //     segment selector, and the range lists' without offset entries;
@@ -1051,8 +1052,8 @@ static bool object_debug_contribution(String8 section, uint64_t at, uint32_t hea
 // the line addresses ascending, each a DW_LNE_set_address operand inside .debug_line; and each function an ordinary
 // function the unit defines in a TEXT atom, at an offset inside it. These checks hold a descriptor to the layout
 // debug.c writes, its headers and its contributions' places, which keeps a malformed one's relocations inside its
-// sections, at its own contributions and on the unit's definitions; they don't decode the DIEs, the line programs'
-// opcodes or the range lists' entries.
+// sections, at its own contributions and on the unit's definitions; they don't decode the DIEs past the compile unit
+// DIE's section offsets, the abbreviations' contents, the line programs' opcodes or the range lists' entries.
 static bool object_debug_valid(const ObjectBuilder* builder)
 {
     const ObjectDebug* debug = builder->debug;
@@ -1103,20 +1104,31 @@ static bool object_debug_valid(const ObjectBuilder* builder)
             memcpy(&offsets, debug->sections[BUSTER_OBJECT_DEBUG_RNGLISTS].pointer + ranges + 8, 4);
             valid = offsets == 0;
         }
-        const uint64_t expected[BUSTER_OBJECT_DEBUG_FIELDS] = { abbreviations, lines, addr + 8, ranges + 12 };
+        // Where the four fields are: the header's abbreviation offset 8 bytes in, then the compile unit DIE's line
+        // program, address base and range lists, one after another past its abbreviation code (1), its name,
+        // compilation directory and producer strings and its language's 2 bytes.
         const uint64_t end = info + 4 + info_length;
-        uint64_t previous = info + 4;
+        uint64_t die = info + 12;
+        uint64_t code = 0;
+        valid = valid && object_debug_leb((const uint8_t*)infos.pointer, end, &die, &code) && code == 1;
+        for (uint32_t string = 0; valid && string < 3; string += 1)
+        {
+            const char* nul = die < end ? memchr(infos.pointer + die, 0, end - die) : 0;
+            valid = nul != 0;
+            die = valid ? (uint64_t)(nul - infos.pointer) + 1 : die;
+        }
+        const uint64_t places[BUSTER_OBJECT_DEBUG_FIELDS] = { info + 8, die + 2, die + 6, die + 10 };
+        const uint64_t expected[BUSTER_OBJECT_DEBUG_FIELDS] = { abbreviations, lines, addr + 8, ranges + 12 };
         for (uint32_t field = 0; valid && field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
         {
             const uint64_t at = debug->fields[(uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * unit + field];
             uint32_t value = 0;
-            valid = at >= previous && at + 4 <= end && (field != 0 || at == info + 8);
+            valid = at == places[field] && at + 4 <= end;
             if (valid)
             {
                 memcpy(&value, infos.pointer + at, 4);
                 valid = value == expected[field];
             }
-            previous = at + 4;
         }
         functions += count;
         info = end;

@@ -17,13 +17,16 @@
 //     section's symbol with the value it held as its addend; and each function's address slot (in its unit's
 //     .debug_addr contribution) and line address an R_X86_64_64 against the symbol of the section its definition is in,
 //     with its st_value as the addend. A descriptor of one unit whose unit_functions say so is the same object.
-//   - Refusals: 45 changes to a valid descriptor of two units (sections missing, empty, cut or too long; columns
+//   - Refusals: 50 changes to a valid descriptor of two units (sections missing, empty, cut or too long; columns
 //     missing; counts that don't add up or move a unit's .debug_addr header; headers, unit lengths, fields and field
 //     values that aren't debug.c's; .debug_info's version, unit type and address size, unit 1's version too; each of
 //     the four fields in its section's bounds but not at its unit's own contribution, one byte off and unit 1's at unit
 //     0's, the address base without its header or past it twice; the line program's and the range lists' headers; an
 //     abbreviation table cut short, and one whose zero code is made a declaration's, which runs on into the next
-//     unit's; line addresses that aren't operands, aren't ascending or end past .debug_line; and functions that are no
+//     unit's; a field whose value is right in the wrong place (the line program's one byte early, where the bytes
+//     before it read as its value, the DIE's three together, and unit 1's), the compile unit DIE's abbreviation code
+//     and a string's end, which move its fields; line addresses that aren't operands, aren't ascending or end past
+//     .debug_line; and functions that are no
 //     symbol, another unit's, not functions, data and an IFUNC), each OBJECT_ERROR_DEBUG with nothing pushed on the
 //     arena and the descriptor's bytes as they were; then an object whose entry is another unit's descriptor, and
 //     entries one fewer than the units.
@@ -426,7 +429,7 @@ static void object_test_debug_refusals(ObjectTestTally* tally, const Link* hand,
     uint32_t lines[2];
     uint32_t counts[2];
     uint32_t fields[2 * BUSTER_OBJECT_DEBUG_FIELDS];
-    const uint32_t changes = 45;
+    const uint32_t changes = 50;
     for (uint32_t change = 0; copied && change < changes; change += 1)
     {
         ObjectDebug bad = valid;
@@ -604,6 +607,27 @@ static void object_test_debug_refusals(ObjectTestTally* tally, const Link* hand,
             case 43:
                 memcpy(&word, valid.sections[DEBUG_SECTION_INFO].pointer + valid.fields[4], 4);
                 copies[DEBUG_SECTION_ABBREV][word - 1] = 1;
+                break;
+            // A field whose value is right in the wrong place: the line program's one byte early, where the language's
+            // high byte and three of the offset's zeros read as its unit's 0 (#474's fourth review), all three of the
+            // DIE's one byte early, and unit 1's line program's; and the compile unit DIE's abbreviation code, and a
+            // string's end, which move where its fields are.
+            case 44:
+                fields[1] -= 1;
+                break;
+            case 45:
+                fields[1] -= 1;
+                fields[2] -= 1;
+                fields[3] -= 1;
+                break;
+            case 46:
+                fields[5] -= 1;
+                break;
+            case 47:
+                copies[DEBUG_SECTION_INFO][12] = 2;
+                break;
+            case 48:
+                *(uint8_t*)memchr(copies[DEBUG_SECTION_INFO] + 13, 0, info_length) = 'x';
                 break;
             default:
                 bad.sections[DEBUG_SECTION_RNGLISTS].pointer = 0;
