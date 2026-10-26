@@ -519,6 +519,44 @@ static __attribute__((noinline)) void check_test_environments(CheckTest* test)
             .body_count = 2,
         },
         {
+            // A tag first named in a file-scope prototype, and an enumeration constant one defines, are of the
+            // prototype's scope, which the file history doesn't hold (#438): a body's `struct S` and `K` are its own.
+            .source = "void g(struct S *p); int f(void) { struct S *q = 0; return q != 0; }\n",
+            .name = "S",
+            .space = C_BINDING_TAG,
+            .declarations =
+            {
+                BUSTER_CHECK_NONE,
+                BUSTER_CHECK_NONE,
+                BUSTER_CHECK_NONE,
+            },
+            .body_count = 1,
+        },
+        {
+            .source = "void g(enum E { K = 1 } e); int f(void) { int K = 2; return K; }\n",
+            .name = "K",
+            .declarations =
+            {
+                BUSTER_CHECK_NONE,
+                BUSTER_CHECK_NONE,
+                BUSTER_CHECK_NONE,
+            },
+            .body_count = 1,
+        },
+        {
+            // A tag that a file-scope array bound defines is the file scope's.
+            .source = "int a[sizeof(struct V { int x; })]; int f(void) { struct V v = { 1 }; return v.x; }\n",
+            .name = "V",
+            .space = C_BINDING_TAG,
+            .declarations =
+            {
+                0,
+                0,
+                0,
+            },
+            .body_count = 1,
+        },
+        {
             .source = "int f(void) { return later; } int later=7;\n",
             .name = "later",
             .rejected = true,

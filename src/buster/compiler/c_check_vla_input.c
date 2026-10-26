@@ -57,23 +57,83 @@ static bool check_input_vla_force_constant(const CheckInputReader* reader, uint3
     return force;
 }
 
-static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter, bool star, uint8_t* kind, uint64_t* extent)
+// Whether a bound defines a struct, union or enum that the reader hasn't read yet, each outside the bound's statement
+// expressions (`[sizeof(struct S { int x; }) + ({ n; })]`). One inside a statement expression is a declaration of its
+// block, which is the walk's (check_input_region_prepare) and which a bound doesn't take yet (docs/c-checker.md,
+// "Variable-length arrays"): its bound is read as before, without a job.
+static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    bool outside = false;
+    bool inside = false;
+    uint32_t region_end = first;
+    for (uint32_t token = first; token < end; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        // A statement expression, `(` and `{`, to its `)`, as check_constant_source_regions finds one.
+        if (parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && token + 1 < end && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK &&
+            parser->tree.parents[token] < end)
+        {
+            const uint32_t after = parser->tree.parents[token] + 1;
+            region_end = after > region_end ? after : region_end;
+        }
+        if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && reader->tag_types[token] == 0)
+        {
+            const uint32_t body = check_input_tag_body(parser, token, end);
+            const bool definition = body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;
+            inside |= definition && token < region_end;
+            outside |= definition && token >= region_end;
+        }
+    }
+    return outside && !inside;
+}
+
+// The bound from `first` to `end` (its `]`) of the array declarator that `open` opens. One that defines a struct, union
+// or enum (`[sizeof(struct V { int x; })]`) is evaluated by a job of the constant evaluator (check_input_constant_job),
+// which binds the bound's names in source order and stops at each definition, as an enumerator's value's does: then
+// *definition is the definition's keyword and *job the job, and the caller reads the definition
+// (check_input_tag_definition, or a tag frame of its own) before it calls this again for the bound, which goes on with
+// the job. Otherwise *definition is BUSTER_CHECK_NONE and *job 0.
+static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter, bool star,
+                                  CheckConstantInput** job, uint32_t* definition, uint8_t* kind, uint64_t* extent)
 {
     const Parser* parser = reader->parser;
     bool valid = open < first && first <= end && end < parser->tokens.count;
     *kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     *extent = 0;
+    *definition = BUSTER_CHECK_NONE;
     if (valid && first != end && !star)
     {
         CheckValue value = { 0 };
-        TypeId unused = 0;
         uint32_t failed = BUSTER_CHECK_NONE;
-        const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
-        valid = check_input_constant_read(reader, first, end, false, cached, &value, &unused, &failed) &&
-                check_action_is_integer(reader->types, value.type);
-        const bool folded = check_input_integer_constant(reader, &value) && (value.flags & BUSTER_CHECK_GNU_DIVISION) == 0 &&
+        if (*job == 0 && check_input_vla_defines(reader, first, end))
+        {
+            *job = check_input_constant_job(reader, first, end);
+            valid = *job != 0;
+        }
+        if (*job != 0)
+        {
+            CheckConstantInput* input = *job;
+            valid = check_input_constant_job_step(input, &value, definition);
+            if (*definition == BUSTER_CHECK_NONE)
+            {
+                failed = input->failure;
+                *job = 0;
+                arena_pop_to(reader->scratch, input->mark);
+            }
+        }
+        else if (valid)
+        {
+            TypeId unused = 0;
+            const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
+            valid = check_input_constant_read(reader, first, end, false, cached, &value, &unused, &failed);
+        }
+        // A job that stopped at a definition has no value yet.
+        const bool evaluated = *definition == BUSTER_CHECK_NONE;
+        valid = valid && (!evaluated || check_action_is_integer(reader->types, value.type));
+        const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & BUSTER_CHECK_GNU_DIVISION) == 0 &&
                             (check_input_integer_ice(reader, &value) || check_input_vla_force_constant(reader, open, parameter));
-        if (valid && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
+        if (valid && evaluated && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {
             int64_t number = 0;
             valid = check_action_i64(reader->types, &value, &number) && number >= 0;
@@ -84,7 +144,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                 check_input_constant_bound_warning(reader, first, end, &value);
             }
         }
-        else if (valid)
+        else if (valid && evaluated)
         {
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
@@ -129,7 +189,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             reader->vla_ends[end] = index + 1;
         }
     }
-    if (valid)
+    if (valid && *definition == BUSTER_CHECK_NONE)
     {
         if (*kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && !star)
         {

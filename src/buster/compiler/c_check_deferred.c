@@ -385,8 +385,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
 
 // The file scope's declaration of `key` that source order's reader sees at `point`, given the history's last one
 // activated at or before it (`handle`, an event + 1, 0 for none): that one, unless a restore ended it at or before the
-// point, as it ends a tag first named in a file-scope declarator (`void g(struct S *p);`) at the declarator's end, which
-// the history keeps since its depth is 0. Then the latest of the name's earlier ones that is still active, or none.
+// point, then the latest of the name's earlier ones that is still active, or none. Only a declarator that fails ends
+// one, whose unit has a report and is source order's: a tag or an enumeration constant first declared in a file-scope
+// prototype (`void g(struct S *p);`) is of the prototype's scope, a level deeper than the file scope the history holds
+// (#438).
 static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t key, uint32_t point, uint32_t handle)
 {
     const CBindings* bindings = environment->bindings;
@@ -520,6 +522,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const uint64_t setup_begin = deferred->timing ? check_deferred_now() : 0;
     // The walk's state at a file-scope function's opening brace, before its scope.
     reader->scope_count = 0;
+    reader->prototype_depth = 0;
     reader->function_result = 0;
     reader->function_end = 0;
     reader->function_body = BUSTER_CHECK_NONE;
