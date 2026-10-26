@@ -26,7 +26,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
   structs returned in x87 registers ("Long double", below).
 - **128-bit integers** (#136): `__int128`'s and `unsigned __int128`'s classes, I128 and U128, whose values live in the
-  slots long double's do ("128-bit integers", below). #133's producer doesn't lower them yet.
+  slots long double's do ("128-bit integers", below), which #133's producer lowers `__int128` to ([the checker
+  guide](c-checker.md)'s "Backend handoff").
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating

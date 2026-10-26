@@ -276,7 +276,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
     // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
     // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
-    // helpers are the unit's, and the C runtime's errno function isn't.
+    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image.
     const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count + 1;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
@@ -307,9 +307,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             const bool thread_local = !literal && program->input->thread_local[declaration];
             access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
         }
-        if (result->lowered.runtime_symbol_count != 0)
+        for (uint32_t r = 0; r < result->lowered.runtime_symbol_count; r += 1)
         {
-            access[result->lowered.errno_symbol] = BUSTER_TIER0_ACCESS_GOT;
+            const uint32_t symbol = program->symbol_count + result->lowered.helpers.count + 1 + r;
+            access[symbol] = result->lowered.runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -497,12 +498,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                             BUSTER_LINK_SOURCE_NONE) == helper->symbol;
     }
-    if (valid && result->lowered.runtime_symbol_count != 0)
+    // The runtime's functions the lowering made symbols of its own for, in their order (CheckProgramLowered.runtime_order).
+    for (uint32_t r = 0; valid && r < result->lowered.runtime_symbol_count; r += 1)
     {
-        const NameId name = link_add_name(&result->link, (const uint8_t*)"__errno_location", sizeof("__errno_location") - 1);
-        valid = name != 0 && result->lowered.runtime_symbol_count == 1 &&
-                link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
-                                BUSTER_LINK_SOURCE_NONE) == result->lowered.errno_symbol;
+        const CheckLowerRuntime runtime = (CheckLowerRuntime)result->lowered.runtime_order[r];
+        const char* spelling = check_lower_runtime_names[runtime];
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
+                                 result->lowered.runtime_symbols[runtime];
     }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
