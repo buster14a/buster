@@ -15,12 +15,15 @@
 //   - Scrt1.o's .note.ABI-tag;
 //   - crti.o's _init and _fini, as the link's symbols of those names, for DT_INIT and DT_FINI, as GNU ld and lld find
 //     them by name;
-//   - binding's exports.
+//   - binding's exports;
+//   - the link's __tls_get_addr, the loader's, whose calls the writer relaxes away with the general- and local-dynamic
+//     TLS accesses that make them (libgcc.a's generic-morestack.o's, which split-stack code joins: #515).
 // A static executable's with the C runtime (ExecutableRuntime, dynamic_static_inputs) are crt1.o's ABI note and the
 // link's __tls_get_addr. A static PIE's (dynamic_static_pie_inputs) are both: an ExecutableDynamic without an
 // interpreter, a library, versions or exports, with rcrt1.o's ABI note, crti.o's _init and _fini and RELR when libc.a's
 // startup takes it (dynamic_static_relr), and the static executable's ExecutableRuntime. A shared library's
-// (dynamic_shared_inputs) are a dynamic PIE's without the interpreter or the ABI note, with its soname.
+// (dynamic_shared_inputs) are a dynamic PIE's without the interpreter, the ABI note or __tls_get_addr, whose calls it
+// keeps, with its soname.
 //
 // main.c includes this file after bind.c and executable.c. dynamic_inputs takes BUSTER_LINKER_ENTRY rather than static:
 // main.c's units compile it in one unit alone (link.c).
@@ -142,6 +145,7 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
         .export_count = bind->export_count,
         .relr_version = relr_version,
         .relr = relr_version != 0,
+        .tls_get_addr = dynamic_global(runtime, bind, "__tls_get_addr"),
     };
     return versions != 0 && needed != 0;
 }
@@ -156,6 +160,7 @@ static __attribute__((unused)) bool dynamic_shared_inputs(ExecutableDynamic* dyn
     const bool result = dynamic_inputs(dynamic, runtime, bind, arena);
     dynamic->interpreter = (String8){ 0 };
     dynamic->note = (String8){ 0 };
+    dynamic->tls_get_addr = 0;
     dynamic->shared = true;
     dynamic->soname = soname;
     return result;

@@ -563,7 +563,10 @@ designs and the compilers already built this way.
   relax them, and an IFUNC whose stub only calls reach reads the stub's slot
   through the GOT, as lld's does; a dynamic PIE takes its own IFUNCs too, their
   stubs before its imports' and their `IRELATIVE` relocations last in
-  `.rela.dyn`; all from vector passes with exact twins.
+  `.rela.dyn`, and relaxes its general- and local-dynamic TLS accesses
+  (`ExecutableDynamic.tls_get_addr`, #515): to local-exec, or to initial-exec
+  through a `TPOFF64` slot for an imported thread-local; all from vector
+  passes with exact twins.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
@@ -2803,6 +2806,12 @@ alone and run alike. The checks:
   cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
   reference needs it, and `.gnu.version_r` an entry for each library, each
   import's version in its library's;
+- general- and local-dynamic TLS (#515): test-bind's split-stack PIE, whose
+  `generic-morestack.o` has such accesses, and assembly with each sequence
+  through the PLT and the GOT, to its own thread-locals and to `libc.so.6`'s
+  `errno` (status 53): every access's bytes in the file the relaxation's
+  (local-exec, or initial-exec through the import's GOT slot), each written
+  from binding's bytes (the relaxation can't be repeated), and run;
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;

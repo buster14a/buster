@@ -824,8 +824,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
             else if (!valid && (error == EXECUTABLE_ERROR_RELOCATION || error == EXECUTABLE_ERROR_FIXUP) && write.result.fixup != 0)
             {
-                // The fixup's origin and target: libgcc.a(generic-morestack.o)'s general-dynamic TLS accesses, which a
-                // dynamic PIE doesn't take yet, for split-stack code.
+                // The fixup's origin and target, a runtime member's as libgcc.a(generic-morestack.o) names one.
                 char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
                 fprintf(stderr, "error: can't link %s: %s (executable error %u)\n", output_path,
                         check_driver_fixup_origin(&code.link, &runtime, 1, write.result.fixup, origin, sizeof(origin)), (uint32_t)error);

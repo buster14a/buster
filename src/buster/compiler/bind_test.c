@@ -4955,7 +4955,8 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
 //     alike, morestack.o joined and its _Unwind_Resume an import of libgcc_s.so.1's (bind_test_split_bound); the bound
 //     link's objects, linked by ld.lld and ld.bfd as GCC's driver links them (bind_test_link_arguments: libgcc_s.so.1
 //     as needed), must run, the PIE with status 0 and the library loaded into a harness that doesn't need
-//     libgcc_s.so.1 (dlopen with RTLD_NOW, as alone), split_entry returning 0. test-dynamic writes the library itself;
+//     libgcc_s.so.1 (dlopen with RTLD_NOW, as alone), split_entry returning 0. test-dynamic writes both itself (the
+//     PIE since #515, whose generic-morestack.o's general- and local-dynamic TLS accesses the writer relaxes);
 //   - binds each against the runtime without libgcc_s.so.1 (bind_test_without_gcc_s), by both paths, which must
 //     refuse it alike as BIND_ERROR_MEMBER_UNDEFINED naming _Unwind_Resume and libgcc.a's morestack.o;
 //   - links the same objects by cc with GNU ld and with lld: each output must need libgcc_s.so.1, each library must
