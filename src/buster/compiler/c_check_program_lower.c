@@ -4397,7 +4397,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes every signature together after.
     AbiTable table;
-    valid = valid && abi_initialize(&table, scratch, types, 16);
+    // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
+    valid = valid && abi_initialize_types(&table, scratch, types, 16, types->types.count);
     if (valid)
     {
         if (scalar)
@@ -4414,9 +4415,11 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     uint8_t* incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
     uint32_t* local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
-    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0) &&
+    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && declaring != 0 && (program->body_count == 0 || lowered->functions != 0) &&
             (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
@@ -4440,8 +4443,10 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
             }
         }
         memset(local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        for (uint32_t token = count; token-- > 0;)
+        // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
+        for (uint32_t d = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, scalar); d-- > 0;)
         {
+            const uint32_t token = declaring[d];
             if (input->initializer_nodes[token] < nodes)
             {
                 writer.initializer_declarations[input->initializer_nodes[token]] = token;

@@ -207,28 +207,33 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
+    // The tokens that declare, which the passes below visit rather than every token of the unit.
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
+    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declaring != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
+    const uint32_t declaring_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(retained_objects, 0, program->object_count);
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; d < declaring_count; d += 1)
         {
+            const uint32_t token = declaring[d];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count)
             {
                 bool gnu_inline = false;
                 retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t token = 0; valid && token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; valid && d < declaring_count; d += 1)
         {
+            const uint32_t token = declaring[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && attributes != 0 && object != 0 && object < program->object_count)
+            if (attributes != 0 && object != 0 && object < program->object_count)
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];
@@ -281,6 +286,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     valid = valid && access != 0 && defined != 0;
+    // Whether the unit makes a symbol's name (check_program_emit_makes_name), which most don't: only such a unit needs
+    // the table of the names a made one must not be, below. The symbols' pass for their accesses finds it.
+    bool makes = false;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
@@ -289,10 +297,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             defined[program->bodies[b].object] = 1;
         }
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; d < declaring_count; d += 1)
         {
+            const uint32_t token = declaring[d];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
                 (program->input->defined[token] || program->input->tentative[token]))
             {
                 defined[object] = 1;
@@ -306,6 +315,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
             const bool thread_local = !literal && program->input->thread_local[declaration];
             access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+            makes |= declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(program->input, declaration, symbol_names[s + 1]);
         }
         for (uint32_t r = 0; r < result->lowered.runtime_symbol_count; r += 1)
         {
@@ -404,14 +414,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
     // function declaration has linkage, and its symbol is the file-scope entity's.
     const CheckInput* input = program->input;
-    // Only a unit that makes a name, which most don't, needs the table of the names a made one must not be, and the
-    // source's names in it first; the others add their names as they come.
-    bool makes = false;
-    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
-    {
-        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-        makes |= declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(input, declaration, symbol_names[s + 1]);
-    }
+    // Only a unit that makes a name (`makes`), which most don't, needs the table of the names a made one must not be, and
+    // the source's names in it first; the others add their names as they come.
     uint32_t slots = 2;
     while (makes && slots <= (uint64_t)program->symbol_count * 2 && slots < (UINT32_C(1) << 31))
     {

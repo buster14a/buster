@@ -63,6 +63,133 @@ static void check_test_program_addressed(CheckTest* test)
     }
 }
 
+// `bytes` at the end of a mapping whose next page is PROT_NONE, so that an access past them faults: the start, or 0.
+static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, uint64_t bytes)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t pages = (bytes + page - 1) / page * page;
+    *mapped = pages + page;
+    uint8_t* base = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = base != MAP_FAILED && mprotect(base + pages, page, PROT_NONE) == 0;
+    *mapping = base != MAP_FAILED ? base : 0;
+    return guarded ? base + pages - bytes : 0;
+}
+
+// #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
+// PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
+// ones, and the needed objects' count and numbering (object 0 never a symbol), at every density.
+static void check_test_program_declaring(CheckTest* test)
+{
+    static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
+    uint64_t checked = 0;
+    bool all = true;
+    uint64_t state = 0x442;
+    for (uint32_t c = 0; c <= 200 + sizeof(larger) / sizeof(larger[0]); c += 1)
+    {
+        const uint32_t count = c <= 200 ? c : larger[c - 201];
+        for (uint32_t density = 0; density < 4; density += 1)
+        {
+            uint8_t* maps[7] = { 0 };
+            uint64_t sizes[7] = { 0 };
+            uint32_t* declarations = (uint32_t*)check_test_program_guarded(&maps[0], &sizes[0], (uint64_t)count * sizeof(uint32_t));
+            uint32_t* nodes = (uint32_t*)check_test_program_guarded(&maps[1], &sizes[1], (uint64_t)count * sizeof(uint32_t));
+            // The tokens' room: count + 16, as the kernel's contract asks, and not one more.
+            uint32_t* tokens = (uint32_t*)check_test_program_guarded(&maps[2], &sizes[2], ((uint64_t)count + 16) * sizeof(uint32_t));
+            uint8_t* needed = check_test_program_guarded(&maps[3], &sizes[3], (uint64_t)count + 1);
+            SymbolId* object_symbols = (SymbolId*)check_test_program_guarded(&maps[4], &sizes[4], ((uint64_t)count + 1) * sizeof(SymbolId));
+            uint32_t* expected = (uint32_t*)check_test_program_guarded(&maps[5], &sizes[5], ((uint64_t)count + 1) * sizeof(uint32_t));
+            bool ready = declarations != 0 && nodes != 0 && tokens != 0 && needed != 0 && object_symbols != 0 && expected != 0;
+            const uint32_t limit = count / 2 + 1;
+            for (uint32_t t = 0; ready && t < count; t += 1)
+            {
+                state = state * 6364136223846793005u + 1442695040888963407u;
+                const uint32_t random = (uint32_t)(state >> 33);
+                // Density 0 declares nothing, 3 everything; between, about a quarter or a half of the tokens.
+                const bool declares = density == 3 || (density != 0 && random % (density == 1 ? 4 : 2) == 0);
+                declarations[t] = declares ? t : (random & 1) != 0 ? t + 1 : (random & 2) != 0 ? BUSTER_CHECK_NONE : t - 1;
+                nodes[t] = (random >> 8) % 3 == 0 ? (random >> 12) % limit : limit + (random >> 12) % 3;
+                needed[t + 1] = density == 3 || (density != 0 && (random >> 4) % (density == 1 ? 8 : 2) == 0);
+            }
+            if (ready)
+            {
+                needed[0] = 1;
+            }
+            for (uint32_t with_nodes = 0; ready && with_nodes < 2; with_nodes += 1)
+            {
+                uint32_t want = 0;
+                for (uint32_t t = 0; t < count; t += 1)
+                {
+                    if (declarations[t] == t || (with_nodes != 0 && nodes[t] < limit))
+                    {
+                        expected[want++] = t;
+                    }
+                }
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    const uint32_t got = check_program_declaring(declarations, with_nodes != 0 ? nodes : 0, limit, count, tokens, path == 0);
+                    const bool same = got == want && memcmp(tokens, expected, (uint64_t)want * sizeof(uint32_t)) == 0;
+                    all &= same;
+                    checked += 1;
+                    if (!same)
+                    {
+                        printf("  declaring tokens: count %u density %u nodes %u %s path: %u tokens, expected %u\n", count, density, with_nodes,
+                               path == 0 ? "scalar" : "vector", got, want);
+                    }
+                }
+            }
+            const uint32_t objects = count + 1;
+            uint32_t want = 0;
+            for (uint32_t object = 1; ready && object < objects; object += 1)
+            {
+                want += needed[object] != 0;
+            }
+            for (uint32_t path = 0; ready && path < 2; path += 1)
+            {
+                const uint32_t got = path == 0 ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+                // The symbols' objects exactly as many as the needed objects, ending at the protected page.
+                uint32_t* symbol_objects = got == want ? (uint32_t*)check_test_program_guarded(&maps[6], &sizes[6], (uint64_t)want * sizeof(uint32_t)) : 0;
+                memset(object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
+                if (symbol_objects != 0 && path == 0)
+                {
+                    check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
+                }
+                else if (symbol_objects != 0)
+                {
+                    check_program_needed_number_vector(needed, objects, object_symbols, symbol_objects);
+                }
+                bool same = symbol_objects != 0 && object_symbols[0] == 0;
+                SymbolId symbol = 0;
+                for (uint32_t object = 1; same && object < objects; object += 1)
+                {
+                    same = needed[object] != 0 ? object_symbols[object] == symbol + 1 && symbol_objects[symbol] == object : object_symbols[object] == 0;
+                    symbol += needed[object] != 0;
+                }
+                all &= same;
+                checked += 1;
+                if (!same)
+                {
+                    printf("  needed objects: count %u density %u %s path: %u symbols, expected %u\n", count, density, path == 0 ? "scalar" : "vector", got, want);
+                }
+                if (maps[6] != 0)
+                {
+                    munmap(maps[6], sizes[6]);
+                    maps[6] = 0;
+                }
+            }
+            all &= ready;
+            for (uint32_t m = 0; m < 7; m += 1)
+            {
+                if (maps[m] != 0)
+                {
+                    munmap(maps[m], sizes[m]);
+                }
+            }
+        }
+    }
+    printf("  declaring tokens and needed objects: %llu cases, both paths at PROT_NONE pages\n", (unsigned long long)checked);
+    check_test_expect(test, all, "declaring tokens and needed objects agree with the contract by both paths, at every count and density");
+}
+
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
 {
     return size == 0 || (a != 0 && b != 0 && memcmp(a, b, size) == 0);
@@ -667,6 +794,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
+    check_test_program_declaring(test);
     check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);

@@ -434,6 +434,10 @@ static __attribute__((unused)) uint64_t abi_capacity_bytes(uint32_t types);
 // Pushes the columns from `arena` for every type `table` has room for and classifies the builtin types. Returns false,
 // with the arena as it was, if it can't hold them or vector_bytes isn't 16, 32 or 64.
 static __attribute__((unused)) bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes);
+// The same for the table's first `types` types alone, from its count to its capacity: a table no type will be made in
+// after it (a code generator's whose front end has finished) needs no columns for the room past its types, which
+// abi_initialize would clear (#442: the checker's room is four times a unit's tokens).
+static __attribute__((unused)) bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types);
 // Classifies every complete type the table has that isn't yet, a level at a time (each level's types depend only on
 // types classified before it): with the vector path, or its twin. Returns how many types it classified.
 static __attribute__((unused)) uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table);
@@ -2895,10 +2899,10 @@ static uint64_t abi_capacity_bytes(uint32_t types)
     return count * BUSTER_ABI_ROW_BYTES + count * sizeof(uint32_t) * 2 + count * 2 + count * sizeof(uint64_t) + count * sizeof(AbiReturn) + 7 * 64;
 }
 
-static bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes)
+static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types)
 {
     const uint64_t length = arena->length;
-    const uint32_t capacity = table->types.capacity;
+    const uint32_t capacity = types;
     abi->rows = arena_push(arena, (uint64_t)capacity * BUSTER_ABI_ROW_BYTES, 64);
     abi->pass = abi->rows != 0 ? arena_push(arena, (uint64_t)capacity * sizeof(uint32_t), 64) : 0;
     abi->stack_bytes = abi->pass != 0 ? arena_push(arena, (uint64_t)capacity * sizeof(uint32_t), 64) : 0;
@@ -2910,7 +2914,8 @@ static bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, 
     abi->vector_bytes = vector_bytes;
     abi->larger = 0;
     abi->rare = 0;
-    const bool result = abi->results != 0 && (vector_bytes == 16 || vector_bytes == 32 || vector_bytes == 64);
+    const bool result = abi->results != 0 && (vector_bytes == 16 || vector_bytes == 32 || vector_bytes == 64) && types >= table->types.count &&
+                        types <= table->types.capacity;
     if (result)
     {
         memset(abi->pass, 0, (uint64_t)capacity * sizeof(uint32_t));
@@ -2937,6 +2942,11 @@ static bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, 
         arena_pop_to(arena, length);
     }
     return result;
+}
+
+static bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes)
+{
+    return abi_initialize_types(abi, arena, table, vector_bytes, table->types.capacity);
 }
 
 static void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
