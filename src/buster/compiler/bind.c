@@ -113,7 +113,7 @@
 //     bind_keep_libraries and bind_library_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
-//   - Entry points: bind_capacity, bind_begin and bind_end.
+//   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_begin and bind_end.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -204,11 +204,14 @@ struct Bind
     uint32_t program_symbols;
     uint32_t symbols_begun;
     // Whether bind_end has begun, after the program's atoms joined; whether names have been bound, after which a link
-    // symbol with source NONE is a weak reference to nothing (a static runtime's members all join before); and whether
-    // crtendS.o and crtn.o have joined.
+    // symbol with source NONE below `resolved` is a weak reference to nothing (a static runtime's members all join
+    // before); and whether crtendS.o and crtn.o have joined. `resolved` is the end of the symbols bind_resolve has bound
+    // so far: one past it is a name that a member which joined in the current round added, still to bind, which another
+    // member of the round may refer to as well (libgcc.a's members' memset, __sfp_handle_exceptions).
     bool resolving;
     bool bound;
     bool tail_joined;
+    SymbolId resolved;
     // The link's imports from libc.so.6, the loader and the libraries it names, and the definitions it exports, room for
     // `capacity` of each.
     SymbolId* imports;
@@ -236,6 +239,17 @@ struct Bind
 // How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
 // alignments): the room a link that binds against it needs besides its own.
 static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, uint64_t* atom_bytes);
+// bind_capacity for a link whose undefined global names, its own and its code's, are `names` (`count` of them): the crt
+// objects' records, and of the archives' members only the ones binding may load for it, where bind_capacity counts every
+// member (libgcc.a's 298 make a link's columns spread past the base pages its arena starts with). A member joins for a
+// strong reference to a name it defines, from the link, a crt object or another member that joins, so the closure of the
+// names' members and the crt objects' references' over the members' references (Runtime.reference_members) bounds them:
+// a name the link defines or a library exports counts a member that may not join. Its bitset and queue are pushed onto
+// `scratch` while it runs. A loaded runtime's pieces are read before binding checks them (runtime_piece_current): a
+// damaged one can only make the room wrong, and its join then fails as damaged (BIND_ERROR_SNAPSHOT) before it can fail
+// for room.
+static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes,
+                                                                 uint64_t* atom_bytes);
 // Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
 // appends Scrt1.o, crti.o and crtbeginS.o (crt1.o, crti.o and crtbeginT.o for a static runtime), numbering the
 // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
@@ -451,8 +465,10 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
         const bool weak = from_weak && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         const uint8_t type = (flags & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_NOTYPE ? flags & BUSTER_LINK_SYMBOL_TYPE : from_flags & BUSTER_LINK_SYMBOL_TYPE;
         symbols->flags[symbol] = (uint8_t)(type | (weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL) | visibility);
-        // Once names are bound, a link symbol of source NONE is a weak reference that nothing defines.
-        if (bind->bound && !weak && symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE)
+        // Once names are bound, a link symbol of source NONE is a weak reference that nothing defines, unless a member
+        // of the current round added it and binding hasn't reached it (Bind.resolved).
+        if (bind->bound && !weak && symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE && symbol < bind->resolved)
+
         {
             bind_fail(bind, BIND_ERROR_UNDEFINED, symbols->name[symbol]);
         }
@@ -989,6 +1005,7 @@ static void bind_members(Bind* bind, Link* link, SymbolId first)
     {
         const SymbolId to = link->symbols.count;
         bind_resolve(bind, link, from, to, true);
+        bind->resolved = to;
         joined = false;
         for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
         {
@@ -1773,6 +1790,75 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
     return result;
 }
 
+// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed).
+static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapacity* capacity, uint64_t* name_bytes, uint64_t* atom_bytes)
+{
+    const LinkAtoms* atoms = &runtime->link.atoms;
+    const ImportMark begin = runtime->pieces[piece].begin;
+    const ImportMark end = runtime->pieces[piece].end;
+    capacity->names += end.names - begin.names;
+    capacity->atoms += end.atoms - begin.atoms;
+    capacity->symbols += end.symbols - begin.symbols;
+    capacity->fixups += end.fixups - begin.fixups;
+    capacity->wide_addends += end.wide_addends - begin.wide_addends;
+    capacity->priorities += end.priorities - begin.priorities;
+    *name_bytes += end.name_bytes - begin.name_bytes;
+    for (AtomId atom = begin.atoms; atom < end.atoms; atom += 1)
+    {
+        *atom_bytes += atoms->bytes[atom] != 0 ? atoms->size[atom] + ((uint64_t)1 << atoms->alignment_log2[atom]) - 1 : 0;
+    }
+}
+
+static LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes, uint64_t* atom_bytes)
+{
+    const RuntimeNames* global_names = &runtime->global_names;
+    const uint32_t member_count = runtime->member_count;
+    const uint64_t length = scratch->length;
+    uint8_t* marked = arena_push(scratch, (uint64_t)member_count + 1, 1);
+    uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)member_count + 1);
+    LinkCapacity result = { 0 };
+    *name_bytes = 0;
+    *atom_bytes = 0;
+    if (marked == 0 || queue == 0)
+    {
+        // Without room for the closure, every member's.
+        result = bind_capacity(runtime, name_bytes, atom_bytes);
+    }
+    else
+    {
+        memset(marked, 0, member_count);
+        uint32_t queued = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t* bytes = (const uint8_t*)names[i].pointer;
+            const uint32_t entry = runtime_find_global_name(global_names, bytes, (uint32_t)names[i].length, link_hash(bytes, (uint32_t)names[i].length));
+            const uint32_t member = entry != 0 ? global_names->member[entry - 1] : 0;
+            if (member != 0 && member - 1 < member_count && marked[member - 1] == 0)
+            {
+                marked[member - 1] = 1;
+                queue[queued++] = member - 1;
+            }
+        }
+        // The crt objects' references, then each queued member's, which may queue more.
+        for (uint32_t step = 0; step < RUNTIME_OBJECTS + queued; step += 1)
+        {
+            const uint32_t piece = step < RUNTIME_OBJECTS ? step : RUNTIME_OBJECTS + queue[step - RUNTIME_OBJECTS];
+            for (uint32_t r = runtime->reference_begin[piece]; r < runtime->reference_begin[piece + 1]; r += 1)
+            {
+                const uint32_t member = runtime->reference_members[r];
+                if (member != 0 && member - 1 < member_count && marked[member - 1] == 0)
+                {
+                    marked[member - 1] = 1;
+                    queue[queued++] = member - 1;
+                }
+            }
+            bind_capacity_piece(runtime, piece, &result, name_bytes, atom_bytes);
+        }
+    }
+    arena_pop_to(scratch, length);
+    return result;
+}
+
 BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
@@ -1866,6 +1952,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     if (bind->error == BIND_ERROR_NONE && static_runtime)
     {
         bind_resolve(bind, link, 1, link->symbols.count, false);
+        bind->resolved = link->symbols.count;
     }
     else if (bind->error == BIND_ERROR_NONE)
     {
@@ -1884,6 +1971,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     if (bind->error == BIND_ERROR_NONE)
     {
         bind_resolve(bind, link, before_tail, link->symbols.count, false);
+        bind->resolved = link->symbols.count;
     }
     bind_keep_imports(bind, link);
     bind_keep_loader(bind, link);
