@@ -2,16 +2,22 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-checker-deferred: #113's deferred bodies (c_check_deferred.c) on fixtures of the issue's cases. Each fixture is
-// written to a file and checked as test-checker-corpus checks one (check_corpus_measure): on the scalar path, the vector
-// path, and the vector path with every body read apart, which must give the vector path's results exactly, column by
-// column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct
-// binding resolution, and each fixture says whether the deferred reader must merge it or leave it to source order. A
-// merged unit's bodies must run on no more lanes than they are, and its reader be copied by one of them at least and
-// by no more (#432's review). A unit that merges is checked again with its first lane taking every part, when no other
-// lane may copy the reader; with its merge failing after the replay, which must give source order's result; and with
-// the allocation of the deferred reader's state failing, which must count as a resource failure, not as a result that
-// differs. Then benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no
-// input, which must say so rather than read its columns.
+// written to a file and checked as test-checker-corpus checks one (check_corpus_measure): on the scalar path, the
+// vector path, and the vector path with every body read apart, which must give the vector path's results exactly,
+// column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
+// direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
+// whether the deferred reader must merge it or leave it to source order. A merged unit's bodies must run on that many
+// lanes, and its reader be copied by one of them at least and by no more (#432's review). Each fixture is read again on
+// 8 lanes by the reader's rule of how many (one lane, and one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies'
+// tokens beyond twice the largest body's), and six of bodies of known tokens are read by the rule alone: on each side
+// of a second lane and of an eighth, and beside a largest body, which leaves the others fewer tokens. A unit that
+// merges, but the rule's sides, is checked again with its first lane taking every part, when no other lane may copy the
+// reader; with its merge failing after the replay, which must give source order's result; and with the allocation of
+// the deferred reader's state failing, which must count as a resource failure, not as a result that differs. The many
+// bodies are read again with the reader timing what its lanes cost (CheckDeferred.timing), on one lane, which must
+// wait for no other, and on 8, and lane_run's dispatch and the wake-up must fall within the lanes' span. Then
+// benchmark-checker-deferred's --cpus parser, and the difference report on a deferred path that made no input, which
+// must say so rather than read its columns.
 //
 //   ./build/compiler test-checker-deferred [--keep]
 //
@@ -24,6 +30,8 @@ struct CheckDeferredFixture
     const char* source;
     // Whether the unit is merged (false: it does what only source order can merge).
     bool merged;
+    // The fixture's -std= option, -std=gnu17 when 0.
+    char* standard;
 };
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
@@ -53,9 +61,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "enum-completed-between-bodies", "enum E;\nint f(void) { enum E* e = 0; return e != 0; }\nenum E { A, B };\nint g(void) { enum E e = B; return e; }\n", true },
     { "typedef-of-a-later-completion",
       "struct S;\nint f(void) { typedef struct S T; T* t = 0; return t != 0; }\nstruct S { int x; };\nint g(void) { typedef struct S T; T t = { 2 }; return t.x; }\n", true },
-    // A tag first named in a file-scope declarator (a prototype's parameter, a sizeof in an array's bound, a
-    // definition's parameter) ends with the declarator in source order's reader, which the history doesn't say: a later
-    // body that names the tag makes one of its own. The last declares the tag first, which every body sees.
+    // A tag first named in a file-scope declarator's parameter list (a prototype's, a definition's) ends with the list in
+    // source order's reader, whose scope is deeper than the file scope the history holds: a later body that names the
+    // tag makes one of its own. One that an array's bound names is the file scope's, which later bodies see, as is the
+    // last fixture's, which the file scope declares first.
     { "tag-in-a-prototype", "void g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
     { "tag-in-a-prototype-then-passed", "void g(struct S *p);\nvoid f(void) { struct S *q = 0; g(q); }\n", true },
     { "tag-in-a-prototype-two-bodies", "void g(struct S *p);\nint f1(void) { struct S *q = 0; return q != 0; }\nint f2(void) { struct S *r = 0; return r != 0; }\n", true },
@@ -103,6 +112,36 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
     { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
     { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
+    // Structs, unions and enums defined in a parameter list (#438): a definition's tags and enumeration constants, which
+    // its body declares again at its opening, whether it names them or not; and a prototype's, which end with it.
+    { "parameter-list-definitions-in-its-body",
+      "int f(struct S { int x; } s, enum E { K = 7 } e) { struct S t = s; enum E k = K; return t.x + k + e; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-constant-shadows-the-file-scope", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return K + e; }\nint g(void) { return K; }\n", true },
+    { "parameter-list-constant-its-body-doesnt-name", "enum { K = 5 };\nint f(enum E { K = 1 } e) { return e; }\nint g(void) { return K; }\n", true },
+    { "prototype-list-constant-ends-with-it", "void g(enum E { K = 7 } e);\nint f(void) { int K = 3; return K; }\n", true },
+    { "definition-in-an-array-bound", "int a[sizeof(struct V { int x; })];\nint f(void) { struct V v = { 2 }; return v.x; }\n", true },
+    // A definition in a prototype that a parameter's bound holds ends at that prototype's `)`, and one in a body's
+    // bound after a statement expression is read before the walk reaches the expression (#460's review).
+    { "bound-prototype-constant-isnt-the-bodys", "int K = 3;\nint f(int a[sizeof(void (*)(enum E { K = 7 }))]) { return K; }\nint g(void) { return K; }\n", true },
+    { "body-bound-definition-after-a-statement-expression",
+      "int f(int m) { int a[({ m; }) + sizeof(struct S { int x; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\nint g(void) { return 2; }\n", true },
+    // C23's enums with a fixed underlying type in bodies, beside plain enums, structs and unions. A body's tags take the
+    // indices after the top level's, as the tags of the bodies its lane read before it did, and none may keep another's
+    // fixed base (lanes once shared the top level's enum_fixed). Both orders, many bodies, and a file-scope one shadowed.
+    { "fixed-enum-then-plain-enum", "int f(void) { enum E : int { A = 1 }; return A; }\nint g(void) { enum F { B = 2 }; return (int)sizeof(enum F) + B; }\n", true,
+      "-std=gnu23" },
+    { "plain-enum-then-fixed-enum", "int f(void) { enum F { B = 2 }; return B; }\nint g(void) { enum E : long { A = 1 }; return (int)sizeof(enum E) + A; }\n", true,
+      "-std=gnu23" },
+    { "fixed-enums-in-many-bodies",
+      "int f0(void) { enum E0 : char { A0 = 1 }; return A0; }\nint f1(void) { enum E1 { B1 = 2 }; return (int)sizeof(enum E1) + B1; }\n"
+      "int f2(void) { enum E2 : long long { A2 = 3 }; return (int)sizeof(enum E2) + A2; }\n"
+      "int f3(void) { struct S3 { int x; } s = { 4 }; return s.x + (int)sizeof(struct S3); }\n"
+      "int f4(void) { enum E4 : short; enum E4 : short { A4 = 5 }; return (int)sizeof(enum E4) + A4; }\n"
+      "int f5(void) { enum E5 { B5 = 6 } e = B5; return e; }\nint f6(void) { union U6 { int i; char c; } u = { 7 }; return u.i + (int)sizeof(union U6); }\n"
+      "int f7(void) { enum E7 : unsigned { A7 = 8 }; enum F7 { B7 = 9 }; return A7 + B7 + (int)sizeof(enum F7); }\n", true, "-std=gnu23" },
+    { "fixed-enum-at-file-scope-and-in-a-body",
+      "enum T : unsigned char { X = 1 };\nint f(void) { enum T t = X; return t + (int)sizeof t; }\n"
+      "int g(void) { enum T : short { Y = 2 }; return Y + (int)sizeof(enum T); }\nint h(void) { enum T u = X; return u; }\n", true, "-std=gnu23" },
 };
 
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
@@ -171,6 +210,62 @@ static bool check_deferred_test_no_input(void)
     return quiet && strstr(text, "made no input") != NULL;
 }
 
+// The lanes a unit's bodies run on, written again from the rule (docs/c-deferred-bodies.md, "How many lanes"): one, and
+// one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of their tokens beyond twice the largest body's, or with `every` as
+// many as there are lanes; and no more than `lanes` or the bodies, none without bodies.
+static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t largest, uint64_t lanes, bool every)
+{
+    const uint64_t beyond = tokens > largest * 2 ? tokens - largest * 2 : 0;
+    const uint64_t wanted = every ? lanes : 1 + beyond / BUSTER_CHECK_DEFERRED_LANE_TOKENS;
+    const uint64_t most = bodies < lanes ? bodies : lanes;
+    return wanted < most ? wanted : most;
+}
+
+// The rule's sides, with BUSTER_CHECK_DEFERRED_LANE_TOKENS (N): `bodies` functions of empty statements, whose bodies
+// have N tokens each from their opening brace to their closing one, but the first `first` times as many and the last
+// `fewer` fewer; and the lanes the rule gives them on 8. A second lane needs N tokens beyond twice the largest body's,
+// and an eighth seven times as many, each with a token fewer too; and a largest body of four times N beside four of N, a
+// token fewer, which leave one lane, and beside five, which take two.
+typedef struct CheckDeferredSize CheckDeferredSize;
+struct CheckDeferredSize
+{
+    const char* name;
+    uint32_t bodies;
+    uint32_t first;
+    uint32_t fewer;
+    uint32_t lanes;
+};
+
+static const CheckDeferredSize check_deferred_sizes[] =
+{
+    { "lane-tokens-below-two-lanes", 3, 1, 1, 1 },
+    { "lane-tokens-two-lanes", 3, 1, 0, 2 },
+    { "lane-tokens-below-eight-lanes", 9, 1, 1, 7 },
+    { "lane-tokens-eight-lanes", 9, 1, 0, 8 },
+    { "lane-tokens-large-body-and-four", 5, 4, 1, 1 },
+    { "lane-tokens-large-body-and-five", 6, 4, 0, 2 },
+};
+
+// A CheckDeferredSize's unit: its bodies and the tokens they hold in all, and the largest one's.
+static void check_deferred_sized(char* text, uint64_t capacity, const CheckDeferredSize* size, uint64_t* tokens, uint64_t* largest)
+{
+    uint64_t length = 0;
+    *tokens = 0;
+    *largest = 0;
+    for (uint32_t b = 0; b < size->bodies && length < capacity; b += 1)
+    {
+        const uint64_t body = (uint64_t)BUSTER_CHECK_DEFERRED_LANE_TOKENS * (b == 0 ? size->first : 1) - (b + 1 == size->bodies ? size->fewer : 0);
+        length += (uint64_t)snprintf(text + length, capacity - length, "void f%u(void) {", b);
+        for (uint64_t i = 2; i < body && length < capacity; i += 1)
+        {
+            length += (uint64_t)snprintf(text + length, capacity - length, i % 64 == 0 ? ";\n" : ";");
+        }
+        length += length < capacity ? (uint64_t)snprintf(text + length, capacity - length, "}\n") : 0;
+        *tokens += body;
+        *largest = body > *largest ? body : *largest;
+    }
+}
+
 // Many bodies, for the lanes' parts: a unit of `count` small functions that call one another.
 static void check_deferred_many(char* text, uint64_t capacity, uint32_t count)
 {
@@ -195,8 +290,10 @@ static int run_checker_deferred_tests(int count, char** arguments)
     valid = valid && mkdtemp(directory) != NULL;
     Arena option_arena = arena_reserve(UINT64_C(1) << 24);
     static char many[1 << 20];
+    static char sized[1 << 20];
     check_deferred_many(many, sizeof(many), 400);
-    const uint32_t fixtures = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_fixtures) + 1;
+    const uint32_t listed = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_fixtures);
+    const uint32_t fixtures = listed + 1 + (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
     static const CheckInputBindingMode modes[] = { CHECK_INPUT_BINDINGS_STACKS, CHECK_INPUT_BINDINGS_BATCH, CHECK_INPUT_BINDINGS_DIRECT };
     static const char* const mode_names[] = { "stacks", "batch", "direct" };
@@ -206,14 +303,22 @@ static int run_checker_deferred_tests(int count, char** arguments)
     uint64_t bodies = 0;
     for (uint32_t f = 0; valid && f < fixtures; f += 1)
     {
-        const bool generated = f + 1 == fixtures;
-        const char* name = generated ? "many-bodies" : check_deferred_fixtures[f].name;
-        const char* source = generated ? many : check_deferred_fixtures[f].source;
-        const bool expected = generated ? true : check_deferred_fixtures[f].merged;
+        // The listed fixtures, the many bodies, and the rule's sides, which the reader reads by its own rule alone.
+        const CheckDeferredSize* size = f > listed ? check_deferred_sizes + (f - listed - 1) : 0;
+        uint64_t size_tokens = 0;
+        uint64_t size_largest = 0;
+        if (size != 0)
+        {
+            check_deferred_sized(sized, sizeof(sized), size, &size_tokens, &size_largest);
+        }
+        const char* name = f < listed ? check_deferred_fixtures[f].name : size == 0 ? "many-bodies" : size->name;
+        const char* source = f < listed ? check_deferred_fixtures[f].source : size == 0 ? many : sized;
+        const bool expected = f < listed ? check_deferred_fixtures[f].merged : true;
+        const bool every = size == 0;
         char path[256];
         snprintf(path, sizeof(path), "%s/%s.c", directory, name);
         valid = parse_test_write(path, source, strlen(source));
-        char* options_text[2] = { "-std=gnu17", path };
+        char* options_text[2] = { f < listed && check_deferred_fixtures[f].standard != 0 ? check_deferred_fixtures[f].standard : "-std=gnu17", path };
         PPOptions options;
         const char* input = 0;
         const char* output = 0;
@@ -226,28 +331,59 @@ static int run_checker_deferred_tests(int count, char** arguments)
             {
                 check_corpus_deferred_lanes = lane_counts[l];
                 check_corpus_deferred_bindings = modes[m];
+                check_corpus_deferred_every_lane = every;
                 CheckCorpusOutcome outcome;
                 check_corpus_measure(path, &options, false, true, &outcome);
-                // No more lanes than bodies, and the reader copied by one of them at least and by no more.
-                const uint64_t most = outcome.deferred_bodies < lane_counts[l] ? outcome.deferred_bodies : lane_counts[l];
+                check_corpus_deferred_every_lane = true;
+                // The rule's lanes, and the reader copied by one of them at least and by no more; and a side of the
+                // rule's bodies of the tokens it was made with, on the lanes it was made for.
+                const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body,
+                                                                lane_counts[l], every);
                 const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
                                                           outcome.deferred_copies <= most);
-                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied;
+                const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
+                                                       outcome.deferred_largest_body == size_largest &&
+                                                       outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
+                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right;
                 checks += 1;
                 failures += !passed;
                 merged += outcome.deferred;
                 bodies += outcome.deferred_bodies;
                 if (!passed)
                 {
-                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s\n", name, lane_counts[l], mode_names[m],
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
-                            copied ? "" : " (its reader copied by too many lanes or by none)");
+                            copied ? "" : " (not the rule's lanes, or its reader copied by too many of them or by none)",
+                            sized_right ? "" : " (not the bodies' tokens it was made with, or not the lanes it was made for)");
                 }
             }
         }
-        // A unit that merges, with its first lane taking every part: no other lane copies the reader.
-        if (valid && expected)
+        // The reader's own rule on 8 lanes, which reads most of the listed fixtures on one.
+        if (valid && size == 0)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_every_lane = false;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_every_lane = true;
+            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body, 8, false);
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected &&
+                                (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on 8 lanes by the reader's rule: %s\n", name,
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : outcome.deferred != expected ? (expected ? "not merged" : "merged") :
+                        "not the rule's lanes, or its reader copied by too many of them or by none");
+            }
+        }
+        // A unit that merges, with its first lane taking every part: no other lane copies the reader. (The rule's sides,
+        // whose bodies are only empty statements, take none of these.)
+        if (valid && expected && size == 0)
         {
             check_corpus_deferred_lanes = 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
@@ -268,7 +404,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         }
         // A unit that merges, with its merge failing after the replay into the caller's table: source order's result,
         // from the table taken back to how it came.
-        for (uint32_t l = 0; valid && expected && l < 2; l += 1)
+        for (uint32_t l = 0; valid && expected && size == 0 && l < 2; l += 1)
         {
             check_corpus_deferred_lanes = l == 0 ? 1 : 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
@@ -288,7 +424,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         }
         // A unit that merges, with the allocation of the deferred reader's state failing: a resource failure, which
         // check_corpus_check_policy keeps through the input's result, and not a result that differs.
-        if (valid && expected)
+        if (valid && expected && size == 0)
         {
             check_corpus_deferred_lanes = 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
@@ -305,6 +441,32 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s with the deferred reader's state not allocated: %s\n", name,
                         !outcome.prepared ? "not preprocessed" : !outcome.resource ? "not a resource failure" : !outcome.deferred_equal ? "reported as a difference" :
                         !outcome.equal ? "the scalar and vector paths differ" : "merged, or another reason");
+            }
+        }
+        // The many bodies with the reader timing what its lanes cost (CheckDeferred.timing), on one lane and on every one
+        // of 8: no wake-up on one lane, which has no other to wait for, and lane_run's dispatch and the wake-up within
+        // the lanes' span.
+        for (uint32_t l = 0; valid && f == listed && l < 2; l += 1)
+        {
+            check_corpus_deferred_lanes = l == 0 ? 1 : 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_timing = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_timing = false;
+            const bool timed = outcome.deferred_active == check_corpus_deferred_lanes && outcome.deferred_lanes_ns != 0 &&
+                               (l != 0 || outcome.deferred_wake_ns == 0) &&
+                               outcome.deferred_dispatch_ns + outcome.deferred_wake_ns <= outcome.deferred_lanes_ns;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && timed;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on %u lanes, timed: %s (span %" PRIu64 " ns, dispatch %" PRIu64 " ns, wake-up %" PRIu64 " ns)\n", name,
+                        check_corpus_deferred_lanes, !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
+                        "not on every lane, untimed, a wake-up on one lane, or the dispatch and the wake-up past the lanes' span",
+                        outcome.deferred_lanes_ns, outcome.deferred_dispatch_ns, outcome.deferred_wake_ns);
             }
         }
         check_corpus_deferred_lanes = 0;

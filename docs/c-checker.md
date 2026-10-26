@@ -99,7 +99,9 @@ plain-char semantics.
 ## Implementation boundary
 
 The source adapter handles nested pointer, array and function declarators;
-prototype scopes and parameter adjustments; typedefs and local scopes;
+prototype scopes and parameter adjustments; struct, union and enum definitions
+in a declarator, in a parameter's specifiers or an array bound; typedefs and
+local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
 bit-fields (with GNU attributes after a width, the member's, which the parser
 hangs on the member's end, outside the width's tree, so that the width is
@@ -148,11 +150,29 @@ duration, actual and tentative definitions, and each selected initializer node.
 Linked declarations also retain translation-unit identity across closed blocks.
 An out-of-scope prototype constrains later declarations of the same entity but
 does not silently change the type visible to an unprototyped call. A
-prototype's parameters, and the tags its list declares, end at its `)`. A
-definition's are declared again at its body's opening, as clang has them, since
-the body's scope is theirs too (C11 6.2.1p4): in
-`int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
-parameter's (#435).
+declarator's parameter list is a scope of its own, a level deeper than the one
+around it (C11 6.2.1p4): its parameters are declared in it, and so are the tags
+and enumeration constants it declares, those of a struct, union or enum defined
+in a parameter's specifiers or in an array bound among them, each read where it
+is, in source order. A prototype's end at its `)`. A definition's are declared
+again at its body's opening, as clang has them, since the body's scope is
+theirs too: in `int f(struct T *p) { struct T *q = p; ... }` the body's
+`struct T` is the parameter's (#435), and in
+`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). A list's
+second definition of a tag only warns in clang, which makes it a tag of its own
+that its name doesn't name, and the checker does the same. A tag that a
+declarator's array bound names or defines outside a parameter list is the
+declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
+valid. A prototype in a constant expression's type name (a typeof's, a
+builtin's operand, a bound's `sizeof`) is a scope a level deeper as well, which
+ends its tags and enumeration constants at its `)`, in the evaluator's binding
+walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s `struct Z` isn't
+a later one's (#437), and in `int f(int K, int a[sizeof(void (*)(enum E { K }))])`
+the inner `K` is that prototype's alone. A bound's definitions are read beside
+its statement expressions, before or after them; one inside a statement
+expression is refused with its bound, as a statement expression that holds a
+declaration is ("Variable-length arrays" below). A definition in a `typeof` is
+still refused, there as anywhere.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -684,6 +704,10 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
+  alike in identifiers and `#if`'s character constants (the preprocessor's
+  errors) and in literals (`invalid or unsupported literal`), at their places
+  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that

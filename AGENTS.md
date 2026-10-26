@@ -321,10 +321,11 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, and `--lower-all`
+  checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`). `./build/compiler parse
+  `check_program_select`), and `-g` attaching DWARF of its functions' source
+  lines (`c_check_debug.c`, #395; `-c -g` writes no DWARF yet). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -581,8 +582,26 @@ designs and the compilers already built this way.
   `test-debug --cross-check` checks original fixtures, as one unit and as two,
   with readelf, GDB and perf; `benchmark-debug` measures validation through
   address finalization. [The debug guide](docs/debug.md) records the contract
-  and the source-row production still pending; `streaming.c` makes a unit per
-  256 functions as they compile.
+  and a function's body's row (`DebugFunction.prologue_end`); `streaming.c`
+  makes a unit per 256 functions as they compile.
+- `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
+  typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
+  `check_program_emit`'s raw rows, the driver maps their tokens to presumed
+  lines as the diagnostics place them, bounded per function by its
+  declaration's and closing brace's places, and keeps a row per change of line
+  in the function's file, and the body's start; each pass a vector path with
+  an exact twin (`--scalar`). The lowering and its loop over tasks are
+  compiled twice, without the tokens (`check_program_lower`,
+  `check_lower_drain`) and with them (`check_program_lower_sources`,
+  `check_lower_drain_sources`), so that a compile without `-g` runs the code
+  it ran before.
+  `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
+  the lines against `pp_presumed` on fixtures (a computed goto among them)
+  and generated programs, that lowering with the tokens changes no typed
+  function, and with `--cross-check` the executable through
+  `llvm-dwarfdump --verify` and gdb.
+  [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
   (strings not merged), references between debug sections resolved, those to
@@ -805,7 +824,8 @@ designs and the compilers already built this way.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
-  check the driver and inline assembly against Clang; `test-checker-corpus`
+  check the driver and inline assembly against Clang (but for named UCNs,
+  which clang accepts and the driver refuses at their places, #452); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
@@ -847,13 +867,19 @@ designs and the compilers already built this way.
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
   them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. Values past the
+  parameters objects and its constants an optional column. The 128-bit
+  integers (I128 and U128, `__int128`'s) live in the same slots, each entry of
+  them deferred too, their halves through scratch registers; a front end
+  divides them, converts them to and from floating values and passes them
+  through calls and 16-byte objects, as clang's code does. Values past the
   depth tables (15 integer, 14 with a frame pointer, and 16 floating ones)
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`). The output is
-  the records with #144's branch columns and `LinkReference`s. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s and, when asked for
+  (`Tier0Function.entry_records`), each entry's first record, for source
+  rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
@@ -1043,6 +1069,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler benchmark-backend
+./build/compiler test-check-debug --cross-check
+./build/compiler benchmark-check-debug
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -1080,22 +1108,67 @@ there at a time, so everything takes one lock:
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
   includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
-  or one that its entry in `changes`' `benchmarks` names, for one in `main.c`'s
+  or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
   step. A change to `build.sh` runs every one, and so does a push to main, so
   that main has each benchmark's numbers at every commit. A new benchmark's
-  step gets an entry in `benchmarks` and an `if:` on `MEASURE`, as the others
-  have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
+  step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
+  others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
   repeated processes), which cost about 200 ms before each of 21 samples per
   case, go in a step of their own that runs where the `changes` job's output
   for the module isn't `false`: on the daily scheduled run, dispatched runs and
-  pull requests that change the module's sources (its pattern in `changes`).
-  The same holds for the linkers' baselines and floors and mold's and wild's
-  foreign phases. A push to main runs none of them: its pull request's run
-  measured what it changes, and the full set took the job past its 10
-  minutes. The daily and dispatched runs have 25 minutes.
+  pull requests that change the module's sources (its `changes_modules` entry,
+  which no `*_test.c` matches: tests don't change what the samples measure).
+  Keep the pattern to what the samples measure: a module's own decision
+  campaign (#336's binding handoff) has a module of its own, not the whole
+  checker's. A step gated so also runs on the pull request that changes it.
+  The same holds for the linkers' baselines and floors, mold's and wild's
+  foreign phases, and the first-party performance readers' qualification
+  (`tools/performance`, `docs/performance`, `web/perf`, their pin; a change to
+  `docs/performance` alone runs the job for it). A push
+  to main runs none of them: its pull request's run measured what it changes,
+  and the full set took the job past its 10 minutes. The daily and dispatched
+  runs have 25 minutes.
+- The `changes` job's selector is `tools/ci/changes.c`, with those tables:
+  the job builds it with the hosted runner's `cc`, then `--self-test` checks it
+  before it decides, and fails the job (so that `test` runs everything) when
+  its tables and the workflow disagree: an output a step reads that it doesn't
+  write, a `MEASURE` name that isn't a benchmark or a benchmark no step runs, a
+  gated step that doesn't run when changed alone, a pattern alternative or a
+  unit that names no source; or when a fixture's decision changes (docs alone,
+  `docs/performance`, `web/perf`, tests alone, the binding events' producers,
+  `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
+  locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
+  tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
+  benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Sharing the owner's machines' cores
+
+Where `cores` is on `PATH` (the owner's own machines; `cores help`), every
+multicore run goes through it: builds (`./build.sh`), the parallel test runner,
+lane tests and benchmarks, `--jobs` campaigns, clang oracles run at once. It is
+a first-come, first-served queue of physical cores, not a lock on the machine:
+
+```sh
+CORES_TITLE="<session title>" CORES_LINK="<session, PR or issue>" cores -n 4 -- ./build.sh
+cores --all -- ./build/compiler parallel < list
+```
+
+A job waits for every older one and for its cores, then runs pinned to both
+threads of each, at niceness 19, with `CORES` set to its count, so tools that
+size themselves by the CPUs they may run on (`nproc`, `parallel`'s `--jobs`,
+lanes) fit the grant; pass `--jobs "$CORES"` or `--lanes "$CORES"` where a tool
+takes a count. A single-threaded run that takes more than about 30 s (a fuzz
+campaign, a test or oracle without `--jobs`, a long benchmark) goes through
+`cores -n 1`, so that it neither shares a granted core's threads unseen nor
+fills the pool past what `cores status` shows; shorter commands don't queue.
+Ask for the cores the run can use, hold them per run rather than around a
+series, and let a nested `cores` inside a job run at once on the job's cores. `cores status` shows who
+holds and who waits; `cores away` and `cores here` are the owner's switch
+between lending every core and keeping two for interactive use. None of this
+replaces the 9700X's lock: benchmark timings still come from there.
 
 ## Agent memory
 
@@ -3409,9 +3482,10 @@ identifier must get the same id and every token the same leading-space bit, on:
 - 300,000 random spellings that grow the table three times;
 - growth after 1, 4, 15, 16, 31, 32, 63 or 64 new names, with preceding-batch
   repeats and long common-prefix names, then the same input again;
-- 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
-  and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
-  misalignments from a cache line;
+- 30 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
+  and trigraphs; comments; UCNs; named UCNs, which stay as written, apart from
+  the `\u`, `\U` and UTF-8 spellings of their characters (#452); identifiers of
+  62 to 65 bytes), each at all 64 misalignments from a cache line;
 - identifiers of every length from 1 to 130 bytes with a line splice (four
   spellings, one a trigraph's) at every position inside, or a UCN at every
   position, each followed by the same identifier written plainly: 50,570
@@ -3487,6 +3561,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     diagnostic/location comparisons; contextual recovery beyond 8/64/256
     repairs with earlier macro snapshots retained, and failure injection for
     allocation, data-index exhaustion and an unchanged recovery mask (#285);
+  - named UCNs (`\N{...}`, #452), refused where the lexer reads one in a token
+    (an identifier, a pp-number or an unknown token): in active text, a macro's
+    definition once and an unused argument, `#if` and `#elif` lines, after line
+    splices and as a trigraph, beside `\u`, `\U` and UTF-8 spellings, and with
+    names no character has; and no error in a skipped group, a literal or a
+    comment, whose `-E` text is clang's;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -3508,6 +3588,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
+  `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
+  its error, three columns before it (clang reads one past an identifier's first character silently); one in an
+  identifier of 40,000, each an error within 10 s (`pp_test_named_ucn_scaling`); and one, or a trigraph's `??/`,
+  across the edges of the 64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by
+  both kernels, whole and a window at a time (`pp_test_named_ucn_boundaries`);
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that
@@ -3553,7 +3639,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
   language modes: every record must be the whole file's, byte for byte; and the
   scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
-  byte at a time, on random bytes ending at a `PROT_NONE` page;
+  byte at a time, on random bytes ending at a `PROT_NONE` page; and 11 files
+  made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
+  64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
+  alone, a `\r` last), whose line ends `pp_count_lines` must count from many
+  starts to every end, as a count a byte at a time does (a `\r\n` at its `\n`,
+  so not by a query that ends at the `\n`), the line pages counted whole and in
+  two windows cut around each line end, `pp_page_line` at every byte, and
+  `pp_line_of`'s lines and columns near each line end from the cursor and from
+  the pages;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
   `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
@@ -4029,26 +4123,40 @@ A unit it can't merge yet (a body with a declaration with linkage, a
 transparent union or an intrinsic, a completion of its parameter-list tag, an
 error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
 
-`./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
+The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+of the bodies' tokens beyond twice the largest body's, no more than its lanes
+or the bodies: a lane's copy of the reader and its wake-up must be paid for by
+its share of the walks, and a woken lane reads at about half the first lane's
+speed.
+
+`./build/compiler test-checker-deferred [--keep]` checks 50 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
-left to source order as each fixture says, on no more lanes than bodies, its
-reader copied only by lanes that take a part. Each that merges must give source
-order's result again with its merge failing after the replay, and count as a
-resource failure with its state's allocation failing; and the benchmark's
+left to source order as each fixture says, on every lane its bodies can take
+and by the lanes' rule, its reader copied only by lanes that take a part. Six
+fixtures of bodies of known tokens must take the rule's lanes on each side of
+its steps. Each that merges must give source order's result again with its
+merge failing after the replay, and count as a resource failure with its
+state's allocation failing; timed, one lane must wait for no other and eight
+lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
-comparison and tallies the units left to source order by reason.
-`./build/compiler benchmark-checker-deferred [--passes N] [--lanes N] [--cpus
-LIST] [-E's options] file...` times source order's reader against the deferred
-one on one lane and on N, with the parse, the top level, the bodies' walks,
-their position checks, the lanes' span and the merge apart; `--cpus` pins the
-command to the first CPU and a lane team to the list (on the 9700X, `--cpus
-2,0,1,3,4,5,6,7` under its lock). The 9700X job runs the fixtures, c-testsuite
-and the frozen SQLite source with `--deferred 8`, and the benchmark where the
-checker changes. [docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
+comparison, on every lane the bodies can take up to N, and tallies the units
+left to source order by reason. `./build/compiler benchmark-checker-deferred
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [-E's options] file...`
+times source order's reader against the deferred one on one lane and on up to
+N, with the parse, the top level, the bodies' walks, their position checks, the
+lanes' span and the merge apart, and what a lane costs: its copy of the reader,
+`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
+orders of its three readings in turn, so `--passes` is a multiple of six (24).
+`--every-lane` runs every lane the bodies can take, whatever
+their tokens; `--cpus` pins the command to the first
+CPU and a lane team to the list (on the 9700X, `--cpus 2,0,1,3,4,5,6,7` under
+its lock). The 9700X job runs the fixtures, c-testsuite and the frozen SQLite
+source with `--deferred 8`, and the benchmark where the checker changes.
+[docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
 the design, the corpora and the measurements.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
@@ -4455,7 +4563,21 @@ must truncate and leave the control word as it was; and
 from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
 both ways and calls of C functions, against the check's own stack machine. The
-programs must reach every kind and conversion of the class.
+programs must reach every kind and conversion of the class. Then the `int128`
+check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
+U128, against clang's `__int128`: each break of the classes' rules refused at
+its entry; a stack of a memory class's values up to the last 16-byte slot,
+which runs, and one past it, which both paths refuse (for long double too);
+functions of 128-bit parameters and results in register pairs and on the
+stack, called from C, and calling C; each class's compares and shifts on every
+pair of ten boundary values, against C's own operators too; and `--count`
+random programs over every kind of the classes, shifts by constant and variable
+counts and conversions to and from the other integers, under live values where
+`MUL` saves rax and rdx and a shift rcx. Any error but a random program's depth
+past the slots fails it, and only the entries that ran in the programs both
+paths compiled, that ran and matched the check's stack machine count toward its
+coverage, which must reach each class's every kind, conversion and save and
+both arms of a `?:`.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines

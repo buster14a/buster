@@ -951,6 +951,8 @@ struct RefineFixture
     bool leading_space;
     int32_t same_a;
     int32_t same_b;
+    // Whether same_a and same_b are two identifiers that must differ instead.
+    bool apart;
 };
 
 static const RefineFixture refine_fixtures[] = {
@@ -975,6 +977,19 @@ static const RefineFixture refine_fixtures[] = {
     { "\xC3\xA9t\xC3\xA9 \\u00e9t\\u00E9 \\U000000e9t\\u{e9}", 0, -1, false, 1, 2 },
     { "caf\\u00\\\ne9 caf\xC3\xA9", 0, -1, false, 0, 1 },
     { "x?" "?/u00e9 x\xC3\xA9", C_TOKENIZER_TRIGRAPHS, -1, false, 0, 1 },
+    // A named UCN stays as written, its line splices removed (#452: the preprocessor refuses it): never the identifier
+    // that another spelling of its character makes (\u, \U or UTF-8), nor one with its name spelled otherwise (two spaces,
+    // which clang's loose matching would read as its name).
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\N{LATIN SMALL LET\\\nTER E WITH ACUTE}y", 0, -1, false, 0, 1 },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\u00e9y", 0, -1, false, 0, 1, true },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\\U000000E9y", 0, -1, false, 0, 1, true },
+    { "x\\N{LATIN SMALL LETTER E WITH ACUTE}y x\xC3\xA9y", 0, -1, false, 0, 1, true },
+    { "\\N{GREEK SMALL LETTER ALPHA} \\N{GREEK SMALL LETTER ALPHA}", 0, -1, false, 0, 1 },
+    { "\\N{GREEK SMALL LETTER ALPHA} \\N{GREEK  SMALL LETTER ALPHA}", 0, -1, false, 0, 1, true },
+    { "x?" "?/N{GREEK SMALL LETTER ALPHA} x\\N{GREEK SMALL LETTER ALPHA}", C_TOKENIZER_TRIGRAPHS, -1, false, 0, 1 },
+    // A name not written with capital letters, digits, spaces and hyphens isn't one (clang has none such): the identifier
+    // before it ends there.
+    { "x\\N{greek small letter alpha} x", 0, -1, false, 0, 2 },
     // Around the vectorized path's 63-byte limit: 62, 63, 64 and 65 bytes, and a spliced long one.
     { "a12345678901234567890123456789012345678901234567890123456789012 a12345678901234567890123456789012345678901234567890123456789012", 0, -1, false, 0, 1 },
     { "a123456789012345678901234567890123456789012345678901234567890123 a123456789012345678901234567890123456789012345678901234567890123", 0, -1, false, 0, 1 },
@@ -1004,8 +1019,8 @@ static bool refine_check_fixtures(RefineTestState* state)
             }
             if (passed && fixture->same_a >= 0)
             {
-                passed = state->scalar_values[fixture->same_a] == state->scalar_values[fixture->same_b] &&
-                         (state->kinds[fixture->same_a] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
+                passed = (state->scalar_values[fixture->same_a] == state->scalar_values[fixture->same_b]) != fixture->apart &&
+                         (state->kinds[fixture->same_a] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && (state->kinds[fixture->same_b] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
             }
             if (!passed)
             {

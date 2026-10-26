@@ -2729,6 +2729,287 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // A prototype's tag in a constant expression's type name (a typeof's, a builtin's operand) ends at the
+        // prototype's `)` too (#437).
+        {
+            "typeof's prototype tag in a parameter list ends with the prototype",
+            "int f(typeof(int (*)(struct Z *)) g, struct Z *z) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "file-scope typeof's prototype tag ends with the prototype",
+            "typeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "block-scope typeof's prototype tag ends with the prototype",
+            "int f(void) {\n typeof(int (*)(struct Z *)) h = 0;\n struct Z *z = 0;\n return h(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype tag in a parameter list doesn't reach the body",
+            "int f(typeof(int (*)(struct Z *)) g) {\n struct Z *z = 0;\n return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype names the visible tag",
+            "struct Z;\ntypeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            false,
+            false
+        },
+        {
+            "builtin operands' prototype tags are each their own",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(struct Y *), int (*)(struct Y *)), \"distinct\");\n",
+            false,
+            false
+        },
+        {
+            "nested prototype's tag in a typeof ends with each prototype",
+            "typeof(int (*)(int (*)(struct Z *), struct Z *)) g;\nint h(struct Z *);\nint f(void) { return g(h, 0); }\n",
+            true,
+            false
+        },
+        {
+            "register parameter's prototype tag ends with the prototype",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(register struct S *), int (*)(struct S *)), \"distinct\");\n",
+            false,
+            false
+        },
+        // A C23 attribute's operand is read raw (#437's review): a list whose parameter starts with `register` or an
+        // attribute is a prototype there too, its tag ended at its `)`.
+        {
+            "raw register parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw attributed parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(__attribute__((unused)) struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw function type of a register parameter",
+            "[[gnu::aligned(sizeof(int (register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        // A struct, union or enum defined in a parameter list (#438): read where it is, in source order, its tags and
+        // enumeration constants in the list's scope, which is a scope of its own; a definition's are its body's too,
+        // and a prototype's end with it.
+        {
+            "struct defined in a definition's parameter list",
+            "int f(struct S { int x; } s) { return s.x; }\n",
+            false,
+            false
+        },
+        {
+            "enum defined in a definition's parameter list, its constants in the body",
+            "int f(enum E { K = 7 } e) { return K + (e == K); }\n",
+            false,
+            false
+        },
+        {
+            "definition in a sizeof in a parameter's array bound, its tag in later parameters and the body",
+            "int f(int a[sizeof(struct V { int x; })], struct V *v) { struct V *w = v; return w->x; }\n",
+            false,
+            false
+        },
+        {
+            "parameter-list definitions' nested tags and constants in the body",
+            "int f(union U { struct S { int x; } s; enum E { A, B } e; } u) { struct S t = u.s; enum E k = B; return t.x + (k == u.e) + A; }\n",
+            false,
+            false
+        },
+        {
+            "parameter-list constant in a later parameter's bound",
+            "int f(enum E { K = 3 } e, char (*p)[K + 1]) { _Static_assert(sizeof(*p) == 4, \"bound\"); return K + e; }\n",
+            false,
+            false
+        },
+        {
+            "parameter-list constant shadows the file scope's in the body alone",
+            "enum { K = 5 };\nint f(enum E { K = 1 } e) { _Static_assert(K == 1, \"body\"); return K + e; }\n_Static_assert(K == 5, \"file\");\n",
+            false,
+            false
+        },
+        {
+            "prototype's list is a scope of its own",
+            "struct S { long z; };\nenum { K };\nvoid g(struct S { int x; } s, enum E { K = 4 } e, struct S *p);\n",
+            false,
+            false
+        },
+        {
+            "parameter list's redefinition of a tag only warns",
+            "int f(struct S { int x; } a, struct S { int y; } b, struct S *c) { return a.x + b.y + c->x; }\n",
+            false,
+            false
+        },
+        {
+            "definitions in a member's parameters and array bound",
+            "struct A { void (*g)(struct B { int y; } b); int a[sizeof(struct C { int z; })]; };\nstruct C c;\nstruct B *q;\n",
+            false,
+            false
+        },
+        {
+            "definitions in array bounds at file and block scope",
+            "int a[sizeof(struct V { int x; })];\nstruct V v;\nint f(void) { int b[sizeof(struct W { int y; })]; struct W w = { 1 }; return w.y + (int)sizeof(b) + v.x; }\n",
+            false,
+            false
+        },
+        {
+            "definitions in a type name's parameters and a variable bound",
+            "int f(int n, int a[n + sizeof(struct V { int x; })]) { struct V v = { n }; return v.x + a[0] + (int)sizeof(void (*)(struct W { int y; })); }\n",
+            false,
+            false
+        },
+        {
+            "enum of a fixed underlying type defined in a parameter list",
+            "int f(enum E : long { K = 7 } e) { _Static_assert(sizeof(K) == sizeof(long), \"C23\"); return K == e; }\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            "prototype's parameter-list constant ends with it",
+            "void g(enum E { K = 7 } e);\nint f(void) { return K; }\n",
+            true,
+            false
+        },
+        {
+            "prototype's parameter-list definition isn't the file scope's",
+            "void g(struct S { int x; } s);\nstruct S { int x; } t;\nint f(void) { g(t);\n return 0; }\n",
+            true,
+            false
+        },
+        {
+            "definition in a prototype's array bound ends with it",
+            "void g(int a[sizeof(struct V { int x; })]);\nstruct V v;\n",
+            true,
+            false
+        },
+        {
+            "nested prototype's constant ends before the body",
+            "int f(int (*k)(enum E { K = 1 } e)) {\n return K; }\n",
+            true,
+            false
+        },
+        {
+            "return type's prototype constant ends before the body",
+            "int (*f(int x))(enum E { K } e) {\n return K + x; }\n",
+            true,
+            false
+        },
+        {
+            "parameter and later enumeration constant of one list conflict",
+            "int f(int K,\n enum E { K = 1 } e);\n",
+            true,
+            false
+        },
+        {
+            "enumeration constant and later parameter of one list conflict",
+            "int f(enum E { K = 1 } e,\n int K);\n",
+            true,
+            false
+        },
+        {
+            "body's declaration conflicts with its parameter-list constant",
+            "int f(enum E { K = 7 } e) {\n int K = 1; return K + e; }\n",
+            true,
+            false
+        },
+        {
+            "body's definition redefines its parameter-list definition",
+            "int f(struct S { int x; } s) {\n struct S { int y; } t; return t.y + s.x; }\n",
+            true,
+            false
+        },
+        // A definition in a prototype that a bound's type name holds is that prototype's, a scope a level deeper which
+        // ends at its `)`, and a bound's definitions are read beside its statement expressions, before or after them
+        // (#460's review).
+        {
+            "bound's nested prototype's constant ends before the body",
+            "int f(int a[sizeof(void (*)(enum E { K = 7 }))]) {\n return K; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's definition isn't the body's",
+            "int g(int a[sizeof(void (*)(struct S { int x; }))]) {\n struct S s = { 1 }; return s.x; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's constant doesn't conflict with a parameter",
+            "int f(int K, int a[sizeof(void (*)(enum E { K = 7 }))]) { return K; }\n",
+            false,
+            false
+        },
+        {
+            "bound's nested prototype's definition doesn't complete the list's tag",
+            "int g(struct S *p, int a[sizeof(void (*)(struct S { int x; }))]) {\n return p->x; }\n",
+            true,
+            false
+        },
+        {
+            "bound's nested prototype's definition beside the list's",
+            "int g(struct S { int y; } *p, int a[sizeof(void (*)(struct S { int x; }))]) { return p->y; }\n",
+            false,
+            false
+        },
+        {
+            "enumerator value's nested prototype's constant doesn't conflict",
+            "enum X { K = 2, A = sizeof(void (*)(enum E { K = 1 })) };\n_Static_assert(K == 2, \"outer\");\n",
+            false,
+            false
+        },
+        {
+            "file-scope bound's nested prototype's definition ends with it",
+            "int a[sizeof(void (*)(struct S { int x; }))];\nstruct S s;\n",
+            true,
+            false
+        },
+        {
+            "member bound's nested prototype's definition ends with it",
+            "struct T { int a[sizeof(void (*)(struct S { int x; }))]; };\nstruct S s;\n",
+            true,
+            false
+        },
+        {
+            "nested prototype's constant in its own later bound",
+            "int f(int a[sizeof(void (*)(enum E { K = 7 }, int b[K]))]) { return 0; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition before a statement expression",
+            "int f(void) { int a[sizeof(struct S { int x; }) + ({ 1; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition after a statement expression",
+            "int f(void) { int a[({ 1; }) + sizeof(struct S { int x; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
+        {
+            "bound's definition between statement expressions",
+            "int f(int m) { int a[({ m; }) + sizeof(struct S { int x; }) + ({ m + 1; })]; struct S s = { 0 }; return s.x + (int)sizeof a; }\n",
+            false,
+            false
+        },
     };
     enum
     {

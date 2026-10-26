@@ -6,8 +6,9 @@
 //   - The top level is read first: check_input_run with every function body deferred, on a table of its own that records
 //     its changes (TypeChanges). Where the walk skips a body, check_deferred_cut records the reader's counts there: its
 //     types and tags, its binding events and active declarations, and each table the walk appends to.
-//   - After the walk, check_deferred_bodies reads the bodies on lanes, no more lanes than bodies. A lane copies the top
-//     level's reader when it takes its first part, so that one that takes none copies nothing
+//   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
+//     BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies' tokens beyond twice the largest body's, no more than bodies. A
+//     lane copies the top level's reader when it takes its first part, so that one that takes none copies nothing
 //     (check_deferred_lane_prepare), and sets it back for each body to what source order's reader is at the body's
 //     opening (check_deferred_body): the file scope's bindings from their history (#319's environment, c_environment.c)
 //     for the names the body and its parameters spell, its table a view of the top level's that hides the types the top
@@ -34,6 +35,10 @@
 #include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
+// The bodies' tokens that pay for a lane past the first, beyond twice the largest body's (check_deferred_bodies): on the
+// 9700X a second lane paid on units of 13,902 and 14,105 such tokens and lost on ones of 7,553 and 10,185
+// (docs/c-deferred-bodies.md, "How many lanes").
+#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 12288
 // The bytes of each of a lane's arenas in base pages.
 #define BUSTER_CHECK_DEFERRED_SMALL_BYTES (UINT64_C(64) << 20)
 
@@ -135,6 +140,10 @@ struct CheckDeferredLane
     uint64_t withdrawn;
     uint64_t position_ns;
     uint64_t walk_ns;
+    uint64_t copy_ns;
+    // With `timing`, when the lane reached the partition: CLOCK_MONOTONIC's nanoseconds, for CheckDeferred's dispatch_ns
+    // and wake_ns.
+    uint64_t arrived_ns;
 };
 
 struct CheckDeferred
@@ -179,10 +188,16 @@ struct CheckDeferred
     uint64_t copies;
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
-    // their position checks: setting each body's heads from the history and its table's view, and taking them back.
+    // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
+    // what a lane costs: its copy of the reader, summed over the lanes that copied it; lane_run's dispatch, from its call
+    // to the first lane's arrival at the partition (the first lane's pinning, and the others' wake calls); and their
+    // wake-up, from the first lane's arrival to the last one's: the first lane's wait at the partition's sync, without
+    // the partition's own work, and none on one lane.
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
+    // Every lane the bodies can take, however few tokens they have, as the tests and test-checker-corpus read them.
+    bool every_lane;
     // For the tests (test-checker-deferred): the merge fails right after its replay into the caller's table, as one
     // that runs out of room there does, and the unit goes to source order; and with `hold_lanes`, every lane but the
     // first waits to take a part until the first has taken them all, so that the others must copy nothing.
@@ -190,7 +205,8 @@ struct CheckDeferred
     bool hold_lanes;
     // The first lane's word that it has taken every part, which hold_lanes' other lanes wait for.
     uint32_t held;
-    // The lanes the bodies ran on, as the first records it: `lanes`, or as many as the bodies when they are fewer.
+    // The lanes the bodies ran on, as the first records it: `lanes`, or fewer when the bodies' tokens pay for fewer or the
+    // bodies are fewer.
     uint32_t active;
     uint64_t top_ns;
     uint64_t environment_ns;
@@ -198,6 +214,9 @@ struct CheckDeferred
     uint64_t merge_ns;
     uint64_t walk_ns;
     uint64_t position_ns;
+    uint64_t copy_ns;
+    uint64_t dispatch_ns;
+    uint64_t wake_ns;
 };
 
 // CLOCK_MONOTONIC's nanoseconds, for `timing`'s spans.
@@ -310,7 +329,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->linked_types = reader->linked_declarations != 0 ? check_deferred_copy(arena, top->linked_types, names, names, sizeof(TypeId)) : 0;
     reader->builtin_names = reader->linked_types != 0 ? check_deferred_copy(arena, top->builtin_names, names, names, sizeof(uint16_t)) : 0;
     reader->tag_completions = reader->builtin_names != 0 ? check_deferred_copy(arena, top->tag_completions, top->types->tags.count, tags, sizeof(uint32_t)) : 0;
-    valid = reader->tag_completions != 0;
+    // Whether each enum has a fixed base: the top level's for its tags, and the lane's own for those its bodies make,
+    // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
+    reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
+    valid = reader->enum_fixed != 0;
     if (valid && top->intrinsic_names != 0)
     {
         // The intrinsics' cache, which the lane fills for the names it meets, and their tables, which a body that uses
@@ -363,8 +385,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
 
 // The file scope's declaration of `key` that source order's reader sees at `point`, given the history's last one
 // activated at or before it (`handle`, an event + 1, 0 for none): that one, unless a restore ended it at or before the
-// point, as it ends a tag first named in a file-scope declarator (`void g(struct S *p);`) at the declarator's end, which
-// the history keeps since its depth is 0. Then the latest of the name's earlier ones that is still active, or none.
+// point, then the latest of the name's earlier ones that is still active, or none. Only a declarator that fails ends
+// one, whose unit has a report and is source order's: a tag or an enumeration constant first declared in a file-scope
+// prototype (`void g(struct S *p);`) is of the prototype's scope, a level deeper than the file scope the history holds
+// (#438).
 static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t key, uint32_t point, uint32_t handle)
 {
     const CBindings* bindings = environment->bindings;
@@ -498,6 +522,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const uint64_t setup_begin = deferred->timing ? check_deferred_now() : 0;
     // The walk's state at a file-scope function's opening brace, before its scope.
     reader->scope_count = 0;
+    reader->prototype_depth = 0;
     reader->function_result = 0;
     reader->function_end = 0;
     reader->function_body = BUSTER_CHECK_NONE;
@@ -689,6 +714,8 @@ static void check_deferred_lane(void* argument)
     CheckDeferred* deferred = run->deferred;
     const uint32_t index = lane_index();
     CheckDeferredLane* lane = deferred->lane_states + index;
+    // The partition's sync is the first that every lane reaches: the first lane waits there for the last to arrive.
+    lane->arrived_ns = deferred->timing ? check_deferred_now() : 0;
     const uint64_t parts = lane_parts_by_cost(deferred->costs, deferred->body_count, deferred->boundaries, deferred->orders[index]);
     while (deferred->hold_lanes && index != 0 && __atomic_load_n(&deferred->held, __ATOMIC_ACQUIRE) == 0)
     {
@@ -698,7 +725,9 @@ static void check_deferred_lane(void* argument)
     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
     {
         // The copy of the reader, made for the lane's first part: a lane that takes none spends nothing on one.
+        const uint64_t copy_begin = deferred->timing && !lane->copied ? check_deferred_now() : 0;
         lane->ready = lane->copied ? lane->ready : check_deferred_lane_prepare(deferred, lane);
+        lane->copy_ns += copy_begin != 0 ? check_deferred_now() - copy_begin : 0;
         lane->copied = true;
         const uint32_t part = deferred->orders[index][taken];
         for (uint64_t body = deferred->boundaries[part]; body < deferred->boundaries[part + 1]; body += 1)
@@ -1241,16 +1270,28 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->largest_parameters = parameters > deferred->largest_parameters ? parameters : deferred->largest_parameters;
     }
     CheckDeferredRun run = { .deferred = deferred };
-    // No more lanes than bodies, which are at least as many as the parts: a lane past them would take none.
-    const uint32_t active = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
+    // One lane, and one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies' tokens beyond twice the largest
+    // body's: a lane costs its copy of the reader and its wake-up, which its share of the walks must pay for, and a lane
+    // woken for the bodies reads them at about half the first lane's speed, so the lane that takes the largest body may
+    // take twice as long as the first would. And no more lanes than bodies, which are at least as many as the parts: a
+    // lane past them would take none.
+    const uint64_t largest = (uint64_t)deferred->largest_body * 2;
+    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > largest ? total - largest : 0) / BUSTER_CHECK_DEFERRED_LANE_TOKENS;
+    const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
+    const uint32_t active = paid < most ? (uint32_t)paid : most;
     const uint64_t lanes_begin = deferred->timing ? check_deferred_now() : 0;
     const bool ran = !valid || deferred->body_count == 0 || lane_run(active, check_deferred_lane, &run, deferred->cpus);
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
+    // The first lane reaches the partition after lane_run's dispatch, and the last one after the others' wake-up; a
+    // lane that didn't run arrived nowhere (0).
+    const uint64_t first_arrival = deferred->lane_states[0].arrived_ns;
+    uint64_t last_arrival = first_arrival;
     for (uint32_t lane = 0; lane < deferred->lanes && lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
     {
         const CheckDeferredLane* state = deferred->lane_states + lane;
+        last_arrival = state->arrived_ns > last_arrival ? state->arrived_ns : last_arrival;
         deferred->bodies += state->bodies;
         deferred->body_tokens += state->body_tokens;
         deferred->history_reads += state->history_reads;
@@ -1258,7 +1299,10 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->copies += state->copied;
         deferred->position_ns += state->position_ns;
         deferred->walk_ns += state->walk_ns;
+        deferred->copy_ns += state->copy_ns;
     }
+    deferred->dispatch_ns = first_arrival != 0 ? first_arrival - lanes_begin : 0;
+    deferred->wake_ns = first_arrival != 0 ? last_arrival - first_arrival : 0;
     for (uint32_t b = 0; valid && b < deferred->body_count; b += 1)
     {
         valid = !deferred->results[b].unsupported;
@@ -1301,11 +1345,13 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const uint32_t* cpus = deferred->cpus;
     const bool fail_after_replay = deferred->fail_after_replay;
     const bool hold_lanes = deferred->hold_lanes;
+    const bool every_lane = deferred->every_lane;
     *deferred = (CheckDeferred){
         .lanes = lanes,
         .table = types,
         .timing = timing,
         .cpus = cpus,
+        .every_lane = every_lane,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
     };

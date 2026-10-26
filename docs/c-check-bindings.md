@@ -199,11 +199,15 @@ It reports:
   its own footprint past its arenas' lengths (exact for what it writes).
 
 The 9700X job runs it on every pull request on the small and header-heavy
-inputs and with 5 passes on frozen SQLite; where the checker's sources change,
-it adds three processes of the large input and SQLite, and SQLite's `direct`
-and `parser-batch` alone and after 100 ms of scalar work. A separate conditional
-step adds three nine-pass pipeline processes on all four inputs and pipeline
-SQLite's `direct` and `parser-batch` after the same scalar conditioning.
+inputs and with 5 passes on frozen SQLite; where the handoff's sources change
+(`changes`' `checker_bindings`: `c_check_binding*.c`, the events' producers
+`c_check_input.c`, `c_check_enum_input.c` and `c_check_constant.c`,
+`c_bindings*.c` and the parser's replay, `c_parser_binding*.c`, tests aside, or
+the steps themselves), it adds three processes
+of the large input and SQLite, and SQLite's `direct` and `parser-batch` alone
+and after 100 ms of scalar work. A separate conditional step adds three
+nine-pass pipeline processes on all four inputs and pipeline SQLite's `direct`
+and `parser-batch` after the same scalar conditioning.
 
 ### Inputs
 

@@ -113,6 +113,9 @@ struct CheckConstantInput
     uint32_t bind_cursor;
     uint32_t pending_tag;
     uint32_t failure;
+    // The reader's prototype depth when the evaluation began, which it gives back when it ends, whether or not its
+    // binding reached every list's `)` (check_constant_prototype_open).
+    uint32_t prototype_depth;
     CheckValue* values;
     CheckValue* proof_values;
     uint8_t* proof_active;
@@ -131,6 +134,7 @@ struct CheckConstantInput
     CheckConstantAttributes** attribute_ends;
     uint32_t* tag_finishes;
     uint32_t* tag_next;
+    uint32_t* prototype_marks;
     uint32_t* failed_token;
     bool raw;
     bool cached;
@@ -556,6 +560,7 @@ static bool check_constant_range_value(CheckConstantInput* input, uint32_t first
 }
 
 static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
+static bool check_constant_raw_parameters(CheckConstantInput* input, uint32_t open, uint32_t close);
 
 static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uint32_t end)
 {
@@ -636,8 +641,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                 frame->name = i++;
             }
             else if (i < frame->end && parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP &&
-                     (!input->raw || (i + 1 < frame->end && parser->tokens.kinds[i + 1] != PARSE_KIND_R_PAREN &&
-                      parser->tokens.kinds[i + 1] != PARSE_KIND_ELLIPSIS && !check_constant_raw_type_start(input, i + 1))))
+                     (!input->raw || (i + 1 < frame->end && !check_constant_raw_parameters(input, i, parser->tree.parents[i]))))
             {
                 const uint32_t close = parser->tree.parents[i];
                 valid = close > i && close < frame->end;
@@ -1232,6 +1236,32 @@ static void check_constant_source_regions(CheckConstantInput* input)
     }
 }
 
+// A tag that a prototype's list names first has the prototype's scope (C11 6.2.1p4) and ends at the list's `)`, as
+// check_input_declarator ends a declarator's (#437): `typeof(int (*)(struct Z *))`'s Z isn't a later `struct Z`. The
+// binding mark at the `(` waits at its `)`, since binding may yield inside the list for a tag's body and resume there.
+// The list is a scope a level deeper than the one around it, as a declarator's is (check_input_declaration_depth), so
+// that what a definition in it declares, read while binding waits, makes a tag of its own and conflicts with no name
+// outside the list (`int f(int K, int a[sizeof(void (*)(enum E { K }))])`, #438).
+static void check_constant_prototype_open(CheckConstantInput* input, uint32_t token)
+{
+    const uint32_t close = input->reader->parser->tree.parents[token];
+    if (!input->cached && close > token && close < input->end)
+    {
+        input->prototype_marks[close - input->first] = c_bindings_mark(&input->reader->bindings) + 1;
+        input->reader->prototype_depth += 1;
+    }
+}
+
+static bool check_constant_prototype_close(CheckConstantInput* input, uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    const uint32_t mark = input->prototype_marks[token - input->first];
+    const bool valid = mark == 0 || c_bindings_mark(&reader->bindings) == mark - 1 || c_bindings_restore(&reader->bindings, mark - 1, token);
+    reader->output->resource |= !valid;
+    reader->prototype_depth -= mark != 0;
+    return valid;
+}
+
 static bool check_constant_bind(CheckConstantInput* input, bool type_name)
 {
     CheckInputReader* reader = input->reader;
@@ -1254,6 +1284,7 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             input->bind_cursor = token;
             break;
         }
+        valid = valid && check_constant_prototype_close(input, token);
         if (!valid || input->attribute_syntax[index] || (input->statement_syntax[index] & 1) != 0)
         {
             continue;
@@ -1286,6 +1317,10 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                 input->type_begin[close - input->first] = next;
                 check_constant_mark_type(input, next, close);
             }
+        }
+        else if ((role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL) && input->syntax[index] && kind == PARSE_KIND_L_PAREN)
+        {
+            check_constant_prototype_open(input, token);
         }
         else if (role == PARSE_ROLE_OPEN_SPECIFIER && token > input->first)
         {
@@ -2869,6 +2904,17 @@ static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t to
     return type;
 }
 
+// A raw `(` in a type name holds a parameter list when what it holds starts as a parameter declaration may, as
+// check_constant_specifiers reads one: nothing, `...`, or specifiers after any attributes, `register` among them.
+static bool check_constant_raw_parameters(CheckConstantInput* input, uint32_t open, uint32_t close)
+{
+    const Parser* parser = input->reader->parser;
+    const uint32_t first = check_input_skip_attributes(parser, open + 1, close);
+    const uint8_t kind = first < close ? parser->tokens.kinds[first] : PARSE_KIND_R_PAREN;
+    return first >= close || kind == PARSE_KIND_ELLIPSIS || (kind == PARSE_KIND_STORAGE && parser->tokens.names[first] == C_NAME_REGISTER) ||
+           check_constant_raw_type_start(input, first);
+}
+
 static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
 {
     CheckInputReader* reader = input->reader;
@@ -2888,6 +2934,7 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             input->bind_cursor = token;
             break;
         }
+        valid = valid && check_constant_prototype_close(input, token);
         if (!valid || input->attribute_syntax[index])
         {
             continue;
@@ -2911,6 +2958,13 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t close = parser->tree.parents[token];
             valid = close > token && close < input->end;
+            // A list in a type name, as check_constant_type reads a raw `(`.
+            const bool prototype = valid && input->syntax[index] && token > input->first && parser->tokens.kinds[token - 1] != PARSE_KIND_TYPEOF &&
+                                   parser->tokens.kinds[token - 1] != PARSE_KIND_ATOMIC && check_constant_raw_parameters(input, token, close);
+            if (prototype)
+            {
+                check_constant_prototype_open(input, token);
+            }
             if (valid && token > input->first && (parser->tokens.names[token - 1] == C_NAME_BUILTIN_CONVERTVECTOR || parser->tokens.names[token - 1] == C_NAME_BUILTIN_BIT_CAST))
             {
                 valid = check_constant_type_builtin_prepare(input, token, parser->tokens.names[token - 1] == C_NAME_BUILTIN_BIT_CAST ? CBUILTIN_BIT_CAST : CBUILTIN_CONVERTVECTOR);
@@ -3141,6 +3195,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         .bind_cursor = first,
         .pending_tag = BUSTER_CHECK_NONE,
         .failure = BUSTER_CHECK_NONE,
+        .prototype_depth = reader->prototype_depth,
         .cached = cached,
         .failed_token = failed_token,
     };
@@ -3165,6 +3220,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_starts, CheckConstantAttributes*);
     BUSTER_CHECK_CONSTANT_ARRAY(attribute_ends, CheckConstantAttributes*);
     BUSTER_CHECK_CONSTANT_ARRAY(tag_next, uint32_t);
+    BUSTER_CHECK_CONSTANT_ARRAY(prototype_marks, uint32_t);
     input->tag_finishes = valid ? arena_push_array(reader->scratch, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
     valid &= input->tag_finishes != 0;
 #undef BUSTER_CHECK_CONSTANT_ARRAY
@@ -3180,6 +3236,7 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         memset(input->attribute_starts, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
         memset(input->attribute_ends, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
         memset(input->tag_finishes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        memset(input->prototype_marks, 0, (uint64_t)count * sizeof(uint32_t));
         for (uint32_t token = first; token < end; token += 1)
         {
             const uint8_t kind = reader->parser->tokens.kinds[token];
@@ -3243,6 +3300,7 @@ static bool check_constant_job_header(CheckConstantInput* input, uint32_t token)
         BUSTER_CHECK_CONSTANT_SLICE(attribute_ends);
         BUSTER_CHECK_CONSTANT_SLICE(tag_finishes);
         BUSTER_CHECK_CONSTANT_SLICE(tag_next);
+        BUSTER_CHECK_CONSTANT_SLICE(prototype_marks);
 #undef BUSTER_CHECK_CONSTANT_SLICE
         if (header.proof_values != 0)
         {
@@ -3279,6 +3337,12 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
                             check_constant_evaluate(input);
         valid = valid && check_constant_range_value(input, input->first, input->end, value) && check_constant_resolve(input, value, 0, value);
     }
+    // A job that waits for a definition keeps the depth of the lists open around it, at which its caller reads the
+    // definition; one that ended, or failed, gives its own back.
+    if (*nested_tag == BUSTER_CHECK_NONE)
+    {
+        input->reader->prototype_depth = input->prototype_depth;
+    }
     return valid;
 }
 
@@ -3313,6 +3377,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
         const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
         reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
     }
+    reader->prototype_depth = input.prototype_depth;
     arena_pop_to(reader->scratch, mark);
     return valid;
 }

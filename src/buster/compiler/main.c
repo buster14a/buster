@@ -445,6 +445,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
+#include "buster/compiler/c_check_debug_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
@@ -452,6 +453,7 @@ int run_backend_benchmark(int argc, char** argv);
 // #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
 #include "buster/compiler/c_lowering_source_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
+#include "buster/compiler/c_check_debug_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
@@ -931,6 +933,14 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-driver") == 0)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
+    {
+        result = run_check_debug_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
+    {
+        result = run_check_debug_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
