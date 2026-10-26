@@ -185,12 +185,31 @@ does, each rule checked against clang's answers on probes of it:
   statement they precede, so the first error is the count's when it isn't a
   valid one (`int N`, `4 / 0`, an enumerator of 0), and a later pragma's or
   the place's only when it is (#480's fourth review): such a count leaves the
-  loop's pragmas unsupported. Where both errors would be on its own pragma (a
-  second count of its category, or one that a state before it rules out), and
-  at file scope, where clang reads no count, the answer is the error. An error
-  in the statement comes before the places' and the conflicts' in clang's
-  output, which these reports at the pragma don't follow yet (#503). Tier 0
-  has no loop transformation for the hints to steer, so nothing keeps them.
+  loop's pragmas unsupported, including when a state or count of its category
+  shares its pragma. At file scope, where clang reads no count, the pragma is
+  an error. Placement, duplicate and incompatible hints wait for the whole
+  annotated statement (#503): its exclusive end is the reader's barrier and
+  the ordering position of its report, so the diagnostic graph includes the
+  statement's type errors too. The printed source is separate: conflicts at
+  the later pragma's `loop` or hint name, placement at the statement's first
+  token, with clang's directive names and messages. Nested statements finishing
+  together report the inner hints first. The existing postorder subtree ends
+  supply the boundary; the pragma reader follows parent links to the statement
+  root without scanning its body. Only a rejected unit retains one cold
+  `CheckInput.loop_diagnostic` record; successful loops retain no hint metadata.
+  Dropped pragmas create neither a placement error nor a barrier. Counts not
+  evaluated here remain unsupported rather than guessing which later error
+  clang would report. At the same completion position, an error from the next
+  pragma's handler precedes the current hints (the parser lexes that lookahead
+  before Sema); an error parsing that next pragma's argument follows them.
+  The rejected prefix still runs the scalar/vector control walk: duplicate
+  labels and completed switch constraints inside the statement precede the
+  hint. It collects the function-scoped names of forward labels from the tree,
+  while deferring undefined-label and jump-scope obligations until function
+  completion. Unfinished label references have canonical diagnostic-only
+  identities for typing `&&name`; these can never be published or emitted.
+  The ordinary control walk is specialized without the prefix checks.
+  Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.

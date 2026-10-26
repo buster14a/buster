@@ -566,12 +566,12 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             for (uint32_t report = 0; report < result->input.report_count; report += 1)
             {
                 const CheckInputReport* diagnostic = result->input.reports + report;
-                if (check_repair_input_report(repair, diagnostic) && diagnostic->token < result->position)
+                if ((check_repair_input_report(repair, diagnostic) || check_repair_loop_report(repair, &result->input, diagnostic)) && diagnostic->token < result->position)
                 {
                     result->token = diagnostic->token;
                     result->position = result->token;
                     result->pragma = diagnostic->pragma;
-                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_message(diagnostic->message));
+                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_report_message(&result->input, diagnostic));
                 }
             }
             if (result->adapted || result->input.diagnostic_graph)
@@ -726,7 +726,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->token = path->input.reports[report].token;
                     path->position = path->token;
                     path->pragma = path->input.reports[report].pragma;
-                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_message(path->input.reports[report].message));
+                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
                 }
             }
         }
@@ -1558,7 +1558,15 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->parser_binding_event_count == right->parser_binding_event_count &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
-            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL);
+            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL) &&
+            (left->loop_diagnostic == NULL) == (right->loop_diagnostic == NULL);
+    if (equal && left->loop_diagnostic != NULL)
+    {
+        const CheckInputLoopDiagnostic* l = left->loop_diagnostic;
+        const CheckInputLoopDiagnostic* r = right->loop_diagnostic;
+        equal = l->position == r->position && l->statement == r->statement && l->source == r->source && l->pragma == r->pragma &&
+                l->message == r->message && strcmp(l->text, r->text) == 0;
+    }
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&

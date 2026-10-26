@@ -70,6 +70,12 @@ static const char* check_driver_input_message(CheckInputMessage message)
     return result;
 }
 
+static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
+    return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text : check_driver_input_message(report->message);
+}
+
 static const char* check_driver_report_message(const CheckReport* report)
 {
     const char* result = "invalid expression";
@@ -201,7 +207,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
-            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i)))
+            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
             {
                 first[token] = i;
             }
@@ -256,7 +262,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t index = (uint32_t)first[token];
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_message(input->reports[index].message);
+                                                                                     check_driver_input_report_message(input, input->reports + index);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (source != BUSTER_CHECK_NONE)
                 {

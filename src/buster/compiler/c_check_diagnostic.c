@@ -192,6 +192,10 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    if (input->loop_diagnostic != 0 && report->pragma == input->loop_diagnostic->pragma && report->token == input->loop_diagnostic->position)
+    {
+        source = input->loop_diagnostic->source;
+    }
     for (uint32_t i = 0; report->pragma != 0 && i < input->fp_pragma_count; i += 1)
     {
         const CheckInputFpPragma* record = input->fp_pragmas + i;
