@@ -6037,16 +6037,19 @@ static bool build_mode_templates_properties(X86EncoderMode encoder, const X86For
 #define BUSTER_X86_TEMPLATE_ENTRY static
 #endif
 
-// This entry reads the caller's immutable X86_FORM_COUNT descriptions, disjoint from its output, and no home state.
+// This entry reads immutable X86_FORM_COUNT descriptions, disjoint from its output, and no mutable home state.
+// Address32 permits null descriptions for its canonical home table: its used adapter then retains no caller table.
 // The three 64-bit-mode entry points share code across main units; standalone inclusions retain a static copy.
 // Output holds BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES entries, with no alignment requirement; the intervening
-// gap is untouched. An unsupported mode returns false without writing. A broken form table may leave partial output.
+// gap is untouched. Unsupported modes and missing required descriptions fail without writes. A broken table may leave partial output.
 BUSTER_X86_TEMPLATE_ENTRY bool x86_build_nonlegacy_templates(X86EncoderMode encoder, const X86FormDescription* restrict descriptions, X86TemplateEntry* restrict templates)
 {
     bool result = false;
-    if (encoder == X86_ENCODER_MODE_64 || encoder == X86_ENCODER_MODE_ADDRESS32 || encoder == X86_ENCODER_MODE_APX)
+    if ((encoder == X86_ENCODER_MODE_64 || encoder == X86_ENCODER_MODE_ADDRESS32 || encoder == X86_ENCODER_MODE_APX) &&
+        (descriptions != 0 || encoder == X86_ENCODER_MODE_ADDRESS32))
     {
-        result = build_mode_templates_properties(encoder, descriptions, templates, 0);
+        const X86FormDescription* source = descriptions != 0 ? descriptions : x86_form_descriptions;
+        result = build_mode_templates_properties(encoder, source, templates, 0);
     }
     return result;
 }
@@ -6061,7 +6064,7 @@ static bool x86_encoder_initialize(void)
 // would otherwise make the table read-only zeros, megabytes of the executable file.
 __attribute__((used)) static bool x86_encoder_initialize_address32(void)
 {
-    x86_encoder_initialized_address32 = x86_build_nonlegacy_templates(X86_ENCODER_MODE_ADDRESS32, x86_form_descriptions, x86_templates_address32);
+    x86_encoder_initialized_address32 = x86_build_nonlegacy_templates(X86_ENCODER_MODE_ADDRESS32, 0, x86_templates_address32);
     return x86_encoder_initialized_address32;
 }
 

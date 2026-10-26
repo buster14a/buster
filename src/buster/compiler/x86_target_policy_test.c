@@ -17,14 +17,15 @@ static bool x86_target_test_templates(void)
         memcpy(descriptions, x86_form_descriptions, sizeof(x86_form_descriptions));
     }
     uint32_t checks = 0;
-    const X86EncoderMode modes[] = { X86_ENCODER_MODE_64, X86_ENCODER_MODE_ADDRESS32, X86_ENCODER_MODE_APX };
+    const X86EncoderMode modes[] = { X86_ENCODER_MODE_64, X86_ENCODER_MODE_ADDRESS32, X86_ENCODER_MODE_APX, X86_ENCODER_MODE_ADDRESS32 };
     for (uint32_t mode = 0; passed && mode < BUSTER_ARRAY_LENGTH(modes); mode += 1)
     {
         const X86EncoderMode encoder = modes[mode];
         // A deliberately unaligned, dirty destination checks the shared constructor's complete writes and bounds.
         memset(storage, 0xa5, extent + 129);
         X86TemplateEntry* copied = (X86TemplateEntry*)(storage + 65);
-        passed &= x86_build_nonlegacy_templates(encoder, descriptions, copied);
+        const X86FormDescription* source = mode == 3 ? 0 : descriptions;
+        passed &= x86_build_nonlegacy_templates(encoder, source, copied);
         for (uint32_t form = 0; passed && form < BUSTER_X86_FORM_TEMPLATES; form += 1)
         {
             X86TemplateEntry expected;
@@ -71,6 +72,8 @@ static bool x86_target_test_templates(void)
     passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_32, 0, &rejected);
     passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_16, 0, &rejected);
     passed &= !x86_build_nonlegacy_templates((X86EncoderMode)UINT32_MAX, 0, &rejected);
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_64, 0, &rejected);
+    passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_APX, 0, &rejected);
     passed &= memcmp(&original, &rejected, sizeof(original)) == 0;
     free(storage);
     free(descriptions);

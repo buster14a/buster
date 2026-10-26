@@ -95,20 +95,22 @@ loops are unchanged.
 Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
 home. The caller supplies its immutable form descriptions and keeps its own
 template storage and readiness flags. Descriptions and output must be disjoint.
-The constructor accepts only default
-64-bit, address32 and APX modes and reads no legacy-mode state; legacy properties
+The constructor accepts only default 64-bit, address32 and APX modes and reads no legacy-mode state; legacy properties
 and initialization stay local. Standalone inclusions keep static descriptions
-and construction. The output contract requires space for
+and construction. Address32 also accepts null descriptions to select the home's
+canonical table, so its forced writer adapter does not retain unused caller
+descriptions. Default 64-bit and APX require the caller's table. The output contract requires space for
 `BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES` entries, permits unaligned
-storage and leaves the intervening gap untouched. Unsupported modes fail without
-writing; an invalid catalogue can leave partial output.
+storage and leaves the intervening gap untouched. Unsupported modes and missing
+required descriptions fail without writing; an invalid catalogue can leave partial output.
 
-The target test compares 200,448 complete entries, including unavailable rows,
+The target test compares 250,560 complete entries, including unavailable rows,
 fallbacks, segment variants and fixup copies, with private per-form construction.
 It uses a separate descriptor copy, including an isolated opcode change that
 must affect construction without changing the global catalogue. It poisons an
 unaligned output and checks its prefix, suffix and intervening gap, plus unchanged
-output after unsupported-mode rejection with a null descriptor pointer. These comparisons check
+output after unsupported-mode or missing-descriptor rejection. Address32 checks
+both supplied and canonical tables. These comparisons check
 bulk construction and layout; both builders use the same pure form-construction
 body. A separate frozen before/after comparison checks all five encoder modes'
 complete bytes against the implementation before the refactor.
