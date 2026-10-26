@@ -143,7 +143,7 @@ what it is (`abi_finish`):
 | 7 | `UNCOUNTED` | MEMORY by its class, but a scalar clang passes as its value, in a register clang doesn't count, or on the stack once LLVM has none: `nullptr_t` and `_Atomic` scalars |
 | 8 | `IGNORE` | nothing to pass: both classes NO_CLASS (an empty struct, a struct of unnamed bit-fields) |
 | 9 | `PAIR` | one 128-bit integer value (clang's `i128`), which LLVM never splits between a register and the stack; with a NO_CLASS or SSE high eightbyte too (an `i128` a union stores), which clang counts and passes as two INTEGER eightbytes |
-| 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits (the callee, a result) |
+| 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits; for a result, what clang's IR asks of the callee, which LLVM's x86-64 code doesn't do (see "Extension") |
 | 12 | `AGGREGATE` | clang's `byval`: in memory as an argument, a copy on the stack (or an integer value: see "Two counts") |
 | 13 | `END_MEMORY` | a type of no size that is MEMORY at offset 16 though not at 0 |
 | 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
@@ -278,7 +278,9 @@ members' own:
   80-bit value, 10 for one of a vector of long doubles (packed 10 bytes
   apart), and 8 for a double (the third of a `<3 x double>`, after xmm0 and
   xmm1);
-- **flags:** `SIGN` or `ZERO` (the callee extends to 32 bits), `HIGH` (the
+- **flags:** `SIGN` or `ZERO` (clang's IR has the callee extend to 32 bits,
+  which neither its x86-64 code nor GCC's does: a caller extends a narrow
+  result itself, as "Extension" says), `HIGH` (the
   value's low eightbyte is padding: the register holds its high one), and
   `DEMOTED`: a value clang returns as a value and LLVM through a hidden
   pointer, which clang doesn't count (see "Two counts").
@@ -1475,12 +1477,43 @@ Capture descriptors stay above stderr, even when the command starts with
 standard streams closed. Before the ordinary cross-check, bounded child
 processes exercise all eight combinations of open/closed standard descriptors
 with `/bin/false` as every compiler. Each must exit 1, preserve the standard
-descriptors' state and retain all eight runs' failure files; the regression
+descriptors' state and retain all ten runs' failure files; the regression
 then removes its own files. A 10-second alarm and an 8 MiB file-size limit
 bound a replay that regresses into writing back into its capture. Two more
 children exhaust the descriptor limit at duplication and at the second
 capture, checking cleanup and failure accounting. These checks have their
 own tally and were added after the timings above.
+
+### Extension
+
+clang extends a `_Bool`, a character type, a `short` or an `unsigned short`
+argument, an enum of one and a `_BitInt` narrower than `int` (its `Extend`) to
+32 bits, by its signedness, plain `char`'s with `-funsigned-char` too; its
+callee takes the 32 bits as they come (`int f(char c) { return c; }` is
+`movl %edi, %eax`), so a caller must extend them as the flags say. A result is
+the other way round: clang's IR has the callee extend it (`signext`,
+`zeroext`), but LLVM's x86-64 code doesn't (`char g(long v) { return v; }` is
+`movq %rdi, %rax`, and a load of `v` back from its slot at `-O0`), nor does
+GCC's (`movl %edi, %eax`), and clang's caller extends
+what it gets back (`movsbl %al, %eax`). A caller reads a narrow result's bits
+alone and extends them itself, as Tier 0 does, its narrow values' upper bits
+unspecified; its own `RETURN` extends, which no caller needs.
+
+The cross-check's two extension runs (`abi_test_cross_extension`), with plain
+`char` signed and unsigned (`TypeTable.char_unsigned` and the C compilers'
+`-fsigned-char` or `-funsigned-char`), check these on `char`, `signed char`,
+`unsigned char`, enums of a fixed underlying `char` and `signed char`, `short`,
+`unsigned short` and `bool`, at 17 values with bits set past the type's: a
+record callee returns the 32 bits its argument arrived in from clang's caller,
+which must be the flags' extension; a record caller extends as the flags say
+before calling clang's callee, which must then return the value, and the other
+way (the control), which must show; a record caller returns the 32 bits of
+clang's result, whose low bits must be the value's; and this compiler's C,
+compiled with each signedness by both paths into the same bytes, passes,
+takes, returns and gets back each type with clang's code. Each run makes
+1,004 checks, and 71 of clang's 136 results come back unextended. A mutant of
+the module that ignores `char_unsigned`, one of the type table that does, and
+one of Tier 0 that doesn't extend a narrow argument each fail them.
 
 ## Measurements on the 9700X
 
@@ -1665,7 +1698,8 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   levels waiting for what it reads.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it, or
   as unsigned where the type table says so (`TypeTable.char_unsigned`, from
-  `-funsigned-char`). The cross-check's worlds keep signed char.
+  `-funsigned-char`). The cross-check's worlds keep signed char; its extension
+  runs check plain char with each signedness (see "Extension").
 
 ## Boundary audit #298
 

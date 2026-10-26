@@ -4407,10 +4407,21 @@ and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
-hidden pointer, which C doesn't name, are the record runs' checks). The eight
-runs (clang's, then GCC's, each at 16, 32 and 64 bytes, then the compiled
-ones) go at once, a child process each, and the test prints their lines in
-that order; a run that fails keeps its files.
+hidden pointer, which C doesn't name, are the record runs' checks). Two
+extension runs (#475's review), with plain char signed and with it unsigned
+(`-funsigned-char`, `TypeTable.char_unsigned`), pass and return the types clang
+extends (the character types, enums of a fixed underlying char and signed char,
+short, unsigned short and bool) between clang's code and ours, both ways, at
+values with bits set past the type's: records that return the 32 bits an
+argument arrives in (the extension the module's flags say clang's caller
+makes), that extend as the flags say before calling clang's callee, which takes
+the 32 bits as they come, and the other way round (the control), and C that
+this executable compiles with each signedness by both paths. clang's callee
+returns a narrow result unextended, though its IR says `signext` or `zeroext`,
+so a caller extends it itself, as Tier 0 does. The ten runs (clang's, then
+GCC's, each at 16, 32 and 64 bytes, then the compiled ones, then the extension
+ones) go at once, a child process each, and the test prints their lines in that
+order; a run that fails keeps its files.
 GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
