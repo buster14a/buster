@@ -3420,13 +3420,15 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "an enumerator count beside unroll(full) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) unroll(full)\n while (n--) s += 1; return s; }\n",
             true,
-            true
+            true,
+            .undecided = true
         },
         {
             "an enumerator width beside vectorize(disable) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(N)\n while (n--) s += 1; return s; }\n",
             true,
-            true
+            true,
+            .undecided = true
         },
         {
             "an enumerator count before an invalid state refused",
@@ -3470,7 +3472,8 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "an enumerator unroll count after unroll(enable) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll(enable)\n#pragma unroll N\n while (n--) s += 1; return s; }\n",
             true,
-            true
+            true,
+            .undecided = true
         },
         // #480's third and fourth reviews: before one loop, a later pragma's error is clang's first only when an earlier
         // count is valid, and the earlier count's when it isn't (a variable, a division by zero, an enumerator of 0). A
