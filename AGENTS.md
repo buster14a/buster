@@ -1120,6 +1120,29 @@ there at a time, so everything takes one lock:
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
+## Sharing the owner's machines' cores
+
+Where `cores` is on `PATH` (the owner's own machines; `cores help`), every
+multicore run goes through it: builds (`./build.sh`), the parallel test runner,
+lane tests and benchmarks, `--jobs` campaigns, clang oracles run at once. It is
+a first-come, first-served queue of physical cores, not a lock on the machine:
+
+```sh
+CORES_TITLE="<session title>" CORES_LINK="<session, PR or issue>" cores -n 4 -- ./build.sh
+cores --all -- ./build/compiler parallel < list
+```
+
+A job waits for every older one and for its cores, then runs pinned to both
+threads of each, at niceness 19, with `CORES` set to its count, so tools that
+size themselves by the CPUs they may run on (`nproc`, `parallel`'s `--jobs`,
+lanes) fit the grant; pass `--jobs "$CORES"` or `--lanes "$CORES"` where a tool
+takes a count. Single-threaded commands don't queue. Ask for the cores the run
+can use, hold them per run rather than around a series, and let a nested
+`cores` inside a job run at once on the job's cores. `cores status` shows who
+holds and who waits; `cores away` and `cores here` are the owner's switch
+between lending every core and keeping two for interactive use. None of this
+replaces the 9700X's lock: benchmark timings still come from there.
+
 ## Agent memory
 
 Agents keep what they learn about this project in the owner's private
