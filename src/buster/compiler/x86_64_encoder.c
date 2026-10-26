@@ -5556,8 +5556,10 @@ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line
 // record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
 // stay unmapped.
 #define BUSTER_X86_TEMPLATE_PADDING 1
+// The two live 64-bit template spans are separated by the 2 MiB fixup bias. Align their backing array to that
+// boundary so Linux's transparent huge pages do not add a first-touch page when another unit's size changes.
 static X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
-    __attribute__((aligned(64)));
+    __attribute__((aligned(1u << 21)));
 static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
 static bool x86_encoder_initialized;
 // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
