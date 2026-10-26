@@ -3366,8 +3366,8 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         },
         // clang drops a loop pragma with tokens after its options (or a count's parentheses), with a warning: no hint, so
         // nothing to place or to check, at file scope too; it ignores what follows the state or the constant expression an
-        // argument starts with, with a warning; licm takes disable, vectorize_predicate assume_safety; and a count this
-        // doesn't evaluate is still a hint of its category, or clang's error.
+        // argument starts with, with a warning; licm takes disable and vectorize_predicate assume_safety. Counts this
+        // doesn't evaluate stay unsupported: their errors can precede the statement and its Sema conflicts (#503).
         {
             "loop pragmas clang drops, at file scope and before a statement",
             "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\nint f(int n) { int s = 0;\n"
@@ -3417,16 +3417,16 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            "an enumerator count beside unroll(full) refused",
+            "an enumerator count beside unroll(full) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) unroll(full)\n while (n--) s += 1; return s; }\n",
             true,
-            false
+            true
         },
         {
-            "an enumerator width beside vectorize(disable) refused",
+            "an enumerator width beside vectorize(disable) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(N)\n while (n--) s += 1; return s; }\n",
             true,
-            false
+            true
         },
         {
             "an enumerator count before an invalid state refused",
@@ -3467,10 +3467,10 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true
         },
         {
-            "an enumerator unroll count after unroll(enable) refused",
+            "an enumerator unroll count after unroll(enable) unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll(enable)\n#pragma unroll N\n while (n--) s += 1; return s; }\n",
             true,
-            false
+            true
         },
         // #480's third and fourth reviews: before one loop, a later pragma's error is clang's first only when an earlier
         // count is valid, and the earlier count's when it isn't (a variable, a division by zero, an enumerator of 0). A

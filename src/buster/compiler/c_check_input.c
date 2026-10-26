@@ -88,6 +88,7 @@ typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
+typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 #define CHECK_INPUT_FUNCTION_INLINE 0x01u
 #define CHECK_INPUT_FUNCTION_EXTERN 0x02u
 struct CheckInputVla
@@ -120,6 +121,8 @@ struct CheckInput
     CheckInputDiagnosticPragmas* diagnostic_pragmas;
     CheckInputNonnullPragmas* nonnull_pragmas;
     CheckInputPackPragmas* pack_pragmas;
+    // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
+    CheckInputLoopDiagnostic* loop_diagnostic;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -4648,20 +4651,19 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         if (parser->tokens.pragma_count != 0)
         {
             uint8_t* handled = arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1);
-            // A loop hint's error: its message, and the token it is reported at (check_input_loop_pragmas).
+            // Argument errors stop at the pragma. Placement/conflict errors stop after the annotated statement.
             uint8_t* loop_messages = handled != 0 ? arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1) : 0;
-            uint32_t* loop_tokens = loop_messages != 0 ? arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint32_t), 4) : 0;
-            input->resource |= loop_tokens == 0;
-            if (loop_tokens != 0)
+            input->resource |= loop_messages == 0;
+            if (loop_messages != 0)
             {
                 memset(handled, 0, parser->tokens.pragma_count);
                 memset(loop_messages, 0, parser->tokens.pragma_count);
-                memset(loop_tokens, 0xff, (uint64_t)parser->tokens.pragma_count * sizeof(uint32_t));
+                CheckInputLoopDiagnostic delayed = { 0 };
                 bool prepared = check_input_diagnostic_pragmas(&reader, handled);
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
-                prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, loop_tokens);
+                prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 for (uint32_t pragma = 0; prepared && pragma < parser->tokens.pragma_count; pragma += 1)
@@ -4682,8 +4684,20 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         {
                             reader.resolve_diagnostic_token = input->pack_pragmas->records[pack].diagnostic_token;
                         }
-                        reader.resolve_diagnostic_token = loop_tokens[pragma] != BUSTER_CHECK_NONE ? loop_tokens[pragma] : reader.resolve_diagnostic_token;
                         break;
+                    }
+                }
+                if (prepared && delayed.pragma != 0 && delayed.position <= reader.resolve_limit)
+                {
+                    input->loop_diagnostic = BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputLoopDiagnostic, 1);
+                    input->resource |= input->loop_diagnostic == 0;
+                    if (input->loop_diagnostic != 0)
+                    {
+                        *input->loop_diagnostic = delayed;
+                        reader.resolve_limit = delayed.position;
+                        reader.resolve_pragma = delayed.pragma - 1;
+                        reader.resolve_diagnostic_token = BUSTER_CHECK_NONE;
+                        reader.resolve_message = delayed.message;
                     }
                 }
             }
