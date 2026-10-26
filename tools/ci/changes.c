@@ -872,10 +872,10 @@ static bool changes_heredoc_ends(Text line, Text word, size_t block)
 }
 
 // Where a line of a script leaves the shell's quoting: outside quotes (0), in single quotes (1), double quotes (2),
-// ANSI-C quotes (3) or backquotes (4), from where the line before left it; and whether the line ends in a backslash
-// outside quotes, which joins the next line to its command. A comment, from a `#` that starts a word outside quotes,
-// is read no further.
-static uint32_t changes_shell_line(Text line, uint32_t quote, bool* continued)
+// ANSI-C quotes (3) or backquotes (4), from where the line before left it; the parentheses open outside quotes, its
+// `(`s less its `)`s added to *depth; and whether the line ends in a backslash outside quotes, which joins the next
+// line to its command. A comment, from a `#` that starts a word outside quotes, is read no further.
+static uint32_t changes_shell_line(Text line, uint32_t quote, int64_t* depth, bool* continued)
 {
     bool comment = false;
     *continued = false;
@@ -891,7 +891,9 @@ static uint32_t changes_shell_line(Text line, uint32_t quote, bool* continued)
         uint32_t opened = c == '\'' ? 1 : c == '"' ? 2 : c == '`' ? 4 : 0;
         opened = c == '$' && i + 1 < line.length && line.data[i + 1] == '\'' ? 3 : opened;
         bool closes = (quote == 1 && c == '\'') || (quote == 2 && c == '"') || (quote == 3 && c == '\'') || (quote == 4 && c == '`');
-        uint32_t next = quote == 0 && !escape && !comment ? opened : quote;
+        bool bare = quote == 0 && !escape && !comment;
+        *depth += bare && c == '(' ? 1 : bare && c == ')' ? -1 : 0;
+        uint32_t next = bare ? opened : quote;
         next = quote != 0 && !escape && closes ? 0 : next;
         i += escape || (quote == 0 && opened == 3) ? 2 : 1;
         quote = next;
@@ -905,11 +907,13 @@ static uint32_t changes_shell_line(Text line, uint32_t quote, bool* continued)
 // keys' values (`env:`, `with:`) run nothing here. A line runs `./build/compiler benchmark-NAME` or `measure-NAME`
 // itself, after its indentation, a `run:` and a `taskset -c CPUS`, with NAME ending the line or followed by a space.
 // The text of a comment, a string, another command's arguments or a here-document's body runs nothing: a line counts
-// only where the shell starts a command there, outside quotes that lines before it opened and not joined to the line
-// before by a backslash (changes_shell_line); and the lines after one that starts here-documents are their bodies, up
-// to the line of each one's word as the shell reads it, the indentation of the block's first line removed, and the
-// block's rest when one never ends. The shell's control flow isn't read: a command in a function never called, or
-// after `if false`, counts as run. So the commands of the tests' list, which `parallel` reads from one, aren't the step's: a benchmark a
+// only where the shell starts a command there, outside quotes that lines before it opened, outside parentheses they
+// left open, and not joined to the line before by a backslash (changes_shell_line); and the lines after one that
+// starts here-documents are their bodies, up to the line of each one's word as the shell reads it, the indentation of
+// the block's first line removed, and the block's rest when one never ends. Lines inside parentheses are an array's
+// elements, but also a subshell's or a command substitution's commands, which count no more: a benchmark goes on a
+// line of its own. The shell's control flow isn't read: a command in a function never called, or after `if false`,
+// counts as run. So the commands of the tests' list, which `parallel` reads from one, aren't the step's: a benchmark a
 // MEASURE name gates runs in a step of its own, pinned.
 static void changes_step_commands(Text body, TextList* commands)
 {
@@ -921,6 +925,7 @@ static void changes_step_commands(Text body, TextList* commands)
     size_t keys = SIZE_MAX;
     bool literal = false;
     uint32_t quote = 0;
+    int64_t depth = 0;
     bool continued = false;
     while (text_next_line(body, &offset, &line))
     {
@@ -938,13 +943,13 @@ static void changes_step_commands(Text body, TextList* commands)
         }
         else if (literal)
         {
-            bool starts = quote == 0 && !continued;
+            bool starts = quote == 0 && depth == 0 && !continued;
             changes_heredocs(line, &heredocs);
             if (starts)
             {
                 changes_step_line(line, commands);
             }
-            quote = changes_shell_line(line, quote, &continued);
+            quote = changes_shell_line(line, quote, &depth, &continued);
         }
         else if (run)
         {
@@ -953,6 +958,7 @@ static void changes_step_commands(Text body, TextList* commands)
             heredocs = (TextList){ 0 };
             ended = 0;
             quote = 0;
+            depth = 0;
             continued = false;
             bool plain = value.length != 0 && value.data[0] != '|' && value.data[0] != '>';
             if (plain)
@@ -1786,6 +1792,7 @@ static void changes_test_mutation(ChangesTest* test, Text workflow, const char* 
         "cat <<'EOF'\n%\nEOF",
         "cat <<'EOF'\n  EOF\n%\nEOF",
         "echo \"\n%\n\"",
+        "args=(\n  %\n)\necho \"${args[@]}\"",
     };
     for (uint32_t i = 0; i < sizeof(templates) / sizeof(templates[0]); i += 1)
     {
@@ -2005,6 +2012,13 @@ static void changes_test_split(ChangesTest* test)
         "          echo 'a\\\n"
         "          ./build/compiler benchmark-backend\n"
         "          '\n"
+        "          args=(\n"
+        "            ./build/compiler benchmark-ir\n"
+        "          )\n"
+        "          x=$( (\n"
+        "          ./build/compiler benchmark-dataflow\n"
+        "          ) )\n"
+        "          f() { echo \"(\"; }; y=$((1 + (2)))\n"
         "          ./build/compiler benchmark-types\n";
     TextList arguments = { 0 };
     changes_step_commands(text_c(quoted), &arguments);

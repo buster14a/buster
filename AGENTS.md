@@ -1134,8 +1134,9 @@ there at a time, so everything takes one lock:
   benchmark-NAME` (or `measure-NAME`) on a line of its `run:` script, after
   only the line's indentation, a `run:` and a `taskset -c CPUS` (the selector
   finds a step's benchmarks by those lines alone, not in other keys' values,
-  folded blocks, quotes, comments, joined lines or here-documents' bodies,
-  though it doesn't read the shell's control flow; mutants of `benchmark-types`'
+  folded blocks, quotes, comments, joined lines, here-documents' bodies or
+  parentheses earlier lines left open (an array's elements, and a subshell's
+  too), though it doesn't read the shell's control flow; mutants of `benchmark-types`'
   step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
