@@ -231,9 +231,10 @@ static int run_backend_source_benchmark(int count, char** arguments)
         {
             files[file_count++] = arguments[i];
         }
-        else
+        else if (strcmp(arguments[i], "--no-default-config") != 0)
         {
-            // An option and its value, which pp_parse_options reads with each file.
+            // An option and its value, which pp_parse_options reads with each file; clang's --no-default-config, which
+            // the 9700X job's options for the frozen corpora pass, is dropped, as benchmark-checker-source drops it.
             options[option_count++] = arguments[i];
             if (pp_option_takes_value(arguments[i]))
             {
