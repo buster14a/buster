@@ -58,7 +58,7 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
             CheckProgramCode code = { 0 };
             const bool emitted = check_program_emit(&code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
                                                     &output, &bytes, &scratch, NULL, NULL, true);
-            check_test_expect(test, emitted && check_test_program_execute(&code.link, "int tested(int n){return n;}", clang, &scratch),
+            check_test_expect(test, emitted && check_test_program_execute(&code.link, "int tested(int n){return n;}", clang, false, &scratch),
                               "native query consumer uses runtime value even when the source proof has no effect flags");
             *effect = saved;
             effect->evaluated_operands = 1;

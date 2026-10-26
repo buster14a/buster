@@ -1357,6 +1357,9 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
+    // Plain char's signedness on the caller's table, which the merge fills and the phases after the reader read
+    // (check_input_run sets the top level's, and type_copy each lane's).
+    types->char_unsigned = pp->options.predefines.char_unsigned;
     // The caller's table as it comes, which a fallback to source order takes it back to: the merge replays into it, and
     // may fail after that.
     const TypeViewMark empty = type_view_mark(types);

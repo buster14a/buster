@@ -131,7 +131,7 @@ static bool check_test_program_oracle(const Link* link, const char* source, cons
     return valid;
 }
 
-static bool check_test_program_execute(Link* link, const char* source, const char* clang, Arena* scratch)
+static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
     static const char harness[] =
         "#include <stdio.h>\n"
@@ -203,7 +203,8 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         "-O0",
         "-march=x86-64",
         "-fno-common",
-        "-funsigned-char",
+        // Plain char as the checker read it, for the oracle and the harness alike.
+        char_unsigned ? "-funsigned-char" : "-fsigned-char",
         "-Wno-unused-value",
         "-no-pie",
         driver,
@@ -246,7 +247,9 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     return valid;
 }
 
-static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
+// A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
+// it with the same.
+static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -254,6 +257,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     const PPOptions pp_options = {
         .language = { .standard = 2017, .gnu = true },
         .no_standard_includes = true,
+        .predefines.char_unsigned = char_unsigned,
     };
     bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers);
     preprocessed = preprocessed && pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
@@ -340,7 +344,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
         if (emitted)
         {
             snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
-            check_test_expect(test, check_test_program_execute(&code.link, source, clang, &scratch), description);
+            check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -352,6 +356,12 @@ static void check_test_program_source(CheckTest* test, const char* source, const
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+// A program fixture with plain char signed, x86-64's.
+static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
+{
+    check_test_program_source_char(test, source, name, clang, false);
 }
 
 static void check_test_program_boundary(CheckTest* test, const char* source, const char* name, bool accepted, bool machine, uint32_t references, uint32_t initializations)
@@ -513,6 +523,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
+    // Plain char unsigned (-funsigned-char) and signed, from one source: stores and loads of values past 0x7f,
+    // conversions, division, shifts and compares, a switch, character constants, and a char parameter and result.
+    static const char plain_char[] =
+        "static char table[]={'\\x80','\\xff','a','\\x7f',0};static char pass(char c){return c;}static int widen(char c){return c;}"
+        "int tested(int n){char c=(char)(n*37+128);int r=c/3+(c>>1)+(c>100)+widen(pass(c))+'\\xff'+(char)-1;"
+        "r+=table[(unsigned)n%5]+(table[(unsigned)n%5]<0)*1000;switch(c){case '\\xff':r+=7;break;case '\\x80':r+=11;break;default:break;}"
+        "table[(unsigned)n%5]=c;return r;}";
+    check_test_program_source_char(test, plain_char, "plain-char-unsigned", clang, true);
+    check_test_program_source_char(test, plain_char, "plain-char-signed", clang, false);
     check_test_program_source(test,
         "int global=7;int helper(int x){global+=x;return global;}"
         "int tested(int n){int a=helper(n);global+=2;return a*3+global;}", "shared-code-and-data", clang);

@@ -85,16 +85,30 @@ The combined `-c --dump-static` command validates the object and renders the
 same resolved `Link` before publishing the object file. Its data relocations
 therefore share the actual emitted functions' symbols.
 
-Semantic checking currently uses one C LP64 target model: signed plain `char`,
-32-bit `wchar_t`, 80-bit x87 `long double` stored in 16 bytes, and floating
-arithmetic evaluated in its source format. Options that advertise a different
-model are rejected before declaration elaboration. This includes unsigned
-plain `char`, short `wchar_t`, 64/128-bit `long double`, double/extended floating
-evaluation, and default extended evaluation when SSE is disabled. Explicit
-source-format evaluation is accepted. Assembly is outside this adapter, and
-the C language option parser does not admit C++ modes. The host compiler's
-`-funsigned-char` implementation flag does not select the input program's
-plain-char semantics.
+Semantic checking currently uses one C LP64 target model: 32-bit `wchar_t`,
+80-bit x87 `long double` stored in 16 bytes, and floating arithmetic evaluated
+in its source format, with plain `char` signed (x86-64's) or unsigned, as
+`-funsigned-char` and its spellings say. Options that advertise a different
+model are rejected before declaration elaboration. This includes short
+`wchar_t`, 64/128-bit `long double`, double/extended floating evaluation, and
+default extended evaluation when SSE is disabled. Explicit source-format
+evaluation is accepted. Assembly is outside this adapter, and the C language
+option parser does not admit C++ modes.
+
+Plain `char`'s signedness is the type table's (`TypeTable.char_unsigned`), which
+`check_input_run` sets from the unit's options, the deferred reader on the
+caller's table too, and `type_copy` keeps. Every phase reads it from there:
+`type_integer_properties` answers it, so the folding, conversions and
+comparisons, the initializers, a `mode` attribute's base (which keeps its
+signedness, an unsigned one's too) and the lowering's classes (U8 where it was
+I8) follow it, as does the convention's extension of a char argument
+(`abi_extension`, zero for unsigned). An ordinary character constant of one
+character is its char's value (`'\xff'` is 255 where char is unsigned, -1
+where it's signed); multicharacter, `u8`, `u`, `U` and `L` constants don't
+depend on it. `test-checker`'s fixtures check each against clang with
+`-funsigned-char`, and its program fixtures build clang's oracle with the
+fixture's own signedness (`-fsigned-char` but for those that ask otherwise),
+one of them from the same source both ways.
 
 ## Implementation boundary
 

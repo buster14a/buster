@@ -277,8 +277,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 // A result: IGNORE (void, or nothing to return), REGISTERS (registers[] in order, part i at byte i * part_bytes, past
 // the low eightbyte with HIGH: eightbytes, a vector register's, or for an x87 register 16 for an 80-bit value, 10 for
 // one of a vector of long doubles, which LLVM packs, and 8 for a double), or MEMORY (the caller passes the address of
-// the result in rdi, and the callee returns it in rax). flags: SIGN or ZERO (the callee extends to 32 bits), HIGH, and
-// DEMOTED: a value clang returns that LLVM returns through a hidden pointer, rdi, which clang doesn't count.
+// the result in rdi, and the callee returns it in rax). flags: SIGN or ZERO (clang's IR has the callee extend to 32
+// bits, which LLVM's x86-64 code doesn't, nor GCC's: a caller extends a narrow result itself), HIGH, and DEMOTED: a
+// value clang returns that LLVM returns through a hidden pointer, rdi, which clang doesn't count.
 #define BUSTER_ABI_RESULT_IGNORE 0
 #define BUSTER_ABI_RESULT_REGISTERS 1
 #define BUSTER_ABI_RESULT_MEMORY 2
@@ -1714,7 +1715,8 @@ static bool abi_is_illegal_vector(const AbiTable* abi, const TypeTable* table, u
 }
 
 // Whether clang extends the value (Extend): bool, the character and short types, enums of them, and _BitInts narrower
-// than int; how, by their signedness (char is signed on x86-64).
+// than int; how, by their signedness (plain char is signed on x86-64, unless the table says otherwise:
+// TypeTable.char_unsigned, -funsigned-char).
 static uint32_t abi_extension(const TypeTable* table, uint32_t index)
 {
     uint32_t value = index;
@@ -1727,7 +1729,8 @@ static uint32_t abi_extension(const TypeTable* table, uint32_t index)
     uint32_t result = 0;
     if (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[value] < 4)
     {
-        const bool is_unsigned = code == BUSTER_TYPE_CODE_BOOL || code == BUSTER_TYPE_CODE_UCHAR || code == BUSTER_TYPE_CODE_USHORT;
+        const bool is_unsigned = code == BUSTER_TYPE_CODE_BOOL || code == BUSTER_TYPE_CODE_UCHAR || code == BUSTER_TYPE_CODE_USHORT ||
+                                 (code == BUSTER_TYPE_CODE_CHAR && table->char_unsigned);
         result = is_unsigned ? BUSTER_ABI_PASS_ZERO : BUSTER_ABI_PASS_SIGN;
     }
     else if (kind == BUSTER_TYPE_KIND_BIT_INT && table->types.extent[value] < 32)

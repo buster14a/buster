@@ -439,7 +439,7 @@ static bool check_literal_character_unit(const uint8_t* bytes, uint32_t end, uin
     return valid;
 }
 
-static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t length, bool c23)
+static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t length, bool c23, bool char_unsigned)
 {
     CheckLiteral result = { 0 };
     uint32_t start = 0;
@@ -478,7 +478,9 @@ static CheckLiteral check_literal_character(const uint8_t* bytes, uint32_t lengt
     }
     if (valid && count != 0)
     {
-        const uint64_t bits = ordinary && count == 1 ? (uint64_t)(int64_t)(int8_t)combined : (uint64_t)combined;
+        // One ordinary character is its char's value as an int (clang's CharLiteralParser): -1 for '\xff' where char is
+        // signed, 255 where it isn't.
+        const uint64_t bits = ordinary && count == 1 && !char_unsigned ? (uint64_t)(int64_t)(int8_t)combined : (uint64_t)combined;
         result = (CheckLiteral)
         {
             .type = type,
