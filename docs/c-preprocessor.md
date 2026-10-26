@@ -2590,9 +2590,15 @@ spellings alone would miss this change (#272).
   skipped group. One in a literal or a comment is no error here, as in clang's
   `-E`, which keeps the literal as written; the checker refuses a literal with
   one. Each file's preparation finds the candidates (a backslash followed by
-  `N`, or by a line splice) with a vector scan of the bytes it has just lexed,
-  with an exact scalar twin; only a file with one reads them again and records
-  the errors with its raw string literals' (`pp_record_named_ucns`).
+  `N`, or by a line splice) in the 64-byte chunks that refinement's scan marks
+  as holding a backslash (`refine_tokens_chunks`, `pp_scan_named_ucn_chunks`),
+  while they are in the caches, so that a chunk without one costs nothing
+  more; the scalar kernels' twin reads every byte (`pp_scan_named_ucns`). Only
+  a file with a candidate reads its bytes again and records the errors with
+  its raw string literals' (`pp_record_named_ucns`), finding each identifier's
+  end once. A first version, a scan of every byte of its own, added about
+  1 ms (3%) to `main.c`'s preprocessing on the 9700X (the refine phase
+  5.5 to 6.5 ms).
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.

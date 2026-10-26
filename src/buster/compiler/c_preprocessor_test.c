@@ -4383,8 +4383,8 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
 }
 
 // An identifier of BUSTER_PP_TEST_NAMED_UCNS named UCNs in a row (#455's review): each an error, by both kernels (the
-// vectorized ones prepare its file of about 1.1 MB a window at a time, after its refinement, and the scalar ones whole,
-// before it), in time in proportion to its length. Finding each UCN's identifier's end from its start took time in
+// vectorized ones prepare its file of about 1.1 MB a window at a time, and the scalar ones whole, both recording the
+// errors after its refinement, when an identifier's value is its id), in time in proportion to its length. Finding each UCN's identifier's end from its start took time in
 // proportion to the square of it: about 40,000 times the identifier's bytes, tens of seconds, well past the bound. The
 // errors are counted, not printed (PPOptions.quiet): a column is found by reading back to its line's start.
 #define BUSTER_PP_TEST_NAMED_UCNS 40000

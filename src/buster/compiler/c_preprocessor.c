@@ -2692,8 +2692,8 @@ static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileD
     return result;
 }
 
-// Where a file's named universal character names (\N{...}) can be: the candidates pp_scan_named_ucns counts
-// (pp_named_ucn_candidates), and the first's and the last's byte.
+// Where a file's named universal character names (\N{...}) can be: the candidates its scan counts
+// (pp_named_ucn_candidates; pp_scan_named_ucns or pp_scan_named_ucn_chunks), and the first's and the last's byte.
 typedef struct PPNamedUcnScan PPNamedUcnScan;
 struct PPNamedUcnScan
 {
@@ -2703,7 +2703,7 @@ struct PPNamedUcnScan
 };
 
 // The candidates for a named UCN's backslash among bytes [b, end) of a source of `length` bytes, at most 64 of them, as
-// bits: a backslash (or with trigraphs a '/', the last byte of ??/) followed by 'N', by a line splice's backslash and a
+// bits: a backslash (or with trigraphs a '/' after a '?', the end of a ??/) followed by 'N', by a line splice's backslash and a
 // blank or a line break, or with trigraphs by a '?' (a ??/ that splices the line). A named UCN's backslash is always one,
 // since its N follows it after any line splices; pp_named_ucn_at decides which of them are. No byte past `length` is
 // read: the loads are masked. The vector path and its scalar twin give the same bits.
@@ -2713,18 +2713,25 @@ BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t le
     uint64_t result = 0;
     if (vectorized)
     {
-        const __mmask64 next_valid = length > b + 1 ? _bzhi_u64(~0ull, length - (b + 1) < 64 ? (uint32_t)(length - (b + 1)) : 64) : 0;
-        const __mmask64 after_valid = length > b + 2 ? _bzhi_u64(~0ull, length - (b + 2) < 64 ? (uint32_t)(length - (b + 2)) : 64) : 0;
-        const __m512i bytes_0 = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, count), bytes + b);
-        const __m512i bytes_1 = _mm512_maskz_loadu_epi8(next_valid, bytes + b + 1);
-        const __m512i bytes_2 = _mm512_maskz_loadu_epi8(after_valid, bytes + b + 2);
-        const __mmask64 slash = _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('\\')) | (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('/')) : 0);
-        // A blank or a line break: ' ', or '\t' to '\r'.
-        const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
-                                _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
-        const __mmask64 next = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
-                               (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
-        result = slash & next;
+        // A whole block before the source's last two bytes loads plainly; the others, masked.
+        const bool whole = count == 64 && length - b >= 66;
+        const __m512i bytes_0 = whole ? _mm512_loadu_si512(bytes + b) : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, count), bytes + b);
+        // With trigraphs, the '?' before each byte: the block's own, a lane up, and the byte before the block.
+        const __mmask64 question_before = trigraphs ? (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('?')) << 1) | (uint64_t)(b != 0 && bytes[b - 1] == '?') : 0;
+        const __mmask64 slash = _mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('\\')) | (_mm512_cmpeq_epi8_mask(bytes_0, _mm512_set1_epi8('/')) & question_before);
+        if (slash != 0)
+        {
+            const __mmask64 next_valid = length > b + 1 ? _bzhi_u64(~0ull, length - (b + 1) < 64 ? (uint32_t)(length - (b + 1)) : 64) : 0;
+            const __mmask64 after_valid = length > b + 2 ? _bzhi_u64(~0ull, length - (b + 2) < 64 ? (uint32_t)(length - (b + 2)) : 64) : 0;
+            const __m512i bytes_1 = whole ? _mm512_loadu_si512(bytes + b + 1) : _mm512_maskz_loadu_epi8(next_valid, bytes + b + 1);
+            const __m512i bytes_2 = whole ? _mm512_loadu_si512(bytes + b + 2) : _mm512_maskz_loadu_epi8(after_valid, bytes + b + 2);
+            // A blank or a line break: ' ', or '\t' to '\r'.
+            const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
+                                    _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
+            const __mmask64 next = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
+                                   (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
+            result = slash & next;
+        }
     }
     else
     {
@@ -2733,7 +2740,7 @@ BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t le
             const uint64_t i = b + k;
             const uint8_t next = i + 1 < length ? bytes[i + 1] : 0;
             const uint8_t after = i + 2 < length ? bytes[i + 2] : 0;
-            const bool slash = bytes[i] == '\\' || (trigraphs && bytes[i] == '/');
+            const bool slash = bytes[i] == '\\' || (trigraphs && bytes[i] == '/' && i != 0 && bytes[i - 1] == '?');
             const bool blank = after == ' ' || (after >= '\t' && after <= '\r');
             const bool candidate = slash && (next == 'N' || (next == '\\' && blank) || (trigraphs && next == '?'));
             result |= (uint64_t)candidate << k;
@@ -2742,18 +2749,47 @@ BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t le
     return result;
 }
 
-// Adds the candidates among bytes [begin, end) of a source of `length` bytes (pp_named_ucn_candidates) to `scan`. The
-// preparation runs it on bytes it has just lexed, which are still in the caches; most files have no candidate.
-static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t begin, uint64_t end, bool trigraphs, bool vectorized, PPNamedUcnScan* scan)
+// Adds the candidates among bytes [begin, end) of a source of `length` bytes (pp_named_ucn_candidates) to `scan`, a byte at
+// a time: the scalar kernels' search, which the vector kernels' (pp_scan_named_ucn_chunks) must find the same named UCNs
+// as.
+static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t begin, uint64_t end, bool trigraphs, PPNamedUcnScan* scan)
 {
     for (uint64_t b = begin; b < end; b += 64)
     {
-        const uint64_t bits = pp_named_ucn_candidates(bytes, length, b, end, trigraphs, vectorized);
+        const uint64_t bits = pp_named_ucn_candidates(bytes, length, b, end, trigraphs, false);
         if (BUSTER_UNLIKELY(bits != 0))
         {
             scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
             scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
             scan->count += (uint32_t)__builtin_popcountll(bits);
+        }
+    }
+}
+
+// Adds the candidates (pp_named_ucn_candidates) of a source's 64-byte chunks that refinement marked as holding a backslash
+// or with trigraphs a '?' (refine_scan_chunks, refine_tokens_chunks), in words [first, last) of its bitmap `chunks`, to
+// `scan`: the vector kernels' search, which reads no byte again but in those chunks, and with trigraphs in the chunk after
+// each (a ??/ whose '/' starts it). The chunks cover the source up to its last token's end, past which no named UCN is
+// in a token. Most files have no candidate, and most chunks no backslash.
+static void pp_scan_named_ucn_chunks(const uint8_t* bytes, uint64_t length, const uint64_t* chunks, uint64_t first, uint64_t last, bool trigraphs,
+                                     PPNamedUcnScan* scan)
+{
+    uint64_t carry = trigraphs && first != 0 ? chunks[first - 1] >> 63 : 0;
+    for (uint64_t word = first; word < last; word += 1)
+    {
+        const uint64_t marked = chunks[word];
+        const uint64_t read = trigraphs ? marked | (marked << 1) | carry : marked;
+        carry = trigraphs ? marked >> 63 : 0;
+        for (uint64_t chunk_bits = read; chunk_bits != 0; chunk_bits &= chunk_bits - 1)
+        {
+            const uint64_t b = (word * 64 + (uint64_t)__builtin_ctzll(chunk_bits)) * 64;
+            const uint64_t bits = b < length ? pp_named_ucn_candidates(bytes, length, b, length - b < 64 ? length : b + 64, trigraphs, true) : 0;
+            if (BUSTER_UNLIKELY(bits != 0))
+            {
+                scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
+                scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
+                scan->count += (uint32_t)__builtin_popcountll(bits);
+            }
         }
     }
 }
@@ -2831,8 +2867,9 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
 // Adds an error of kind BUSTER_PP_NAMED_UCN_ERROR to the file's raw errors for each named UCN in an identifier, a
 // pp-number or an unknown token (pp_named_ucn_at), at its backslash, as clang places its -pedantic warning that a named
 // UCN is its extension (but past an identifier's first character, which clang reads without one), merged with
-// pp_record_raw_errors's, in the arena they were just pushed to, in the token order the readers' search takes. Only a file with a candidate (`scan`, pp_scan_named_ucns) reads its bytes again, from
-// the first candidate to the last. Returns false if the arena has no room.
+// pp_record_raw_errors's, in the arena they were just pushed to, in the token order the readers' search takes. Only a
+// file with a candidate (`scan`) reads its bytes again, from the first candidate to the last. Returns false if the arena
+// has no room.
 static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileData* data, const PPNamedUcnScan* scan)
 {
     bool result = true;
@@ -2852,7 +2889,7 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
             {
                 uint32_t token = 0;
                 uint64_t position = 0;
-                if (pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position, &identifier, &identifier_end))
+                if (named < scan->count && pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position, &identifier, &identifier_end))
                 {
                     errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = BUSTER_PP_NAMED_UCN_ERROR };
                     named += 1;
@@ -2934,21 +2971,32 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
         arena_pop_to(&columns[1], (uint64_t)((uint8_t*)data->starts - columns[1].base) + kept * sizeof(uint32_t));
         arena_pop_to(&columns[2], (uint64_t)((uint8_t*)data->values - columns[2].base) + kept * sizeof(uint32_t));
         data->space = arena_push_array(&columns[0], (uint64_t)count / 64 + 2, sizeof(uint64_t), 64);
-        // The named UCNs' candidates (pp_scan_named_ucns), while the bytes just lexed are in the caches.
+        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count));
+        // The named UCNs' candidates: from the chunks with a backslash that refinement marks (pp_scan_named_ucn_chunks), or
+        // a byte at a time by the scalar kernels (pp_scan_named_ucns), while the bytes just lexed are in the caches.
+        const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
         PPNamedUcnScan named = { 0 };
-        pp_scan_named_ucns(data->bytes, data->length, 0, data->length, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, prepare->vectorized, &named);
-        bool refined = data->space != 0 && pp_record_raw_errors(prepare, arena, data, pp_count_raw_candidates(prepare, data->kinds, data->token_count)) &&
-                       pp_record_named_ucns(prepare, arena, data, &named);
         if (refined && prepare->vectorized)
         {
-            refined = refine_tokens(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values, data->space,
-                                    prepare->refine_flags);
+            Scratch scratch = scratch_begin(0);
+            uint64_t* chunks = arena_push_array(scratch.arena, refine_progress_words(data->length), sizeof(uint64_t), 64);
+            RefineProgress progress;
+            refine_progress_begin(&progress, chunks);
+            refined = chunks != 0 && refine_tokens_chunks(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
+                                                          data->space, prepare->refine_flags, &progress);
+            if (refined)
+            {
+                pp_scan_named_ucn_chunks(data->bytes, data->length, chunks, 0, progress.scanned, trigraphs, &named);
+            }
+            scratch_end(scratch);
         }
         else if (refined)
         {
             refined = refine_tokens_scalar(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
                                            data->space, prepare->refine_flags);
+            pp_scan_named_ucns(data->bytes, data->length, 0, data->length, trigraphs, &named);
         }
+        refined = refined && pp_record_named_ucns(prepare, arena, data, &named);
         if (ticks != 0)
         {
             const uint64_t now = __rdtsc();
@@ -3117,9 +3165,10 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     uint64_t refined = 0;
     uint64_t counted = 0;
     uint32_t unknowns = 0;
-    // The named UCNs' candidates among the bytes before `named_scanned` (pp_scan_named_ucns).
+    // The named UCNs' candidates in the chunks of the backslash bitmap's words before `named_words`
+    // (pp_scan_named_ucn_chunks).
     PPNamedUcnScan named = { 0 };
-    uint64_t named_scanned = 0;
+    uint64_t named_words = 0;
     uint32_t directives = 0;
     bool last = false;
     while (result == PP_PREPARE_DONE && !last)
@@ -3167,12 +3216,6 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         // The raw string errors' candidates (pp_record_raw_errors), counted while the window's kinds are in the caches.
         unknowns += result == PP_PREPARE_DONE ? pp_count_raw_candidates(prepare, data->kinds + counted, count - counted) : 0;
         counted = count;
-        // And the named UCNs' candidates among the bytes of the window's kept lines, while they are.
-        if (result == PP_PREPARE_DONE && at > named_scanned)
-        {
-            pp_scan_named_ucns(data->bytes, length, named_scanned, at, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, prepare->vectorized, &named);
-            named_scanned = at;
-        }
         const uint64_t complete = last ? count : count - count % BUSTER_REFINE_BLOCK_TOKENS;
         const uint64_t begin = refined;
         if (result == PP_PREPARE_DONE && complete > refined)
@@ -3181,6 +3224,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
                          ? PP_PREPARE_DONE
                          : PP_PREPARE_NO_MEMORY;
             refined = complete;
+            // The named UCNs' candidates in the chunks refinement has just marked, while their bytes are in the caches.
+            pp_scan_named_ucn_chunks(data->bytes, length, backslash_chunks, named_words, progress.scanned, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, &named);
+            named_words = progress.scanned;
         }
         if (ticks != 0)
         {
