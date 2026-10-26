@@ -429,13 +429,6 @@ jobs:
         # step's bound is its longest one and the tests' 310 s on 8 jobs, about 39 s. A new test goes where its time
         # puts it.
         run: |
-          # TEMPORARY (#465): each test's shell (the runner's own children) writes its script and its CPU times to a file.
-          mkdir -p "$RUNNER_TEMP/cpu-times"
-          cat > "$RUNNER_TEMP/cpu-times.sh" <<'HOOK'
-          cpu_times_record() { { printf '%s\n@@times\n' "$BASH_EXECUTION_STRING"; times; } > "$RUNNER_TEMP/cpu-times/$$"; }
-          if [ -n "$BASH_EXECUTION_STRING" ] && tr '\0' ' ' < "/proc/$PPID/cmdline" | grep -q 'parallel --github'; then trap cpu_times_record EXIT; fi
-          HOOK
-          export BASH_ENV="$RUNNER_TEMP/cpu-times.sh"
           ./build/compiler parallel --github --timeout 180 <<'TESTS'
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
@@ -789,11 +782,6 @@ jobs:
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
-
-      - name: TEMPORARY (#465) print the tests' CPU times
-        if: always()
-        run: |
-          for f in "$RUNNER_TEMP"/cpu-times/*; do echo "@@file $f"; cat "$f"; done
 
       - name: Benchmark the C lexer on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
