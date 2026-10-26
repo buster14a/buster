@@ -278,11 +278,13 @@ static bool bind_test_kept_pattern(const Bind* bind, const Runtime* runtime)
     return kept;
 }
 
-// Whether two bindings ended alike: the error and its name, the imports, the exports and the members that joined.
+// Whether two bindings ended alike: the error and its name, the imports, the exports, the libraries needed and the
+// members that joined.
 static bool bind_test_same_binds(const Bind* a, const Bind* b)
 {
     const uint32_t words = (a->runtime->member_count + 63) / 64;
     bool result = a->error == b->error && a->name == b->name && (a->error != BIND_ERROR_MEMBER_UNDEFINED || a->member == b->member) &&
+                  a->libraries_needed == b->libraries_needed && a->runtime_needed == b->runtime_needed &&
                   a->import_count == b->import_count && a->export_count == b->export_count &&
                   memcmp(a->imports, b->imports, a->import_count * sizeof(SymbolId)) == 0 && memcmp(a->exports, b->exports, a->export_count * sizeof(SymbolId)) == 0;
     for (uint32_t w = 0; result && w < words; w += 1)
@@ -1793,6 +1795,98 @@ static void bind_test_dependencies(BindTestTally* tally, const Runtime* runtime,
     arena_release(&arena);
 }
 
+// The loader and libgcc_s.so.1 for a needed library's references (#511's review): libraries made by hand that refer
+// strongly to _Unwind_Backtrace, which libgcc_s.so.1 alone exports, without a DT_NEEDED entry for it (u) and with one
+// (n), to __tls_get_addr, which the loader alone exports (t), and weakly to _Unwind_Backtrace (w). GNU ld's --as-needed
+// keeps libgcc_s.so.1 or the loader for a needed library's strong reference that its own DT_NEEDED doesn't cover, so
+// that the program loads: binding must need it (Bind.runtime_needed) exactly then, by both paths alike, and not for a
+// library the link doesn't need, nor when main's own definition, which the executable exports, satisfies the reference.
+// On a system without libgcc_s.so.1, u's reference is one nothing defines, refused (BIND_ERROR_LIBRARY_UNDEFINED), and
+// n's left unchecked, its DT_NEEDED naming a library the link lacks.
+static void bind_test_runtime_dependencies(BindTestTally* tally, const Runtime* runtime, const char* directory)
+{
+    static const BindTestLibraryFile files[] = {
+        { "buster_u", "libbuster_u.so", "u_func", "_Unwind_Backtrace", 0, 0 },
+        { "buster_n", "libbuster_n.so", "n_func", "_Unwind_Backtrace", 0, "libgcc_s.so.1" },
+        { "buster_t", "libbuster_t.so", "t_func", "__tls_get_addr", 0, 0 },
+        { "buster_w", "libbuster_w.so", "w_func", 0, "_Unwind_Backtrace", 0 },
+    };
+    const bool unwinder = runtime->gcc_s.exports.count != 0;
+    struct
+    {
+        const char* name;
+        uint32_t file;
+        bool calls;
+        bool defines;
+        // With libgcc_s.so.1, and without it: Bind.runtime_needed, or UINT32_MAX for BIND_ERROR_LIBRARY_UNDEFINED.
+        uint32_t needed;
+        uint32_t without;
+    } const cases[] = {
+        { "u's _Unwind_Backtrace: libgcc_s.so.1 needed", 0, true, false, BUSTER_BIND_NEEDS_GCC_S, UINT32_MAX },
+        { "u's _Unwind_Backtrace, main defining it: satisfied", 0, true, true, 0, 0 },
+        { "u not called: nothing needed", 0, false, false, 0, 0 },
+        { "n's _Unwind_Backtrace, its DT_NEEDED naming libgcc_s.so.1: left to it", 1, true, false, 0, 0 },
+        { "t's __tls_get_addr: the loader needed", 2, true, false, BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_LOADER },
+        { "w's weak _Unwind_Backtrace: nothing needed", 3, true, false, 0, 0 },
+    };
+    Arena arena = arena_reserve(1u << 20);
+    bool written = arena.base != 0;
+    for (uint32_t f = 0; written && f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        written = bind_test_write_library(directory, &files[f], &arena);
+    }
+    bind_test_expect(tally, written, "the libraries that refer to the loader's and libgcc_s.so.1's names written", 0);
+    const String8 directories[] = { { .pointer = (char*)directory, .length = strlen(directory) } };
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const String8 name = { .pointer = (char*)files[cases[c].file].name, .length = strlen(files[cases[c].file].name) };
+        RuntimeLibraries libraries = { 0 };
+        const RuntimeError imported = runtime_libraries_import(&libraries, runtime, &name, 1, directories, 1);
+        bind_test_expect(tally, imported == RUNTIME_ERROR_NONE && libraries.count == 1, "imported", c);
+        BindTestLink links[2];
+        bool bound[2] = { false, false };
+        SymbolId defined[2] = { 0, 0 };
+        for (uint32_t p = 0; imported == RUNTIME_ERROR_NONE && p < 2; p += 1)
+        {
+            BindTestLink* test = &links[p];
+            bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
+            const SymbolId main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            result = main != 0 && (!cases[c].calls || bind_test_symbol(test, files[cases[c].file].export, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0);
+            defined[p] = result && cases[c].defines ? bind_test_symbol(test, "_Unwind_Backtrace", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            result = result && (!cases[c].defines || defined[p] != 0);
+            result = result && bind_begin(&test->bind, &test->link, runtime, p == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, &test->bytes, 1, &test->arena) &&
+                     bind_test_define(test, main) && (defined[p] == 0 || bind_test_define(test, defined[p]));
+            test->bind.libraries = &libraries;
+            bound[p] = result && bind_end(&test->bind, &test->link);
+        }
+        if (imported == RUNTIME_ERROR_NONE)
+        {
+            const Bind* bind = &links[0].bind;
+            const uint32_t expected = unwinder ? cases[c].needed : cases[c].without;
+            const bool agree = bound[0] == bound[1] && bind_test_same_links(&links[0].link, &links[1].link) && bind_test_same_binds(&links[0].bind, &links[1].bind);
+            const bool outcome = expected == UINT32_MAX ? !bound[0] && bind->error == BIND_ERROR_LIBRARY_UNDEFINED
+                                                        : bound[0] && bind->runtime_needed == expected && bind->libraries_needed == (cases[c].calls ? 1u : 0u) &&
+                                                              (defined[0] == 0 || bind_test_listed(bind, defined[0], true));
+            if (!agree || !outcome)
+            {
+                printf("  %s: bound %d and %d, paths agree %d, error %s, runtime needed %#x, libraries needed %#x\n", cases[c].name, bound[0], bound[1], agree,
+                       bind_test_errors[bind->error], bind->runtime_needed, bind->libraries_needed);
+            }
+            bind_test_expect(tally, agree && outcome, cases[c].name, c);
+            bind_test_link_end(&links[0]);
+            bind_test_link_end(&links[1]);
+        }
+        runtime_libraries_release(&libraries);
+    }
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        char path[BUSTER_BIND_TEST_PATH_BYTES];
+        snprintf(path, sizeof(path), "%s/lib%s.so", directory, files[f].name);
+        unlink(path);
+    }
+    arena_release(&arena);
+}
+
 static bool bind_test_libraries(const Runtime* runtime, const char* directory)
 {
     BindTestTally tally = {
@@ -1837,6 +1931,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
     runtime_libraries_release(&libraries);
     bind_test_library_import_cases(&tally, runtime, directory);
     bind_test_dependencies(&tally, runtime, directory);
+    bind_test_runtime_dependencies(&tally, runtime, directory);
     return bind_test_report(&tally);
 }
 

@@ -822,6 +822,147 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
     }
 }
 
+// A library whose strong reference to libgcc_s.so.1's _Unwind_Backtrace its own DT_NEEDED doesn't cover (#511's
+// review): clang compiles the helper, which GNU ld links with -shared alone (libhelper.so), and again with
+// libgcc_s.so.1 (libhelper_needs.so). main calls helper, -lhelper: GNU ld's --as-needed keeps libgcc_s.so.1 for the
+// library's reference, and so must the direct path, by both paths, its DT_NEEDED entries GNU ld's (cc -fuse-ld=bfd's)
+// and the program running, where lld drops the library and the program fails to load. With -lhelper_needs, the
+// library's DT_NEEDED loads libgcc_s.so.1 for it, and the executable needs only it; with main defining
+// _Unwind_Backtrace itself, which the executable exports, the reference is main's, and libgcc_s.so.1 isn't needed. On a
+// system without libgcc_s.so.1 (check_test_driver_has_gcc_s), -lhelper is refused, naming the library and the name.
+static void check_test_driver_unwinder_dependency(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char helper_source[] = "struct _Unwind_Context;\n"
+                                        "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
+                                        "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
+                                        "static int frame(struct _Unwind_Context* context, void* argument)\n"
+                                        "{\n"
+                                        "    (void)context;\n"
+                                        "    *(int*)argument += 1;\n"
+                                        "    return 0;\n"
+                                        "}\n"
+                                        "int helper(void)\n"
+                                        "{\n"
+                                        "    int frames = 0;\n"
+                                        "    _Unwind_Backtrace(frame, &frames);\n"
+                                        "    return frames >= 2 ? 0 : 1;\n"
+                                        "}\n";
+    static const char program[] = "int helper(void);\nint main(void) { return helper(); }\n";
+    static const char defines[] = "int helper(void);\n"
+                                  "int _Unwind_Backtrace(void* trace, void* argument)\n"
+                                  "{\n"
+                                  "    (void)trace;\n"
+                                  "    *(int*)argument = 7;\n"
+                                  "    return 0;\n"
+                                  "}\n"
+                                  "int main(void) { return helper(); }\n";
+    const bool unwinder = check_test_driver_has_gcc_s();
+    char helper_path[256];
+    char helper_object[256];
+    char source[256];
+    char defines_source[256];
+    char library[256];
+    char library_needs[256];
+    char output[256];
+    char reference[256];
+    char search[300];
+    char gcc_s[4096] = { 0 };
+    snprintf(helper_path, sizeof(helper_path), "%s/helper.c", directory);
+    snprintf(helper_object, sizeof(helper_object), "%s/helper.o", directory);
+    snprintf(source, sizeof(source), "%s/calls_helper.c", directory);
+    snprintf(defines_source, sizeof(defines_source), "%s/defines_unwinder.c", directory);
+    snprintf(library, sizeof(library), "%s/libhelper.so", directory);
+    snprintf(library_needs, sizeof(library_needs), "%s/libhelper_needs.so", directory);
+    snprintf(output, sizeof(output), "%s/calls_helper", directory);
+    snprintf(reference, sizeof(reference), "%s/calls_helper_bfd", directory);
+    snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
+    FILE* found = unwinder ? popen("cc -print-file-name=libgcc_s.so.1", "r") : NULL;
+    const bool located = found != NULL && fgets(gcc_s, sizeof(gcc_s), found) != NULL;
+    if (found != NULL)
+    {
+        pclose(found);
+    }
+    gcc_s[located ? strcspn(gcc_s, "\n") : 0] = 0;
+    const bool written = parse_test_write(helper_path, helper_source, sizeof(helper_source) - 1) && parse_test_write(source, program, sizeof(program) - 1) &&
+                         parse_test_write(defines_source, defines, sizeof(defines) - 1);
+    char* const compile[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", helper_object, helper_path, NULL };
+    char* const link_alone[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper.so", "-o", library, helper_object, NULL };
+    char* const link_needs[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper_needs.so", "-o", library_needs, helper_object, gcc_s, NULL };
+    char* text = NULL;
+    bool built = written;
+    char* const* const builds[] = { compile, link_alone, link_needs };
+    for (uint32_t b = 0; built && b < (unwinder ? 3u : 2u); b += 1)
+    {
+        built = check_test_driver_spawn(builds[b], &text) == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, built, "a library that refers to the unwinder: clang and GNU ld build it");
+    struct
+    {
+        const char* name;
+        const char* source;
+        const char* library;
+        const char* needed;
+    } const cases[] = {
+        { "-lhelper: libgcc_s.so.1 for libhelper's _Unwind_Backtrace", source, "-lhelper", "libhelper.so libgcc_s.so.1 libc.so.6" },
+        { "-lhelper_needs: libgcc_s.so.1 left to its DT_NEEDED", source, "-lhelper_needs", "libhelper_needs.so libc.so.6" },
+        { "-lhelper, main defining _Unwind_Backtrace: libhelper alone", defines_source, "-lhelper", "libhelper.so libc.so.6" },
+    };
+    for (uint32_t c = 0; built && unwinder && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char needed[256] = { 0 };
+        char reference_needed[256] = { 0 };
+        bool listed = true;
+        int ran = 0;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char* const vector[] = { (char*)executable, "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
+            char* const scalar[] = { (char*)executable, "--scalar", "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
+            char* const run[] = { "env", search, output, NULL };
+            const int linked = check_test_driver_spawn(path == 0 ? vector : scalar, &text);
+            free(text);
+            text = NULL;
+            listed = listed && linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
+            const int status = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+            free(text);
+            text = NULL;
+            ran = ran != 0 ? ran : status;
+        }
+        // GNU ld's link of the same program, through GCC's driver.
+        char* const bfd[] = { "cc", "-fuse-ld=bfd", "-o", reference, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
+        const bool reference_linked = check_test_driver_spawn(bfd, &text) == 0;
+        free(text);
+        text = NULL;
+        const bool agrees = reference_linked && check_test_driver_needed(reference, reference_needed, sizeof(reference_needed)) && strcmp(reference_needed, needed) == 0;
+        if (!listed || ran != 0 || !agrees)
+        {
+            printf("  %s: DT_NEEDED \"%s\", GNU ld's \"%s\", run status %d\n", cases[c].name, needed, reference_needed, ran);
+        }
+        check_test_expect(test, listed && ran == 0 && agrees, cases[c].name);
+    }
+    if (built && !unwinder)
+    {
+        char* const link[] = { (char*)executable, "-o", output, source, "-L", (char*)directory, "-lhelper", NULL };
+        const int status = check_test_driver_spawn(link, &text);
+        char message[320];
+        snprintf(message, sizeof(message), "%s: undefined reference to '_Unwind_Backtrace'", library);
+        const bool refused = status == 1 && text != NULL && strstr(text, message) != NULL;
+        if (!refused)
+        {
+            printf("  -lhelper without libgcc_s.so.1: status %d: %s\n", status, text != NULL ? text : "");
+        }
+        free(text);
+        text = NULL;
+        check_test_expect(test, refused, "-lhelper without libgcc_s.so.1: libhelper's _Unwind_Backtrace undefined, refused");
+    }
+    const char* const files[] = { helper_path, helper_object, source, defines_source, library, library_needs, output, reference };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
 // A library that a linker script names by its path, without a soname (#398's review): its DT_NEEDED entry is that
 // path, as GNU ld and lld write it, so that the program loads it with no search path.
 static void check_test_driver_script_path(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -1921,6 +2062,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
+            check_test_driver_unwinder_dependency(&test, clang, executable, directory);
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);

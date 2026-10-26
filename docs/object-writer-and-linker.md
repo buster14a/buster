@@ -2902,6 +2902,22 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   definition of one of its names with default visibility is exported, as lld
   exports it whether or not the library is needed (GNU ld doesn't when it
   isn't), as the loader's are.
+- **A named library's references.** GNU ld's `--as-needed` also keeps a
+  library for a needed library's strong reference that the referring
+  library's own `DT_NEEDED` entries don't cover: `libhelper.so`, linked by
+  `ld -shared` alone, calling `_Unwind_Backtrace`, makes GNU ld keep
+  `libgcc_s.so.1` for a program that calls it, where lld drops it and the
+  program fails to load ("undefined symbol: _Unwind_Backtrace"). Binding
+  follows GNU ld (#511's review): the closure over the `-l` libraries'
+  references (`bind_needed_libraries`) records an edge to the loader or
+  `libgcc_s.so.1` for such a reference, unless the executable's own exported
+  definition satisfies it, and the libraries a needed library's edges reach
+  are needed (`Bind.runtime_needed`), whatever the program's own references:
+  `bind_keep_as_needed` keeps their imports, and `dynamic_inputs` makes them
+  required, so that their `DT_NEEDED` entries are written without a version
+  of theirs an import uses, as GNU ld writes them. Without `libgcc_s.so.1`,
+  such a reference is one nothing defines, refused as before
+  (`BIND_ERROR_LIBRARY_UNDEFINED`).
 - **The writer.** `dynamic_inputs` lists it before `libc.so.6` and the
   loader, as GNU ld and lld write `DT_NEEDED`: a library that a used version
   selects (`ExecutableLibrary.required` false), so that only a link with an

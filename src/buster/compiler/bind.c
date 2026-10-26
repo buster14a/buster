@@ -49,7 +49,8 @@
 //   - to libgcc_s.so.1's export (the unwinder: _Unwind_Resume, _Unwind_Backtrace, __gcc_personality_v0), which the
 //     driver names as needed after libgcc.a, as libc.so.6's is bound: after the members, since libgcc.a, before it on
 //     the line, defines most of its other names (runtime_export_after_members). Like the loader it is needed only for a
-//     strong reference to one of its names (bind_keep_as_needed), and like libc.so.6 it defines none of the names the
+//     strong reference to one of its names (bind_keep_as_needed), the program's or a needed named library's that the
+//     library's own DT_NEEDED doesn't cover (Bind.runtime_needed), and like libc.so.6 it defines none of the names the
 //     others export (runtime.c), so that its place among them doesn't matter;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
@@ -253,6 +254,12 @@ struct Bind
     // don't satisfy (bind_needed_libraries).
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
+    // The libraries the driver names as needed that a needed named library's strong reference needs, a bit each
+    // (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S): a reference to a name of theirs that the library's own
+    // DT_NEEDED doesn't cover, nor the executable's definition satisfy, as GNU ld's --as-needed counts it
+    // (bind_needed_libraries), from bind_keep_libraries on. bind_keep_as_needed keeps such a library whatever the
+    // program's own references, and dynamic_inputs makes it required.
+    uint32_t runtime_needed;
     // The first error, and the link's name it is about (0 for none); with BIND_ERROR_LIBRARY_UNDEFINED, the library and
     // its reference; with BIND_ERROR_LIBRARY_VERSION, the library, its version need (RuntimeVersionNeeds) and the named
     // library that doesn't define the version, or UINT32_MAX for libc.so.6 or the loader; with
@@ -1104,17 +1111,18 @@ static void bind_keep_imports(Bind* bind, const Link* link)
 }
 
 // The imports of a library the driver names as needed: the loader, which libc.so's script names AS_NEEDED, or
-// libgcc_s.so.1 (-lgcc_s_asneeded). GNU ld and lld need such a library only for a strong reference that binds to it.
+// libgcc_s.so.1 (-lgcc_s_asneeded). GNU ld and lld need such a library only for a strong reference that binds to it,
+// and GNU ld also for a needed named library's that its own DT_NEEDED doesn't cover (`forced`, Bind.runtime_needed).
 // Without one, the weak references to its names are left to nothing, unversioned (source NONE), and drop out of the
 // imports, keeping its export's type: GNU ld and lld write them so, OBJECT WEAK UND for _r_debug, lld demoting them in
 // demoteSymbolsAndComputeIsPreemptible. With one, every reference to its names is an import at its version, the weak
 // ones among them. An import is the library's by its version, whose index follows libc.so.6's and the other's
 // (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens,
 // shared by both paths.
-static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library)
+static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
 {
     LinkSymbols* symbols = &link->symbols;
-    bool needed = false;
+    bool needed = forced;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {
         const SymbolId symbol = bind->imports[i];
@@ -1220,12 +1228,19 @@ static void bind_shared_exports(Bind* bind, const Link* link)
 // The edges of the closure over the libraries the link names with -l (bind_needed_libraries): each a needed library's
 // strong reference to a name that another named library exports, the first on the line that does, unless the
 // referring library's own DT_NEEDED names that library, which the loader then loads for it; and each one to a name no
-// named library, libc.so.6 or the loader exports, which leads to no library (BUSTER_BIND_NO_LIBRARY): only the
-// executable's own definition can satisfy it. By edge: the referring library, its reference, the library it would
+// named library, libc.so.6, the loader or libgcc_s.so.1 exports, which leads to no library (BUSTER_BIND_NO_LIBRARY):
+// only the executable's own definition can satisfy it; and each one that the loader or libgcc_s.so.1 satisfies, which the
+// driver names as needed, unless the referring library's DT_NEEDED names it: the edge leads to that library
+// (BUSTER_BIND_LOADER, BUSTER_BIND_GCC_S), which GNU ld then keeps for the library's sake (its --as-needed counts a
+// needed library's references), where lld drops it and the program fails to load. By edge: the referring library, its reference, the library it would
 // need, the name's hash, and whether the link's own definition of the name satisfies it, a byte; with the edges by
 // their names' hashes (import_index_build) and a filter of them for the vector path, as RuntimeNames' filter: two bits
 // a name in 2^filter_bits words, chosen by the hash's top bits.
 #define BUSTER_BIND_NO_LIBRARY UINT32_MAX
+#define BUSTER_BIND_LOADER (UINT32_MAX - 1)
+#define BUSTER_BIND_GCC_S (UINT32_MAX - 2)
+#define BUSTER_BIND_NEEDS_LOADER 1u
+#define BUSTER_BIND_NEEDS_GCC_S 2u
 
 typedef struct BindLibraryEdges BindLibraryEdges;
 struct BindLibraryEdges
@@ -1257,13 +1272,15 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
         // exports and the loader checks it at load; of another library, a named library's.
         const String8 version = libraries->reference_versions[l][r];
         const String8 file = libraries->reference_files[l][r];
-        const String8 sonames[] = { bind->runtime->libc.soname, bind->runtime->loader.soname, bind->runtime->gcc_s.soname };
-        bool runtime_version = false;
-        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sonames); s += 1)
+        const ImportLibrary* const runtime_libraries[] = { &bind->runtime->libc, &bind->runtime->loader, &bind->runtime->gcc_s };
+        const ImportLibrary* runtime_file = 0;
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(runtime_libraries); s += 1)
         {
-            runtime_version = runtime_version || (version.length != 0 && sonames[s].length != 0 && file.length == sonames[s].length &&
-                                                  memcmp(file.pointer, sonames[s].pointer, sonames[s].length) == 0);
+            const String8 soname = runtime_libraries[s]->soname;
+            const bool same = version.length != 0 && soname.length != 0 && file.length == soname.length && memcmp(file.pointer, soname.pointer, soname.length) == 0;
+            runtime_file = same ? runtime_libraries[s] : runtime_file;
         }
+        const bool runtime_version = runtime_file != 0;
         const uint32_t m = !strong || runtime_version ? 0
                            : version.length != 0      ? runtime_libraries_export_at(libraries, references->name[r], references->length[r], references->hash[r], version)
                                                       : runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export);
@@ -1272,12 +1289,20 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
         // a versioned one no named library exports at its version, the executable's to define.
         const uint32_t entry = strong && m == 0 && version.length == 0 ? runtime_find_global_name(names, references->name[r], references->length[r], references->hash[r]) : 0;
         const bool open = strong && m == 0 && !runtime_version && (version.length != 0 || entry == 0 || names->export[entry - 1] == 0);
+        // The runtime's library that satisfies it, by the file a versioned reference names or by the export of the name:
+        // the loader or libgcc_s.so.1, unless the library's own DT_NEEDED names it.
+        uint32_t index = 0;
+        const ImportLibrary* provider = runtime_file != 0 ? runtime_file
+                                        : strong && m == 0 && entry != 0 && names->export[entry - 1] != 0 ? runtime_export_library(bind->runtime, names->export[entry - 1] - 1, &index)
+                                                                                                           : 0;
+        const bool as_needed = strong && m == 0 && (provider == &bind->runtime->loader || provider == &bind->runtime->gcc_s) &&
+                               !runtime_libraries_lists_name(libraries, l, provider->soname);
         edges->from[edges->count] = l;
         edges->reference[edges->count] = r;
-        edges->to[edges->count] = edge ? m - 1 : BUSTER_BIND_NO_LIBRARY;
+        edges->to[edges->count] = edge ? m - 1 : as_needed ? (provider == &bind->runtime->loader ? BUSTER_BIND_LOADER : BUSTER_BIND_GCC_S) : BUSTER_BIND_NO_LIBRARY;
         edges->hash[edges->count] = references->hash[r];
         edges->satisfied[edges->count] = 0;
-        edges->count += edge || open ? 1 : 0;
+        edges->count += edge || open || as_needed ? 1 : 0;
         result |= edge ? 1u << (m - 1) : 0;
     }
     return result;
@@ -1476,8 +1501,11 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
 // counts a library's references only against the libraries after it on the line, and refuses a link that names them
 // the other way round (-lB -lA, libA referring to libB's name); this counts them against every library, so that such a
 // link works. The references of libc.so.6 and the loader, which come after every named library on the line, count
-// against none. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
-// loader nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
+// against none. A needed library's strong reference to a name of the loader's or libgcc_s.so.1's, which the driver names
+// as needed, makes that library needed too (Bind.runtime_needed), as GNU ld keeps it, unless the referring library's
+// own DT_NEEDED names it or the executable's definition satisfies the reference: lld drops it, and the program fails to
+// load. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
+// loader, libgcc_s.so.1 nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
 // (--no-allow-shlib-undefined), where the program would fail to load (#398's review). Then the version needs of the
 // libraries the program loads (bind_library_versions).
 //
@@ -1528,7 +1556,7 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
             uint32_t next = 0;
             for (uint32_t e = 0; e < edges.count; e += 1)
             {
-                const bool leads = (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 && edges.to[e] != BUSTER_BIND_NO_LIBRARY;
+                const bool leads = (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 && edges.to[e] < libraries->count;
                 next |= leads ? 1u << edges.to[e] : 0;
             }
             added = next & ~needed;
@@ -1542,10 +1570,14 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
         // refuse it (--no-allow-shlib-undefined): unless the library's DT_NEEDED names a library the link doesn't have,
         // whose definitions it can't see, which lld leaves unchecked too (GNU ld searches the system's directories for
         // it and checks the reference against it).
+        // And the loader and libgcc_s.so.1, for a needed library's reference that the executable doesn't satisfy.
         for (uint32_t e = 0; bind->error == BIND_ERROR_NONE && e < edges.count; e += 1)
         {
             const uint32_t l = edges.from[e];
-            const bool open = edges.to[e] == BUSTER_BIND_NO_LIBRARY && edges.satisfied[e] == 0 && (needed & (1u << l)) != 0;
+            const bool live = edges.satisfied[e] == 0 && (needed & (1u << l)) != 0;
+            bind->runtime_needed |= live && edges.to[e] == BUSTER_BIND_LOADER ? BUSTER_BIND_NEEDS_LOADER : 0;
+            bind->runtime_needed |= live && edges.to[e] == BUSTER_BIND_GCC_S ? BUSTER_BIND_NEEDS_GCC_S : 0;
+            const bool open = edges.to[e] == BUSTER_BIND_NO_LIBRARY && live;
             if (open && bind_library_dependencies_known(bind, l))
             {
                 bind->library = l;
@@ -2040,9 +2072,9 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         bind->resolved = link->symbols.count;
     }
     bind_keep_imports(bind, link);
-    bind_keep_as_needed(bind, link, &bind->runtime->loader);
-    bind_keep_as_needed(bind, link, &bind->runtime->gcc_s);
     bind_keep_libraries(bind, link);
+    bind_keep_as_needed(bind, link, &bind->runtime->loader, (bind->runtime_needed & BUSTER_BIND_NEEDS_LOADER) != 0);
+    bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
     if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
     {
         bind_shared_exports(bind, link);

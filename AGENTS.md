@@ -2479,7 +2479,13 @@ exports and members:
   without the third, a needed library's reference to `b_func` is
   `BIND_ERROR_LIBRARY_UNDEFINED` naming the library (but with a global
   definition, or neither needed), and a library whose `DT_NEEDED` names one
-  the link lacks isn't checked;
+  the link lacks isn't checked; and libraries made by hand that refer
+  strongly to `_Unwind_Backtrace` without and with a `DT_NEEDED` for
+  `libgcc_s.so.1`, to `__tls_get_addr`, and weakly to `_Unwind_Backtrace`:
+  as GNU ld's `--as-needed` keeps it, `libgcc_s.so.1` (or the loader) is
+  needed (`Bind.runtime_needed`) for a needed library's strong reference its
+  `DT_NEEDED` doesn't cover, and not when main defines the name, the library
+  isn't needed or the reference is weak (without `libgcc_s.so.1`, refused);
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`

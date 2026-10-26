@@ -458,6 +458,9 @@ static __attribute__((unused)) bool runtime_libraries_refer(const RuntimeLibrari
 static __attribute__((unused)) String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_t l);
 // Whether library `l`'s own DT_NEEDED entries name library `m`, which the loader then loads for it.
 static __attribute__((unused)) bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m);
+// Whether library `l`'s DT_NEEDED entries name `soname`: libc.so.6's, the loader's or libgcc_s.so.1's, which the loader
+// then loads for it.
+static __attribute__((unused)) bool runtime_libraries_lists_name(const RuntimeLibraries* libraries, uint32_t l, String8 soname);
 // The first library, in link order, that exports `name` at `version`, its name's default or not (RuntimeHiddenExports),
 // as GNU ld and lld bind a reference that requires that version: an export without a version doesn't satisfy it, though
 // glibc's loader takes one where the requirement isn't hidden. Its index plus 1, or 0.
@@ -2475,16 +2478,20 @@ static bool runtime_library_defines_version(const ImportLibrary* library, String
     return defined;
 }
 
-static bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m)
+static bool runtime_libraries_lists_name(const RuntimeLibraries* libraries, uint32_t l, String8 soname)
 {
-    const String8 name = runtime_libraries_name(libraries, m);
     bool listed = false;
-    for (uint32_t d = 0; !listed && d < libraries->dependency_count[l]; d += 1)
+    for (uint32_t d = 0; !listed && soname.length != 0 && d < libraries->dependency_count[l]; d += 1)
     {
         const String8 dependency = libraries->dependencies[l][d];
-        listed = dependency.length == name.length && memcmp(dependency.pointer, name.pointer, name.length) == 0;
+        listed = dependency.length == soname.length && memcmp(dependency.pointer, soname.pointer, soname.length) == 0;
     }
     return listed;
+}
+
+static bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m)
+{
+    return runtime_libraries_lists_name(libraries, l, runtime_libraries_name(libraries, m));
 }
 
 static bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length, uint64_t hash)

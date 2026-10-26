@@ -107,7 +107,10 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
         const bool libc = library == &runtime->libc;
         needed[l] = (ExecutableLibrary){
             .name = l < named_count ? runtime_libraries_name(named, l) : library->soname,
-            .required = l < named_count ? (bind->libraries_needed & (1u << l)) != 0 : libc,
+            .required = l < named_count                    ? (bind->libraries_needed & (1u << l)) != 0
+                        : library == &runtime->loader ? (bind->runtime_needed & BUSTER_BIND_NEEDS_LOADER) != 0
+                        : library == &runtime->gcc_s  ? (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0
+                                                      : libc,
         };
         for (uint32_t v = 0; v < library->version_count; v += 1)
         {
