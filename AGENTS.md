@@ -1113,11 +1113,16 @@ there at a time, so everything takes one lock:
   repeated processes), which cost about 200 ms before each of 21 samples per
   case, go in a step of their own that runs where the `changes` job's output
   for the module isn't `false`: on the daily scheduled run, dispatched runs and
-  pull requests that change the module's sources (its pattern in `changes`).
-  The same holds for the linkers' baselines and floors and mold's and wild's
-  foreign phases. A push to main runs none of them: its pull request's run
-  measured what it changes, and the full set took the job past its 10
-  minutes. The daily and dispatched runs have 25 minutes.
+  pull requests that change the module's sources (its pattern in `changes`,
+  which no `*_test.c` matches: tests don't change what the samples measure).
+  Keep the pattern to what the samples measure: a module's own decision
+  campaign (#336's binding handoff) has a module of its own, not the whole
+  checker's. The same holds for the linkers' baselines and floors, mold's and
+  wild's foreign phases, and the first-party performance readers'
+  qualification (`tools/performance`, `docs/performance`, their pin). A push
+  to main runs none of them: its pull request's run measured what it changes,
+  and the full set took the job past its 10 minutes. The daily and dispatched
+  runs have 25 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
