@@ -57,7 +57,35 @@ struct UnwindTestRow
     int64_t rules[17];
 };
 
-static bool unwind_test_row(const UnwindFunction* function, uint32_t pc, const UnwindTestRow* row)
+// The row a frame pointer's function must have at `pc`: the CFA rsp + 8 before rbp's push and after its pop, rsp + 16
+// between the push and its mov, rbp + 16 from the mov to rbp's pop; rbp at CFA - 16 from its push to its pop; and the
+// i-th other push's register at CFA - 24 - 8i from its push to its pop, the pops in reverse.
+static bool unwind_test_pointer_row(const UnwindFunction* function, uint32_t pc, const UnwindTestRow* row)
+{
+    const uint32_t registers[] = { 3, 6, 12, 13, 14, 15 };
+    const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
+    const uint32_t popped = function->offsets[2 + 2 * pushes];
+    const bool pushed = pc >= function->offsets[0] && pc < popped;
+    const bool based = pc >= function->offsets[1] && pc < popped;
+    bool valid = row->cfa_register == (based ? 6u : 7u) && row->cfa == (pushed ? 16u : 8u) && row->rules[16] == -8 && row->rules[6] == (pushed ? -16 : 0);
+    uint32_t ordinal = 0;
+    for (uint32_t i = 0; i < 6; i += 1)
+    {
+        int64_t expected = 0;
+        if (i != 1 && (function->saved & (1u << i)) != 0)
+        {
+            const uint32_t saved_at = function->offsets[2 + ordinal];
+            const uint32_t restored_at = function->offsets[2 + pushes + (pushes - 1 - ordinal)];
+            expected = pc >= saved_at && pc < restored_at ? -(int64_t)(24 + 8 * ordinal) : 0;
+            ordinal += 1;
+        }
+        valid &= i == 1 || row->rules[registers[i]] == expected;
+    }
+    return valid;
+}
+
+// The row a function without a frame pointer must have at `pc`.
+static bool unwind_test_fixed_row(const UnwindFunction* function, uint32_t pc, const UnwindTestRow* row)
 {
     const uint32_t registers[] = { 3, 6, 12, 13, 14, 15 };
     const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
@@ -83,6 +111,11 @@ static bool unwind_test_row(const UnwindFunction* function, uint32_t pc, const U
         valid &= row->rules[registers[i]] == expected;
     }
     return valid;
+}
+
+static bool unwind_test_row(const UnwindFunction* function, uint32_t pc, const UnwindTestRow* row)
+{
+    return function->pointer != 0 ? unwind_test_pointer_row(function, pc, row) : unwind_test_fixed_row(function, pc, row);
 }
 
 static bool unwind_test_instructions(UnwindTestReader* reader, UnwindTestRow* row, const UnwindTestRow* initial, const UnwindFunction* function)
@@ -116,6 +149,10 @@ static bool unwind_test_instructions(UnwindTestReader* reader, UnwindTestRow* ro
         else if (op == 0x0e)
         {
             row->cfa = unwind_test_uleb(reader);
+        }
+        else if (op == 0x0d)
+        {
+            row->cfa_register = (uint32_t)unwind_test_uleb(reader);
         }
         else if (op == 8)
         {
@@ -157,6 +194,29 @@ static bool unwind_test_instructions(UnwindTestReader* reader, UnwindTestRow* ro
     return reader->valid;
 }
 
+// A CIE at the reader's place: its fields, and the initial row its instructions give, into `initial`.
+static bool unwind_test_cie(UnwindTestReader* reader, UnwindTestRow* initial, uint64_t size)
+{
+    const uint64_t begin = reader->at;
+    const uint64_t cie_length = unwind_test_integer(reader, 4);
+    const uint64_t cie_end = reader->at + cie_length;
+    reader->valid &= cie_length != 0 && cie_end <= size && (begin & 7) == 0;
+    reader->valid &= unwind_test_integer(reader, 4) == 0 && unwind_test_integer(reader, 1) == 1;
+    reader->valid &= unwind_test_integer(reader, 1) == 'z' && unwind_test_integer(reader, 1) == 'R' && unwind_test_integer(reader, 1) == 0;
+    reader->valid &= unwind_test_uleb(reader) == 1 && unwind_test_integer(reader, 1) == 0x78 && unwind_test_integer(reader, 1) == 16;
+    reader->valid &= unwind_test_uleb(reader) == 1 && unwind_test_integer(reader, 1) == 0x1b;
+    *initial = (UnwindTestRow){ 0 };
+    for (uint32_t reg = 0; reg < 17; reg += 1)
+    {
+        initial->rules[reg] = INT64_MAX;
+    }
+    reader->end = cie_end;
+    reader->valid &= unwind_test_instructions(reader, initial, 0, 0);
+    reader->end = size;
+    return reader->valid;
+}
+
+// The output's records: a CIE per FDE, or with UnwindOutput.shared one CIE first, which every FDE points back to.
 static bool unwind_test_decode(const UnwindFunction* functions, uint32_t count, const UnwindOutput* output)
 {
     UnwindTestReader reader = {
@@ -164,24 +224,18 @@ static bool unwind_test_decode(const UnwindFunction* functions, uint32_t count, 
         .end = output->size,
         .valid = true,
     };
+    UnwindTestRow initial = { 0 };
+    if (output->shared && count != 0)
+    {
+        unwind_test_cie(&reader, &initial, output->size);
+    }
     for (uint32_t i = 0; reader.valid && i < count; i += 1)
     {
-        const uint64_t begin = reader.at;
-        const uint64_t cie_length = unwind_test_integer(&reader, 4);
-        const uint64_t cie_end = reader.at + cie_length;
-        reader.valid &= cie_length != 0 && cie_end <= output->size && (begin & 7) == 0;
-        reader.valid &= unwind_test_integer(&reader, 4) == 0 && unwind_test_integer(&reader, 1) == 1;
-        reader.valid &= unwind_test_integer(&reader, 1) == 'z' && unwind_test_integer(&reader, 1) == 'R' && unwind_test_integer(&reader, 1) == 0;
-        reader.valid &= unwind_test_uleb(&reader) == 1 && unwind_test_integer(&reader, 1) == 0x78 && unwind_test_integer(&reader, 1) == 16;
-        reader.valid &= unwind_test_uleb(&reader) == 1 && unwind_test_integer(&reader, 1) == 0x1b;
-        UnwindTestRow initial = { 0 };
-        for (uint32_t reg = 0; reg < 17; reg += 1)
+        const uint64_t begin = output->shared ? 0 : reader.at;
+        if (!output->shared)
         {
-            initial.rules[reg] = INT64_MAX;
+            unwind_test_cie(&reader, &initial, output->size);
         }
-        reader.end = cie_end;
-        reader.valid &= unwind_test_instructions(&reader, &initial, 0, 0);
-        reader.end = output->size;
         const uint64_t fde_length = unwind_test_integer(&reader, 4);
         const uint64_t fde_end = reader.at + fde_length;
         const uint64_t pointer = reader.at;
@@ -213,10 +267,31 @@ static UnwindFunction unwind_test_description(uint32_t saved, uint32_t frame)
     return function;
 }
 
+// A frame pointer's description of the other saves `saved` (RBP's bit clear), spaced as unwind_test_description's.
+static UnwindFunction unwind_test_pointer_description(uint32_t saved)
+{
+    UnwindFunction function = {
+        .saved = (uint8_t)saved,
+        .pointer = 1,
+        .event_count = (uint8_t)(2 * __builtin_popcount(saved) + 3),
+    };
+    uint32_t offset = 0;
+    for (uint32_t event = 0; event < function.event_count; event += 1)
+    {
+        offset += event % 3 == 0 ? 65537 : event + 1;
+        function.offsets[event] = offset;
+    }
+    function.size = offset + 1;
+    return function;
+}
+
+// Every save mask's descriptions across the CFA LEB's widths, and each frame pointer's mask among them, so that the
+// vector path's batches leave their lanes to the exact writer here and there: written as pairs and with one shared
+// CIE, by both writers into the same bytes, each read back by the independent interpreter.
 static bool unwind_test_emitters(void)
 {
     const uint32_t thresholds[] = { 128, 16384, 2097152, 268435456 };
-    UnwindFunction functions[64 * 11];
+    static UnwindFunction functions[64 * 12];
     uint32_t count = 0;
     for (uint32_t saved = 0; saved < 64; saved += 1)
     {
@@ -229,52 +304,66 @@ static bool unwind_test_emitters(void)
             functions[count++] = unwind_test_description(saved, thresholds[width] - base - 1);
             functions[count++] = unwind_test_description(saved, thresholds[width] - base);
         }
+        if ((saved & 2) == 0)
+        {
+            functions[count++] = unwind_test_pointer_description(saved);
+        }
     }
     bool valid = unwind_check(functions, count) == UNWIND_OK;
-    uint8_t bytes[2][64 * 11 * 192];
-    uint32_t locations[2][64 * 11];
-    UnwindOutput outputs[2] = { 0 };
-    for (uint32_t way = 0; way < 2; way += 1)
+    static uint8_t bytes[2][64 * 12 * 192];
+    static uint32_t locations[2][64 * 12];
+    for (uint32_t shared = 0; shared < 2; shared += 1)
     {
-        outputs[way] = (UnwindOutput){
-            .bytes = bytes[way],
-            .capacity = sizeof(bytes[way]),
-            .locations = locations[way],
-            .location_capacity = count,
-        };
-        memset(bytes[way], 0xa5, sizeof(bytes[way]));
-        valid &= unwind_write(functions, count, &outputs[way], way == 0) == UNWIND_OK && unwind_test_decode(functions, count, &outputs[way]);
-    }
-    valid &= outputs[0].size == outputs[1].size && memcmp(bytes[0], bytes[1], outputs[0].size) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
-    // Negative controls for the independent interpreter: corrupt the return-address rule and the first FDE's range.
-    bytes[0][21] ^= 3;
-    valid &= !unwind_test_decode(functions, count, &outputs[0]);
-    bytes[0][21] ^= 3;
-    bytes[0][locations[0][0] + 4] ^= 1;
-    valid &= !unwind_test_decode(functions, count, &outputs[0]);
-    bytes[0][locations[0][0] + 4] ^= 1;
-    // Every refusal is before stores, including an insufficient location slice after the byte slice fits.
-    for (uint32_t way = 0; way < 2; way += 1)
-    {
-        for (uint32_t failure = 0; failure < 2; failure += 1)
+        UnwindOutput outputs[2] = { 0 };
+        for (uint32_t way = 0; way < 2; way += 1)
         {
-            UnwindOutput short_output = outputs[way];
-            short_output.capacity = failure == 0 ? outputs[way].size - 1 : outputs[way].size;
-            short_output.location_capacity = count - (failure != 0);
+            outputs[way] = (UnwindOutput){
+                .bytes = bytes[way],
+                .capacity = sizeof(bytes[way]),
+                .locations = locations[way],
+                .location_capacity = count,
+                .shared = shared != 0,
+            };
             memset(bytes[way], 0xa5, sizeof(bytes[way]));
-            memset(locations[way], 0xa5, sizeof(locations[way]));
-            valid &= unwind_write(functions, count, &short_output, way == 0) == UNWIND_ERROR_CAPACITY && short_output.size == outputs[way].size;
-            for (uint32_t byte = 0; byte < sizeof(bytes[way]); byte += 1)
+            valid &= unwind_write(functions, count, &outputs[way], way == 0) == UNWIND_OK && unwind_test_decode(functions, count, &outputs[way]);
+        }
+        valid &= outputs[0].size == outputs[1].size && memcmp(bytes[0], bytes[1], outputs[0].size) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
+        // Negative controls for the independent interpreter: corrupt the return-address rule and the first FDE's range.
+        bytes[0][21] ^= 3;
+        valid &= !unwind_test_decode(functions, count, &outputs[0]);
+        bytes[0][21] ^= 3;
+        bytes[0][locations[0][0] + 4] ^= 1;
+        valid &= !unwind_test_decode(functions, count, &outputs[0]);
+        bytes[0][locations[0][0] + 4] ^= 1;
+        // Every refusal is before stores, including an insufficient location slice after the byte slice fits.
+        for (uint32_t way = 0; way < 2; way += 1)
+        {
+            for (uint32_t failure = 0; failure < 2; failure += 1)
             {
-                valid &= bytes[way][byte] == 0xa5;
-            }
-            for (uint32_t location = 0; location < count; location += 1)
-            {
-                valid &= locations[way][location] == 0xa5a5a5a5;
+                UnwindOutput short_output = outputs[way];
+                short_output.capacity = failure == 0 ? outputs[way].size - 1 : outputs[way].size;
+                short_output.location_capacity = count - (failure != 0);
+                memset(bytes[way], 0xa5, sizeof(bytes[way]));
+                memset(locations[way], 0xa5, sizeof(locations[way]));
+                valid &= unwind_write(functions, count, &short_output, way == 0) == UNWIND_ERROR_CAPACITY && short_output.size == outputs[way].size;
+                for (uint32_t byte = 0; byte < sizeof(bytes[way]); byte += 1)
+                {
+                    valid &= bytes[way][byte] == 0xa5;
+                }
+                for (uint32_t location = 0; location < count; location += 1)
+                {
+                    valid &= locations[way][location] == 0xa5a5a5a5;
+                }
             }
         }
     }
-    printf("unwind emitters: %u save/frame combinations, independent CFI rows and atomic capacity refusal: %s\n", count, valid ? "pass" : "FAIL");
+    // The shared layout is the pairs' less a CIE per FDE but the first: measured by both writers.
+    UnwindOutput pairs = { .location_capacity = count };
+    UnwindOutput shared = { .location_capacity = count, .shared = true };
+    valid &= unwind_write(functions, count, &pairs, false) == UNWIND_ERROR_CAPACITY && unwind_write(functions, count, &shared, true) == UNWIND_ERROR_CAPACITY &&
+             shared.size == pairs.size - (uint64_t)(count - 1) * BUSTER_UNWIND_CIE_BYTES;
+    printf("unwind emitters: %u save/frame combinations, frame pointers among them, as pairs and with one CIE, independent CFI rows and atomic capacity refusal: %s\n",
+           count, valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -319,7 +408,27 @@ static bool unwind_test_diagnostics(void)
     UnwindFunction inactive = unwind_test_description(0, 0);
     inactive.offsets[13] = 1;
     valid &= unwind_check(&inactive, 1) == UNWIND_ERROR_INVALID;
-    printf("unwind descriptor diagnostics and representability refusal: %s\n", valid ? "pass" : "FAIL");
+    // A frame pointer's rules: rbp its own push (RBP's bit clear), no allocation the CFA follows, 2n + 3 events.
+    const UnwindFunction pointer = unwind_test_pointer_description(61);
+    valid &= unwind_check(&pointer, 1) == UNWIND_OK;
+    for (uint32_t change = 0; change < 6; change += 1)
+    {
+        UnwindFunction bad = pointer;
+        switch (change)
+        {
+            case 0: bad.saved |= 2; break;
+            case 1: bad.frame_size = 16; break;
+            case 2: bad.pointer = 2; break;
+            case 3: bad.event_count -= 1; break;
+            case 4: bad.pointer = 0; break;
+            case 5: bad.offsets[bad.event_count] = bad.size - 1; break;
+        }
+        valid &= unwind_check(&bad, 1) == UNWIND_ERROR_INVALID;
+    }
+    UnwindFunction fixed = unwind_test_description(61, 0);
+    fixed.pointer = 1;
+    valid &= unwind_check(&fixed, 1) == UNWIND_ERROR_INVALID;
+    printf("unwind descriptor diagnostics, frame pointers' among them, and representability refusal: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -338,23 +447,26 @@ static bool unwind_test_guards(void)
             UnwindFunction* functions = (UnwindFunction*)(mapping + region - count * sizeof(UnwindFunction));
             for (uint32_t i = 0; i < count; i += 1)
             {
-                functions[i] = unwind_test_description(i & 63, i % 2 != 0 ? INT32_MAX : 0);
+                // Every third a frame pointer's, so that a batch's last lanes are the exact writer's too.
+                functions[i] = i % 3 == 2 ? unwind_test_pointer_description(i & 61) : unwind_test_description(i & 63, i % 2 != 0 ? INT32_MAX : 0);
             }
-            for (uint32_t way = 0; valid && way < 2; way += 1)
+            for (uint32_t way = 0; valid && way < 4; way += 1)
             {
-                UnwindOutput output = { 0 };
-                const UnwindError measured = unwind_write(functions, count, &output, way == 0);
+                UnwindOutput output = {
+                    .shared = way >= 2,
+                };
+                const UnwindError measured = unwind_write(functions, count, &output, way % 2 == 0);
                 valid &= measured == (count == 0 ? UNWIND_OK : UNWIND_ERROR_CAPACITY) && output.size <= region;
                 output.bytes = mapping + 3 * region - output.size;
                 output.capacity = output.size;
                 output.locations = (uint32_t*)(mapping + 5 * region - count * sizeof(uint32_t));
                 output.location_capacity = count;
-                valid &= unwind_write(functions, count, &output, way == 0) == UNWIND_OK && unwind_test_decode(functions, count, &output);
+                valid &= unwind_write(functions, count, &output, way % 2 == 0) == UNWIND_OK && unwind_test_decode(functions, count, &output);
             }
         }
         munmap(mapping, 6 * region);
     }
-    printf("unwind emitters: guarded descriptor/byte/location tails 0..65: %s\n", valid ? "pass" : "FAIL");
+    printf("unwind emitters: guarded descriptor/byte/location tails 0..65, as pairs and with one CIE: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 

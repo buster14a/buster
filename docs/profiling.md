@@ -14,7 +14,10 @@ method, so that the next stage can be tuned the same way. The commands are `buil
   testing and reading code; every performance decision comes from runs on the 9700X.
 - **One run at a time.** Every build, test, benchmark and `perf` run there goes through
   `EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh COMMAND...`, one lock per run (AGENTS.md, "Sharing the
-  9700X"), pinned to CPU 2 (`taskset -c 2`), the CPU with the `performance` governor and its SMT sibling offline.
+  9700X"). A run on one thread is pinned to CPU 2 (`taskset -c 2`), the CPU with the `performance` governor and its
+  SMT sibling offline. A run on several lanes isn't, since `taskset` would put all its threads on that CPU: it pins its
+  lanes itself (`benchmark-lanes`, `benchmark-link`), or runs on the CPUs its command would (`link-foreign` on its
+  threads), beside a one-lane control on CPU 2.
 - **Measure in time as well as cycles, in both states.** After 30–300 ms of lighter code the clock boosts, and heavy
   AVX-512 loops then run 5–50% slower for 5–20 ms, which #199's measurements are consistent with a per-core power cap
   causing. The encoder's and dataflow's benchmarks take `--after-scalar MS` for that state and `--only NAME` for the
@@ -78,6 +81,17 @@ The noise sets which comparison to use.
   on the same CPU, the state a compiler starts in after lighter work; `--executable PATH` times another program. A
   process whose exit status isn't its list's first warm-up's fails the command. Compare the five rounds' medians:
   their spread is the noise.
+- **Short runs on many lanes: the reference twice, and a balanced order.** A run of a few milliseconds on several cores
+  varies with what ran before it: the other cores' idle states and clocks (only CPU 2 runs the performance governor),
+  and its threads' waits and scheduling. `link-foreign`'s 2,000-worker dynamic PIE on eight lanes took 2.2 to 2.8 ms
+  (p10 to p90) with the same instructions, and each round's median of 41 runs of main moved by −4% to +8% against
+  another label of the same executable in the same round (#446). Three rounds of #424's A/B read +4.4% for its head; 16
+  rounds that mostly ran main first, after 3 s of one-thread links, then the head and main's second label, read +1.9%
+  and +1.6% for those two over all their runs, and 24 rounds in which each of the three took each place equally, within
+  ±0.4% for both ([the
+  record](https://github.com/buster14a/buster-performance/tree/1ee59a26e4a3e2431c6836e4b29bfcb12b727a5c/docs/measurements/link-foreign-small-446-2026-10-26)).
+  Time the reference twice in the same rounds, rotate the order so that each takes each place equally, and read a change
+  against the reference's own difference.
 
 ## Counting in the process
 
@@ -224,6 +238,19 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
 - **Placement.** Branchy scalar loops run slower at some 64-byte offsets, in states that differ between processes, and
   stack slots or rows that share their low 12 bits with stores alias. A difference that comes and goes between builds of
   the same source is probably one of these (dataflow.md, "Where the scalar twin's code falls").
+- **The stack's page offset.** Address space randomization starts each process's stack at another offset in its page,
+  and a stage can then run fast in some processes of one build and slow in others. With the stack placed at every 64th
+  byte of its page, `benchmark-checker-source`'s body checking on `sqlite3.c` ran 3 to 13% slower at seven offsets from
+  208 to 656 bytes (all those sampled but 528) and 4% at 2,832, with the same instructions and more store-to-load
+  conflicts (`ls_bad_status2.stli_other`, loads that couldn't take an older store's data). That is consistent with stack
+  slots that share their low 12 bits with the data the loop stores (4 KiB aliasing), though the record doesn't identify
+  the loads and stores. With randomization, 8 of 32 processes of a campaign were over 2% slower, in main and #424's head
+  alike, while the whole driver's `-fsyntax-only` moved by at most 1.5% over its own 64-offset sweep (#445, [the
+  record](https://github.com/buster14a/buster-performance/tree/e0f03a362c29568db3230b265600b2085afe6ce0/docs/measurements/checker-source-slow-state-445-2026-10-26)).
+  Compare such a stage's medians over many processes, or place the stack alike in every process: `setarch -R` with the
+  same argument and environment bytes (both executables at paths of the same length, and an environment of a chosen
+  length, as the record's `procbench` gives them with `norandom` and `pad=N`), each process's offset checked
+  (`/proc/PID/stat`'s startstack modulo 4,096, which `procbench` records), and the builds compared at several offsets.
 - **Two threads.** Two lexer processes on one core's two hardware threads had 1.22 times the throughput of one: one
   thread uses about 80% of what the core does for that mix, so SMT is no lever.
 - **A phase's cost is in context.** The difference between runs that stop after a phase and before it is the phase's

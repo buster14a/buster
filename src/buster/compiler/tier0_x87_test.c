@@ -727,11 +727,19 @@ static uint64_t tier0_test_x87_integer(uint32_t class, uint64_t bits)
     return value;
 }
 
-// The program's stream run as a stack machine on `parameters`, as C means it: long double arithmetic, conversions and
-// compares by this file's C (the x87's), the calls by calling the functions. Returns whether it ran to its RETURN.
-static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const uint64_t parameters[4])
+// Interpreter marks for each executed entry and the direction of each branch.
+#define BUSTER_TIER0_TEST_X87_VISITED_RAN 1
+#define BUSTER_TIER0_TEST_X87_VISITED_TAKEN 2
+#define BUSTER_TIER0_TEST_X87_VISITED_NOT_TAKEN 4
+#define BUSTER_TIER0_TEST_X87_ARM_FIRST 1
+#define BUSTER_TIER0_TEST_X87_ARM_SECOND 2
+#define BUSTER_TIER0_TEST_X87_ARMS (BUSTER_TIER0_TEST_X87_ARM_FIRST | BUSTER_TIER0_TEST_X87_ARM_SECOND)
+
+// The program's stream run as a stack machine on `parameters`, marking executed entries and branch directions.
+static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const uint64_t parameters[4], uint8_t* visited)
 {
     long double objects[BUSTER_TIER0_TEST_X87_OBJECTS] = { 0 };
+    memset(visited, 0, program->count);
     Tier0TestX87Value stack[64];
     uint32_t depth = 0;
     uint32_t i = 0;
@@ -745,6 +753,7 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
         const uint32_t operand = i > 0 ? program->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
         uint32_t next = i + 1;
         valid = depth + 1 < BUSTER_ARRAY_LENGTH(stack);
+        visited[i] |= BUSTER_TIER0_TEST_X87_VISITED_RAN;
         if (kind == BUSTER_TYPED_CONST && class == BUSTER_TYPED_CLASS_F80)
         {
             stack[depth].f = tier0_test_x87_make(program->constants[2 * value], (uint16_t)program->constants[2 * value + 1]);
@@ -845,6 +854,7 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
         {
             depth -= 1;
             next = stack[depth].bits == 0 ? (uint32_t)value : next;
+            visited[i] |= stack[depth].bits == 0 ? BUSTER_TIER0_TEST_X87_VISITED_TAKEN : BUSTER_TIER0_TEST_X87_VISITED_NOT_TAKEN;
         }
         else if (kind == BUSTER_TYPED_JUMP_VALUE)
         {
@@ -903,10 +913,9 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
 
 // A function compiled by both paths, which must make the same code, its records valid, its branches sized, and encoded by
 // both encoders into `image` (the vector one's) and `scratch` (the scalar one's), which must be the same bytes. Returns
-// the code's length, 0 for a failure, and in *error Tier 0's error (a depth past the tables is one both paths give alike,
-// not a failure).
+// the code's length, 0 for a failure, and in *error Tier 0's error. Only random programs may refuse excess depth.
 static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, uint8_t* scratch,
-                                      Tier0Error* error)
+                                      bool depth_allowed, Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
     const Tier0Code scalar = tier0_compile_scalar(function, arena);
@@ -914,6 +923,10 @@ static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, c
     *error = scalar.error;
     bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "x87", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)", name,
                                    check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
+    const char* error_name = scalar.error == TIER0_ERROR_UNSUPPORTED ? "TIER0_ERROR_UNSUPPORTED" : scalar.error == TIER0_ERROR_DEPTH ? "TIER0_ERROR_DEPTH"
+                             : scalar.error == TIER0_ERROR_MEMORY ? "TIER0_ERROR_MEMORY" : scalar.error == TIER0_ERROR_INVALID ? "TIER0_ERROR_INVALID" : "unknown";
+    ready = ready && tier0_test_expect(tally, scalar.error == TIER0_OK || (depth_allowed && scalar.error == TIER0_ERROR_DEPTH), "x87",
+                                       "%s: both paths refuse it with %s (%d) at entry %u", name, error_name, scalar.error, scalar.node);
     ready = ready && scalar.error == TIER0_OK;
     ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
@@ -1026,9 +1039,10 @@ struct Tier0TestX87Reach
     // A bit per class, below BUSTER_TYPED_CLASS_LIMIT: converted to F80, and from it.
     uint16_t to;
     uint16_t from;
+    uint8_t arms;
 };
 
-static Tier0TestX87Reach tier0_test_x87_reached(const Tier0TestX87Program* program)
+static Tier0TestX87Reach tier0_test_x87_reached(const Tier0TestX87Program* program, const uint8_t* visited)
 {
     Tier0TestX87Reach reached = { 0 };
     for (uint32_t i = 0; i < program->count; i += 1)
@@ -1036,18 +1050,26 @@ static Tier0TestX87Reach tier0_test_x87_reached(const Tier0TestX87Program* progr
         const uint32_t kind = program->kinds[i];
         const uint32_t class = program->classes[i];
         const uint32_t operand = i > 0 ? program->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
+        const bool ran = (visited[i] & BUSTER_TIER0_TEST_X87_VISITED_RAN) != 0;
         const bool x87 = class == BUSTER_TYPED_CLASS_F80 || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && operand == BUSTER_TYPED_CLASS_F80);
-        if (kind == BUSTER_TYPED_CONVERT && class == BUSTER_TYPED_CLASS_F80)
+        if (ran && kind == BUSTER_TYPED_CONVERT && class == BUSTER_TYPED_CLASS_F80)
         {
             reached.to |= (uint16_t)(1u << operand);
         }
-        else if (kind == BUSTER_TYPED_CONVERT && operand == BUSTER_TYPED_CLASS_F80)
+        else if (ran && kind == BUSTER_TYPED_CONVERT && operand == BUSTER_TYPED_CLASS_F80)
         {
             reached.from |= (uint16_t)(1u << class);
         }
-        else if (x87)
+        else if (ran && x87)
         {
             reached.kinds |= 1ull << kind;
+        }
+        // The branch target follows the first arm's JUMP_VALUE, whose class identifies the conditional.
+        if (ran && kind == BUSTER_TYPED_BRANCH_FALSE && program->values[i] > 0 && program->values[i] <= program->count &&
+            program->kinds[program->values[i] - 1] == BUSTER_TYPED_JUMP_VALUE && program->classes[program->values[i] - 1] == BUSTER_TYPED_CLASS_F80)
+        {
+            reached.arms |= (visited[i] & BUSTER_TIER0_TEST_X87_VISITED_NOT_TAKEN) != 0 ? BUSTER_TIER0_TEST_X87_ARM_FIRST : 0;
+            reached.arms |= (visited[i] & BUSTER_TIER0_TEST_X87_VISITED_TAKEN) != 0 ? BUSTER_TIER0_TEST_X87_ARM_SECOND : 0;
         }
     }
     return reached;
@@ -1062,6 +1084,7 @@ static Tier0TestX87Reach tier0_test_x87_wanted(void)
         BUSTER_TYPED_CALL, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_SET_LOCAL,
     };
     Tier0TestX87Reach wanted = { 0 };
+    wanted.arms = BUSTER_TIER0_TEST_X87_ARMS;
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
     {
         wanted.kinds |= 1ull << kinds[k];
@@ -1099,7 +1122,7 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         }
         const Tier0Function function = tier0_test_x87_function(program, abi);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, true, &error);
         *too_deep += error == TIER0_ERROR_DEPTH ? 1 : 0;
         *entries += program->count;
         if (length == 0)
@@ -1129,7 +1152,8 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         uint8_t expected[sizeof(shared->out)];
         memset(expected, 0xa5, sizeof(expected));
         const uint64_t parameters[4] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)shared->floats, (uint64_t)(uintptr_t)expected };
-        const bool interpreted = tier0_test_expect(tally, tier0_test_x87_interpret(program, parameters), "x87", "%s: the interpreter can't run it", name);
+        uint8_t visited[BUSTER_TIER0_TEST_X87_ENTRIES];
+        const bool interpreted = tier0_test_expect(tally, tier0_test_x87_interpret(program, parameters, visited), "x87", "%s: the interpreter can't run it", name);
         bool same = ran && interpreted;
         for (uint32_t o = 0; o < BUSTER_TIER0_TEST_X87_OUTPUTS && ran && interpreted; o += 1)
         {
@@ -1141,19 +1165,21 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         // tables) emitted none of its code.
         if (same)
         {
-            const Tier0TestX87Reach program_reached = tier0_test_x87_reached(program);
+            const Tier0TestX87Reach program_reached = tier0_test_x87_reached(program, visited);
             reached.kinds |= program_reached.kinds;
             reached.to |= program_reached.to;
             reached.from |= program_reached.from;
+            reached.arms |= program_reached.arms;
         }
     }
     const Tier0TestX87Reach wanted = tier0_test_x87_wanted();
     const uint64_t missing_kinds = wanted.kinds & ~reached.kinds;
     const uint32_t missing_to = wanted.to & ~reached.to;
     const uint32_t missing_from = wanted.from & ~reached.from;
-    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_X87_PROGRAMS || (missing_kinds == 0 && missing_to == 0 && missing_from == 0), "x87",
-                      "the checked programs don't reach every kind and conversion (missing kinds %#" PRIx64 ", conversions to %#x and from %#x)", missing_kinds,
-                      missing_to, missing_from);
+    const uint32_t missing_arms = wanted.arms & ~reached.arms;
+    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_X87_PROGRAMS || (missing_kinds == 0 && missing_to == 0 && missing_from == 0 && missing_arms == 0), "x87",
+                      "the checked programs don't reach every kind, conversion and arm (missing kinds %#" PRIx64 ", conversions to %#x and from %#x, arms %#x)",
+                      missing_kinds, missing_to, missing_from, missing_arms);
     arena_release(&arena);
     free(image);
     free(program);
@@ -1431,7 +1457,7 @@ static void tier0_test_x87_functions(Tier0TestTally* tally, const Tier0TestX87Ab
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_x87_written_function(&written, abi, signatures[which], result_size);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
         const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_x87_native(image, length, runs[which], shared), "x87", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < 4 && ran; k += 1)
         {
@@ -1543,7 +1569,7 @@ static void tier0_test_x87_boundaries(Tier0TestTally* tally, const Tier0TestX87A
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_x87_written_function(&written, abi, signature, 0);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
         const bool ran = length != 0 &&
                          tier0_test_expect(tally, tier0_test_x87_native(image, length, tier0_test_x87_run_boundary, shared), "x87", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < shared->boundary_count && ran; k += 1)

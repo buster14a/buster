@@ -1293,7 +1293,7 @@ static void changes_expect(ChangesTest* test, bool condition, const char* what, 
         test->failures += 1;
         if (!test->quiet)
         {
-            fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.data);
+            fprintf(stderr, "FAIL: %s%s%.*s\n", what, detail.length != 0 ? ": " : "", (int)detail.length, detail.length != 0 ? detail.data : "");
         }
     }
 }
