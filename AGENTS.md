@@ -3553,7 +3553,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
   language modes: every record must be the whole file's, byte for byte; and the
   scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
-  byte at a time, on random bytes ending at a `PROT_NONE` page;
+  byte at a time, on random bytes ending at a `PROT_NONE` page; and 11 files
+  made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
+  64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
+  alone, a `\r` last), whose line ends `pp_count_lines` must count from many
+  starts to every end, as a count a byte at a time does (a `\r\n` at its `\n`,
+  so not by a query that ends at the `\n`), the line pages counted whole and in
+  two windows cut around each line end, `pp_page_line` at every byte, and
+  `pp_line_of`'s lines and columns near each line end from the cursor and from
+  the pages;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
   `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
