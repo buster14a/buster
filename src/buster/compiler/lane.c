@@ -53,7 +53,8 @@
 #include <sys/syscall.h>
 #include <linux/futex.h>
 
-// CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h.
+// CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
+// them where the build's target has mwaitx, __MWAITX__).
 #include <x86intrin.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -427,6 +428,7 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
         uint64_t waited = 0;
         while ((current & ~1u) == value && waited < BUSTER_LANE_MWAITX_TICKS)
         {
+#if defined(__MWAITX__)
             // The monitor is armed before the read, so a write after the read ends the wait. The wait also ends on an
             // interrupt, or when the timer runs out the rest of the ticks.
             _mm_monitorx(word, 0, 0);
@@ -436,6 +438,13 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
                 _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, (uint32_t)(BUSTER_LANE_MWAITX_TICKS - waited));
                 current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
             }
+#else
+            // A build host without mwaitx (-march=native on a CPU other than AMD's) spins with pause for the same ticks
+            // instead: the same wake-up order, at the cost of a busy core while it waits. The 9700X builds the branch
+            // above.
+            _mm_pause();
+            current = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+#endif
             waited = __rdtsc() - begin;
         }
     }
