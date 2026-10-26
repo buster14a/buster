@@ -265,7 +265,8 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
             for (uint32_t parent = names->parents[tag]; parent != BUSTER_CHECK_NONE && depth < types->tags.count; parent = names->parents[parent])
             {
                 contexts[depth++] = parent;
-                capacity += check_input_packed_identifier(reader, types->tags.name[parent]).length + 32;
+                const uint32_t name = types->tags.name[parent] != 0 ? types->tags.name[parent] : names->typedefs[parent];
+                capacity += check_input_packed_identifier(reader, name).length + 32;
             }
             for (uint32_t i = 0; i < depth / 2; i += 1)
             {
