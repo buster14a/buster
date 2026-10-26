@@ -37,6 +37,10 @@ linker's design), as soon as its options are valid; the three stages run on
 them in turn, the threads sleeping between them and keeping their scratch
 arenas from one to the next (`lane_team_keep_scratch`), and the release stops
 them (#501). A link whose threads can't start fails before its resolution.
+On the 9700X, against the cold group per stage before it, the team took 6.8%
+to 17.7% off links on eight lanes of `benchmark-link`'s programs of 1, 2,000
+and 102,400 workers, dynamic and static, and nothing off one lane ([the
+record](https://github.com/buster14a/buster-performance/tree/4077986b62a09f2c8954fa0d3dd0aff05359be66/docs/measurements/link-foreign-team-501-2026-10-26)).
 `--time` reports, on standard
 error after the link, each stage's wall time (the arguments, the team's start,
 the interpreter's
