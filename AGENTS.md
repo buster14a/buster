@@ -330,7 +330,7 @@ designs and the compilers already built this way.
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as thirteen translation units: `main.c` itself, the driver's unit, and each
+  it as twelve translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -359,14 +359,7 @@ designs and the compilers already built this way.
   the units balanced: the
   types unit, which had grown to hold the checker, took 2.5 times as long as
   any other until it was split into the types, checker and checker builtins
-  units. The default C command runs in the checker's unit, but with `-g` in
-  a unit of its own (`main_unit_debug.c`): the checker's `run_check_command`
-  hands it back once it has parsed the options and released its arenas
-  (`BUSTER_CHECK_RESULT_DEBUG`), and `main_command` runs it there, a command of
-  its own for the split-state check. Only that unit's lowering keeps the
-  typed entries' source tokens (`BUSTER_CHECK_SOURCE_ROWS`), so that the others
-  compile none of that work and the default compile runs main's code. A test
-  runner that calls each section once (`run_checker_tests`)
+  units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
   one function that its optimizer takes superlinear time over.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
@@ -598,14 +591,14 @@ designs and the compilers already built this way.
   lines as the diagnostics place them, bounded per function by its
   declaration's and closing brace's places, and keeps a row per change of line
   in the function's file, and the body's start; each pass a vector path with
-  an exact twin (`--scalar`). The link runs in the `-g` unit
-  (`BUSTER_UNIT_DEBUG`), whose lowering alone keeps the tokens.
-  `test-check-debug [--cross-check]`, in that unit, checks the twins at
-  `PROT_NONE` pages, the lines against `pp_presumed` on fixtures and generated
-  programs, that lowering with the tokens changes no typed function, that
-  `-g`'s link fits in 64 GiB more `RLIMIT_AS` than the same link without it,
-  and with `--cross-check` the executable through `llvm-dwarfdump --verify`
-  and gdb.
+  an exact twin (`--scalar`). The lowering is compiled twice from one body,
+  `check_program_lower` without the tokens and `check_program_lower_sources`
+  with them, so that a compile without `-g` carries none of their state.
+  `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
+  the lines against `pp_presumed` on fixtures (a computed goto among them)
+  and generated programs, that lowering with the tokens changes no typed
+  function, and with `--cross-check` the executable through
+  `llvm-dwarfdump --verify` and gdb.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order

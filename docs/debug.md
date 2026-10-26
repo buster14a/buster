@@ -150,17 +150,18 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
   `#line`s naming one file keep their rows together, and the unit's file
   table is built by key without comparing names.
 
-Only one unit of the build keeps those tokens: the default C command's link
-with `-g` runs in a unit of its own (`main_unit_debug.c`), whose lowering alone
-tracks each task's token (`BUSTER_CHECK_SOURCE_ROWS`). The checker's unit
-parses the options, sees `-g` and returns `BUSTER_CHECK_RESULT_DEBUG` once it
-has released its arenas (so the two never hold six 64 GiB reservations at
-once), and `main_command` runs the command again in the `-g` unit: two
-commands for `check-call-graph`'s split-state check, which share no state. In every other unit, the default
-command's among them, the tracking and the raw rows fold away at compile
-time, so that a compile without `-g` runs the same code as before this
-feature but for Tier 0's per-function check of `entry_records`, and writes the
-same executable.
+The lowering is compiled twice from one body (`check_program_lower_body`,
+always inlined): `check_program_lower`, which every compile without `-g`
+runs, keeps no tokens, and `check_program_lower_sources`, `-g`'s, keeps them.
+The flag is a constant in each, so that the plain lowering carries none of
+the tokens' state through its loops: when it was a value that the checker
+unit's two callers gave it, clang kept it and the tokens' column live across
+them and spilled more, which every compile paid. The tracking the two share
+is cheap: a task saves the token current when it was pushed and restores it
+when it runs, but an expression's, which sets its node's own when it runs.
+The emission reserves the raw rows and writes each function's out of line
+(`check_program_emit_reserve_rows` and `check_program_emit_body_rows`), so
+that the plain emission's loop doesn't carry them either.
 
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a

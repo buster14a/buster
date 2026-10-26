@@ -32,15 +32,10 @@
 #define BUSTER_UNIT_FRAGMENTS 9
 #define BUSTER_UNIT_CHECKER 10
 #define BUSTER_UNIT_CHECK_BUILTINS 11
-#define BUSTER_UNIT_DEBUG 12
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
-// The default C command with -g runs in a unit of its own (run_check_command sends it there): the only one whose lowering
-// keeps each typed entry's source token for DWARF's rows (c_check_program_lower.c). The other units' lowering, the
-// default command's among them, compiles none of that work, and their emission none of the rows' (#395, #426).
-#define BUSTER_CHECK_SOURCE_ROWS BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG)
 
 // An entry point in a unit that isn't its module's home: an inline definition, which clang emits only to inline it,
 // and noinline keeps it from that, so that the unit's calls go to the home's external definition. Calling the module's
@@ -541,10 +536,8 @@ int main_unit_dynamic(int argc, char** argv, bool* found);
 int main_unit_types(int argc, char** argv, bool* found);
 int main_unit_checker(int argc, char** argv, bool* found);
 int main_unit_check_builtins(int argc, char** argv, bool* found);
-int main_unit_debug(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
-int run_source_debug_command(int count, char** arguments);
 
 // Keep the historical -c assembly spelling while sending C compilation to the semantic driver. Options which
 // take a separate argument cannot make an output or include path look like an assembly input.
@@ -938,11 +931,11 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_checker_driver_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-debug") == 0)
     {
         result = run_check_debug_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DEBUG) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-debug") == 0)
     {
         result = run_check_debug_benchmark(argc - 2, argv + 2);
     }
@@ -1306,14 +1299,8 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER))
     {
-        // Semantic checking and object emission share the same typed source stream in the checker's unit; a link with -g,
-        // which that unit hands back once it has parsed the options (BUSTER_CHECK_RESULT_DEBUG), in the unit of source
-        // rows.
+        // Semantic checking and object emission share the same typed source stream in the checker's unit.
         result = run_source_check_command(argc - 1, argv + 1);
-        if (result == BUSTER_CHECK_RESULT_DEBUG)
-        {
-            result = run_source_debug_command(argc - 1, argv + 1);
-        }
     }
     else
     {
@@ -1358,10 +1345,6 @@ int main(int argc, char** argv)
     if (!found)
     {
         result = main_unit_check_builtins(argc, argv, &found);
-    }
-    if (!found)
-    {
-        result = main_unit_debug(argc, argv, &found);
     }
     if (!found)
     {
@@ -1424,16 +1407,6 @@ int main_unit_checker(int argc, char** argv, bool* found)
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECK_BUILTINS
 int main_unit_check_builtins(int argc, char** argv, bool* found)
-{
-    return main_command(argc, argv, found);
-}
-#elif BUSTER_UNIT == BUSTER_UNIT_DEBUG
-int run_source_debug_command(int count, char** arguments)
-{
-    return run_check_command(count, arguments, true);
-}
-
-int main_unit_debug(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }

@@ -801,12 +801,6 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
     return result;
 }
 
-// run_check_command's result, in every unit but the one of source rows (BUSTER_CHECK_SOURCE_ROWS, main.c), for a link
-// with -g: its options parsed and its arenas released, main_command runs the command again in that unit
-// (run_source_debug_command), whose lowering alone keeps the typed entries' source tokens. The two units' copies are
-// each a command of their own then, which share no state (call_graph.c's split-state check).
-#define BUSTER_CHECK_RESULT_DEBUG (-1)
-
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
 static int run_check_command(int count, char** arguments, bool executable)
@@ -919,9 +913,9 @@ static int run_check_command(int count, char** arguments, bool executable)
     // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
     // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
     // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link
-    // with -g in the unit of source rows, whose rows read every function's tokens' expansion places (c_check_debug.c),
-    // rather than preprocessing the unit again for them.
-    const bool source_rows = parsed && BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules);
+    // with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than preprocessing the
+    // unit again for them.
+    const bool source_rows = parsed && link && (options.predefines.debug || options.predefines.debug_modules);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {
@@ -931,13 +925,6 @@ static int run_check_command(int count, char** arguments, bool executable)
     else if (!check_input_target_supported(&options))
     {
         fprintf(stderr, "error: checker requires C, signed char, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
-    }
-    else if (!BUSTER_CHECK_SOURCE_ROWS && link && (options.predefines.debug || options.predefines.debug_modules))
-    {
-        // -g's link, whole, in the unit whose lowering keeps the source rows, which main_command calls once this call has
-        // released its arenas below (the two calls' together would take twice the address space). That unit folds this
-        // branch away.
-        result = BUSTER_CHECK_RESULT_DEBUG;
     }
     else
     {
@@ -1186,8 +1173,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                                 BUSTER_CHECK_SOURCE_ROWS && (options.predefines.debug || options.predefines.debug_modules), &libraries,
-                                                                 &scratch) ? 0 : 1;
+                                                                 source_rows, &libraries, &scratch) ? 0 : 1;
                             }
                             else
                             {

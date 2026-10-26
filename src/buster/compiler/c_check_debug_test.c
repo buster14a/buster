@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-check-debug [--seed N] [--programs N] [--cross-check] [--keep]: the C driver's source rows and DWARF (#395,
-// c_check_debug.c), in the unit whose lowering keeps them (BUSTER_UNIT_DEBUG, main.c).
+// c_check_debug.c).
 //
 // - Raw rows: check_debug_rows against check_debug_rows_scalar on random functions (their entries' first records
 //   ascending, with runs of entries that start no code, and each record's offset after the one before), of every entry
@@ -13,7 +13,7 @@
 //   ending at PROT_NONE pages.
 // - Lines: fixtures (a header's function, macros, a multi-line call, macros nested past the vector path's walk, an
 //   #include and a #line inside a body, a #line before a function, two #lines naming one file around a function's
-//   statements) and --programs generated programs of macros across
+//   statements, a computed goto through a static table of labels' addresses) and --programs generated programs of macros across
 //   lines and #lines, compiled through the pipeline with source rows by each path: every row's file and line by the
 //   vector path and the exact path alike, the exact path's as pp_presumed gives them, each function's rows within its
 //   lines where nothing moves them, both paths' units and sections the same bytes, and the fixtures' functions with
@@ -23,14 +23,12 @@
 // - A unit whose selection keeps no function: emitted with source rows into an empty set, a unit of no functions, by
 //   both paths alike; with --cross-check, linked with -g against a shared library holding its main (cc), into an
 //   executable that runs, whose DWARF llvm-dwarfdump --verify takes.
-// - Options that fail before they're parsed (a -l without its name), on a link with -g in this unit's own driver: the
-//   usage message, and status 1.
-// - Address space: -g's link, which the default command sends to this unit, fits in 64 GiB more RLIMIT_AS than the
-//   same program's link without -g needs (found by halves), where the arenas of both calls together took 192 GiB more.
+// - Options that fail before they're parsed (a -l without its name), on a link with -g: the usage message, and status 1.
 // - The driver, with --cross-check (gdb and llvm-dwarfdump): the fixture linked with -g by each path into the same
 //   bytes, which run; llvm-dwarfdump --verify finds no error; gdb stops at a line's breakpoint on that line, at a
-//   function's breakpoint on its first statement, steps over an untaken branch, and gives a backtrace's frames their
-//   functions, files and lines, the header's function in the header.
+//   function's breakpoint on its first statement, steps over an untaken branch, steps from a computed goto to its
+//   target's statement, and gives a backtrace's frames their functions, files and lines, the header's function in the
+//   header.
 
 typedef struct CheckDebugTestTally CheckDebugTestTally;
 struct CheckDebugTestTally
@@ -227,8 +225,8 @@ static void check_debug_test_keep(CheckDebugTestTally* tally)
 }
 
 // The fixtures: a header's function, a macro whose definition is lines above its use, a call across two lines, an
-// untaken branch, macros nested past the vector path's walk, an #include and a #line inside a body, and a #line before a
-// function. main returns 0.
+// untaken branch, macros nested past the vector path's walk, an #include and a #line inside a body, a #line before a
+// function, and a computed goto through a static table of its labels' addresses (#431, #426's review). main returns 0.
 typedef struct CheckDebugTestFile CheckDebugTestFile;
 struct CheckDebugTestFile
 {
@@ -287,7 +285,8 @@ static const CheckDebugTestFile check_debug_test_files[] = {
         "#line 500\n"                               // 35
         "    return r / 2;\n"                       // 500
         "}\n"                                       // 501
-        "#line 39\n"                                // 502, then the file's own numbers again
+        "int dispatch(int v);\n"                    // 502, defined in dbg_goto.c below
+        "#line 39\n"                                // 503, then the file's own numbers again
         "int main(int argc, char** argv)\n"         // 39
         "{\n"                                       // 40
         "    (void)argv;\n"                         // 41
@@ -301,7 +300,7 @@ static const CheckDebugTestFile check_debug_test_files[] = {
         "    total = total + nested(3) - 4;\n"      // 49
         "    total = total + included(5) - 5;\n"    // 50
         "    total = total + moved(6) - 6;\n"       // 51
-        "    return total - 4;\n"                   // 52
+        "    return total - 6 + dispatch(2);\n"     // 52
         "}\n"                                       // 53
         "#line 1 \"dbg_renamed.c\"\n"
         "int renamed(int v)\n"                      // dbg_renamed.c:1
@@ -314,7 +313,18 @@ static const CheckDebugTestFile check_debug_test_files[] = {
         "    int x = v * 3;\n"                      // 12
         "#line 100 \"dbg_same.c\"\n"
         "    return x + 1;\n"                       // 100: a second #line of the same name, the same file
-        "}\n",                                      // 101
+        "}\n"                                       // 101
+        "#line 1 \"dbg_goto.c\"\n"
+        "int dispatch(int v)\n"                                     // dbg_goto.c:1
+        "{\n"                                                       // 2
+        "    static void* const table[] = { &&low, &&high };\n"    // 3
+        "    void* target = table[v > 1];\n"                        // 4
+        "    goto *target;\n"                                       // 5
+        "low:\n"                                                    // 6
+        "    v = -v;\n"                                             // 7
+        "high:\n"                                                   // 8
+        "    return v;\n"                                           // 9
+        "}\n",                                                      // 10
     },
 };
 
@@ -340,6 +350,7 @@ static const CheckDebugTestExpected check_debug_test_expected[] = {
     { "main", "dbg_rows.c", 39, { 42, 43, 45, 47, 49, 50, 51, 52, 53 }, { 40, 46 } },
     { "renamed", "dbg_renamed.c", 1, { 3, 4 }, { 2 } },
     { "same_named", "dbg_same.c", 10, { 12, 100, 101 }, { 11 } },
+    { "dispatch", "dbg_goto.c", 1, { 4, 5, 7, 9, 10 }, { 2, 3, 6, 8 } },
 };
 
 // One compilation through the pipeline, with source rows (the driver's steps to check_program_emit): everything the
@@ -438,7 +449,7 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
     unit->ready = ready;
 }
 
-// The lowering with the entries' source tokens, which only this unit keeps (BUSTER_CHECK_SOURCE_ROWS): each of the
+// The lowering with the entries' source tokens (check_program_lower_sources) against the one without them: each of the
 // compiled program's functions lowered with them and without them, by both unit ABI batches, the same typed function,
 // and each entry's token alike by both batches and one of the function's own, from its declaration to its closing brace.
 static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTestUnit* unit, const Parser* parser, const char* what)
@@ -447,9 +458,9 @@ static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTest
     const uint64_t mark = unit->output.length;
     CheckProgramLowered plain = { 0 };
     CheckProgramLowered sourced[2] = { 0 };
-    const bool lowered = check_program_lower(&plain, program, true, false, &unit->output, &unit->scratch) &&
-                         check_program_lower(sourced, program, true, true, &unit->output, &unit->scratch) &&
-                         check_program_lower(sourced + 1, program, false, true, &unit->output, &unit->scratch);
+    const bool lowered = check_program_lower(&plain, program, true, &unit->output, &unit->scratch) &&
+                         check_program_lower_sources(sourced, program, true, &unit->output, &unit->scratch) &&
+                         check_program_lower_sources(sourced + 1, program, false, &unit->output, &unit->scratch);
     check_debug_test_expect(tally, lowered, "lower with the entries' source tokens as without them", what);
     for (uint32_t b = 0; lowered && b < program->body_count; b += 1)
     {
@@ -938,11 +949,20 @@ static void check_debug_test_driver(CheckDebugTestTally* tally, const char* dire
                             "gdb stops at a function's breakpoint on its first statement, and its backtrace gives the caller's line", report);
     check_debug_test_expect(tally, header != 0 && strstr(header, "dbg_rows.h:3") != 0 && strstr(header, "dbg_rows.c:43") != 0,
                             "the header's function stops in the header, called from its callee's line (the call's first)", report);
+    // The computed goto: stopped at it, called from main's last line, then a step to the label's statement it goes to.
+    snprintf(report, sizeof(report), "%s.gdb-goto", outputs[0]);
+    static const char* const jumps[] = { "break dbg_goto.c:5", "run", "bt", "next", "info line *$pc" };
+    const String8 jumped = check_debug_test_gdb(outputs[0], report, jumps, BUSTER_ARRAY_LENGTH(jumps), arena);
+    const char* dispatch = jumped.pointer != 0 ? strstr(jumped.pointer, "Breakpoint 1, dispatch") : 0;
+    // gdb names the file with the compilation's directory before it, the #line's name being relative.
+    const char* target = dispatch != 0 ? strstr(dispatch, "\nLine 9 of \"") : 0;
+    check_debug_test_expect(tally, dispatch != 0 && strstr(dispatch, "dbg_goto.c:5") != 0 && strstr(dispatch, "dbg_rows.c:52") != 0 && target != 0 &&
+                                       strstr(target, "/dbg_goto.c\" starts at address") != 0,
+                            "gdb stops at a computed goto and steps to the statement of the label it goes to", report);
 }
 
-// This unit's own driver (run_check_command, which takes a link with -g whole here) on a link with -g whose options fail
-// before pp_parse_options runs, a -l without its name (#426's review): in a child, it must fail with the usage message,
-// having read no option it didn't parse.
+// The driver (/proc/self/exe) on a link with -g whose options fail before pp_parse_options runs, a -l without its name
+// (#426's review): it must fail with the usage message, having read no option it didn't parse.
 static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
     char source[PATH_MAX];
@@ -952,86 +972,12 @@ static void check_debug_test_unparsed(CheckDebugTestTally* tally, const char* di
     snprintf(output, sizeof(output), "%s/dbg_unparsed", directory);
     snprintf(errors, sizeof(errors), "%s/dbg_unparsed.err", directory);
     static const char text[] = "int main(void)\n{\n    return 0;\n}\n";
-    char* arguments[] = { (char*)"-g", (char*)"-o", output, source, (char*)"-l", 0 };
+    char* arguments[] = { (char*)"/proc/self/exe", (char*)"-g", (char*)"-o", output, source, (char*)"-l", 0 };
     const bool written = foreign_test_write(source, text, sizeof(text) - 1);
-    const pid_t child = written ? fork() : -1;
-    if (child == 0)
-    {
-        const int file = open(errors, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        const int status = file >= 0 && dup2(file, 2) == 2 ? run_check_command((int)BUSTER_ARRAY_LENGTH(arguments) - 1, arguments, true) : 127;
-        _exit(status);
-    }
-    int status = 0;
-    pid_t waited = child;
-    while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
-    {
-    }
-    const String8 message = child > 0 && waited == child ? foreign_test_read(arena, errors) : (String8){ 0 };
-    check_debug_test_expect(tally, child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 1 && message.pointer != 0 &&
-                                       strstr(message.pointer, "usage: compiler") != 0,
-                            "this unit's driver refuses a link with -g whose options fail before they're parsed, with the usage message", errors);
-}
-
-// A link by the executable's default command (/proc/self/exe, which sends one with -g to this unit) in a child whose
-// address space RLIMIT_AS bounds at `limit` bytes: whether it succeeded.
-static bool check_debug_test_limited(char* const* arguments, uint64_t limit)
-{
-    const pid_t child = fork();
-    if (child == 0)
-    {
-        const struct rlimit space = { .rlim_cur = limit, .rlim_max = limit };
-        const int null = open("/dev/null", O_WRONLY);
-        if (null >= 0 && dup2(null, 1) == 1 && dup2(null, 2) == 2 && setrlimit(RLIMIT_AS, &space) == 0)
-        {
-            execv("/proc/self/exe", arguments);
-        }
-        _exit(127);
-    }
-    int status = 0;
-    pid_t waited = child;
-    while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
-    {
-    }
-    return child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
-}
-
-// -g's link takes no more address space than the link without it (#426's review): the checker's unit hands it back to
-// main_command, which runs it in this unit, once its own arenas, 192 GiB of reservations, are released. The least
-// RLIMIT_AS a program's link without -g fits, found by halves to 4 GiB below the hard limit (or 64 TiB), and its link
-// with -g under 64 GiB more.
-static void check_debug_test_address_space(CheckDebugTestTally* tally, const char* directory)
-{
-    char source[PATH_MAX];
-    char output[PATH_MAX];
-    snprintf(source, sizeof(source), "%s/dbg_space.c", directory);
-    snprintf(output, sizeof(output), "%s/dbg_space", directory);
-    static const char text[] = "int dbg_space_square(int x)\n{\n    return x * x;\n}\n\nint main(void)\n{\n    return dbg_space_square(3) - 9;\n}\n";
-    char* plain[] = { (char*)"/proc/self/exe", (char*)"-o", output, source, 0 };
-    char* debug[] = { (char*)"/proc/self/exe", (char*)"-g", (char*)"-o", output, source, 0 };
-    struct rlimit space;
-    const uint64_t most = UINT64_C(1) << 46;
-    const uint64_t top = getrlimit(RLIMIT_AS, &space) == 0 && space.rlim_max != RLIM_INFINITY && space.rlim_max < most ? space.rlim_max : most;
-    const bool fits = foreign_test_write(source, text, sizeof(text) - 1) && check_debug_test_limited(plain, top);
-    check_debug_test_expect(tally, fits, "link a program without -g", source);
-    uint64_t low = UINT64_C(1) << 30;
-    uint64_t high = top;
-    while (fits && high - low > (UINT64_C(4) << 30))
-    {
-        const uint64_t middle = low + (high - low) / 2;
-        if (check_debug_test_limited(plain, middle))
-        {
-            high = middle;
-        }
-        else
-        {
-            low = middle;
-        }
-    }
-    const uint64_t limit = high + (UINT64_C(64) << 30);
-    char detail[PATH_MAX + 64];
-    snprintf(detail, sizeof(detail), "%s, %llu GiB", source, (unsigned long long)(limit >> 30));
-    check_debug_test_expect(tally, !fits || (limit <= top && check_debug_test_limited(debug, limit)), "link it with -g in 64 GiB more address space than it takes without",
-                            detail);
+    const int status = written ? object_test_run(arguments, "/dev/null", errors) : -1;
+    const String8 message = written ? foreign_test_read(arena, errors) : (String8){ 0 };
+    check_debug_test_expect(tally, status == 1 && message.pointer != 0 && strstr(message.pointer, "usage: compiler") != 0,
+                            "the driver refuses a link with -g whose options fail before they're parsed, with the usage message", errors);
 }
 
 static int run_check_debug_tests(int argc, char** argv)
@@ -1081,7 +1027,6 @@ static int run_check_debug_tests(int argc, char** argv)
         check_debug_test_sources(&tally, directory, programs);
         check_debug_test_empty(&tally, directory);
         check_debug_test_unparsed(&tally, directory, &arena);
-        check_debug_test_address_space(&tally, directory);
         if (cross_check)
         {
             check_debug_test_driver(&tally, directory, &arena);

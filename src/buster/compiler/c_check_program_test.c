@@ -246,7 +246,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
                     input.report_count, stream.report_count, initializers.status, data.status, program.status, program.token);
         }
         CheckProgramLowered lower[2] = { 0 };
-        bool lowered = ready && check_program_lower(lower, &program, true, false, &output, &scratch) && check_program_lower(lower + 1, &program, false, false, &output, &scratch);
+        bool lowered = ready && check_program_lower(lower, &program, true, &output, &scratch) && check_program_lower(lower + 1, &program, false, &output, &scratch);
         snprintf(description, sizeof(description), "%s: both unit ABI batches lower to valid Tier0 functions", name);
         check_test_expect(test, lowered, description);
         if (ready && !lowered)
@@ -355,7 +355,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
-                const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, false, &output, &scratch);
+                const bool lowered_ok = check_program_lower(&lowered, &program, path == 0, &output, &scratch);
                 snprintf(description, sizeof(description), "%s: typed program support is independent of current Tier0 machine classes", name);
                 check_test_expect(test, lowered_ok == machine && lowered.status == (machine ? CHECK_PROGRAM_OK : CHECK_PROGRAM_UNSUPPORTED), description);
                 if (!lowered_ok)
@@ -373,7 +373,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     check_test_expect(test, !failed_ok && failed.status == CHECK_PROGRAM_RESOURCE && failed.controls == 0 && failed.bodies == 0 &&
                                            empty.length == 17 && scratch.length == 0, "program output exhaustion is atomic and preserves live prefixes");
                     CheckProgramLowered failed_lower = { 0 };
-                    const bool failed_lower_ok = check_program_lower(&failed_lower, &program, path == 0, false, &empty, &scratch);
+                    const bool failed_lower_ok = check_program_lower(&failed_lower, &program, path == 0, &empty, &scratch);
                     check_test_expect(test, !failed_lower_ok && failed_lower.status == CHECK_PROGRAM_RESOURCE && failed_lower.functions == 0 &&
                                            empty.length == 17 && scratch.length == 0, "unit ABI/lowering exhaustion is atomic");
                     CheckProgramCode failed_code = { 0 };
@@ -419,7 +419,7 @@ static void check_test_program_refused(CheckTest* test)
         const CheckProgram program = { .status = CHECK_PROGRAM_INVALID };
         CheckProgramLowered lowered = { 0 };
         const bool ready = output.base != 0 && scratch.base != 0;
-        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, false, &output, &scratch);
+        const bool lowered_ok = ready && check_program_lower(&lowered, &program, path == 0, &output, &scratch);
         check_test_expect(test, ready && !lowered_ok && lowered.status == CHECK_PROGRAM_INVALID && lowered.functions == 0 && output.length == 0 && scratch.length == 0,
                           "a refused program without its stream or input lowers to nothing");
     }

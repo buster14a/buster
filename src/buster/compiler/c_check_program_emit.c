@@ -123,6 +123,42 @@ static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names,
     return result;
 }
 
+// The raw rows' room (CheckProgramRows): each body's entries, its prologue's and its epilogue's. A program whose
+// selection kept no function has none, an empty set of rows (a unit of no functions to debug.c), not a failure. Only -g
+// reaches it, out of line so that the plain emission carries none of it.
+static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgramRows* rows, uint64_t entries, uint32_t count, Arena* output)
+{
+    const uint64_t capacity = entries + 2 * (uint64_t)count;
+    const bool fits = capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK;
+    *rows = (CheckProgramRows){ .capacity = fits ? (uint32_t)capacity : 0 };
+    rows->offsets = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+    rows->tokens = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+    rows->first = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+}
+
+// Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
+// record count's offset is the end. Only -g reaches it, out of line as the rows' room is.
+static __attribute__((noinline)) void check_program_emit_body_rows(CheckProgramRows* rows, const CheckProgram* program, const Parser* parser,
+                                                                   const uint32_t* tokens, const Tier0Code* code, uint32_t b, uint32_t* offsets, uint32_t length,
+                                                                   bool scalar)
+{
+    offsets[code->count] = length;
+    const uint32_t declaration = program->bodies[b].declaration;
+    const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
+    rows->first[b] = rows->count;
+    rows->counts[b] = scalar ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
+                                                        rows->offsets + rows->count, rows->tokens + rows->count) :
+                               check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
+                                                rows->offsets + rows->count, rows->tokens + rows->count);
+    rows->sizes[b] = length;
+    rows->bodies[b] = offsets[code->entry_records[0]];
+    rows->count += rows->counts[b];
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
 // `rows`, each source body's raw source rows too (c_check_debug.c), from `output`.
@@ -143,7 +179,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     if (valid)
     {
-        valid = check_program_lower(&result->lowered, program, scalar, rows != NULL, output, scratch);
+        valid = rows != NULL ? check_program_lower_sources(&result->lowered, program, scalar, output, scratch) :
+                               check_program_lower(&result->lowered, program, scalar, output, scratch);
         if (!valid)
         {
             result->status = result->lowered.status;
@@ -308,20 +345,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->token = program->bodies[b].declaration;
         }
     }
-    // The raw rows' room: each body's entries, its prologue's and its epilogue's. A program whose selection kept no
-    // function has none, an empty set of rows (a unit of no functions to debug.c), not a failure.
-    const uint64_t row_capacity = result->lowered.entries + 2 * (uint64_t)count;
-    if (rows != NULL)
+    // A failure before the rows' room leaves `rows` to the failure's reset below.
+    if (valid && rows != NULL)
     {
-        const bool fits = valid && row_capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK;
-        *rows = (CheckProgramRows){ .capacity = fits ? (uint32_t)row_capacity : 0 };
-        rows->offsets = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
-        rows->tokens = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
-        rows->first = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-        valid = valid && rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+        valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
     }
     const CheckProgramHelpers* helpers = &result->lowered.helpers;
     for (uint32_t h = 0; valid && h < helpers->count; h += 1)
@@ -537,19 +564,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             valid = length >= 0;
             if (valid && source_body && rows != NULL)
             {
-                // Where each entry's code starts, now that the branches are sized: the record count's offset is the end.
-                offsets[code->count] = (uint32_t)length;
-                const uint32_t* tokens = result->lowered.entry_tokens[b];
-                const uint32_t declaration = program->bodies[b].declaration;
-                const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
-                rows->first[b] = rows->count;
-                rows->counts[b] = scalar ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, (uint32_t)length, declaration, closing,
-                                                                    rows->offsets + rows->count, rows->tokens + rows->count) :
-                                           check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, (uint32_t)length, declaration, closing,
-                                                            rows->offsets + rows->count, rows->tokens + rows->count);
-                rows->sizes[b] = (uint32_t)length;
-                rows->bodies[b] = offsets[code->entry_records[0]];
-                rows->count += rows->counts[b];
+                check_program_emit_body_rows(rows, program, parser, result->lowered.entry_tokens[b], code, b, offsets, (uint32_t)length, scalar);
             }
             if (valid)
             {
