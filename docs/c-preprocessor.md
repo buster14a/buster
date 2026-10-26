@@ -2524,6 +2524,38 @@ change measurably. The first measurement found no gain in time:
 `sqlite3.c`'s 254 templates had crossed into a huge page, which the kernel
 cleared whole, 2 MB per run. They take base pages now.
 
+Its second step is templates for `##` and `#` ("Templates with `##` and `#`"
+in "The main loop", #473, [the
+record](https://github.com/buster14a/buster-performance/blob/f16d287cec2512ea15e3010c196f9add9ac4b4ee/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md)).
+On `sqlite3.c`, 3,522 of the 7,051 invocations that went through the
+invocation stack take them; of the 3,529 left, 3,490 have arguments expanded
+first (math.h's declarations). Against main at `dd982df`, with the history
+deferred:
+
+| | main | with the templates for `##` and `#` |
+| --- | ---: | ---: |
+| `sqlite3.c`, directive tables and main loop | 4.767-4.775 ms | 4.761-4.882 ms |
+| `sqlite3.c`, main loop | 4.432-4.439 ms | 4.427-4.538 ms |
+| `sqlite3.c`, instructions/input token | 106.56 | 105.21 |
+| `main.c`, main loop | 20.983-21.018 ms | 20.583-20.829 ms |
+| `main.c`, instructions/input token | 283.95 | 278.15 |
+
+`sqlite3.c`'s time doesn't change measurably, and `main.c`'s main loop takes
+about 0.3 ms less. With the history recorded, which takes the old paths, the
+main loop takes up to 0.07 ms more (5.350-5.411 against 5.421-5.428 ms). As
+whole processes, `-E` and `parse` of `sqlite3.c` don't change, with 240-290 KB
+more peak resident set and 4 or 5 more page faults (more templates, of 272
+bytes rather than 260). `-fsyntax-only` takes 0.2-0.5 ms more
+(147.436-147.585 against 147.680-148.096 ms): its user instructions fall by
+1.7 million and its user cycles rise by 0.4%, in checker code that is the same
+in both binaries but starts at other places in its cache lines. On the PR's
+first head, shifting the checker's unit 32 bytes back to main's offsets took
+about 60% of that difference back.
+
+The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
+4.77 ms. The next piece is the arguments expanded before substitution, and the
+rest needs #149 or another budget.
+
 ## Assembly output spacing
 
 In `-x assembler-with-cpp` mode, the lexer splits `$` from names and
