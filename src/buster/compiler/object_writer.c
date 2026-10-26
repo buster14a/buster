@@ -106,8 +106,10 @@ typedef enum ObjectError
 #define BUSTER_OBJECT_DEBUG_SECTIONS 5
 #define BUSTER_OBJECT_DEBUG_FIELDS 4
 #define BUSTER_OBJECT_DEBUG_INFO 0
+#define BUSTER_OBJECT_DEBUG_ABBREV 1
 #define BUSTER_OBJECT_DEBUG_LINE 2
 #define BUSTER_OBJECT_DEBUG_ADDR 3
+#define BUSTER_OBJECT_DEBUG_RNGLISTS 4
 
 // The DWARF of the unit's functions (#395), as debug.c writes it before final layout, in units, as ExecutableDebug takes
 // them: each section's slice the units' contributions one after another, each unit after the first written at its
@@ -124,8 +126,9 @@ typedef enum ObjectError
 //     definition's address, which no other definition of its name takes over.
 // Those fields hold zero in the object, where the relocations put their values. The functions are ordinary ones
 // (BUSTER_LINK_SYMBOL_FUNCTION) the unit defines in TEXT atoms: object_build refuses a descriptor that isn't the unit's,
-// or whose fields, addresses or line addresses aren't where debug.c puts them, with OBJECT_ERROR_DEBUG. The caller
-// keeps the slices and columns alive and unchanged through object_build.
+// whose headers aren't debug.c's, or whose fields, addresses or line addresses aren't where debug.c puts them, with
+// OBJECT_ERROR_DEBUG (object_debug_valid has the checks). The caller keeps the slices and columns alive and unchanged
+// through object_build.
 typedef struct ObjectDebug ObjectDebug;
 struct ObjectDebug
 {
@@ -969,14 +972,87 @@ static bool object_debug_absent(const ObjectDebug* debug)
     return absent;
 }
 
-// Whether the unit's entry of ObjectOptions.debug is the DWARF of its functions as ObjectDebug describes it: the slices not
-// empty and within DWARF32's offsets; the units' function counts adding up to the functions; each unit's .debug_info
-// contribution (its unit_length, and as many bytes) holding its four fields in order, the abbreviation offset's 8 bytes
-// in, each holding an offset at most its section's size; each unit's .debug_addr contribution its header (unit_length
-// 4 + 8n, DWARF 5, 8-byte addresses, no segment selector) and its addresses, the contributions filling both slices; the
-// line addresses ascending, each a DW_LNE_set_address operand inside .debug_line; and each function an ordinary function
-// the unit defines in a TEXT atom, at an offset inside it. The format is debug.c's: these bounds keep a malformed
-// descriptor's relocations inside its sections and on the unit's definitions.
+// A LEB128 at `*at` in `bytes`, before `end`: its value's low 64 bits into `*value`, and `*at` past it; false if it runs
+// to `end`.
+static bool object_debug_leb(const uint8_t* bytes, uint64_t end, uint64_t* at, uint64_t* value)
+{
+    uint64_t result = 0;
+    uint32_t shift = 0;
+    bool more = true;
+    bool valid = true;
+    while (valid && more)
+    {
+        valid = *at < end;
+        const uint8_t byte = valid ? bytes[*at] : 0;
+        result |= valid && shift < 64 ? (uint64_t)(byte & 0x7f) << shift : 0;
+        more = (byte & 0x80) != 0;
+        *at += valid ? 1 : 0;
+        shift += 7;
+    }
+    *value = result;
+    return valid;
+}
+
+// The end of the abbreviation table at `at` in .debug_abbrev: its declarations (a code, a tag, a children byte, then
+// attribute and form pairs to a pair of zeros, an implicit constant's value after its form) to the zero code that ends
+// it; or 0 if one runs past the slice.
+static uint64_t object_debug_abbreviations_end(String8 abbreviations, uint64_t at)
+{
+    const uint8_t* bytes = (const uint8_t*)abbreviations.pointer;
+    const uint64_t end = abbreviations.length;
+    uint64_t code = 1;
+    bool valid = true;
+    while (valid && code != 0)
+    {
+        valid = object_debug_leb(bytes, end, &at, &code);
+        uint64_t tag = 0;
+        valid = valid && (code == 0 || (object_debug_leb(bytes, end, &at, &tag) && at < end));
+        at += valid && code != 0 ? 1 : 0;
+        uint64_t name = code != 0 ? 1 : 0;
+        uint64_t form = name;
+        while (valid && (name != 0 || form != 0))
+        {
+            uint64_t constant = 0;
+            valid = object_debug_leb(bytes, end, &at, &name) && object_debug_leb(bytes, end, &at, &form) &&
+                    (form != 0x21 || object_debug_leb(bytes, end, &at, &constant));
+        }
+    }
+    return valid ? at : 0;
+}
+
+// A unit's contribution with a 4-byte unit_length at `at` in `section`, with `header` more bytes of its header in it:
+// whether its version (2 bytes) is 5, its address size 8 and its segment selector size 0, and its end into `*end`.
+static bool object_debug_contribution(String8 section, uint64_t at, uint32_t header, uint64_t* end)
+{
+    uint32_t length = 0;
+    uint16_t version = 0;
+    bool valid = at <= section.length && section.length - at >= 4 + (uint64_t)header;
+    if (valid)
+    {
+        memcpy(&length, section.pointer + at, 4);
+        memcpy(&version, section.pointer + at + 4, 2);
+        valid = length >= header && length <= section.length - at - 4 && version == 5 && section.pointer[at + 6] == 8 && section.pointer[at + 7] == 0;
+        *end = at + 4 + length;
+    }
+    return valid;
+}
+
+// Whether the unit's entry of ObjectOptions.debug is the DWARF of its functions as debug.c writes it: the slices not
+// empty and within DWARF32's offsets; the units' function counts adding up to the functions; each unit's contributions,
+// one after another in each section and filling it:
+//   - .debug_info's, by its unit_length, its header DWARF 5, DW_UT_compile and 8-byte addresses, holding its four fields
+//     in order, the abbreviation offset's 8 bytes in, each the place of the unit's own contribution to the section it
+//     points into: its abbreviation table's start, its line program's, its address table's past its 8-byte header and
+//     its range lists' past their 12-byte header;
+//   - its abbreviation table, read declaration by declaration to its zero code;
+//   - its line program and range lists, by their unit_lengths, their headers DWARF 5 with 8-byte addresses and no
+//     segment selector, and the range lists' without offset entries;
+//   - .debug_addr's, its header (unit_length 4 + 8n, DWARF 5, 8-byte addresses, no segment selector) and its addresses;
+// the line addresses ascending, each a DW_LNE_set_address operand inside .debug_line; and each function an ordinary
+// function the unit defines in a TEXT atom, at an offset inside it. These checks hold a descriptor to the layout
+// debug.c writes, its headers and its contributions' places, which keeps a malformed one's relocations inside its
+// sections, at its own contributions and on the unit's definitions; they don't decode the DIEs, the line programs'
+// opcodes or the range lists' entries.
 static bool object_debug_valid(const ObjectBuilder* builder)
 {
     const ObjectDebug* debug = builder->debug;
@@ -991,24 +1067,43 @@ static bool object_debug_valid(const ObjectBuilder* builder)
              debug->fields != 0;
     const String8 infos = debug->sections[BUSTER_OBJECT_DEBUG_INFO];
     const String8 addresses = debug->sections[BUSTER_OBJECT_DEBUG_ADDR];
+    const String8 line = debug->sections[BUSTER_OBJECT_DEBUG_LINE];
     uint64_t functions = 0;
     uint64_t info = 0;
+    uint64_t abbreviations = 0;
+    uint64_t lines = 0;
     uint64_t addr = 0;
+    uint64_t ranges = 0;
     for (uint32_t unit = 0; valid && unit < units; unit += 1)
     {
         const uint64_t count = object_debug_unit_functions(debug, unit);
         uint32_t info_length = 0;
         uint32_t addr_length = 0;
         uint16_t version = 0;
-        valid = info + 4 <= infos.length && addr + 8 + 8 * count <= addresses.length;
+        valid = info <= infos.length && infos.length - info >= 8 && addr + 8 + 8 * count <= addresses.length;
         if (valid)
         {
             memcpy(&info_length, infos.pointer + info, 4);
             memcpy(&addr_length, addresses.pointer + addr, 4);
             memcpy(&version, addresses.pointer + addr + 4, 2);
-            valid = info_length <= infos.length - info - 4 && addr_length == 4 + 8 * count && version == 5 && addresses.pointer[addr + 6] == 8 &&
+            valid = info_length >= 4 && info_length <= infos.length - info - 4 && addr_length == 4 + 8 * count && version == 5 && addresses.pointer[addr + 6] == 8 &&
                     addresses.pointer[addr + 7] == 0;
+            memcpy(&version, infos.pointer + info + 4, 2);
+            valid = valid && version == 5 && infos.pointer[info + 6] == 1 && infos.pointer[info + 7] == 8;
         }
+        // The unit's other contributions: where each starts and ends.
+        const uint64_t abbreviations_end = valid ? object_debug_abbreviations_end(debug->sections[BUSTER_OBJECT_DEBUG_ABBREV], abbreviations) : 0;
+        uint64_t lines_end = 0;
+        uint64_t ranges_end = 0;
+        uint32_t offsets = 1;
+        valid = valid && abbreviations_end != 0 && object_debug_contribution(line, lines, 4, &lines_end) &&
+                object_debug_contribution(debug->sections[BUSTER_OBJECT_DEBUG_RNGLISTS], ranges, 8, &ranges_end);
+        if (valid)
+        {
+            memcpy(&offsets, debug->sections[BUSTER_OBJECT_DEBUG_RNGLISTS].pointer + ranges + 8, 4);
+            valid = offsets == 0;
+        }
+        const uint64_t expected[BUSTER_OBJECT_DEBUG_FIELDS] = { abbreviations, lines, addr + 8, ranges + 12 };
         const uint64_t end = info + 4 + info_length;
         uint64_t previous = info + 4;
         for (uint32_t field = 0; valid && field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
@@ -1018,19 +1113,20 @@ static bool object_debug_valid(const ObjectBuilder* builder)
             valid = at >= previous && at + 4 <= end && (field != 0 || at == info + 8);
             if (valid)
             {
-                // A unit without functions points its address base at the end of its address table's header, which may
-                // end the section.
                 memcpy(&value, infos.pointer + at, 4);
-                valid = value <= debug->sections[field + 1].length;
+                valid = value == expected[field];
             }
             previous = at + 4;
         }
         functions += count;
         info = end;
+        abbreviations = abbreviations_end;
+        lines = lines_end;
         addr += 8 + 8 * count;
+        ranges = ranges_end;
     }
-    valid &= functions == debug->function_count && info == infos.length && addr == addresses.length;
-    const String8 line = debug->sections[BUSTER_OBJECT_DEBUG_LINE];
+    valid &= functions == debug->function_count && info == infos.length && abbreviations == debug->sections[BUSTER_OBJECT_DEBUG_ABBREV].length &&
+             lines == line.length && addr == addresses.length && ranges == debug->sections[BUSTER_OBJECT_DEBUG_RNGLISTS].length;
     uint64_t previous_end = 0;
     for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
     {

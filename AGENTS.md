@@ -2109,8 +2109,10 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   of atoms, their bytes with the fields and address slots zero, each field an
   `R_X86_64_32` against its section's symbol with what it held, and each
   function's slot and line address an `R_X86_64_64` against its section's
-  symbol at its offset; the descriptor's bytes as they were; and 26 changed
-  descriptors, and an IFUNC's, which `object_build` refuses
+  symbol at its offset; the descriptor's bytes as they were; and 45 changed
+  descriptors (among them headers that aren't debug.c's and fields in their
+  sections' bounds but not at their units' own contributions), and an IFUNC's,
+  which `object_build` refuses
   (`OBJECT_ERROR_DEBUG`) with nothing on the arena, as it refuses another
   unit's descriptor as a unit's entry and entries one fewer than the units;
   then every unit's object of the lanes' program below, each with its own

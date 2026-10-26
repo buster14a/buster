@@ -149,11 +149,19 @@ sizes. The fields and slots hold zero in the object, as GNU as writes a RELA
 relocation's field. The caller's bytes stay unchanged, so the same unit can
 be attached to an executable too. `object_build` refuses a descriptor that
 isn't the unit's DWARF as `debug_write` writes it, with `OBJECT_ERROR_DEBUG`:
-slices missing or past DWARF32, function counts that don't add up,
-`.debug_addr` headers or unit lengths that don't match, fields out of order,
-outside their unit or past their sections, line addresses that aren't
-`DW_LNE_set_address` operands in order, and functions that aren't ordinary
-ones the unit defines in `TEXT` atoms; and entries that aren't the units'.
+slices missing or past DWARF32, function counts that don't add up, unit
+lengths that don't match, headers that aren't debug.c's (`.debug_info`'s
+DWARF 5, `DW_UT_compile` and 8-byte addresses; the line programs', the range
+lists' and `.debug_addr`'s DWARF 5, 8-byte addresses and no segment selector,
+and the range lists' no offset entries), fields out of order or outside their
+unit, a field anywhere but at its unit's own contribution to the section it
+points into (each unit's contributions follow the earlier units' in every
+section, and its abbreviation table is read to its zero code to find where the
+next starts), line addresses that aren't `DW_LNE_set_address` operands in
+order, and functions that aren't ordinary ones the unit defines in `TEXT`
+atoms; and entries that aren't the units'. It checks that layout, not the
+DIEs, the abbreviations' contents, the line programs' opcodes or the range
+lists' entries.
 `test-object-writer` writes every unit's object of a program of 25 units, each
 with its own entry (every fourth empty), by `object_write_units` on 1, 2, 3
 and 8 lanes into `object_build`'s bytes.
@@ -316,7 +324,7 @@ order, to the objects of test-link's sets and of the link made by hand, as
 one unit and as two, with and without function sections. It works each
 object's DWARF out again from the descriptor: the sections after the
 sections of atoms, their bytes with the fields and address slots zeroed, and
-every relocation. It also checks the 26 changed descriptors `object_build`
+every relocation. It also checks the 45 changed descriptors `object_build`
 must refuse, and an IFUNC's. With `--cross-check`, GNU ld, lld and mold link
 the objects of two sets into programs that run. `llvm-dwarfdump --verify`
 must pass each program's DWARF, which must be the objects' contributions
