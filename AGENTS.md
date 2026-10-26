@@ -1104,16 +1104,16 @@ there at a time, so everything takes one lock:
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
   includes, for one built as a unit of its own (`build.sh`'s `*_benchmark.c`),
-  or one that its entry in `changes`' `benchmarks` names, for one in `main.c`'s
+  or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
   units (the files that define the functions it calls); or the benchmark's own
   step. A change to `build.sh` runs every one, and so does a push to main, so
   that main has each benchmark's numbers at every commit. A new benchmark's
-  step gets an entry in `benchmarks` and an `if:` on `MEASURE`, as the others
-  have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
+  step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
+  others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
   repeated processes), which cost about 200 ms before each of 21 samples per
   case, go in a step of their own that runs where the `changes` job's output
   for the module isn't `false`: on the daily scheduled run, dispatched runs and
-  pull requests that change the module's sources (its pattern in `changes`,
+  pull requests that change the module's sources (its `changes_modules` entry,
   which no `*_test.c` matches: tests don't change what the samples measure).
   Keep the pattern to what the samples measure: a module's own decision
   campaign (#336's binding handoff) has a module of its own, not the whole
@@ -1125,6 +1125,18 @@ there at a time, so everything takes one lock:
   to main runs none of them: its pull request's run measured what it changes,
   and the full set took the job past its 10 minutes. The daily and dispatched
   runs have 25 minutes.
+- The `changes` job's selector is `tools/ci/changes.c`, with those tables:
+  the job builds it with the hosted runner's `cc`, then `--self-test` checks it
+  before it decides, and fails the job (so that `test` runs everything) when
+  its tables and the workflow disagree: an output a step reads that it doesn't
+  write, a `MEASURE` name that isn't a benchmark or a benchmark no step runs, a
+  gated step that doesn't run when changed alone, a pattern alternative or a
+  unit that names no source; or when a fixture's decision changes (docs alone,
+  `docs/performance`, `web/perf`, tests alone, the binding events' producers,
+  `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
+  locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
+  tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
+  benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
 
