@@ -1845,6 +1845,9 @@ struct CheckSourceFixture
     uint32_t standard;
     // Whether both sides check it with plain char unsigned (-funsigned-char).
     bool char_unsigned;
+    // An unsupported fixture that clang rejects, as what this can't decide: an error, or valid code whose own error comes
+    // later. Its refusal is no later than clang's first error.
+    bool undecided;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1975,6 +1978,10 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         if (!fixture->unsupported && !fixture->extension)
         {
             check_test_expect(test, rejected[p] == clang->rejected && (!rejected[p] || lines[p] == clang->line), description);
+        }
+        else if (fixture->undecided)
+        {
+            check_test_expect(test, clang->rejected && lines[p] <= clang->line, description);
         }
     }
     if (ready)
@@ -3427,11 +3434,37 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // In a body, clang checks a count before it places the hint: an error at the count's pragma when it is invalid, and
+        // at the statement only when it is valid (#480's fourth review).
         {
-            "a misplaced enumerator count refused",
+            "a misplaced enumerator count unsupported",
             "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n s += 1; return s; }\n",
             true,
-            false
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a misplaced count of a variable unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n    n++;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a misplaced unroll count of a variable unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma unroll N\n    n++;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
         },
         {
             "an enumerator unroll count after unroll(enable) refused",
@@ -3439,25 +3472,68 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
-        // #480's third review: before one loop, an error in a later pragma outranks an earlier count this doesn't
-        // evaluate, which is a hint of its category either way.
+        // #480's third and fourth reviews: before one loop, a later pragma's error is clang's first only when an earlier
+        // count is valid, and the earlier count's when it isn't (a variable, a division by zero, an enumerator of 0). A
+        // count this doesn't evaluate leaves the loop's pragmas unsupported.
         {
-            "an enumerator count before unroll(full)'s pragma refused",
+            "an enumerator count before unroll(full)'s pragma unsupported",
             "enum { N = 4 };\nint f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n    return n;\n}\n",
             true,
-            false
+            true,
+            false,
+            0,
+            false,
+            true
         },
         {
-            "an enumerator width before vectorize(disable)'s pragma refused",
+            "an enumerator width before vectorize(disable)'s pragma unsupported",
             "enum { N = 4 };\nint f(int n) {\n#pragma clang loop vectorize_width(N)\n#pragma clang loop vectorize(disable)\n    while (n--) {}\n    return n;\n}\n",
             true,
-            false
+            true,
+            false,
+            0,
+            false,
+            true
         },
         {
-            "an enumerator unroll count before another refused",
+            "an enumerator unroll count before another unsupported",
             "enum { N = 4 };\nint f(int n) {\n#pragma unroll N\n#pragma GCC diagnostic push\n#pragma unroll 4\n    while (n--) {}\n    return n;\n}\n",
             true,
-            false
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a variable's count before unroll(full)'s pragma unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a count divided by zero before unroll(full)'s pragma unsupported",
+            "void f(int n) {\n#pragma clang loop unroll_count(4 / 0)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator count of 0 before unroll(full)'s pragma unsupported",
+            "enum { N = 0 };\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
         },
         {
             "an enumerator unroll count at file scope refused",
@@ -3665,7 +3741,7 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {
         const CheckSourceFixture* fixture = i < BUSTER_ARRAY_LENGTH(fixtures) ? &fixtures[i] : &random_fixtures[i - BUSTER_ARRAY_LENGTH(fixtures)];
-        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && !fixture->unsupported && !fixture->extension), "source fixture expectation differs from clang");
+        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && (!fixture->unsupported || fixture->undecided) && !fixture->extension), "source fixture expectation differs from clang");
         check_test_source(test, fixture, paths[i], &outcomes[i]);
     }
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
