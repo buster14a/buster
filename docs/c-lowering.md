@@ -347,3 +347,50 @@ name.
 
 [The planner's qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the planner's original synthetic measurements.
+
+### Whole-unit passes after checking (#442)
+
+[#442](https://github.com/buster14a/buster/issues/442) attributed that rest, on
+the same harness split by stage, with profiles and ablations of #418
+([the record](https://github.com/buster14a/buster-performance/tree/3918dc06a3ea00780da7942e2aca615fb48c7c7a/docs/measurements/lowering-scans-442-2026-10-26)).
+**It was measured in a cloud VM on an Intel Xeon, not the 9700X**; its scripts
+make the 9700X's record, which is still to be made. The path's time after
+checking went mostly to passes over every token of the unit, most of them its
+headers', which predate #418: the selection's loop for declarations and its
+numbering of the needed objects over every object, the emission's three loops,
+the lowering's loop, and `abi_initialize` clearing the ABI table's columns for
+the type table's whole room, which the checker sizes at four times the unit's
+tokens. #418's excess grew with the tokens there: its selection's isn't its new
+edges (an ablation without them is no faster), but the per-token loop's code,
+and about two thirds of its emission's is `c_check_program_emit.c`'s (an
+ablation with main's file takes it back).
+
+So the selection, the emission and the lowering visit the tokens that declare
+(and for the lowering, that start an initializer), which
+`check_program_declaring` gives 16 at a time with a register compress; the
+selection counts and numbers its needed objects 64 at a time
+(`check_program_needed_count`, `check_program_needed_number`); each has an exact
+scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
+ABI table has rows for its type table's types alone (`abi_initialize_types`):
+the lowering makes no type. Whether a unit makes a name rides the existing pass
+over the symbols, and of the names a unit gives, only asm labels with a `.` go
+in the made names' table, since every made name has one and no identifier does.
+Every c-testsuite object, by both paths, is byte for byte what main wrote before.
+
+On that host, c-testsuite's 220 programs, each file's least run minimum over 6
+rounds of 101 passes, summed:
+
+| | Main before #418 | #418's merge | Main at `7e3782a` | #442 |
+| --- | ---: | ---: | ---: | ---: |
+| All 220 (ns) | 4,310,181 | +4.9% | +4.9% | −25.5% |
+| The 216 whose output #418 kept | 3,977,392 | +4.5% | +4.1% | −25.2% |
+| The 4 whose output #418 changed | 332,789 | +9.4% | +14.2% | −28.8% |
+| Under 300 tokens (154) | 907,551 | +4.3% | +6.4% | +4.0% |
+| 3,000 tokens or more (46) | 2,843,942 | +5.2% | +5.0% | −32.7% |
+
+A second host repeated it (−24.8% in all, +1.7% under 300 tokens). The smallest
+units, which have few tokens to skip, keep a fixed cost: chiefly the ABI
+classification of the 64 builtin types on every lowering, whose rows are the
+same for every unit of a configuration but would need state that `main.c`'s
+units share to cache. These are the post-checking path's times, not the whole
+compiler's, and not what the selection saves against `--lower-all`.
