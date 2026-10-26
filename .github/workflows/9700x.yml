@@ -259,7 +259,7 @@ jobs:
                       case "${step##*/}" in
                           Check-out-pinned-branch-sizing-measurement-harnesses|Benchmark-branch-sizing) branch_sizing=true ;;
                       esac
-                      gates=$(grep -ohE "needs\.changes\.outputs\.[a-z_]+ != 'false'" "$step" | sed -E 's/^needs\.changes\.outputs\.([a-z_]+).*/\1/' || true)
+                      gates=$(grep -ohE "needs\.changes\.outputs\.[a-z0-9_]+ != 'false'" "$step" | sed -E 's/^needs\.changes\.outputs\.([a-z0-9_]+).*/\1/' || true)
                       for gate in $gates; do
                           case "$gate" in
                               baselines) baselines=true ;;
