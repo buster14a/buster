@@ -463,6 +463,8 @@ int run_backend_benchmark(int argc, char** argv);
 // semantic identity test checks units through c_check_corpus.c's paths.
 #if BUSTER_PARSE_FRAGMENT_SINK
 #include "buster/compiler/c_fragments_test.c"
+// #107's measurement, benchmark-parser --expressions: the four paths from tokens to the checker's results.
+#include "buster/compiler/c_check_fragments_benchmark.c"
 #endif
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
@@ -652,6 +654,12 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS) && argc >= 2 && strcmp(argv[1], "test-fragments") == 0)
     {
         result = run_fragment_tests(argc - 2, argv + 2);
+    }
+    // benchmark-parser --expressions, #107's four paths: the fragments' unit's, since only it has the sink. The fragments'
+    // unit is asked before the driver's, whose benchmark-parser takes every other form.
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0 && check_fragments_benchmark_requested(argc - 2, argv + 2))
+    {
+        result = run_fragment_benchmark(argc - 2, argv + 2);
     }
 #endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
