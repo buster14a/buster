@@ -2707,8 +2707,18 @@ round, as it joins `libc_nonshared.a`'s:
 - **`libgcc_s.so.1`,** which the driver names as needed, isn't linked. Of the
   names `libgcc.a`'s members refer to that neither it nor libc defines, it has
   the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`), which only the
-  split-stack members (`morestack.o`) refer to: a PIE that joins them is
-  refused, naming the first, and a shared library leaves them to the loader.
+  split-stack member (`morestack.o`) refers to: split-stack code
+  (`-fsplit-stack`, whose prologues call `__morestack`) and its API
+  (`__splitstack_getcontext`) make it join. A PIE and a shared library that
+  join it are refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong reference
+  to a name nothing defines that only the members which joined refer to,
+  naming the first such member), where the shared library left the names to
+  the loader, as `-shared` leaves a program's own: it would load only beside
+  a library that defines them. GCC's and lld's links of such a library need
+  `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc but not
+  `libgcc_s.so.1` doesn't load into a process without it ("undefined symbol:
+  __gcc_personality_v0"). Linking it as needed, its exports a third library
+  of the snapshot's after `libc.so.6` and the loader, is #489.
 - **Hidden helpers.** The integer and binary floating helpers are hidden, so a
   shared library exports none of them. Only the decimal floating-point and
   split-stack members define names with default visibility, which GNU ld and
@@ -2721,18 +2731,73 @@ round, as it joins `libc_nonshared.a`'s:
   calls `__fixunsdfti`, so a program that called both failed. Such a symbol
   now has source `RUNTIME_ARCHIVE` (`bind_resolve_symbol`), as one that
   `crtendS.o` defines when it joins has.
+- **One round's members.** Two members that join in one round can refer to a
+  name that neither defines and that binding hasn't reached: the first one's
+  join adds its symbol, which the next round binds, and the second one's took
+  that for a weak reference left to nothing. `memset` (of the `_BitInt` and
+  decimal floating conversions), `__sfp_handle_exceptions` (of the
+  `__float128` helpers) and the decimal floating point's thread-local flags
+  (`__bid_IDEC_glbflags`) failed 32 of the 300 members' links so. `bind_merge`
+  takes a symbol of source NONE for one so only below `Bind.resolved`, the end
+  of the symbols binding has bound.
+- **The room.** The room a link reserves for the runtime counted every member
+  (`bind_capacity`): 2,063 symbols for a PIE's runtime, against 51 before
+  `libgcc.a`. The C driver's links count only the crt objects and the members
+  that their names may make join (`bind_capacity_needed`): the closure of the
+  members that define the names the unit refers to without defining them (its
+  symbols with linkage, and the runtime functions its lowering calls) and the
+  crt objects' references, over the members' references
+  (`Runtime.reference_members`), since a member joins only for a strong
+  reference to a name it defines. A name that the link defines or a library
+  exports counts a member that doesn't join. A link of one member's name
+  needs 72 symbols of room on average, and 266 at most.
+- **The overrides.** `bind_begin`'s room for the runtime's definitions that
+  take the program's over was one per global name, 3,387 of 12 bytes with
+  `libgcc.a`'s names, which put the arrays after it past the 64 KB of base
+  pages the C driver's arena starts with: clearing `Bind.symbols` then faulted
+  and cleared a 2 MB huge page in every link. Only the program's own
+  definitions can be taken over, in `bind_begin`'s joins, so the room is the
+  fewer of the global names and the link's symbols then, pushed last.
+
+**The cost**, on the 9700X against main (ff8936be), two rounds each, main's and
+the branch's in turn ([the
+record](https://github.com/buster14a/buster-performance/tree/0c80bfaaac18e96b40aebeec78ef7c9a63455dbb/docs/measurements/libgcc-483-2026-10-26)):
+the dynamic runtime's snapshot grew from 197,828 bytes to 3,281,015 (302
+members, 3,387 global names), and `runtime_open` from 9.9 us to 11.7 us (the
+directory's hash 3.2 to 4.65 us, and `libgcc.a`'s probe). The direct path's
+link of one worker as a PIE took 24.6 us against 19.7, open and `bind_begin`
+4.9 us of it: `bind_begin` takes 3 us more, 5 us for 102,400 workers, as it
+reads the crt objects' records at the starts of columns that now span 302
+pieces, a page of the mapping each. That stays constant in a program's size: 2,000
+workers' PIE 144.1 us against 139.0, and the larger links' differences are
+within their writes' rounds. The C driver compiling and linking a hello world
+took 2.349 ms against 2.329 (+0.9%), its peak resident set 31,768 KB against
+31,196 and 574 minor faults against 560; before the overrides' bound it took
+2.433 ms and 33,844 KB. The direct path couldn't link a 128-bit integer's
+division or a complex product without `libgcc.a` at all, so the constant is the
+price of linking them; laying the crt objects' records out apart from the
+members' would take back most of `bind_begin`'s part.
 
 `test-import` checks the archives' order, `__udivti3` a member's of
 `libgcc.a` and its names apart from `libc.so.6`'s and the loader's exports;
 `test-bind`'s libgcc program calls `__udivti3`, `__fixunsdfti` and
 `__fixdfti` through references of source NONE, as the C driver's are, and
 must join exactly their three members (with `--cross-check`, ld.lld's and
-ld.bfd's links of it run, and lld extracts the same members); `test-dynamic`
-writes it as a PIE among its cases, and links a shared library whose code,
-cc's, calls seven of `libgcc.a`'s functions; and `test-checker-driver
---executable` compiles and links a C program of 128-bit division and
-conversions by both paths into the same bytes, which needs `libc.so.6` alone
-and prints what the test's own code computes.
+ld.bfd's links of it run, and lld extracts the same members). Its room check
+binds, against a PIE's runtime and a shared library's, a link of each
+member's first name that no library exports, which must bind (or be refused
+for `morestack.o`'s unwinder) within `bind_capacity_needed`'s room for the
+name; its rules refuse references to `__morestack` and
+`__splitstack_getcontext`, and bind one beside the program's own unwinder;
+and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
+library and as a PIE, by both paths, where cc's links with GNU ld and lld
+need `libgcc_s.so.1`, load into a harness that doesn't and run.
+`test-dynamic` writes the libgcc program as a PIE among its cases, and links
+a shared library whose code, cc's, calls seven of `libgcc.a`'s functions; and
+`test-checker-driver --executable` compiles and links a C program of 128-bit
+division and conversions by both paths into the same bytes, which needs
+`libc.so.6` alone and prints what the test's own code computes, and refuses a
+call of `__splitstack_getcontext` with the one error and no executable.
 
 #### The unwind tables
 
