@@ -52,9 +52,10 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
      at a time (`c_environment_lookup_batch`), and its label head none. A
      declaration the history gives that a restore ended at or before the
      opening gives way to the latest of the name's earlier ones still active
-     (`check_deferred_visible`): a tag first named in a file-scope declarator
-     (`void g(struct S *p);`) ends with it in source order's reader, though
-     its event's depth is 0, which keeps it in the history;
+     (`check_deferred_visible`). Only a declarator that fails ends one, and its
+     unit is source order's: a tag first named in a file-scope prototype
+     (`void g(struct S *p);`) is of the prototype's scope, a level deeper than
+     the file scope the history holds (#438);
    - the table's types made after the opening are hidden
      (`TypeTable.hidden_begin`), and the top level's completions and
      transparency after it withdrawn (`type_tag_withdraw`). The withdrawals
@@ -157,7 +158,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 49 fixtures, 43 of the
+- `./build/compiler test-checker-deferred [--keep]`: 56 fixtures, 50 of the
   issue's cases and 6 of the lanes' rule, each written to a file and checked as
   `test-checker-corpus` checks one: on the scalar path, the vector path, and the
   vector path with every body read apart, on 1, 2, 3 and 8 lanes through the

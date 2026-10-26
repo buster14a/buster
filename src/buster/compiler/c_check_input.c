@@ -34,16 +34,16 @@ static const char* const check_input_messages[] =
     "object has incomplete type",
 };
 
-// The type/action tables currently describe one C LP64 model: signed plain char, 32-bit wchar_t, x87 long double
-// stored in 16 bytes, and arithmetic evaluated in its source format. Refuse preprocessing options that advertise
-// a different model before applying those fixed tables to the source.
+// The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
+// arithmetic evaluated in its source format, with plain char signed or unsigned as the options say
+// (TypeTable.char_unsigned). Refuse preprocessing options that advertise a different model before applying those fixed
+// tables to the source.
 static bool check_input_target_supported(const PPOptions* options)
 {
     const PredefinesOptions* target = &options->predefines;
     const bool source_evaluation = target->fp_eval_method == BUSTER_PREDEFINES_EVAL_SOURCE ||
                                    (target->fp_eval_method == BUSTER_PREDEFINES_EVAL_DEFAULT && predefines_eval_method(target) == 0);
-    return !options->assembly && !target->char_unsigned && !target->short_wchar &&
-           target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
+    return !options->assembly && !target->short_wchar && target->long_double == BUSTER_PREDEFINES_LONG_DOUBLE_80 && source_evaluation;
 }
 
 // CheckInputReader.enum_fixed: an enum without a fixed underlying type (or another tag), one with it whose enumerators
@@ -152,6 +152,8 @@ struct CheckInput
     uint32_t* parameter_next;
     uint32_t* control_owners;
     uint32_t* label_targets;
+    // Resolved &&label expressions, counted by check_input_controls; zero lets check_program omit its address table.
+    uint32_t label_address_count;
     uint32_t* case_ranges;
     CheckInputRegion* regions;
     uint32_t* expression_regions;
@@ -296,7 +298,10 @@ struct CheckInputReader
     CheckInputAttributes** attribute_bases;
     CheckInputAttributes* specifier_attributes;
     CheckInputAttributes* declarator_attributes;
-    uint32_t declarator_tags;
+    uint32_t declarator_declarations;
+    // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
+    // the one around it (check_input_declaration_depth).
+    uint32_t prototype_depth;
     uint8_t specifier_abi_origin;
     uint8_t declarator_abi_origin;
     uint8_t constant_abi_origin;
@@ -308,11 +313,11 @@ struct CheckInputReader
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
-    // The tags a definition's parameter list declared, which its body declares again: the first at the body's
-    // opening (written with output->body_declarations there, which says whether it was), and each one's next at its
-    // declaration token.
-    uint32_t* parameter_tags;
-    uint32_t* parameter_tag_next;
+    // The tags and enumeration constants a definition's parameter list declared besides its parameters, which its body
+    // declares again: the first at the body's opening (written with output->body_declarations there, which says whether
+    // it was), and each one's next at its declaration token.
+    uint32_t* parameter_declarations;
+    uint32_t* parameter_declaration_next;
     uint32_t* member_seen;
     uint32_t* linked_declarations;
     TypeId* linked_types;
@@ -691,6 +696,14 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     return valid ? integer : 0;
 }
 
+// The depth of the scope a declaration at the reader's position belongs to: its block's, or, in a declarator's parameter
+// list, the list's, which is a scope of its own (C11 6.2.1p4) a level deeper than the one around it. The list's
+// parameters, and the tags and enumeration constants it declares, are declared at it.
+static uint32_t check_input_declaration_depth(const CheckInputReader* reader)
+{
+    return reader->scope_count + reader->prototype_depth;
+}
+
 // Tags have their own namespace. A definition or stand-alone forward declaration hides an outer tag; an ordinary
 // reference finds the visible tag. The declaration token remains the original tag-name token when a definition
 // completes an earlier forward declaration. Body completion is handled separately by the iterative tag reader.
@@ -698,7 +711,9 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
 // it), and it may be declared without its body only by a declaration of it alone (`enum E : T;`). Its redeclarations
 // in its scope keep its base (a declaration alone, `enum E;`, too; a reference, `enum E x;`, has none), and only one
 // lists its enumerators; one without a base can't list them, nor one with a base those of an enum without one, as clang
-// has it.
+// has it. A parameter list's definition of a tag the list defined already is no error in clang, only a warning
+// (Sema::ActOnTag's warn_redefinition_in_param_list): it makes a tag of its own, which its name doesn't name, so that
+// the name goes on naming the first (`int f(struct S { int x; } a, struct S { int y; } b)`).
 static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token, uint32_t end, bool definition)
 {
     const Parser* parser = reader->parser;
@@ -722,7 +737,8 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool body = i < end && parser->tokens.kinds[i] == PARSE_KIND_L_BRACE;
         const bool forward = !attributed && i < end && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
         const uint32_t previous = name != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_TAG, name) : 0;
-        const bool same_scope = previous != 0 && reader->bindings.depth[previous - 1] == reader->scope_count;
+        const uint32_t depth = check_input_declaration_depth(reader);
+        const bool same_scope = previous != 0 && reader->bindings.depth[previous - 1] == depth;
         valid &= name != 0 || body;
         valid &= !body || definition;
         if (valid && fixed && !body && !forward)
@@ -733,7 +749,13 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         }
         const TypeId underlying = valid && fixed ? check_input_enum_underlying(reader, colon, i) : 0;
         valid &= !fixed || underlying != 0;
-        if (valid && previous != 0 && (same_scope || (!body && !forward)))
+        // A parameter list's second definition of a tag of the same kind (above): one with its enumerators listed, or
+        // complete, for an enum without a fixed underlying type and a record.
+        const TypeId defined = same_scope && body && reader->prototype_depth != 0 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
+        const uint32_t defined_tag = defined != 0 && type_kind(reader->types, defined) == kind ? reader->types->types.index[type_index(defined)] : 0;
+        const bool redefinition = defined_tag != 0 && (kind == BUSTER_TYPE_KIND_ENUM && reader->enum_fixed[defined_tag] != BUSTER_CHECK_ENUM_NONE ?
+                                                       reader->enum_fixed[defined_tag] == BUSTER_CHECK_ENUM_LISTED : type_is_complete(reader->types, defined));
+        if (valid && previous != 0 && !redefinition && (same_scope || (!body && !forward)))
         {
             const uint32_t old = reader->bindings.declaration[previous - 1];
             type = reader->declared_types[old];
@@ -753,7 +775,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         }
         else if (valid)
         {
-            type = check_input_type_result(reader, type_tag(reader->types, kind, name));
+            type = check_input_type_result(reader, type_tag(reader->types, kind, redefinition ? 0 : name));
             valid = type != 0;
             if (valid)
             {
@@ -774,7 +796,7 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             reader->declared_types[declaration] = type;
             reader->declaration_kinds[declaration] = C_BINDING_TAG_KIND;
             reader->output->declarations[declaration] = declaration;
-            if (valid && name != 0 && c_bindings_declare(&reader->bindings, C_BINDING_TAG, name, C_BINDING_TAG_KIND, declaration, i, reader->scope_count) == 0)
+            if (valid && name != 0 && !redefinition && c_bindings_declare(&reader->bindings, C_BINDING_TAG, name, C_BINDING_TAG_KIND, declaration, i, depth) == 0)
             {
                 reader->output->resource = true;
                 valid = false;
@@ -1233,8 +1255,9 @@ static CheckLiteral check_input_literal(CheckInputReader* reader, uint32_t token
     }
     else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
     {
-        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ? check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023) :
-                 check_literal_number(bytes, length, reader->scratch);
+        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ?
+                     check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned) :
+                     check_literal_number(bytes, length, reader->scratch);
     }
     reader->output->resource |= result.resource;
     arena_pop_to(reader->scratch, mark);
@@ -1353,8 +1376,9 @@ struct CheckDeclaratorPart
     uint32_t parameter_count;
     uint32_t names;
     uint32_t last_name;
-    uint32_t tags;
-    uint32_t last_tag;
+    // A function's: the tags and enumeration constants its list declared besides its parameters (names).
+    uint32_t declarations;
+    uint32_t last_declaration;
     uint64_t extent;
     uint8_t kind;
     uint8_t flags;
@@ -1411,17 +1435,83 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
     };
 }
 
-// Declarator operators are collected outwards from the identifier, then applied in reverse to the base type.
-// Group and prototype-parameter frames share one explicit stack, so neither parentheses nor nested callbacks use
-// the C call stack. A prototype's bindings are restored at its closing parenthesis; its own names, and the tags it
-// declared (reader->declarator_tags: not a nested prototype's, which its own parenthesis ended), are retained only
-// for a possible function body, whose scope is theirs too (C11 6.2.1p4). Parameter-array qualifiers belong to the
-// adjusted pointer object; the function signature contains its unqualified adjusted type. A prototype-only [*]
-// remains distinct until body activation.
-static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint32_t* cursor, uint32_t end, uint32_t* name, uint32_t* names)
+// The struct, union or enum keyword among the specifiers from `first`, before `end`, whose body follows it: a definition
+// that the reader hasn't read yet, which a declaration's, a member's or a parameter's reader reads before the specifiers
+// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none.
+static uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    uint32_t stop = *cursor;
+    uint32_t tag = first;
+    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
+           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    {
+        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+    }
+    const bool keyword = tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM);
+    const uint32_t body = keyword ? check_input_tag_body(parser, tag, end) : end;
+    return body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && reader->tag_types[tag] == 0 ? tag : BUSTER_CHECK_NONE;
+}
+
+// A declarator being read (check_input_declarator), with its frames, parts and parameters in scratch after itself:
+// what the run has made so far, and what it waits for when it stops before its end.
+typedef struct CheckDeclaratorRun CheckDeclaratorRun;
+struct CheckDeclaratorRun
+{
+    CheckDeclaratorFrame* frames;
+    CheckDeclaratorPart* parts;
+    CheckDeclaratorParameter* parameters;
+    // An array bound's evaluation that waits for a definition in it (check_input_vla_bound), or 0.
+    CheckConstantInput* bound;
+    CheckInputAttributes* attributes;
+    TypeId result;
+    // Scratch's length before the run.
+    uint64_t mark;
+    uint32_t stop;
+    uint32_t binding_mark;
+    // The reader's prototype depth at the run's start, which its end gives back.
+    uint32_t prototype_depth;
+    uint32_t depth;
+    uint32_t part_count;
+    uint32_t parameter_count;
+    // What a complete run gives check_input_declarator's caller: where it ended, its name, a definition's parameters and
+    // the tags and enumeration constants its parameter list declared besides them.
+    uint32_t cursor;
+    uint32_t name;
+    uint32_t names;
+    uint32_t declarations;
+    // The struct, union or enum keyword of a definition the run waits for, which ends before definition_end (a
+    // parameter list's or an array bound's closing token), or BUSTER_CHECK_NONE.
+    uint32_t definition;
+    uint32_t definition_end;
+    uint8_t abi_origin;
+    bool overloadable;
+    bool valid;
+};
+
+// Declarator operators are collected outwards from the identifier, then applied in reverse to the base type.
+// Group and prototype-parameter frames share one explicit stack, so neither parentheses nor nested callbacks use
+// the C call stack. A prototype's bindings are restored at its closing parenthesis; its own names, and the tags and
+// enumeration constants it declared (CheckDeclaratorRun.declarations: not a nested prototype's, which its own
+// parenthesis ended), are retained only for a possible function body, whose scope is theirs too (C11 6.2.1p4).
+// Parameter-array qualifiers belong to the adjusted pointer object; the function signature contains its unqualified
+// adjusted type. A prototype-only [*] remains distinct until body activation.
+//
+// A declarator runs in steps, since a struct, union or enum may be defined in it, in a parameter's specifiers or in an
+// array bound (`int f(struct S { int x; } s, int a[sizeof(enum E { K })])`): a step stops at each such definition
+// (CheckDeclaratorRun.definition) for its caller to read it, in source order, before the next step goes on from there.
+// A definition reads its members' declarators in runs of their own, so this needs neither recursion nor a cycle in
+// the call graph: check_input_declarator reads definitions with check_input_tag_definition, whose own stack of frames
+// reads those its members' declarators stop at. A complete run's prototypes restored their bindings at their closing
+// parentheses, and what it declared outside them, a tag that an array bound names or defines, is its scope's, as it is
+// in C (`int a[sizeof(struct V { int x; })]; struct V v;`); a run that fails restores everything it declared.
+//
+// The run begins (check_input_declarator_begin) after the caller sets reader->specifier_abi_origin and
+// reader->declarator_overloadable for it, which it takes. Returns 0, with the output's resource set, when there's no
+// room for it in scratch.
+static CheckDeclaratorRun* check_input_declarator_begin(CheckInputReader* reader, TypeId base, uint32_t cursor, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t stop = cursor;
     while (stop < end)
     {
         const uint8_t kind = parser->tokens.kinds[stop];
@@ -1444,28 +1534,56 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             stop += 1;
         }
     }
-    const uint32_t capacity = stop - *cursor + 1;
+    const uint32_t capacity = stop - cursor + 1;
     const uint64_t mark = reader->scratch->length;
-    CheckDeclaratorFrame* frames = arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorFrame), 8);
-    CheckDeclaratorPart* parts = arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorPart), 8);
-    CheckDeclaratorParameter* parameters = arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorParameter), 4);
-    bool valid = frames != 0 && parts != 0 && parameters != 0 && base != 0;
-    reader->output->resource |= frames == 0 || parts == 0 || parameters == 0;
-    const uint32_t binding_mark = c_bindings_mark(&reader->bindings);
-    uint32_t depth = 0;
-    uint32_t part_count = 0;
-    uint32_t parameter_count = 0;
-    TypeId result = 0;
-    *name = BUSTER_CHECK_NONE;
-    *names = BUSTER_CHECK_NONE;
-    reader->declarator_attributes = 0;
-    reader->declarator_tags = BUSTER_CHECK_NONE;
-    reader->declarator_abi_origin = 0;
-    if (valid)
+    CheckDeclaratorRun* run = arena_push(reader->scratch, sizeof(CheckDeclaratorRun), _Alignof(CheckDeclaratorRun));
+    CheckDeclaratorFrame* frames = run != 0 ? arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorFrame), 8) : 0;
+    CheckDeclaratorPart* parts = frames != 0 ? arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorPart), 8) : 0;
+    CheckDeclaratorParameter* parameters = parts != 0 ? arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorParameter), 4) : 0;
+    reader->output->resource |= parameters == 0;
+    if (run != 0)
     {
-        frames[depth++] = check_input_declarator_frame(base, *cursor, stop, false, false, 0, reader->specifier_abi_origin);
+        *run = (CheckDeclaratorRun)
+        {
+            .frames = frames,
+            .parts = parts,
+            .parameters = parameters,
+            .mark = mark,
+            .stop = stop,
+            .binding_mark = c_bindings_mark(&reader->bindings),
+            .prototype_depth = reader->prototype_depth,
+            .cursor = cursor,
+            .name = BUSTER_CHECK_NONE,
+            .names = BUSTER_CHECK_NONE,
+            .declarations = BUSTER_CHECK_NONE,
+            .definition = BUSTER_CHECK_NONE,
+            .definition_end = BUSTER_CHECK_NONE,
+            .overloadable = reader->declarator_overloadable,
+            .valid = parameters != 0 && base != 0,
+        };
+        if (run->valid)
+        {
+            frames[run->depth++] = check_input_declarator_frame(base, cursor, stop, false, false, 0, reader->specifier_abi_origin);
+        }
     }
-    while (valid && depth != 0)
+    reader->declarator_overloadable = false;
+    return run;
+}
+
+// Reads the run's declarator on, until it ends or fails, or stops at a definition (CheckDeclaratorRun.definition) for
+// its caller to read before the next step, which goes on from there.
+static void check_input_declarator_step(CheckInputReader* reader, CheckDeclaratorRun* run)
+{
+    const Parser* parser = reader->parser;
+    CheckDeclaratorFrame* frames = run->frames;
+    CheckDeclaratorPart* parts = run->parts;
+    CheckDeclaratorParameter* parameters = run->parameters;
+    bool valid = run->valid;
+    uint32_t depth = run->depth;
+    uint32_t part_count = run->part_count;
+    uint32_t parameter_count = run->parameter_count;
+    run->definition = BUSTER_CHECK_NONE;
+    while (valid && depth != 0 && run->definition == BUSTER_CHECK_NONE)
     {
         CheckDeclaratorFrame* frame = &frames[depth - 1];
         uint32_t i = frame->cursor;
@@ -1526,7 +1644,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     reader->ignored[i] = true;
                     reader->ignored[close] = true;
                     frame->cursor = close + 1;
-                    frames[depth++] = check_input_declarator_frame(base, i + 1, close, true, false, 0, frame->abi_origin);
+                    frames[depth++] = check_input_declarator_frame(frame->base, i + 1, close, true, false, 0, frame->abi_origin);
                     frames[depth - 1].parameter_context = frame->parameter_context;
                 }
             }
@@ -1538,28 +1656,30 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             const uint32_t close = parser->tree.parents[function->token];
             if (i == close)
             {
-                // The tags the list declared, in its order: those still active, since a nested prototype's ended at
-                // its own parenthesis.
+                // The tags and enumeration constants the list declared, in its order: those still active, since a
+                // nested prototype's ended at its own parenthesis. A struct's, union's or enum's nested in a parameter's
+                // definition are the list's too, as C has no scope of a record's.
                 for (uint32_t active = frame->binding_mark; active < reader->bindings.active_count; active += 1)
                 {
                     const uint32_t event = reader->bindings.active[active];
-                    if (reader->bindings.kind[event] == C_BINDING_TAG_KIND)
+                    if (reader->bindings.kind[event] == C_BINDING_TAG_KIND || reader->bindings.kind[event] == C_BINDING_ENUMERATOR)
                     {
-                        const uint32_t tag = reader->bindings.declaration[event];
-                        reader->parameter_tag_next[tag] = BUSTER_CHECK_NONE;
-                        if (function->last_tag != BUSTER_CHECK_NONE)
+                        const uint32_t declaration = reader->bindings.declaration[event];
+                        reader->parameter_declaration_next[declaration] = BUSTER_CHECK_NONE;
+                        if (function->last_declaration != BUSTER_CHECK_NONE)
                         {
-                            reader->parameter_tag_next[function->last_tag] = tag;
+                            reader->parameter_declaration_next[function->last_declaration] = declaration;
                         }
                         else
                         {
-                            function->tags = tag;
+                            function->declarations = declaration;
                         }
-                        function->last_tag = tag;
+                        function->last_declaration = declaration;
                     }
                 }
                 valid = c_bindings_restore(&reader->bindings, frame->binding_mark, close);
                 reader->output->resource |= !valid;
+                reader->prototype_depth -= 1;
                 for (uint32_t parameter = function->names; parameter != BUSTER_CHECK_NONE; parameter = reader->parameter_next[parameter])
                 {
                     reader->parameter_seen[parser->tokens.names[parameter]] = reader->parameter_previous[parameter];
@@ -1577,16 +1697,27 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             }
             else if (i < close)
             {
-                bool is_typedef;
-                bool is_inline;
-                uint32_t storage;
-                const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline);
-                valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
-                if (valid)
+                // A parameter whose specifiers define a struct, union or enum: the caller reads the definition first, as a
+                // declaration's own is read before its specifiers (check_input_declaration), then the parameter from here.
+                const uint32_t definition = check_input_specifier_definition(reader, i, close);
+                if (definition != BUSTER_CHECK_NONE)
                 {
-                    frames[depth++] = check_input_declarator_frame(parameter, i, close, false, true, storage, reader->specifier_abi_origin);
-                    frames[depth - 1].common_attributes = reader->specifier_attributes;
-                    valid &= !reader->specifier_thread_local;
+                    run->definition = definition;
+                    run->definition_end = close;
+                }
+                else
+                {
+                    bool is_typedef;
+                    bool is_inline;
+                    uint32_t storage;
+                    const TypeId parameter = check_input_specifiers(reader, &i, close, &is_typedef, &storage, &is_inline);
+                    valid = parameter != 0 && !is_typedef && !is_inline && (storage == 0 || storage == C_NAME_REGISTER);
+                    if (valid)
+                    {
+                        frames[depth++] = check_input_declarator_frame(parameter, i, close, false, true, storage, reader->specifier_abi_origin);
+                        frames[depth - 1].common_attributes = reader->specifier_attributes;
+                        valid &= !reader->specifier_thread_local;
+                    }
                 }
             }
             else
@@ -1631,10 +1762,13 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
             };
             if (valid)
             {
+                // A bound that defines a struct, union or enum stops the run at each definition, with its evaluation
+                // kept for the next step, which reads the bound again from here.
                 frame->star_array |= star;
-                valid = check_input_vla_bound(reader, i, bound, close, frame->parameter_context, star, &part.kind, &part.extent);
+                valid = check_input_vla_bound(reader, i, bound, close, frame->parameter_context, star, &run->bound, &run->definition, &part.kind, &part.extent);
+                run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
             }
-            if (valid)
+            if (valid && run->definition == BUSTER_CHECK_NONE)
             {
                 frame->array_qualifiers |= qualifiers;
                 if (frame->last != BUSTER_CHECK_NONE)
@@ -1673,8 +1807,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     .parameter_last = BUSTER_CHECK_NONE,
                     .names = BUSTER_CHECK_NONE,
                     .last_name = BUSTER_CHECK_NONE,
-                    .tags = BUSTER_CHECK_NONE,
-                    .last_tag = BUSTER_CHECK_NONE,
+                    .declarations = BUSTER_CHECK_NONE,
+                    .last_declaration = BUSTER_CHECK_NONE,
                     .kind = BUSTER_TYPE_KIND_FUNCTION,
                     .flags = i + 1 != close || parser->language.standard >= 2023 ? BUSTER_TYPE_FLAG_PROTOTYPE : 0,
                 };
@@ -1684,6 +1818,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 frame->state = 2;
                 frame->cursor = i + 1;
                 reader->ignored[i] = true;
+                // The list's scope, which its closing parenthesis ends.
+                reader->prototype_depth += 1;
             }
         }
         else
@@ -1747,8 +1883,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                     {
                         abi_origin = 0;
                         const bool bare = part->parameter_count == 0 && (part->flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 && parser->language.standard < 2023;
-                        const bool overloadable = reader->declarator_overloadable ||
-                                                  (check_input_overload_flags(frame->attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
+                        const bool overloadable = run->overloadable || (check_input_overload_flags(frame->attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
                         valid &= !bare || (!frame->parameter && p == first && overloadable);
                         const uint64_t parameter_mark = reader->scratch->length;
                         TypeId* parameter_types = arena_push_array(reader->scratch, (uint64_t)part->parameter_count + 1, sizeof(TypeId), 4);
@@ -1812,7 +1947,11 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                             {
                                 const uint32_t token = frame->name;
                                 const uint32_t identifier = parser->tokens.names[token];
-                                if (reader->parameter_seen[identifier] == function->token + 1)
+                                // Another parameter's name, or an enumeration constant's that the list declared, which
+                                // clang reports at the parameter (`int f(enum E { K } e, int K)`).
+                                const uint32_t visible = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+                                if (reader->parameter_seen[identifier] == function->token + 1 ||
+                                    (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader)))
                                 {
                                     check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
                                     valid = false;
@@ -1842,7 +1981,7 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                                     function->names = token;
                                 }
                                 function->last_name = token;
-                                if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_OBJECT, token, i, reader->scope_count + depth) == 0)
+                                if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, identifier, C_BINDING_OBJECT, token, i, check_input_declaration_depth(reader)) == 0)
                                 {
                                     reader->output->resource = true;
                                     valid = false;
@@ -1861,24 +2000,46 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 }
                 else if (valid)
                 {
-                    result = type;
-                    *cursor = i;
-                    *name = frame->name;
-                    *names = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION ? parts[first].names : BUSTER_CHECK_NONE;
-                    reader->declarator_attributes = frame->attributes;
-                    reader->declarator_tags = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION ? parts[first].tags : BUSTER_CHECK_NONE;
-                    reader->declarator_abi_origin = abi_origin;
+                    const bool function = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_FUNCTION;
+                    run->result = type;
+                    run->cursor = i;
+                    run->name = frame->name;
+                    run->names = function ? parts[first].names : BUSTER_CHECK_NONE;
+                    run->attributes = frame->attributes;
+                    run->declarations = function ? parts[first].declarations : BUSTER_CHECK_NONE;
+                    run->abi_origin = abi_origin;
                     depth -= 1;
                 }
             }
         }
     }
-    if (c_bindings_mark(&reader->bindings) != binding_mark && !c_bindings_restore(&reader->bindings, binding_mark, stop))
+    run->valid = valid;
+    run->depth = depth;
+    run->part_count = part_count;
+    run->parameter_count = parameter_count;
+}
+
+// The run's type, 0 when it failed, and as a complete run, where it ended (`cursor`), its name and a definition's
+// parameters (`names`), its attributes, the tags and enumeration constants its parameter list declared and its ABI's
+// origin (reader->declarator_attributes, reader->declarator_declarations and reader->declarator_abi_origin). A run
+// that failed restores what it declared, and the run's memory is taken back.
+static TypeId check_input_declarator_end(CheckInputReader* reader, CheckDeclaratorRun* run, uint32_t* cursor, uint32_t* name, uint32_t* names)
+{
+    const bool complete = run->valid && run->depth == 0;
+    if (!complete && c_bindings_mark(&reader->bindings) != run->binding_mark && !c_bindings_restore(&reader->bindings, run->binding_mark, run->stop))
     {
         reader->output->resource = true;
     }
-    arena_pop_to(reader->scratch, mark);
-    return valid ? result : 0;
+    reader->prototype_depth = run->prototype_depth;
+    *cursor = complete ? run->cursor : *cursor;
+    *name = complete ? run->name : BUSTER_CHECK_NONE;
+    *names = complete ? run->names : BUSTER_CHECK_NONE;
+    reader->declarator_attributes = complete ? run->attributes : 0;
+    reader->declarator_declarations = complete ? run->declarations : BUSTER_CHECK_NONE;
+    reader->declarator_abi_origin = complete ? run->abi_origin : 0;
+    const TypeId result = complete ? run->result : 0;
+    arena_pop_to(reader->scratch, run->mark);
+    return result;
 }
 
 typedef struct CheckTagFrame CheckTagFrame;
@@ -1900,6 +2061,14 @@ struct CheckTagFrame
     CheckInputAttributes* attributes;
     CheckConstantInput* enum_job;
     CheckInputAttributes* enumerator_attributes;
+    // A record's member declaration being read: its specifiers' type (0 between declarations), their ABI origin and
+    // attributes, and its declarator's run while that waits for a frame above to read a definition it stopped at, which
+    // starts at member_declarator.
+    TypeId member_base;
+    CheckInputAttributes* member_attributes;
+    CheckDeclaratorRun* member_run;
+    uint32_t member_declarator;
+    uint8_t member_abi_origin;
 };
 
 typedef struct CheckTagMember CheckTagMember;
@@ -1914,13 +2083,44 @@ struct CheckTagMember
 #include "c_check_record_input.c"
 #include "c_check_enum_input.c"
 
+// Pushes the frame that reads the definition at `token`, its struct, union or enum keyword, which ends before `end`: the
+// tag's identity, unless a job of the constant evaluator made it already (check_constant_tag_finish), and then its body.
+static bool check_input_tag_frame(CheckInputReader* reader, CheckTagFrame* frames, uint32_t* depth, uint32_t capacity, uint32_t token, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t body = check_input_tag_body(parser, token, end);
+    const uint32_t close = body < end ? parser->tree.parents[body] : end;
+    const TypeId type = check_input_tag(reader, token, end, true);
+    const bool valid = type != 0 && body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE && close > body && close < end && *depth < capacity;
+    if (valid)
+    {
+        frames[*depth] = (CheckTagFrame)
+        {
+            .type = type,
+            .token = token,
+            .cursor = body + 1,
+            .close = close,
+            .first = BUSTER_CHECK_NONE,
+            .last = BUSTER_CHECK_NONE,
+            .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
+            .attributes = reader->output->attributes[token],
+        };
+        *depth += 1;
+        reader->ignored[body] = true;
+    }
+    return valid;
+}
+
 // Complete nested record definitions with explicit frames. Their tags have the enclosing declaration scope;
 // members use an independent per-record namespace. Each frame retains a linked slice because nested records may
 // append their members between two outer members; only completion packs that slice for the type-table consumer.
+// So do the definitions in its members' declarators, each a frame above the member's, whose declarator's run waits in
+// its frame (CheckTagFrame.member_run) while that frame reads the definition (check_input_declarator_begin).
 static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token, uint32_t end)
 {
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
+    const uint32_t prototype_depth = reader->prototype_depth;
     uint32_t open = check_input_tag_body(parser, token, end);
     bool valid = open < end && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE;
     const uint32_t close = valid ? parser->tree.parents[open] : open;
@@ -2043,76 +2243,56 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             valid = check_input_enum_read(reader, frame, members, &member_count, &nested);
             if (valid && nested != BUSTER_CHECK_NONE)
             {
-                const uint32_t body = check_input_tag_body(parser, nested, frame->close);
-                const uint32_t nested_close = body < frame->close ? parser->tree.parents[body] : frame->close;
-                const TypeId type = reader->tag_types[nested];
-                valid = type != 0 && body < frame->close && nested_close > body && nested_close < frame->close && depth < capacity;
-                if (valid)
-                {
-                    frames[depth++] = (CheckTagFrame)
-                    {
-                        .type = type,
-                        .token = nested,
-                        .cursor = body + 1,
-                        .close = nested_close,
-                        .first = BUSTER_CHECK_NONE,
-                        .last = BUSTER_CHECK_NONE,
-                        .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
-                        .attributes = reader->output->attributes[nested],
-                    };
-                    reader->ignored[body] = true;
-                }
+                valid = check_input_tag_frame(reader, frames, &depth, capacity, nested, frame->close);
             }
         }
         else
         {
-            uint32_t nested = i;
-            while (nested < frame->close && (parser->tree.roles[nested] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[nested] == PARSE_KIND_QUALIFIER ||
-                   parser->tokens.kinds[nested] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, nested, frame->close)))
+            // A member declaration: a definition in its specifiers, in a frame of its own, then the specifiers, then its
+            // declarators one at a time, each a run that stops at each definition in it (a parameter's or an array
+            // bound's) for a frame above to read: this frame keeps the run, which goes on when that frame ends.
+            const uint32_t nested = frame->member_base == 0 ? check_input_specifier_definition(reader, i, frame->close) : BUSTER_CHECK_NONE;
+            if (nested != BUSTER_CHECK_NONE)
             {
-                nested = check_input_attribute_starts(parser, nested, frame->close) ? check_input_skip_attributes(parser, nested, frame->close) : nested + 1;
-            }
-            uint32_t body = check_input_tag_body(parser, nested, frame->close);
-            if (nested < frame->close && reader->tag_types[nested] == 0 &&
-                (parser->tokens.kinds[nested] == PARSE_KIND_STRUCT || parser->tokens.kinds[nested] == PARSE_KIND_ENUM) &&
-                body < frame->close && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE)
-            {
-                const uint32_t nested_close = parser->tree.parents[body];
-                const TypeId type = check_input_tag(reader, nested, frame->close, true);
-                valid = type != 0 && nested_close > body && nested_close < frame->close;
-                if (valid)
-                {
-                    frames[depth++] = (CheckTagFrame)
-                    {
-                        .type = type,
-                        .token = nested,
-                        .cursor = body + 1,
-                        .close = nested_close,
-                        .first = BUSTER_CHECK_NONE,
-                        .last = BUSTER_CHECK_NONE,
-                        .pack_log2 = reader->output->pack_log2 != 0 ? reader->output->pack_log2[body] : 0,
-                        .attributes = reader->output->attributes[nested],
-                    };
-                    reader->ignored[body] = true;
-                }
+                valid = check_input_tag_frame(reader, frames, &depth, capacity, nested, frame->close);
             }
             else
             {
-                bool is_typedef;
-                bool is_inline;
-                uint32_t storage;
-                const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline);
-                const uint8_t base_abi = reader->specifier_abi_origin;
-                CheckInputAttributes* common_attributes = reader->specifier_attributes;
-                valid = base != 0 && !is_typedef && !is_inline && storage == 0 && !reader->specifier_thread_local;
-                bool more = valid;
-                while (more)
+                if (frame->member_base == 0)
                 {
-                    const uint32_t declarator = i;
+                    bool is_typedef;
+                    bool is_inline;
+                    uint32_t storage;
+                    const TypeId base = check_input_specifiers(reader, &i, frame->close, &is_typedef, &storage, &is_inline);
+                    valid = base != 0 && !is_typedef && !is_inline && storage == 0 && !reader->specifier_thread_local;
+                    frame->member_base = valid ? base : 0;
+                    frame->member_abi_origin = reader->specifier_abi_origin;
+                    frame->member_attributes = reader->specifier_attributes;
+                }
+                if (valid && frame->member_run == 0)
+                {
+                    frame->member_declarator = i;
+                    reader->specifier_abi_origin = frame->member_abi_origin;
+                    frame->member_run = check_input_declarator_begin(reader, frame->member_base, i, frame->close);
+                    valid = frame->member_run != 0;
+                }
+                CheckDeclaratorRun* run = valid ? frame->member_run : 0;
+                if (run != 0)
+                {
+                    check_input_declarator_step(reader, run);
+                }
+                if (run != 0 && run->valid && run->definition != BUSTER_CHECK_NONE)
+                {
+                    valid = check_input_tag_frame(reader, frames, &depth, capacity, run->definition, run->definition_end);
+                }
+                else if (run != 0)
+                {
+                    const uint32_t declarator = frame->member_declarator;
+                    CheckInputAttributes* common_attributes = frame->member_attributes;
                     uint32_t name;
                     uint32_t parameters;
-                    reader->specifier_abi_origin = base_abi;
-                    TypeId type = check_input_declarator(reader, base, &i, frame->close, &name, &parameters);
+                    TypeId type = check_input_declarator_end(reader, run, &i, &name, &parameters);
+                    frame->member_run = 0;
                     failed_token = name != BUSTER_CHECK_NONE ? name : declarator;
                     CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
                     uint8_t abi_origin = reader->declarator_abi_origin;
@@ -2218,22 +2398,69 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             frame->count += 1;
                         }
                     }
-                    more = valid && i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
+                    // After a comma, the declaration's next declarator.
+                    const bool more = valid && i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                     if (valid && i < frame->close)
                     {
                         reader->ignored[i++] = true;
                     }
+                    frame->member_base = more ? frame->member_base : 0;
+                    frame->cursor = i;
                 }
-                frame->cursor = i;
             }
         }
     }
+    // A definition that failed: its frames' runs end, the innermost first, each restoring what it declared, and the
+    // prototype lists an enumerator's value left open (check_constant_prototype_open) close with it.
+    for (uint32_t level = depth; !valid && level-- > 0;)
+    {
+        if (frames[level].member_run != 0)
+        {
+            uint32_t cursor = 0;
+            uint32_t name;
+            uint32_t parameters;
+            frames[level].member_run->valid = false;
+            check_input_declarator_end(reader, frames[level].member_run, &cursor, &name, &parameters);
+        }
+    }
+    reader->prototype_depth = valid ? reader->prototype_depth : prototype_depth;
     if (!valid && reader->output->report_count == 0)
     {
         check_input_report(reader, failed_token, CHECK_INPUT_DECLARATION);
     }
     arena_pop_to(reader->scratch, mark);
     return valid;
+}
+
+// Reads the declarator from `cursor`, before `end`, for a declaration or a type name, and the definitions in it
+// (check_input_declarator_begin), each before the declarator goes on past it: the declarator's type, or 0 when it or a
+// definition in it fails, with check_input_declarator_end's results.
+static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint32_t* cursor, uint32_t end, uint32_t* name, uint32_t* names)
+{
+    CheckDeclaratorRun* run = check_input_declarator_begin(reader, base, *cursor, end);
+    TypeId result = 0;
+    if (run != 0)
+    {
+        check_input_declarator_step(reader, run);
+        while (run->valid && run->definition != BUSTER_CHECK_NONE)
+        {
+            run->valid = check_input_tag_definition(reader, run->definition, run->definition_end);
+            if (run->valid)
+            {
+                check_input_declarator_step(reader, run);
+            }
+        }
+        result = check_input_declarator_end(reader, run, cursor, name, names);
+    }
+    else
+    {
+        *name = BUSTER_CHECK_NONE;
+        *names = BUSTER_CHECK_NONE;
+        reader->declarator_attributes = 0;
+        reader->declarator_declarations = BUSTER_CHECK_NONE;
+        reader->declarator_abi_origin = 0;
+    }
+    return result;
 }
 
 static void check_input_schedule(CheckInputReader* reader, uint32_t token, uint32_t point, TypeId type, CBindingKind kind)
@@ -2333,19 +2560,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
     }
     const bool continuation = reader->declaration_bases[first] != 0;
-    uint32_t tag = first;
-    while (!continuation && tag < count && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION ||
-           check_input_attribute_starts(parser, tag, count)))
-    {
-        tag = check_input_attribute_starts(parser, tag, count) ? check_input_skip_attributes(parser, tag, count) : tag + 1;
-    }
-    uint32_t tag_body = check_input_tag_body(parser, tag, count);
-    bool prepared = true;
-    if (!continuation && tag < count && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM) &&
-        tag_body < count && parser->tokens.kinds[tag_body] == PARSE_KIND_L_BRACE)
-    {
-        prepared = check_input_tag_definition(reader, tag, count);
-    }
+    const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
+    const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
     uint32_t i = first + continuation;
     bool is_typedef = (reader->declaration_flags[first] & 1) != 0;
     bool is_inline = (reader->declaration_flags[first] & 2) != 0;
@@ -2376,7 +2592,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         reader->declarator_overloadable = (check_input_overload_flags(common_attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         reader->declarator_overloadable = false;
-        const uint32_t parameter_tags = reader->declarator_tags;
+        const uint32_t parameter_declarations = reader->declarator_declarations;
         CheckInputAttributes* attributes = check_input_merge_attributes(reader, common_attributes, reader->declarator_attributes);
         valid &= (common_attributes == 0 && reader->declarator_attributes == 0) || attributes != 0;
         uint8_t abi_origin = reader->declarator_abi_origin;
@@ -2463,7 +2679,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->output->body_declarations[i] = name;
                     reader->function_specifiers[i] = first;
                     reader->parameters[i] = parameters;
-                    reader->parameter_tags[i] = parameter_tags;
+                    reader->parameter_declarations[i] = parameter_declarations;
                     reader->query_types[i] = type_return(reader->types, type);
                     // A qualified void (const void, which clang only warns about) is void.
                     valid &= check_action_kind(reader->types, reader->query_types[i]) == BUSTER_TYPE_KIND_VOID || type_is_complete(reader->types, reader->query_types[i]);
@@ -2726,7 +2942,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         while (reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
-            if (!c_bindings_restore(&reader->bindings, reader->scope_marks[reader->scope_count], i))
+            // A scope that declared nothing has nothing to end, and its restore is left out where the stream, which
+            // takes its events in source order, has one past the scope's end already: a definition in a bound after
+            // a statement expression, which the declarator read before the walk reached the expression's block
+            // (`[({ n; }) + sizeof(struct S { int x; })]`, check_input_vla_bound).
+            const bool empty = c_bindings_mark(&reader->bindings) == reader->scope_marks[reader->scope_count];
+            const bool ahead = reader->bindings.count != reader->bindings.base && reader->bindings.point[reader->bindings.count - 1] > i;
+            if (!(empty && ahead) && !c_bindings_restore(&reader->bindings, reader->scope_marks[reader->scope_count], i))
             {
                 reader->output->resource = true;
             }
@@ -2822,18 +3044,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             const uint32_t close = i + 1 < parser->tokens.count ? parser->tree.parents[i + 1] : parser->tokens.count;
             const uint32_t end = close < parser->tokens.count ? check_constant_punctuation(parser, i + 2, close, PARSE_KIND_COMMA) : close;
-            uint32_t tag = i + 2;
-            while (tag < end && parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER)
+            const uint32_t definition = check_input_specifier_definition(reader, i + 2, end);
+            if (definition != BUSTER_CHECK_NONE)
             {
-                tag += 1;
-            }
-            if (tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM))
-            {
-                const uint32_t body = check_input_tag_body(parser, tag, end);
-                if (body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE)
-                {
-                    check_input_tag_definition(reader, tag, end);
-                }
+                check_input_tag_definition(reader, definition, end);
             }
             if (reader->output->report_count == 0 && !reader->output->resource)
             {
@@ -2890,12 +3104,15 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 reader->function_result = reader->query_types[i];
                 reader->function_end = reader->scope_ends[reader->scope_count - 1];
                 reader->function_body = i;
-                // The tags the parameter list declared are in the body's scope too, as its parameters are (C11
-                // 6.2.1p4): declared again in it, with their declarations' tokens, as clang does.
-                const uint32_t first_tag = reader->output->body_declarations[i] != BUSTER_CHECK_NONE ? reader->parameter_tags[i] : BUSTER_CHECK_NONE;
-                for (uint32_t tag = first_tag; tag != BUSTER_CHECK_NONE; tag = reader->parameter_tag_next[tag])
+                // The tags and enumeration constants the parameter list declared are in the body's scope too, as its
+                // parameters are (C11 6.2.1p4): declared again in it, in their order and with their declarations'
+                // tokens, as clang does (Sema::ActOnStartOfFunctionDef).
+                const uint32_t first_declaration = reader->output->body_declarations[i] != BUSTER_CHECK_NONE ? reader->parameter_declarations[i] : BUSTER_CHECK_NONE;
+                for (uint32_t declaration = first_declaration; declaration != BUSTER_CHECK_NONE; declaration = reader->parameter_declaration_next[declaration])
                 {
-                    if (c_bindings_declare(&reader->bindings, C_BINDING_TAG, parser->tokens.names[tag], C_BINDING_TAG_KIND, tag, i, reader->scope_count) == 0)
+                    const bool tag = reader->declaration_kinds[declaration] == C_BINDING_TAG_KIND;
+                    if (c_bindings_declare(&reader->bindings, tag ? C_BINDING_TAG : C_BINDING_ORDINARY, parser->tokens.names[declaration],
+                                           tag ? C_BINDING_TAG_KIND : C_BINDING_ENUMERATOR, declaration, i, reader->scope_count) == 0)
                     {
                         reader->output->resource = true;
                     }
@@ -2959,18 +3176,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_attribute_starts(parser, next, close)))
             {
                 uint32_t cursor = next;
-                uint32_t tag = next;
-                while (tag < close && parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER)
+                // A definition among the type name's specifiers, unless a declarator read it already: one in a variable
+                // array's bound, which the walk reaches after the bound's declaration.
+                const uint32_t definition = check_input_specifier_definition(reader, next, close);
+                if (definition != BUSTER_CHECK_NONE)
                 {
-                    tag += 1;
-                }
-                if (tag < close && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM))
-                {
-                    const uint32_t body = check_input_tag_body(parser, tag, close);
-                    if (body < close && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE)
-                    {
-                        check_input_tag_definition(reader, tag, close);
-                    }
+                    check_input_tag_definition(reader, definition, close);
                 }
                 bool is_typedef;
                 bool is_inline;
@@ -3444,26 +3655,6 @@ static void check_input_expressions(CheckInputReader* reader)
                 }
             }
         }
-        else if (check_input_label_address(parser, token))
-        {
-            // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the label's own
-            // object, its token plus one, which no declaration has.
-            const uint32_t label = reader->output->label_targets[token];
-            const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
-            supported = label < parser->tokens.count && pointer != 0 && count == 0;
-            node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
-            if (node != BUSTER_CHECK_NONE)
-            {
-                graph->leaves[node] = (CheckValue)
-                {
-                    .type = pointer,
-                    .category = CHECK_RVALUE,
-                    .flags = BUSTER_CHECK_STATIC_OBJECT,
-                    .constant_kind = CHECK_CONSTANT_ADDRESS,
-                    .object = label + 1,
-                };
-            }
-        }
         else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_STAR && parser->tree.parents[token] < parser->tokens.count &&
                  check_input_indirect_goto(parser, parser->tree.parents[token]))
         {
@@ -3478,6 +3669,27 @@ static void check_input_expressions(CheckInputReader* reader)
             supported = count == 1;
             switch (kind)
             {
+                case PARSE_KIND_AMPAMP:
+                {
+                    // GNU C's address of a label (check_input_controls found it): a void * constant, the address of the
+                    // label's own object, its token plus one, which no declaration has.
+                    const uint32_t label = reader->output->label_targets[token];
+                    const TypeId pointer = check_input_type_result(reader, type_pointer(reader->types, BUSTER_TYPE_VOID));
+                    supported = label < parser->tokens.count && pointer != 0 && count == 0;
+                    node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
+                    if (node != BUSTER_CHECK_NONE)
+                    {
+                        graph->leaves[node] = (CheckValue)
+                        {
+                            .type = pointer,
+                            .category = CHECK_RVALUE,
+                            .flags = BUSTER_CHECK_STATIC_OBJECT,
+                            .constant_kind = CHECK_CONSTANT_ADDRESS,
+                            .object = label + 1,
+                        };
+                    }
+                    break;
+                }
                 case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
                 case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
                 case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
@@ -4008,6 +4220,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                             CheckDeferred* deferred)
 {
     *input = (CheckInput){ 0 };
+    // Plain char's signedness, which every phase after the reader reads from the table too.
+    types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
     input->token_count = count;
     uint32_t size_queries = 0;
@@ -4185,8 +4399,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(activation_next, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_previous, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(parameter_shapes, uint8_t);
-    BUSTER_CHECK_INPUT_ARRAY(parameter_tags, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(parameter_tag_next, uint32_t);
+    BUSTER_CHECK_INPUT_ARRAY(parameter_declarations, uint32_t);
+    BUSTER_CHECK_INPUT_ARRAY(parameter_declaration_next, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(tag_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(tag_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(enum_values, unsigned __int128);

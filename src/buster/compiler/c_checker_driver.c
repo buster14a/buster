@@ -940,7 +940,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     }
     else if (!check_input_target_supported(&options))
     {
-        fprintf(stderr, "error: checker requires C, signed char, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
+        fprintf(stderr, "error: checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation\n");
     }
     else
     {

@@ -4007,6 +4007,13 @@ static bool type_test_machine_modes(const char* clang, bool keep)
                              full.table.types.count == BUSTER_TYPE_BUILTIN_COUNT, "machine modes", "a vector mode did not preserve capacity failure");
             type_test_expect(&tally, type_machine_mode(&full.table, BUSTER_TYPE_INT, BUSTER_S8("DI")) == BUSTER_TYPE_LONG && full.table.last_error == TYPE_ERROR_NONE,
                              "machine modes", "a scalar mode allocated a derived type or retained a stale error");
+            // Plain char's signedness, which a mode keeps: unsigned where the table says it is (-funsigned-char).
+            full.table.char_unsigned = true;
+            type_test_expect(&tally, type_machine_mode(&full.table, BUSTER_TYPE_CHAR, BUSTER_S8("HI")) == BUSTER_TYPE_USHORT, "machine modes",
+                             "an unsigned plain char's mode was signed");
+            full.table.char_unsigned = false;
+            type_test_expect(&tally, type_machine_mode(&full.table, BUSTER_TYPE_CHAR, BUSTER_S8("HI")) == BUSTER_TYPE_SHORT, "machine modes",
+                             "a signed plain char's mode was unsigned");
         }
         type_test_table_close(&full);
         char source[BUSTER_TYPE_TEST_PATH_BYTES];

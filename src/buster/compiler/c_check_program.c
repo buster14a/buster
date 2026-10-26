@@ -925,7 +925,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
                 check_control_statement(writer, child, task.stop, task.repeat);
             }
         }
-        if (role == PARSE_ROLE_LABEL && writer->addressed[token] != 0)
+        if (role == PARSE_ROLE_LABEL && writer->addressed != 0 && writer->addressed[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         }
@@ -1434,6 +1434,38 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
     return reference_count;
 }
 
+// Only units with resolved &&label expressions need this table. Scan their kind/role columns in bounded blocks;
+// scalar also handles the tail without requiring padding, and is the independent program path's exact twin.
+static void check_program_addressed(const Parser* parser, const CheckInput* input, uint8_t* addressed, bool scalar)
+{
+    const uint32_t count = input->token_count;
+    memset(addressed, 0, (uint64_t)count + 1);
+    uint32_t token = 0;
+    for (; !scalar && count - token >= 64; token += 64)
+    {
+        const __m512i kinds = _mm512_loadu_si512(parser->tokens.kinds + token);
+        const __m512i roles = _mm512_loadu_si512(parser->tree.roles + token);
+        uint64_t selected = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_AMPAMP)) &
+                            _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_PREFIX));
+        while (selected != 0)
+        {
+            const uint32_t target = input->label_targets[token + (uint32_t)__builtin_ctzll(selected)];
+            if (target < count)
+            {
+                addressed[target] = 1;
+            }
+            selected &= selected - 1;
+        }
+    }
+    for (; token < count; token += 1)
+    {
+        if (parser->tokens.kinds[token] == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX && input->label_targets[token] < count)
+        {
+            addressed[input->label_targets[token]] = 1;
+        }
+    }
+}
+
 static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, const CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
@@ -1483,11 +1515,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint8_t* needed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
-    uint8_t* addressed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControlTask, capacity) : 0;
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
-            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && addressed != 0 && entries != 0 && tasks != 0 && plan_first != 0 &&
+            stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && reference_items != 0 && reference_sort != 0 &&
             stops != 0 && repeats != 0 && region_first != 0 && region_next != 0 && vla_first != 0 && vla_next != 0 && asm_statements != 0 &&
@@ -1521,7 +1553,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
         }
         memset(needed, 0, (uint64_t)count + 1);
-        memset(addressed, 0, (uint64_t)count + 1);
+        if (addressed != 0)
+        {
+            check_program_addressed(parser, input, addressed, options.scalar);
+        }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
         memset(stops, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -1557,10 +1592,6 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 last[parent] = token;
             }
             body_count += input->body_declarations[token] != BUSTER_CHECK_NONE && (input->deferred_tokens == 0 || input->deferred_tokens[token] == 0);
-            if (check_input_label_address(parser, token) && input->label_targets[token] < count)
-            {
-                addressed[input->label_targets[token]] = 1;
-            }
             if (input->initializer_nodes[token] < node_count)
             {
                 initializers[input->initializer_nodes[token]] = token;
