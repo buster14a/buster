@@ -2828,6 +2828,7 @@ static bool import_test_exported(const ImportLibrary* library, const char* name,
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
 static bool import_test_names(const Link* link, String8 bytes, const ImportObject* object, SymbolId symbol, const char* name);
 static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
+static bool import_test_path_is(String8 path, const char* name);
 
 // The names the linker of the runtime's kind defines among its global names, each marked the linker's, whether or not
 // the runtime refers to it, and no other name marked: by runtime_linker_names' kinds, for a static PIE _DYNAMIC but not
@@ -2870,9 +2871,9 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
     }
     else
     {
-        printf("  GCC: %.*s; libc: %.*s (%.*s, %u exports, %u versions, %u references); libc_nonshared.a: %u members; %u probes\n", (int)runtime.gcc_directory.length,
-               runtime.gcc_directory.pointer, (int)runtime.libc_path.length, runtime.libc_path.pointer, (int)runtime.libc.soname.length, runtime.libc.soname.pointer,
-               runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.member_count, runtime.probe_count);
+        printf("  GCC: %.*s; libc: %.*s (%.*s, %u exports, %u versions, %u references); libgcc.a and libc_nonshared.a: %u members; %u probes\n",
+               (int)runtime.gcc_directory.length, runtime.gcc_directory.pointer, (int)runtime.libc_path.length, runtime.libc_path.pointer, (int)runtime.libc.soname.length,
+               runtime.libc.soname.pointer, runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.member_count, runtime.probe_count);
         const Link* link = &runtime.link;
         // What each crt object is for.
         const SymbolId start = import_test_runtime_symbol(&runtime, "_start", true);
@@ -2930,13 +2931,25 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
             loader_smallest = runtime.loader.versions[v].index < loader_smallest ? runtime.loader.versions[v].index : loader_smallest;
         }
         import_test_expect(&tally, runtime.loader.version_count != 0 && loader_smallest > libc_largest, "the loader's version indices past libc.so.6's", loader_smallest);
+        // The archives in the driver's order, libgcc.a before libc.so's libc_nonshared.a, libc's (runtime_libc_archive), each
+        // one's members one after another.
+        const RuntimeArchive* libc_archive = runtime_libc_archive(&runtime);
+        bool archived = runtime.archive_count == 2 && import_test_path_is(runtime.archives[0].path, "libgcc.a") && libc_archive == &runtime.archives[1] &&
+                        import_test_path_is(libc_archive->path, "libc_nonshared.a");
+        uint32_t archive_members = 0;
+        for (uint32_t a = 0; a < runtime.archive_count; a += 1)
+        {
+            archived = archived && runtime.archives[a].first_member == archive_members && runtime.archives[a].archive.member_count != 0;
+            archive_members += runtime.archives[a].archive.member_count;
+        }
+        import_test_expect(&tally, archived && archive_members == runtime.member_count, "libgcc.a, then libc_nonshared.a", runtime.archive_count);
         // libc_nonshared.a's index.
         bool atexit_indexed = false;
-        for (uint32_t s = 0; s < runtime.archives[0].archive.symbol_count; s += 1)
+        for (uint32_t s = 0; archived && s < libc_archive->archive.symbol_count; s += 1)
         {
-            atexit_indexed = atexit_indexed || import_equal(runtime.archives[0].archive.symbols[s].name, "atexit");
+            atexit_indexed = atexit_indexed || import_equal(libc_archive->archive.symbols[s].name, "atexit");
         }
-        import_test_expect(&tally, atexit_indexed, "libc_nonshared.a's index has atexit", runtime.archives[0].archive.symbol_count);
+        import_test_expect(&tally, atexit_indexed, "libc_nonshared.a's index has atexit", archived ? libc_archive->archive.symbol_count : 0);
         import_test_expect(&tally, runtime.abi_note.length >= 16, "Scrt1.o's ABI note", runtime.abi_note.length);
         // The bindings, of every reference to each name.
         const char* const binding_names[] = {
@@ -3057,6 +3070,23 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         import_test_expect(&tally, atexit_name != 0 && global_names->definition[atexit_name - 1] != 0 &&
                                        link->atoms.unit[link->symbols.atom[global_names->definition[atexit_name - 1]]] >= runtime.member_unit,
                            "atexit: a member's", 0);
+        // __udivti3, which a compiler's code of a 128-bit integer's division calls: a member's of libgcc.a. And libgcc.a
+        // defines none of the names libc.so.6 and the loader export, so that binding a name to an export before a member
+        // (bind.c) binds it as the driver's order, libgcc.a before libc.so, does.
+        const uint32_t udivti3_name = runtime_find_global_name(global_names, (const uint8_t*)"__udivti3", 9, link_hash((const uint8_t*)"__udivti3", 9));
+        const uint32_t libgcc_members = archived ? runtime.archives[0].archive.member_count : 0;
+        import_test_expect(&tally, udivti3_name != 0 && global_names->member[udivti3_name - 1] != 0 && global_names->member[udivti3_name - 1] - 1 < libgcc_members &&
+                                       global_names->export[udivti3_name - 1] == 0,
+                           "__udivti3: a member's of libgcc.a", 0);
+        uint32_t libgcc_names = 0;
+        bool apart = true;
+        for (uint32_t e = 0; e < global_names->count; e += 1)
+        {
+            const bool libgcc = global_names->member[e] != 0 && global_names->member[e] - 1 < libgcc_members;
+            libgcc_names += libgcc ? 1 : 0;
+            apart = apart && (!libgcc || global_names->export[e] == 0);
+        }
+        import_test_expect(&tally, libgcc_names != 0 && apart, "libgcc.a's names none of libc.so.6's or the loader's exports", libgcc_names);
         // Each name the linker defines, whether or not the runtime refers to it (only _GLOBAL_OFFSET_TABLE_ does), and no
         // other name.
         import_test_linker_names(&tally, &runtime);
@@ -3076,14 +3106,17 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
         // The vector paths read libc.so.6, each crt object and each member, as the exact paths do.
         import_test_library_paths(&tally, runtime.libc_bytes, IMPORT_TEST_VECTOR, "libc.so.6", arena);
         import_test_library_paths(&tally, runtime.loader_bytes, IMPORT_TEST_VECTOR, "the loader", arena);
-        import_test_archive_paths(&tally, runtime.archives[0].bytes, IMPORT_TEST_VECTOR, "libc_nonshared.a", arena);
+        for (uint32_t a = 0; a < runtime.archive_count; a += 1)
+        {
+            import_test_archive_paths(&tally, runtime.archives[a].bytes, IMPORT_TEST_VECTOR, a == 0 ? "libgcc.a" : "libc_nonshared.a", arena);
+        }
         for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
         {
             import_test_paths(&tally, runtime.object_bytes[i], IMPORT_TEST_VECTOR, "a crt object", i, arena);
         }
         for (uint32_t m = 0; m < runtime.member_count; m += 1)
         {
-            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member of libc_nonshared.a", m, arena);
+            import_test_paths(&tally, runtime.members[m].bytes, IMPORT_TEST_VECTOR, "a member of libgcc.a or libc_nonshared.a", m, arena);
         }
         if (cross_check)
         {
@@ -3895,7 +3928,7 @@ static bool import_test_edges(uint64_t seed, Arena* arena)
 }
 
 // A shared library's runtime (runtime_import_shared): no start object, its unit's piece empty and no ABI note; crti.o,
-// crtbeginS.o, crtendS.o and crtn.o; libc.so.6, the loader and libc_nonshared.a; nothing refers to main, which is no
+// crtbeginS.o, crtendS.o and crtn.o; libgcc.a, libc.so.6, the loader and libc_nonshared.a; nothing refers to main, which is no
 // global name; crti.o's _init and crtbeginS.o's __dso_handle; the names the kind's linker defines (_DYNAMIC among them)
 // and no other; and every crt object and member taking the vector path.
 static bool import_test_shared_runtime(Arena* arena)
@@ -3925,17 +3958,24 @@ static bool import_test_shared_runtime(Arena* arena)
             const bool found = path.length > length && memcmp(path.pointer + path.length - length, objects[i], length) == 0 && path.pointer[path.length - length - 1] == '/';
             import_test_expect(&tally, found, objects[i], i);
         }
-        import_test_expect(&tally, import_equal(runtime.libc.soname, "libc.so.6") && import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2") && runtime.archive_count == 1,
-                           "libc.so.6, the loader and libc_nonshared.a", runtime.archive_count);
+        import_test_expect(&tally, import_equal(runtime.libc.soname, "libc.so.6") && import_equal(runtime.loader.soname, "ld-linux-x86-64.so.2") && runtime.archive_count == 2 &&
+                                       import_test_path_is(runtime.archives[0].path, "libgcc.a") && import_test_path_is(runtime_libc_archive(&runtime)->path, "libc_nonshared.a"),
+                           "libgcc.a, libc.so.6, the loader and libc_nonshared.a", runtime.archive_count);
         const RuntimeNames* names = &runtime.global_names;
         const Link* link = &runtime.link;
         const uint32_t main_entry = runtime_find_global_name(names, (const uint8_t*)"main", 4, link_hash((const uint8_t*)"main", 4));
-        bool program = false;
-        for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+        // And only libgcc.a's members refer to names nothing in the runtime defines, which bind to the program: its
+        // split-stack members', whose unwinder libgcc_s.so.1 has.
+        const bool libgcc = runtime.archive_count == 2 && runtime.archives[0].archive.member_count != 0;
+        const RuntimePiece* first_member = libgcc ? &runtime.pieces[RUNTIME_OBJECTS + runtime.archives[0].first_member] : 0;
+        const RuntimePiece* last_member = libgcc ? first_member + runtime.archives[0].archive.member_count - 1 : 0;
+        bool program = !libgcc;
+        for (SymbolId symbol = 1; libgcc && symbol < link->symbols.count; symbol += 1)
         {
-            program = program || runtime.bindings[symbol].kind == RUNTIME_BINDING_PROGRAM;
+            const bool member = symbol >= first_member->begin.symbols && symbol < last_member->end.symbols;
+            program = program || (runtime.bindings[symbol].kind == RUNTIME_BINDING_PROGRAM && !member);
         }
-        import_test_expect(&tally, main_entry == 0 && !program, "nothing refers to main", main_entry);
+        import_test_expect(&tally, main_entry == 0 && !program, "nothing refers to main, and only libgcc.a's members to names nothing defines", main_entry);
         const uint32_t init = runtime_find_global_name(names, (const uint8_t*)"_init", 5, link_hash((const uint8_t*)"_init", 5));
         const uint32_t dso = runtime_find_global_name(names, (const uint8_t*)"__dso_handle", 12, link_hash((const uint8_t*)"__dso_handle", 12));
         const SymbolId init_symbol = init != 0 ? names->definition[init - 1] : 0;

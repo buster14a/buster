@@ -34,7 +34,8 @@
 //     region misaligned, past the end or of the wrong size, counts out of range); runtime_open must replace them. A
 //     directory and a FIFO at the snapshot's path must neither block nor fail the link.
 //   - Damaged pieces, of each kind's snapshot: a byte of the pieces' records changed, which only the piece that holds
-//     it shows, and a link that reads that piece fails (snapshot_test_damaged).
+//     it shows and no link's room (bind_capacity_needed) sees, and a link that reads that piece fails
+//     (snapshot_test_damaged).
 //   - Concurrency: eight processes opening the runtime at once in an empty directory must each get it, imported or
 //     loaded, and leave one snapshot, which loads, and no other file.
 //   - The cache directory: snapshot_directory from XDG_CACHE_HOME and HOME.
@@ -1093,6 +1094,31 @@ static uint64_t snapshot_test_piece_byte(const SnapshotHeader* header, const Run
     return result;
 }
 
+// The room bind_capacity_needed gives a link of `runtime` that refers to every global name a member defines, whose
+// closure takes every member: from the snapshot's directory alone, whatever the pieces' records hold. False if there
+// is no room for the names' list.
+static bool snapshot_test_room(const Runtime* runtime, LinkCapacity* room, uint64_t* name_bytes, uint64_t* atom_bytes, Arena* arena)
+{
+    const RuntimeNames* names = &runtime->global_names;
+    const uint64_t length = arena->length;
+    String8* list = BUSTER_ARENA_PUSH_ARRAY(arena, String8, (uint64_t)names->count + 1);
+    uint32_t count = 0;
+    for (uint32_t e = 0; list != 0 && e < names->count; e += 1)
+    {
+        if (names->member[e] != 0 && !names->linker[e])
+        {
+            list[count] = (String8){
+                .pointer = (char*)runtime_global_name(names, e),
+                .length = names->length[e],
+            };
+            count += 1;
+        }
+    }
+    *room = list != 0 ? bind_capacity_needed(runtime, list, count, arena, name_bytes, atom_bytes) : (LinkCapacity){ 0 };
+    arena_pop_to(arena, length);
+    return list != 0;
+}
+
 // The snapshot at `path`, whose file (`file`) holds `good`, with the byte at `flip` changed in place (none for
 // UINT64_MAX), loaded as `compiler`: its status. The caller changes the byte back (snapshot_test_edit's `repair`) once it
 // has released the runtime, whose private mapping would see the repair in the pages it hasn't copied.
@@ -1103,8 +1129,9 @@ static SnapshotStatus snapshot_test_damage(Runtime* loaded, int file, const char
 }
 
 // A runtime's snapshot with a byte of its pieces' records changed, one at a time: at each 1/61 of them, and the first
-// and last of each piece region. Each loads, and every piece is current but the one whose records hold the byte
-// (snapshot_test_piece_at), if any. Then binding a program by each path: a program that joins a damaged piece
+// and last of each piece region. Each loads, every piece is current but the one whose records hold the byte
+// (snapshot_test_piece_at), if any, and a link's room is the whole snapshot's (snapshot_test_room), since sizing reads
+// only the directory, before binding checks a piece (#483's review). Then binding a program by each path: a program that joins a damaged piece
 // (Scrt1.o's, crt1.o's or rcrt1.o's, which bind_begin joins; crtendS.o's or crtend.o's, which it checks first; or a
 // member the program joins) must fail with BIND_ERROR_SNAPSHOT, and one that doesn't (a member it doesn't join) must
 // bind as against the snapshot whole. After a failure, snapshot_discard and runtime_open give a runtime imported again,
@@ -1141,6 +1168,10 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
     bool repaired = file >= 0;
     uint64_t cases = 0;
     uint64_t harmless = 0;
+    LinkCapacity whole_room = { 0 };
+    uint64_t whole_names = 0;
+    uint64_t whole_atoms = 0;
+    snapshot_test_expect(&tally, snapshot_test_room(imported, &whole_room, &whole_names, &whole_atoms, scratch.arena), "the whole runtime's room", 0);
     for (uint64_t i = 0; copy != 0 && i < 61 + 2 * (uint64_t)regions; i += 1)
     {
         const uint64_t first = header->directory_bytes;
@@ -1157,6 +1188,12 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
             wrong = runtime_piece_current(&loaded, p) == (p == expected) && wrong == UINT32_MAX ? p : wrong;
         }
         snapshot_test_expect(&tally, wrong == UINT32_MAX, "only the damaged piece not current", i * 1000000 + wrong);
+        LinkCapacity room = { 0 };
+        uint64_t room_names = 0;
+        uint64_t room_atoms = 0;
+        const bool roomed = status == SNAPSHOT_STATUS_LOADED && snapshot_test_room(&loaded, &room, &room_names, &room_atoms, scratch.arena);
+        snapshot_test_expect(&tally, roomed && memcmp(&room, &whole_room, sizeof(room)) == 0 && room_names == whole_names && room_atoms == whole_atoms,
+                             "a link's room whatever the pieces' records hold", i);
         if (status == SNAPSHOT_STATUS_LOADED)
         {
             runtime_release(&loaded);

@@ -7,11 +7,11 @@
 // The runtime's objects join the link in the order GCC's driver links them, so that the classes whose atoms keep their
 // id order (.init's fragments, .eh_frame and the terminator that crtendS.o ends it with, the init and fini arrays) come
 // out as lld lays them out: bind_begin appends Scrt1.o, crti.o and crtbeginS.o, the caller then adds the program's
-// atoms, and bind_end appends the members of libc_nonshared.a that the link needs, then crtendS.o and crtn.o. The
-// program's global symbols should all exist before bind_begin; one added later is matched in bind_end. An object joins
-// as a block: its names, atoms, symbols, fixups and wide addends, with their ids moved by the link's counts, its units
-// numbered from the caller's unit_base on, and its atoms' bytes copied into the caller's arena, since an executable
-// patches atoms where they are.
+// atoms, and bind_end appends the members of libgcc.a and libc_nonshared.a that the link needs, then crtendS.o and
+// crtn.o. The program's global symbols should all exist before bind_begin; one added later is matched in bind_end. An
+// object joins as a block: its names, atoms, symbols, fixups and wide addends, with their ids moved by the link's
+// counts, its units numbered from the caller's unit_base on, and its atoms' bytes copied into the caller's arena, since
+// an executable patches atoms where they are.
 //
 // A global or weak symbol of the runtime takes the link's symbol of its name if there is one, so that the link keeps
 // one symbol per global name: bind_begin matches the link's global symbols against the runtime's global names
@@ -43,21 +43,30 @@
 //     --as-needed: the program's, or a needed library's that its own DT_NEEDED doesn't cover and no definition the
 //     executable exports satisfies (bind_needed_libraries, bind_keep_libraries); and it exports its definitions of
 //     names a needed library defines or refers to (bind_library_exports);
-//   - for a strong reference, to a member of libc_nonshared.a (atexit), which joins the link;
+//   - for a strong reference, to a member of libgcc.a (__udivti3, which a compiler's code of a 128-bit integer's
+//     division calls) or of libc_nonshared.a (atexit), which joins the link. The driver names libgcc.a before libc.so,
+//     and it defines no name libc.so.6 exports (runtime.c), so that the export's binding comes first all the same;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
 // rounds, each over the symbols the round before added, until no member joins: a frontier walk over a bitset of the
-// members. crtendS.o's and crtn.o's references bind without members, as GNU ld scans libc's group before them. A
-// member's strong reference to a name that a weak one left to nothing is an error, where GNU ld would scan the archive
-// again; libc_nonshared.a's members refer only to libc.so.6 and crtbeginS.o. Last, each definition with default or
-// protected visibility of a name that libc.so.6 or the loader defines too, or that libc.so.6 refers to, is an export
-// (Bind.exports), as GNU ld and lld export them, the loader's names even when it isn't needed: those among the names
-// that took a link symbol, which binding lists as they do.
+// members. A name that only the members that joined refer to and nothing defines is an error of its own, naming the
+// member too (BIND_ERROR_MEMBER_UNDEFINED): on GCC's link line only libgcc_s.so.1 could define it, which the driver
+// names as needed after libgcc.a (-lgcc_s_asneeded) and the runtime doesn't import, as it defines the unwinder that
+// libgcc.a's split-stack member (morestack.o) refers to. crtendS.o's and crtn.o's references bind without members, as
+// GNU ld scans libc's group before them. A member's strong reference to a name that a weak one left to nothing is an
+// error, where GNU ld would scan the archive again; libc_nonshared.a's members refer only to libc.so.6 and crtbeginS.o,
+// and the members of libgcc.a that a C program's code needs to each other, to libc.so.6 and to the loader's
+// __tls_get_addr. Last, each definition with default or protected visibility of a name that libc.so.6 or the loader
+// defines too, or that libc.so.6 refers to, is an export (Bind.exports), as GNU ld and lld export them, the loader's
+// names even when it isn't needed: those among the names that took a link symbol, which binding lists as they do.
 //
 // A shared library's runtime (runtime_import_shared) joins as a dynamic PIE's, without a start object: bind_begin
 // appends crti.o and crtbeginS.o, and nothing refers to main. A name nothing defines binds as a dynamic PIE's, but a
 // strong reference with default visibility that no library exports stays undefined (source NONE), a dynamic symbol for
-// the loader to bind in the libraries the program loads, as GNU ld and lld leave it with -shared (-z undefs). And every
+// the loader to bind in the libraries the program loads, as GNU ld and lld leave it with -shared (-z undefs); but not a
+// name that only members refer to, which stays the error it is in a PIE: GCC's driver binds it to libgcc_s.so.1, which
+// the library then needs, and left to the loader it would make a library that loads only beside one that defines it
+// (morestack.o's _Unwind_Resume and __gcc_personality_v0, which an isolated dlopen refuses). And every
 // definition with default or protected visibility is an export (bind_shared_exports), not only those of names the
 // libraries define or libc.so.6 refers to.
 //
@@ -103,14 +112,14 @@
 //     bind_match_exact and bind_match.
 //   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records,
 //     bind_discards and bind_join.
-//   - Binding: bind_relaxed_name, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact, bind_resolve,
-//     bind_members, bind_keep_imports, bind_keep_loader, bind_find_exports, bind_exported_lanes, bind_shared_exports,
-//     BindLibraryEdges, bind_library_edges, bind_library_satisfy, bind_library_satisfied_vector,
+//   - Binding: bind_relaxed_name, bind_referring_member, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact,
+//     bind_resolve, bind_members, bind_keep_imports, bind_keep_loader, bind_find_exports, bind_exported_lanes,
+//     bind_shared_exports, BindLibraryEdges, bind_library_edges, bind_library_satisfy, bind_library_satisfied_vector,
 //     bind_library_satisfied_exact, bind_library_satisfied, bind_library_versions, bind_needed_libraries,
 //     bind_keep_libraries and bind_library_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
-//   - Entry points: bind_capacity, bind_begin and bind_end.
+//   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_begin and bind_end.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -146,6 +155,13 @@ typedef enum BindError
     // A version that a library the program loads needs of another (its .gnu.version_r) which that one doesn't define, as
     // glibc's loader refuses the program at startup (bind_library_versions): Bind.library, Bind.need and Bind.provider.
     BIND_ERROR_LIBRARY_VERSION,
+    // A strong reference of a member that joined a dynamic PIE's or a shared library's link (libgcc.a's or
+    // libc_nonshared.a's) to a name nothing defines and that only the members refer to: Bind.name and Bind.member. GCC's
+    // driver names libgcc_s.so.1 after libgcc.a, as needed (-lgcc_s_asneeded), which the runtime doesn't import, and on
+    // its link line only that library could define the name: it defines the unwinder that libgcc.a's split-stack member
+    // refers to (morestack.o's _Unwind_Resume and __gcc_personality_v0). Refused, where a shared library would otherwise
+    // leave it to the loader and load only beside a library that defines it.
+    BIND_ERROR_MEMBER_UNDEFINED,
 } BindError;
 
 typedef enum BindPath
@@ -179,7 +195,11 @@ struct Bind
     uint32_t* named;
     uint32_t named_count;
     // The definitions of the runtime's that take the program's over in bind_begin, which bind_end installs once the
-    // program's atoms have joined: room for one per global name, and how many (almost always none).
+    // program's atoms have joined, and how many (almost always none): room for one per global name that a symbol of the
+    // program's has, the fewer of the global names and of the link's symbols when bind_begin began. A program's own
+    // definitions are the only ones the head objects' can take over before bind_end, so that a small program's room
+    // stays small: one per global name took 40 KB with libgcc.a's names, which pushed the arrays after it past the base
+    // pages that the caller's arena starts with, and made every link of the C driver fault and clear a huge page.
     BindOverride* overrides;
     uint32_t override_count;
     // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
@@ -200,12 +220,19 @@ struct Bind
     // says only that it is absolute); and after bind_begin, from which bind_end matches those up to its own start.
     uint32_t program_symbols;
     uint32_t symbols_begun;
+    // The link's symbols count when the first of libgcc.a's or libc_nonshared.a's members joined (bind_members): the
+    // symbols from it on, up to crtendS.o's and crtn.o's, are names that only the members refer to (0 before one joins,
+    // and for a static runtime, whose members join otherwise).
+    uint32_t member_symbols;
     // Whether bind_end has begun, after the program's atoms joined; whether names have been bound, after which a link
-    // symbol with source NONE is a weak reference to nothing (a static runtime's members all join before); and whether
-    // crtendS.o and crtn.o have joined.
+    // symbol with source NONE below `resolved` is a weak reference to nothing (a static runtime's members all join
+    // before); and whether crtendS.o and crtn.o have joined. `resolved` is the end of the symbols bind_resolve has bound
+    // so far: one past it is a name that a member which joined in the current round added, still to bind, which another
+    // member of the round may refer to as well (libgcc.a's members' memset, __sfp_handle_exceptions).
     bool resolving;
     bool bound;
     bool tail_joined;
+    SymbolId resolved;
     // The link's imports from libc.so.6, the loader and the libraries it names, and the definitions it exports, room for
     // `capacity` of each.
     SymbolId* imports;
@@ -221,26 +248,41 @@ struct Bind
     uint32_t libraries_needed;
     // The first error, and the link's name it is about (0 for none); with BIND_ERROR_LIBRARY_UNDEFINED, the library and
     // its reference; with BIND_ERROR_LIBRARY_VERSION, the library, its version need (RuntimeVersionNeeds) and the named
-    // library that doesn't define the version, or UINT32_MAX for libc.so.6 or the loader.
+    // library that doesn't define the version, or UINT32_MAX for libc.so.6 or the loader; with
+    // BIND_ERROR_MEMBER_UNDEFINED, the first member that joined, in the runtime's order, with a strong reference to the
+    // name (its index among Runtime.members).
     BindError error;
     NameId name;
     uint32_t library;
     uint32_t reference;
     uint32_t need;
     uint32_t provider;
+    uint32_t member;
 };
 
 // How many records the runtime adds to a link at most, and how many bytes of names and of atoms (with their
 // alignments): the room a link that binds against it needs besides its own.
 static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, uint64_t* atom_bytes);
+// bind_capacity for a link whose undefined global names, its own and its code's, are `names` (`count` of them): the crt
+// objects' records, and of the archives' members only the ones binding may load for it, where bind_capacity counts every
+// member (libgcc.a's 298 make a link's columns spread past the base pages its arena starts with). A member joins for a
+// strong reference to a name it defines, from the link, a crt object or another member that joins, so the closure of the
+// names' members and the crt objects' references' over the members' references (Runtime.reference_members) bounds them:
+// a name the link defines or a library exports counts a member that may not join. Its bitset and queue are pushed onto
+// `scratch` while it runs. It reads only what a snapshot's directory holds, which loading checks whole (the global
+// names, the pieces' references, marks and atoms' rooms): none of a piece's records, which binding checks as it joins
+// the piece (runtime_piece_current), so that a damaged piece can't size a link wrong, or past what an arena takes, before
+// its join fails as damaged (BIND_ERROR_SNAPSHOT) and the caller opens the runtime again.
+static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes,
+                                                                 uint64_t* atom_bytes);
 // Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
 // appends Scrt1.o, crti.o and crtbeginS.o (crt1.o, crti.o and crtbeginT.o for a static runtime), numbering the
 // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
 // bind->error, if it fails.
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
-// Binds every name of the link, appending the archives' members it needs (libc_nonshared.a's, or a static runtime's),
-// then crtendS.o (crtend.o) and crtn.o, and lists the imports and exports. False, with bind->error and bind->name, if
-// it fails; the link is then unfit to link.
+// Binds every name of the link, appending the archives' members it needs (libgcc.a's and libc_nonshared.a's, or a
+// static runtime's), then crtendS.o (crtend.o) and crtn.o, and lists the imports and exports. False, with bind->error
+// and bind->name, if it fails; the link is then unfit to link.
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_end(Bind* bind, Link* link);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -448,8 +490,9 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
         const bool weak = from_weak && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
         const uint8_t type = (flags & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_NOTYPE ? flags & BUSTER_LINK_SYMBOL_TYPE : from_flags & BUSTER_LINK_SYMBOL_TYPE;
         symbols->flags[symbol] = (uint8_t)(type | (weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL) | visibility);
-        // Once names are bound, a link symbol of source NONE is a weak reference that nothing defines.
-        if (bind->bound && !weak && symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE)
+        // Once names are bound, a link symbol of source NONE is a weak reference that nothing defines, unless a member
+        // of the current round added it and binding hasn't reached it (Bind.resolved).
+        if (bind->bound && !weak && symbols->source[symbol] == BUSTER_LINK_SOURCE_NONE && symbol < bind->resolved)
         {
             bind_fail(bind, BIND_ERROR_UNDEFINED, symbols->name[symbol]);
         }
@@ -825,8 +868,27 @@ static bool bind_relaxed_name(const Link* link, NameId name)
     return link->names.length[name] == sizeof(relaxed) - 1 && memcmp(link->names.bytes[name], relaxed, sizeof(relaxed) - 1) == 0;
 }
 
-// Binds `symbol`, which nothing in the link defines (see the orientation comment); with `members`, a member of
-// libc_nonshared.a that defines it is marked as needed.
+// The first member that joined, in the runtime's order, among whose strong references (Runtime.references) is the
+// runtime's global name `entry` (an index plus 1), or UINT32_MAX for none: BIND_ERROR_MEMBER_UNDEFINED's member, read
+// once, when binding fails.
+static uint32_t bind_referring_member(const Bind* bind, uint32_t entry)
+{
+    const Runtime* runtime = bind->runtime;
+    uint32_t result = UINT32_MAX;
+    for (uint32_t m = 0; result == UINT32_MAX && entry != 0 && m < runtime->member_count; m += 1)
+    {
+        const bool joined = (bind->members_joined[m / 64] >> (m % 64) & 1) != 0;
+        const uint32_t end = joined ? runtime->reference_begin[RUNTIME_OBJECTS + m + 1] : 0;
+        for (uint32_t r = joined ? runtime->reference_begin[RUNTIME_OBJECTS + m] : 0; r < end; r += 1)
+        {
+            result = result == UINT32_MAX && runtime->references[r] == entry - 1 ? m : result;
+        }
+    }
+    return result;
+}
+
+// Binds `symbol`, which nothing in the link defines (see the orientation comment); with `members`, a member of libgcc.a
+// or libc_nonshared.a that defines it is marked as needed.
 static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool members)
 {
     const Runtime* runtime = bind->runtime;
@@ -846,6 +908,9 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     // A reference with a visibility other than default needs a definition within the executable: a library's can't be
     // one, as GNU ld and lld resolve it.
     const bool shareable = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
+    // A name that the members which joined brought into the link (bind_members), which none of the program's symbols,
+    // the head crt objects' or the tail's names: only members refer to it.
+    const bool member_name = bind->member_symbols != 0 && symbol >= bind->member_symbols && !bind->tail_joined;
     // A library the link names with -l comes before libc.so's on the link line, as GCC's driver puts it.
     uint32_t library_export = 0;
     const uint32_t library = runtime_libraries_export(bind->libraries, link->names.bytes[name], link->names.length[name], link->names.hash[name], &library_export);
@@ -894,8 +959,12 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     }
     else if (member != 0 && members && !weak)
     {
+        // Its member defines it when it joins, at the end of this round. Until then the symbol isn't a reference left to
+        // nothing (source NONE), which bind_merge would take it for when another member that joins first refers to the
+        // name: libgcc.a's __fixdfti's to __fixunsdfti, of a program that calls both.
         const uint32_t m = member - 1;
         bind->members_needed[m / 64] |= 1ull << (m % 64);
+        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
     }
     else if (weak)
     {
@@ -905,11 +974,18 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     {
         // Left undefined, to the relaxation (bind_relaxed_name).
     }
-    else if (runtime->kind == RUNTIME_KIND_SHARED && shareable)
+    else if (runtime->kind == RUNTIME_KIND_SHARED && shareable && !member_name)
     {
         // A shared library's reference that nothing defines stays undefined, a dynamic symbol for the loader to bind in
-        // the libraries the program loads, as GNU ld and lld leave it (-shared allows it: -z undefs).
+        // the libraries the program loads, as GNU ld and lld leave it (-shared allows it: -z undefs); but not one that
+        // only members refer to (BIND_ERROR_MEMBER_UNDEFINED).
         symbols->source[symbol] = BUSTER_LINK_SOURCE_NONE;
+    }
+    else if (member_name)
+    {
+        const bool first = bind->error == BIND_ERROR_NONE;
+        bind_fail(bind, BIND_ERROR_MEMBER_UNDEFINED, name);
+        bind->member = first ? bind_referring_member(bind, entry) : bind->member;
     }
     else
     {
@@ -982,6 +1058,7 @@ static void bind_members(Bind* bind, Link* link, SymbolId first)
     {
         const SymbolId to = link->symbols.count;
         bind_resolve(bind, link, from, to, true);
+        bind->resolved = to;
         joined = false;
         for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
         {
@@ -991,6 +1068,7 @@ static void bind_members(Bind* bind, Link* link, SymbolId first)
             {
                 const uint32_t m = w * 64 + (uint32_t)__builtin_ctzll(pending);
                 pending &= pending - 1;
+                bind->member_symbols = bind->member_symbols == 0 ? link->symbols.count : bind->member_symbols;
                 bind_join(bind, link, RUNTIME_OBJECTS + m);
                 joined = true;
             }
@@ -1079,8 +1157,9 @@ static __mmask16 bind_exported_lanes(__m512i flags, __m512i atoms, __m512i sourc
 
 // A shared library's exports (Bind.exports): every definition of the link's that is global or weak, with default or
 // protected visibility, in an atom or absolute, as GNU ld and lld export them with -shared: the program's, since the
-// crt objects and libc_nonshared.a's members define only hidden names. In symbol order: by the vector path 16 symbols
-// at a time, compressed from their flags, atoms and sources, by the exact one a symbol at a time.
+// crt objects and libc_nonshared.a's members define only hidden names, and so do libgcc.a's but its decimal
+// floating-point and split-stack members, whose definitions GNU ld and lld export too. In symbol order: by the vector
+// path 16 symbols at a time, compressed from their flags, atoms and sources, by the exact one a symbol at a time.
 static void bind_shared_exports(Bind* bind, const Link* link)
 {
     // The columns and the count in locals: with the build's -fno-strict-aliasing, each store into the exports would make
@@ -1765,6 +1844,72 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes, 
     return result;
 }
 
+// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed), from its marks and
+// its atoms' room alone (RuntimePiece).
+static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapacity* capacity, uint64_t* name_bytes, uint64_t* atom_bytes)
+{
+    const ImportMark begin = runtime->pieces[piece].begin;
+    const ImportMark end = runtime->pieces[piece].end;
+    capacity->names += end.names - begin.names;
+    capacity->atoms += end.atoms - begin.atoms;
+    capacity->symbols += end.symbols - begin.symbols;
+    capacity->fixups += end.fixups - begin.fixups;
+    capacity->wide_addends += end.wide_addends - begin.wide_addends;
+    capacity->priorities += end.priorities - begin.priorities;
+    *name_bytes += end.name_bytes - begin.name_bytes;
+    *atom_bytes += runtime->pieces[piece].atom_room;
+}
+
+static LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes, uint64_t* atom_bytes)
+{
+    const RuntimeNames* global_names = &runtime->global_names;
+    const uint32_t member_count = runtime->member_count;
+    const uint64_t length = scratch->length;
+    uint8_t* marked = arena_push(scratch, (uint64_t)member_count + 1, 1);
+    uint32_t* queue = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)member_count + 1);
+    LinkCapacity result = { 0 };
+    *name_bytes = 0;
+    *atom_bytes = 0;
+    if (marked == 0 || queue == 0)
+    {
+        // Without room for the closure, every member's.
+        result = bind_capacity(runtime, name_bytes, atom_bytes);
+    }
+    else
+    {
+        memset(marked, 0, member_count);
+        uint32_t queued = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t* bytes = (const uint8_t*)names[i].pointer;
+            const uint32_t entry = runtime_find_global_name(global_names, bytes, (uint32_t)names[i].length, link_hash(bytes, (uint32_t)names[i].length));
+            const uint32_t member = entry != 0 ? global_names->member[entry - 1] : 0;
+            if (member != 0 && member - 1 < member_count && marked[member - 1] == 0)
+            {
+                marked[member - 1] = 1;
+                queue[queued++] = member - 1;
+            }
+        }
+        // The crt objects' references, then each queued member's, which may queue more.
+        for (uint32_t step = 0; step < RUNTIME_OBJECTS + queued; step += 1)
+        {
+            const uint32_t piece = step < RUNTIME_OBJECTS ? step : RUNTIME_OBJECTS + queue[step - RUNTIME_OBJECTS];
+            for (uint32_t r = runtime->reference_begin[piece]; r < runtime->reference_begin[piece + 1]; r += 1)
+            {
+                const uint32_t member = runtime->reference_members[r];
+                if (member != 0 && member - 1 < member_count && marked[member - 1] == 0)
+                {
+                    marked[member - 1] = 1;
+                    queue[queued++] = member - 1;
+                }
+            }
+            bind_capacity_piece(runtime, piece, &result, name_bytes, atom_bytes);
+        }
+    }
+    arena_pop_to(scratch, length);
+    return result;
+}
+
 BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
@@ -1777,9 +1922,9 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
         .program_symbols = link->symbols.count,
         .capacity = link->symbols.capacity,
     };
+    const uint32_t override_room = runtime->global_names.count < link->symbols.count ? runtime->global_names.count : link->symbols.count;
     bind->name_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->global_names.count);
     bind->named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, runtime->global_names.count);
-    bind->overrides = BUSTER_ARENA_PUSH_ARRAY(arena, BindOverride, runtime->global_names.count);
     bind->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, runtime->link.symbols.count);
     bind->members_needed = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
     bind->members_joined = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
@@ -1790,6 +1935,7 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     bind->queue = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)runtime->member_count + 1);
     bind->imports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
     bind->exports = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, bind->capacity);
+    bind->overrides = BUSTER_ARENA_PUSH_ARRAY(arena, BindOverride, override_room);
     const bool pushed = bind->name_symbols != 0 && bind->named != 0 && bind->overrides != 0 && bind->symbols != 0 && bind->members_needed != 0 &&
                         bind->members_joined != 0 && bind->signatures != 0 && bind->frontier != 0 && bind->loads != 0 && bind->marks != 0 &&
                         bind->queue != 0 && bind->imports != 0 && bind->exports != 0;
@@ -1847,7 +1993,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     }
     bind->resolving = true;
     // A static runtime's members all join before anything binds: GNU ld's group scan, then archive order.
-    // libc_nonshared.a's join round by round, each after the names that need it bind.
+    // libgcc.a's and libc_nonshared.a's join round by round, each after the names that need it bind.
     const bool static_runtime = runtime_kind_is_static(bind->runtime->kind);
     bind->bound = !static_runtime;
     if (bind->error == BIND_ERROR_NONE && static_runtime)
@@ -1858,6 +2004,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     if (bind->error == BIND_ERROR_NONE && static_runtime)
     {
         bind_resolve(bind, link, 1, link->symbols.count, false);
+        bind->resolved = link->symbols.count;
     }
     else if (bind->error == BIND_ERROR_NONE)
     {
@@ -1876,6 +2023,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     if (bind->error == BIND_ERROR_NONE)
     {
         bind_resolve(bind, link, before_tail, link->symbols.count, false);
+        bind->resolved = link->symbols.count;
     }
     bind_keep_imports(bind, link);
     bind_keep_loader(bind, link);

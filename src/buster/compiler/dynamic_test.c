@@ -27,8 +27,8 @@
 //     (2,000 by default) whose table of pointers has some that the writer's filter takes for symbols outside the image.
 //     Each must run under the system's loader, without stand-ins, exiting with status 0 having written
 //     LinkProgram.output.
-//   - Cases: the atexit program and the linkers' cases of test-bind: each must bind, or not, as GNU ld and lld link it,
-//     and run with the status their links exit with.
+//   - Cases: the atexit program, the libgcc program and the linkers' cases of test-bind: each must bind, or not, as GNU
+//     ld and lld link it, and run with the status their links exit with.
 //   - Exports: definitions of sixteen names that libc.so.6 defines too, which binding exports and main finds with dlsym
 //     through the executable's .gnu.hash.
 //   - Imports: BUSTER_DYNAMIC_TEST_IMPORTS of libc.so.6's functions, each called through a stub and pointed to, which
@@ -2429,8 +2429,8 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
     return dynamic_test_report(&tally);
 }
 
-// The atexit program and the linkers' cases: each that binds runs with the status GNU ld's and lld's links of it exit
-// with.
+// The atexit program, the libgcc program (whose member of libgcc.a joins) and the linkers' cases: each that binds runs
+// with the status GNU ld's and lld's links of it exit with.
 static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
 {
     DynamicTestTally tally = {
@@ -2438,21 +2438,25 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
     };
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     BindTestAtexit atexit_program;
+    BindTestLibgcc libgcc_program;
     bind_test_atexit(&atexit_program, runtime, BIND_PATH_VECTOR, true);
-    dynamic_test_expect(&tally, atexit_program.bound, "the atexit program bound", 0);
-    for (uint32_t which = 0; which <= BIND_TEST_CASES; which += 1)
+    bind_test_libgcc(&libgcc_program, runtime, BIND_PATH_VECTOR, true);
+    dynamic_test_expect(&tally, atexit_program.bound && libgcc_program.bound, "the atexit and libgcc programs bound", 0);
+    for (uint32_t which = 0; which <= BIND_TEST_CASES + 1; which += 1)
     {
         BindTestCaseProgram case_program;
         const bool atexit = which == BIND_TEST_CASES;
-        if (!atexit)
+        const bool libgcc = which == BIND_TEST_CASES + 1;
+        const bool own = atexit || libgcc;
+        if (!own)
         {
             bind_test_case_program(&case_program, runtime, (BindTestCase)which, BIND_PATH_VECTOR, true);
         }
-        BindTestLink* test = atexit ? &atexit_program.test : &case_program.test;
-        const bool bound = atexit ? atexit_program.bound : case_program.bound;
-        const char* name = atexit ? "atexit" : bind_test_cases[which].name;
-        const bool links = atexit || bind_test_cases[which].links;
-        const int expected = atexit ? 0 : bind_test_cases[which].status;
+        BindTestLink* test = atexit ? &atexit_program.test : libgcc ? &libgcc_program.test : &case_program.test;
+        const bool bound = atexit ? atexit_program.bound : libgcc ? libgcc_program.bound : case_program.bound;
+        const char* name = atexit ? "atexit" : libgcc ? "libgcc" : bind_test_cases[which].name;
+        const bool links = own || bind_test_cases[which].links;
+        const int expected = atexit ? 0 : libgcc ? BUSTER_BIND_TEST_LIBGCC_STATUS : bind_test_cases[which].status;
         dynamic_test_expect(&tally, bound == links, "bound as GNU ld and lld link it", which);
         const String8 path = executable_test_path(directory, name, path_bytes);
         Scratch scratch = scratch_begin(0);
@@ -2483,12 +2487,13 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
         {
             unlink(path.pointer);
         }
-        if (!atexit)
+        if (!own)
         {
             bind_test_link_end(&case_program.test);
         }
     }
     bind_test_link_end(&atexit_program.test);
+    bind_test_link_end(&libgcc_program.test);
     return dynamic_test_report(&tally);
 }
 
@@ -3456,6 +3461,27 @@ static const DynamicTestSharedSource dynamic_test_shared_sources[] = {
                   "int buster_check(int (*helper)(void), int* data)\n"
                   "{\n"
                   "    return atexit(buster_handler) != 0 || helper() != 2 || *data != 9;\n"
+                  "}\n",
+        .pic = "-fPIC",
+    },
+    {
+        // The 128-bit integers' division, remainder and conversions, which cc's code calls libgcc.a's functions for
+        // (__udivti3, __umodti3, __divti3, __modti3, __floatuntidf, __fixunsdfti, __floattixf): their members join the
+        // library, their definitions hidden.
+        .name = "libgcc",
+        .source = "static volatile unsigned __int128 buster_dividend = ((unsigned __int128)1 << 100) + 12345;\n"
+                  "static volatile unsigned __int128 buster_divisor = 1000003;\n"
+                  "static volatile __int128 buster_signed = -((__int128)1 << 90) - 7;\n"
+                  "static volatile __int128 buster_by = 77;\n"
+                  "static volatile double buster_double = 1e30;\n"
+                  "int buster_check(int (*helper)(void), int* data)\n"
+                  "{\n"
+                  "    unsigned __int128 q = buster_dividend / buster_divisor, r = buster_dividend % buster_divisor;\n"
+                  "    __int128 s = buster_signed / buster_by, t = buster_signed % buster_by;\n"
+                  "    unsigned __int128 back = (unsigned __int128)buster_double;\n"
+                  "    int bad = q * buster_divisor + r != buster_dividend || r >= buster_divisor || s * buster_by + t != buster_signed || t > 0 || t <= -77;\n"
+                  "    bad |= (double)buster_dividend != 0x1p100 || (double)back != buster_double || (long double)buster_signed != -0x1p90L - 7;\n"
+                  "    return bad || helper() != 2 || *data != 9;\n"
                   "}\n",
         .pic = "-fPIC",
     },
