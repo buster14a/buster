@@ -862,8 +862,9 @@ Before the programs, checks of their own:
     2^63 too), calls of C functions through their addresses and frame objects (four, of 16 to 32 bytes aligned to 8 or
     16, given values first, read by `LOCAL`, written by `STORE_LOCAL` and `SET_LOCAL` and copied out at the end), against
     the check's own stack machine over the stream. A program past the depth tables is counted, not compiled. The programs
-    compiled, run and checked must reach every kind and conversion of the class, in bitmaps of their own (`CALL`'s and
-    `JUMP_VALUE`'s bits had been two conversions' too).
+    compiled, run and checked must execute every kind and conversion of the class and both arms of a `?:`. Separate
+    bitmaps record kinds and conversions, and the interpreter marks only entries and arms it runs. Any refusal except
+    a random program's excess depth fails the check with its error and entry.
 - **int128** (`tier0_int128_test.c`), the 128-bit integers compiled by both paths into the same records, encoded by both
   encoders into the same bytes and run natively in a child, called from C through function pointers, so that the file's
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
