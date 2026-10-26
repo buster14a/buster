@@ -150,18 +150,32 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
   `#line`s naming one file keep their rows together, and the unit's file
   table is built by key without comparing names.
 
-The lowering is compiled twice from one body (`check_program_lower_body`,
-always inlined): `check_program_lower`, which every compile without `-g`
-runs, keeps no tokens, and `check_program_lower_sources`, `-g`'s, keeps them.
-The flag is a constant in each, so that the plain lowering carries none of
-the tokens' state through its loops: when it was a value that the checker
-unit's two callers gave it, clang kept it and the tokens' column live across
-them and spilled more, which every compile paid. The tracking the two share
-is cheap: a task saves the token current when it was pushed and restores it
-when it runs, but an expression's, which sets its node's own when it runs.
-The emission reserves the raw rows and writes each function's out of line
-(`check_program_emit_reserve_rows` and `check_program_emit_body_rows`), so
-that the plain emission's loop doesn't carry them either.
+The lowering and its loop over tasks are each compiled twice from one
+always-inlined body (`check_program_lower_body`, `check_lower_drain_body`):
+`check_program_lower` and `check_lower_drain`, which every compile without
+`-g` runs, keep no tokens, and `check_program_lower_sources` and
+`check_lower_drain_sources`, `-g`'s, keep them. The flag is a constant in
+each, so that the plain copies are the code a compile ran before this
+feature. It cost every compile while it was a value: clang kept the flag and
+the tokens' column live across the lowering's loops and spilled more, and a
+branch on it at every entry cost about as much as the store it skipped, as
+did saving the token with every push and restoring it at every pop. Only
+`-g`'s drain sets each task's token as it pops it: an expression's node's, a
+statement's own, or for any other task the one it was pushed under. The
+tokens settle lazily (`check_lower_settle`): when the token changes, the
+entries written and the tasks pushed since it last changed take it, so that
+no entry or push spends anything on them. The helpers both copies share only
+test the flag where a call or an initializer part changes the token in the
+middle of a task, and at a function's start and end. Each copy inlines the
+tasks' work and `tier0_validate` as clang inlines them into code it compiles
+once (`[[clang::always_inline]]` at the calls): with a call in each copy, it
+left them out of line, and a compile without `-g` took 2% more cycles. The
+emission reserves the raw rows and writes each function's out of line
+(`check_program_emit_reserve_rows`, `check_program_emit_body_rows`). On the
+9700X, a compile without `-g` of a generated program of 31,269 lines retired
+0.045% fewer instructions than main, took 0.37% more wall time and wrote
+main's executable; with `-g` it took 7.1% more
+([the record](https://github.com/buster14a/buster-performance/tree/d7d14b414fdfe0cfc0e9a030b3148b3dacb1d1ba/docs/measurements/c-driver-dwarf-395-2026-10-25)).
 
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a

@@ -591,9 +591,11 @@ designs and the compilers already built this way.
   lines as the diagnostics place them, bounded per function by its
   declaration's and closing brace's places, and keeps a row per change of line
   in the function's file, and the body's start; each pass a vector path with
-  an exact twin (`--scalar`). The lowering is compiled twice from one body,
-  `check_program_lower` without the tokens and `check_program_lower_sources`
-  with them, so that a compile without `-g` carries none of their state.
+  an exact twin (`--scalar`). The lowering and its loop over tasks are
+  compiled twice, without the tokens (`check_program_lower`,
+  `check_lower_drain`) and with them (`check_program_lower_sources`,
+  `check_lower_drain_sources`), so that a compile without `-g` runs the code
+  it ran before.
   `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
   the lines against `pp_presumed` on fixtures (a computed goto among them)
   and generated programs, that lowering with the tokens changes no typed
