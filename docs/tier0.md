@@ -32,6 +32,10 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
+  - each typed entry's first record (`Tier0Code.entry_records`, the epilogue's after the last), when the producer asks
+    for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
+    sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
+    `c_check_debug.c`);
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
@@ -127,9 +131,17 @@ table. The kinds are:
 - `JUMP` goes to its target.
 - `JUMP_VALUE` carries an arm's value of `?:`, or a value's `&&` and `||`, to the arm after it.
 - `RETURN` returns at statement level.
+- `JUMP_INDIRECT` pops an address (U64) and goes there: GNU C's `goto *p`, at statement level. Its targets are the
+  function's labels whose addresses the code takes (`&&label`), an optional column, `label_entries` (`label_count`
+  entry indices, each a statement's start or the count). Tier 0 reports each one's first record
+  (`Tier0Code.label_records`); the front end defines the label's symbol there, after branch sizing, and an address of
+  a label is a `GLOBAL_ADDRESS` of it. Each label is a target in the fusion's windows, reached with nothing on the
+  stacks.
 
 The producer lowers conditions to jumps, the short-circuit operators straight to their targets. Wherever control
 arrives at a target, the stacks hold the same values; `tier0_validate` checks that, as WebAssembly's validator does.
+A label of `label_entries` counts as reached with empty stacks before the first entry, since a `JUMP_INDIRECT` may
+arrive at any time; and a `JUMP_INDIRECT` must leave the stacks empty, in a function with a label.
 
 **The memory contract:**
 
@@ -143,8 +155,8 @@ arrives at a target, the stacks hold the same values; `tier0_validate` checks th
 
 **What Tier 0 derives itself,** under #298's producer–consumer rule:
 
-- **The labels** (a bitset of targets): one pass over the control entries the vector path finds 64 at a time. A
-  producer's bitset would cost the same to build and adds a column to keep consistent.
+- **The labels** (a bitset of targets): one pass over the control entries the vector path finds 64 at a time, and the
+  labels of `label_entries`. A producer's bitset would cost the same to build and adds a column to keep consistent.
 - **Each entry's operand class:** a shifted load of `classes`.
 
 The rest of what fusion needs is in the stream. A unit-wide API, one stream for every function of a unit, would keep
@@ -457,7 +469,11 @@ record index (ascending) and its target's; the function's end is the epilogue's 
 
 **Symbolic fields** (`[rip + global]`, `call f`) are records with `BUSTER_X86_FORM_FIXUP` and a `LinkReference`:
 `PC32` or `CALL`, or for a symbol outside the image `LOAD_GOT`, `TPOFF32` or `GOTTPOFF`, the target `SymbolId` and
-addend 0, in record order. An indirect call is `call r11`, with none.
+addend 0, in record order. An indirect call is `call r11`, with none, and an indirect jump `jmp` through the address's
+register.
+
+**The labels' records** (`label_records`, one per entry of `label_entries`): the first record of each label whose
+address the code takes, from the positions both paths compute; equal in both, as the tests compare.
 
 ## The design
 
@@ -646,7 +662,9 @@ six shapes: one function of integers, integers and calls, everything, larger, la
 (#137), and larger past the depth tables, 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
-2. Both paths must compile it to the same records, branch columns and references.
+2. Both paths must compile it to the same records, branch columns, references and entries' first records, which must
+   ascend within the records; and a compile without the entries' first records must make the same code and none of
+   them.
 3. The records must pass `x86_validate` and the branch columns `branch_sizing_validate`.
 4. They are sized and encoded, loaded into fresh pages and run in a child process on eight inputs, which an alarm stops
    after 10 s (a frame laid out wrong can make code loop). The result and every global's bytes must equal what the
@@ -760,6 +778,15 @@ Before the programs, checks of their own:
     the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
     `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
     expected one.
+- **labels** (#133's labels as values, `tier0_label_test.c`):
+  - `tier0_validate` must refuse, at the entry, an indirect jump to an I64, of class I64, with a value, with a value left
+    under it and in a function without labels, a label past the end, the labels' count without their entries and a
+    label that control reaches with a value, and take the stream beside them.
+  - a function of the test's own dispatches on its argument's base-4 digits through a table of five labels' addresses,
+    one label going on to another through the table, as an interpreter's loop does. Both paths must compile it alike,
+    labels' records included, in ascending order; both encoders must give the same bytes; and it must run in a child
+    on 12 inputs, the table filled from the labels' records and the records' offsets after branch sizing, with this
+    file's results.
 - **x87** (#136's item 8, `tier0_x87_test.c`), long double compiled by both paths into the same records, encoded by
   both encoders into the same bytes and run natively in a child, called from C through function pointers, so that the
   file's C (clang's code) is the oracle of the convention for its arguments, parameters and results, and its x87
@@ -1119,6 +1146,7 @@ actual current producer is `tier0_generate` and the tests' manually built
 | Template/hole blocks → expanded records → `x86_choose_forms` | Implemented direct 16-byte record emission. Scalar twin constructs fields independently; immediate shortening must preserve value and live flags. |
 | Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
 | Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
+| Entries' first records + branch sizing's offsets → source rows | Implemented for the C driver's `-g` (#395): `Tier0Code.entry_records` are the measured positions both paths emit from, which `check_program_emit` turns into byte offsets after sizing and `c_check_debug.c` into DWARF rows. |
 
 A logical batch is one complete function; kernels classify 64 entries and
 read u64 values eight at a time with bounded masks. Input columns need natural
@@ -1131,7 +1159,8 @@ precedes use and concurrent readers.
 
 The typed producer already knows machine classes, pointer scale, explicit
 conversion, branch targets and ABI placement; omitting them would force
-reconstruction. Labels are deliberately derived from control entries and the
+reconstruction. Labels are deliberately derived from control entries (but those
+an indirect jump reaches, which only the producer knows) and the
 last-operand class from a shifted load. Keeping an extra label column requires
 a measured benefit and a consistency rule. Small-function occupancy motivates
 a unit-batch alternative, but batching cannot fuse across function boundaries,

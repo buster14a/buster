@@ -26,6 +26,19 @@ external implementation or test corpus is incorporated.
 Every build and test runs on the approved 9700X through the shared per-run lock.
 The new test commands are also in the existing protected workflow.
 
+Dynamic-stack text uses `alloca.ptr %size`, `stack_save.i64` and
+`stack_restore.void %position` with no extra metadata. Both interpreter fronts
+execute the [shared dynamic-stack contract](ir.md#dynamic-stack-contract).
+`test-ir-lowering` includes their frame/lifetime, overflow/resource, transformation
+and native-refusal regressions; `test-ir-parse` includes a canonical stack fixture.
+The execution oracle bounds storage by its supplied arena and live memory limit.
+Restore handle values that do not match a retained capture in the current
+invocation fail with `INTERPRETER_INVALID`. Numeric equality cannot establish
+provenance: a fabricated integer with identical bits passes this check, so
+producers must preserve captured-handle provenance. Undefined or released storage
+uses the existing undefined/memory diagnostics. The verifier checks static
+structure and types; execution checks live-capture membership and memory access.
+
 `interpret-ir` reads a sequence of functions from a regular file. Their symbols
 are their one-based order in that file; `--entry ID` selects one, defaulting to
 1. Following arguments are integer spellings of the parameter bit patterns,

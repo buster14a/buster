@@ -123,11 +123,48 @@ static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names,
     return result;
 }
 
+// The raw rows' room (CheckProgramRows): each body's entries, its prologue's and its epilogue's. A program whose
+// selection kept no function has none, an empty set of rows (a unit of no functions to debug.c), not a failure. Only -g
+// reaches it, out of line so that the plain emission carries none of it.
+static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgramRows* rows, uint64_t entries, uint32_t count, Arena* output)
+{
+    const uint64_t capacity = entries + 2 * (uint64_t)count;
+    const bool fits = capacity <= UINT32_MAX - BUSTER_CHECK_DEBUG_SLACK;
+    *rows = (CheckProgramRows){ .capacity = fits ? (uint32_t)capacity : 0 };
+    rows->offsets = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+    rows->tokens = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)rows->capacity + BUSTER_CHECK_DEBUG_SLACK) : 0;
+    rows->first = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->counts = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->sizes = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    rows->bodies = fits ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    return rows->offsets != 0 && rows->tokens != 0 && rows->first != 0 && rows->counts != 0 && rows->sizes != 0 && rows->bodies != 0;
+}
+
+// Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
+// record count's offset is the end. Only -g reaches it, out of line as the rows' room is.
+static __attribute__((noinline)) void check_program_emit_body_rows(CheckProgramRows* rows, const CheckProgram* program, const Parser* parser,
+                                                                   const uint32_t* tokens, const Tier0Code* code, uint32_t b, uint32_t* offsets, uint32_t length,
+                                                                   bool scalar)
+{
+    offsets[code->count] = length;
+    const uint32_t declaration = program->bodies[b].declaration;
+    const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
+    rows->first[b] = rows->count;
+    rows->counts[b] = scalar ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
+                                                        rows->offsets + rows->count, rows->tokens + rows->count) :
+                               check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
+                                                rows->offsets + rows->count, rows->tokens + rows->count);
+    rows->sizes[b] = length;
+    rows->bodies[b] = offsets[code->entry_records[0]];
+    rows->count += rows->counts[b];
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
-// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND.
+// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
+// `rows`, each source body's raw source rows too (c_check_debug.c), from `output`.
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                               CheckProgramBinding* binding, bool verify)
+                               CheckProgramBinding* binding, CheckProgramRows* rows, bool verify)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -142,7 +179,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     if (valid)
     {
-        valid = check_program_lower(&result->lowered, program, scalar, output, scratch);
+        valid = rows != NULL ? check_program_lower_sources(&result->lowered, program, scalar, output, scratch) :
+                               check_program_lower(&result->lowered, program, scalar, output, scratch);
         if (!valid)
         {
             result->status = result->lowered.status;
@@ -277,6 +315,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         {
             result->lowered.functions[b].symbol_access = access;
             result->lowered.functions[b].symbol_count = access_count;
+            // The entries' first records only for source rows.
+            result->lowered.functions[b].entry_records = rows != NULL;
         }
     }
     uint64_t references = 0;
@@ -304,6 +344,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->backend_node = codes[b].node;
             result->token = program->bodies[b].declaration;
         }
+    }
+    // A failure before the rows' room leaves `rows` to the failure's reset below.
+    if (valid && rows != NULL)
+    {
+        valid = check_program_emit_reserve_rows(rows, result->lowered.entries, count, output);
     }
     const CheckProgramHelpers* helpers = &result->lowered.helpers;
     for (uint32_t h = 0; valid && h < helpers->count; h += 1)
@@ -428,6 +473,14 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", object);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
+        else if (object != 0 && object - 1 < parser->tokens.count && parser->tree.roles[object - 1] == PARSE_ROLE_LABEL)
+        {
+            // A label whose address the program takes (GNU C's &&label): a place in its function's code, defined below.
+            char spelling[48];
+            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_label_%u", object);
+            name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+            flags = BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE;
+        }
         else
         {
             result->status = CHECK_PROGRAM_INVALID;
@@ -463,6 +516,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
+    for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
+    {
+        result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
     if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
     {
         const NameId name = binding->bind->name;
@@ -475,6 +532,8 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         result->reason = "binding against the C runtime failed";
         valid = false;
     }
+    // The labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols).
+    uint32_t labels = 0;
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -503,6 +562,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                                    scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, fixup_ends) :
                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, fixup_ends);
             valid = length >= 0;
+            if (valid && source_body && rows != NULL)
+            {
+                check_program_emit_body_rows(rows, program, parser, result->lowered.entry_tokens[b], code, b, offsets, (uint32_t)length, scalar);
+            }
             if (valid)
             {
                 const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length;
@@ -510,6 +573,17 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, (uint64_t)length, encoded, 0);
                 valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, 0, (uint64_t)length) &&
                         link_add_code_fixups(&result->link, atom, code->records, code->count, fixup_ends, code->reference_count, code->references, code->reference_count);
+                // Each label at its first record's offset, after branch sizing: the program's definition.
+                for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
+                {
+                    valid = labels < result->lowered.label_symbol_count && code->label_records[k] < code->count &&
+                            link_define_symbol(&result->link, result->lowered.label_symbols[labels], atom, offsets[code->label_records[k]], 0);
+                    if (valid)
+                    {
+                        result->link.symbols.source[result->lowered.label_symbols[labels]] = BUSTER_LINK_SOURCE_PROGRAM;
+                    }
+                    labels += 1;
+                }
                 if (valid)
                 {
                     result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
@@ -538,6 +612,10 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
         *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason };
+        if (rows != NULL)
+        {
+            *rows = (CheckProgramRows){ 0 };
+        }
     }
     arena_pop_to(scratch, temporary);
     return valid;

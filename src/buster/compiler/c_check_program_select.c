@@ -183,7 +183,11 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 valid = object != 0 && object < objects && edges < reference_capacity;
                 if (valid)
                 {
-                    const uint32_t target = object_definitions[object];
+                    // An address of a label (GNU C's &&label, its object the label's token plus one) is its function's:
+                    // the function's code defines the label's symbol.
+                    const uint32_t label = object - 1;
+                    const bool owned = full->parser->tree.roles[label] == PARSE_ROLE_LABEL && token_bodies[label] != 0;
+                    const uint32_t target = object_definitions[owned ? full->bodies[token_bodies[label] - 1].object : object];
                     sources[edges] = definition;
                     targets[edges] = target != 0 ? target - 1 : BUSTER_C_LOWERING_NONE;
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;

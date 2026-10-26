@@ -101,7 +101,12 @@ plain-char semantics.
 The source adapter handles nested pointer, array and function declarators;
 prototype scopes and parameter adjustments; typedefs and local scopes;
 arithmetic, pointers, calls and casts; records/unions, anonymous members,
-bit-fields and flexible arrays; enumerations and source-point completion.
+bit-fields (with GNU attributes after a width, the member's, which the parser
+hangs on the member's end, outside the width's tree, so that the width is
+evaluated as any constant expression is) and flexible arrays (a struct whose only named
+member is one too, a GNU extension clang takes, with clang's layout);
+enumerations, C23's with a fixed underlying type among them, and source-point
+completion.
 It retains initializer lists, designators and ranges, strings and predefined
 function-name arrays, compound literals, GNU statement expressions, generic
 selection, `typeof`, and runtime array bounds. Increment/decrement and compound
@@ -109,6 +114,26 @@ assignments retain one destination evaluation and an explicit store conversion.
 `if`, loops, `switch`/cases, labels/goto, break/continue, returns and static
 assertions receive semantic checks. Assembly operands/constraints and source
 attribute applicability have separate bounded consumers.
+
+An enum with a fixed underlying type (`enum E : T`, C23's, which clang takes in
+every mode) is complete at its base, so that its own list may take `sizeof` of
+it. Its enumerators have the base's type in its list, and after it the enum's
+in C23 but still the base's before it, as clang 23 types them (two such enums'
+enumerators of one base are of one type before C23, and of two after it). Each
+value is representable in the base as clang's `isRepresentableIntegerValue` has
+it (a negative one by its significant bits, any other by its active bits, less a
+signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
+needs a pointer, is refused), and an integer type of any width but `_BitInt`
+takes it. GNU attributes among the base's specifiers are the base type's, as
+clang has them: ignored, but one that would make it a vector's (`vector_size`,
+`ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
+declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
+none. A declaration of it with a declarator (`enum E : int x;`) is refused at
+the `:`, and an enum without a base can't be given one, nor the other way round,
+each where clang reports it. An `aligned` attribute after its body, which clang
+applies after the base completed it, is refused as unsupported. (Attributes
+after a tag's name, before a `;`, make any tag's declaration a reference to the
+visible tag, as clang has it, not a declaration of it alone.)
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -127,7 +152,10 @@ prototype's parameters, and the tags its list declares, end at its `)`. A
 definition's are declared again at its body's opening, as clang has them, since
 the body's scope is theirs too (C11 6.2.1p4): in
 `int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
-parameter's (#435).
+parameter's (#435). A prototype in a constant expression's type name (a
+typeof's, a builtin's operand) ends its tags at its `)` as well, in the
+evaluator's binding walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s
+`struct Z` isn't a later one's (#437).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -557,6 +585,32 @@ What the lowering covers past scalars (#145's programs):
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the
   block's `STACK_SAVE`, where it needs no restore.
+- **Labels as values** (GNU C's, which Lua's interpreter dispatches with).
+  `&&label` is a `void *` address constant of the label's own object (its
+  token plus one, which no declaration has); a label its function doesn't
+  have, or `&&` outside a function's body, is an undeclared name at the
+  label's, where clang puts its errors. In `goto *expression` the `*` is
+  the goto's delimiter (the parser's child of the goto, with the whole
+  expression after it as its own child, a comma's or an assignment's too:
+  `goto *p ? &&a : &&b` goes to the conditional's value, as clang's does), and
+  the expression converts to `const void *` as an assignment would. Clang's
+  jump-scope rules for it: a function with a computed goto and no address of a
+  label refuses its first one, and every computed goto must be inside each
+  variable-length array's scope and each statement expression that holds a
+  label whose address its function takes, since it may go to any of them.
+  Those scopes nest, so the labels' innermost ones intersect in one interval,
+  which each goto must be in: a pass over the function, not one per pair. The
+  control stream marks each such label's place (`CHECK_CONTROL_LABEL`) and a
+  computed goto is `CHECK_CONTROL_JUMP_INDIRECT`, with no `STACK_RESTORE`: as
+  in clang's code, leaving an array's block that way doesn't release its
+  storage, which the function's return does. An address of a label is a
+  reference to its function in the selection. The lowering gives Tier 0 each
+  function's labels (`Tier0Function.label_entries`), and the emission defines
+  a local symbol at each one's first record after branch sizing
+  (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
+  table's pointers point at. Not yet: the difference of two labels' addresses
+  as a static initializer's constant (GNU's relative jump tables), which clang
+  folds and the checker refuses as not a constant.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
@@ -633,6 +687,10 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
+  alike in identifiers and `#if`'s character constants (the preprocessor's
+  errors) and in literals (`invalid or unsupported literal`), at their places
+  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that
@@ -707,11 +765,11 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-three differences left are in bases, and mutants aren't made of a unit whose
-base differs:
+differences left are in bases, and mutants aren't made of a unit whose base
+differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
+one: since the checker takes them (#133), Lua's 34 files agree with clang (the
+corpus comparison, without mutants, on a laptop's clang 23). Two are left:
 
-- Lua's `lvm.c`: GNU's labels as values (`&&L_OP_MOVE`, `goto *`), which the
-  checker doesn't take yet;
 - the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
   `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
   floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s

@@ -321,10 +321,11 @@ designs and the compilers already built this way.
   links an executable (`-o`, `a.out` by default) by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, and `--lower-all`
+  checking every function's records with `x86_validate`, `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
-  `check_program_select`). `./build/compiler parse
+  `check_program_select`), and `-g` attaching DWARF of its functions' source
+  lines (`c_check_debug.c`, #395; `-c -g` writes no DWARF yet). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -334,26 +335,53 @@ designs and the compilers already built this way.
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
   clang emits no static function that only other units' branches reach. A new
-  command's branch names its unit. On the 9700X the units took 3.5 to 7.1 s
-  each (46.7 s in all), where `main.c` as one unit took 28.5 s (#270). The
-  build waits for its largest unit, so keep the units balanced: the types
-  unit, which had grown to hold the checker, took 2.5 times as long as any
-  other until it was split into the types, checker and checker builtins
+  command's branch names its unit. The modules that several units' commands
+  run compile in one unit alone, their home, which the others call (#270): the
+  lexer in the driver's unit, the preprocessor and the parser in the front
+  end's (but for the fragments' unit, which compiles a parser of its own with
+  the fragment sink), and the linker's modules (`import.c`, `runtime.c`,
+  `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
+  unit. Their entry points that other units call take the module's macro
+  (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
+  `BUSTER_LINKER_ENTRY`) instead of `static`: `main.c` defines it as nothing
+  in the home, and elsewhere as an inline definition that is never inlined,
+  which clang doesn't emit, so that neither the entry point nor what only it
+  reaches compiles there; a unit without `main.c` (a benchmark's) gets
+  `static`. A command then runs in two units' copies of the code, so a home
+  must share no static variable with its callers' units: `main.c`'s units share
+  one lane context (`lane.c`), and `./build.sh check-call-graph` reports any
+  variable a command reaches in two units ("Call graph check"). A function to
+  home is a module's entry point that several units compile, coarse enough
+  that a call from another unit costs nothing, which keeps its state in its
+  arguments. On the 9700X the checker's unit, the longest, took 27.0 s alone
+  and all of the build's 40.0 s before the homes, which removed 13% of the
+  functions the units compile. The build waits for its largest unit, so keep
+  the units balanced: the
+  types unit, which had grown to hold the checker, took 2.5 times as long as
+  any other until it was split into the types, checker and checker builtins
   units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
   one function that its optimizer takes superlinear time over.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
-  It compiles the translation units at once, a clang process each, and links
-  them in order: the same executable as one clang command for all of them.
-  It reports how long the compiles took, and the three that took longest.
+  It compiles the translation units in a clang process each, one per core of
+  the CPUs it may run on at a time (`cores`), the longest first (`order`, by
+  their times on the 9700X: a new source goes where its time puts it, and the
+  build stops at a source that `order` doesn't name), and links them in the
+  sources' order: the same executable as one clang command for all of them.
+  Two compiles on one core's threads slow each other down, the longest among
+  them: on the 9700X before the homes (`main.c`), its 15 threads compiling at
+  once took 40.0 s and 331 s of CPU, and its 8 cores one compile each 32.3 s
+  and 233 s; with the homes, one compile per core takes 25.3 s and 200 s, the
+  cores' work rather than the longest unit's. It reports how long the
+  compiles took, and the three that took longest.
   `BUSTER_DEBUG_INFO=0` builds without `-g`, which took a fifth of the build's
   time; the 9700X job builds so, since nothing there reads it (clang's code
   then differs in a few functions' stack slots). The checker's unit takes
-  longest, and splitting it doesn't help: `check` and the default driver,
-  `test-checker`, and its other commands each reach the whole compiler, so a
-  unit for any one of them took 84 to 88% of its time (clang 18, locally).
+  longest: `check` and the default driver, `test-checker`, and its other
+  commands each reach the whole compiler, and before the homes a unit for any
+  one of them took 84 to 88% of its time (clang 18, locally).
   The executable is linked at a fixed address (`-no-pie`), from the same code:
   as a PIE, its pointer tables' 366,684 relative relocations made every start
   take 8 to 13 ms of page faults, which `link-foreign` and the tests pay per
@@ -554,8 +582,26 @@ designs and the compilers already built this way.
   `test-debug --cross-check` checks original fixtures, as one unit and as two,
   with readelf, GDB and perf; `benchmark-debug` measures validation through
   address finalization. [The debug guide](docs/debug.md) records the contract
-  and the source-row production still pending; `streaming.c` makes a unit per
-  256 functions as they compile.
+  and a function's body's row (`DebugFunction.prologue_end`); `streaming.c`
+  makes a unit per 256 functions as they compile.
+- `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
+  typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
+  `check_program_emit`'s raw rows, the driver maps their tokens to presumed
+  lines as the diagnostics place them, bounded per function by its
+  declaration's and closing brace's places, and keeps a row per change of line
+  in the function's file, and the body's start; each pass a vector path with
+  an exact twin (`--scalar`). The lowering and its loop over tasks are
+  compiled twice, without the tokens (`check_program_lower`,
+  `check_lower_drain`) and with them (`check_program_lower_sources`,
+  `check_lower_drain_sources`), so that a compile without `-g` runs the code
+  it ran before.
+  `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
+  the lines against `pp_presumed` on fixtures (a computed goto among them)
+  and generated programs, that lowering with the tokens changes no typed
+  function, and with `--cross-check` the executable through
+  `llvm-dwarfdump --verify` and gdb.
+  [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
   (strings not merged), references between debug sections resolved, those to
@@ -778,7 +824,8 @@ designs and the compilers already built this way.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler` and `test-checker-asm`
-  check the driver and inline assembly against Clang; `test-checker-corpus`
+  check the driver and inline assembly against Clang (but for named UCNs,
+  which clang accepts and the driver refuses at their places, #452); `test-checker-corpus`
   compares a corpus's acceptance and first diagnostics with Clang, and its
   semantic mutants with `--semantic-mutations` ("Checker corpus and semantic
   mutations" below), and `benchmark-checker-source` measures checking of real
@@ -826,7 +873,9 @@ designs and the compilers already built this way.
   cross that line or that use registers past it are deferred, their operands
   loaded from the slots into the stacks' first registers around their own
   records (`tier0_select_deep`). The output is
-  the records with #144's branch columns and `LinkReference`s. `tier0_compile`
+  the records with #144's branch columns, `LinkReference`s and, when asked for
+  (`Tier0Function.entry_records`), each entry's first record, for source
+  rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
@@ -1016,6 +1065,8 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-calling-convention
 ./build/compiler test-tier0 --cross-check
 ./build/compiler benchmark-backend
+./build/compiler test-check-debug --cross-check
+./build/compiler benchmark-check-debug
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -1069,6 +1120,29 @@ there at a time, so everything takes one lock:
   minutes. The daily and dispatched runs have 25 minutes.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Sharing the owner's machines' cores
+
+Where `cores` is on `PATH` (the owner's own machines; `cores help`), every
+multicore run goes through it: builds (`./build.sh`), the parallel test runner,
+lane tests and benchmarks, `--jobs` campaigns, clang oracles run at once. It is
+a first-come, first-served queue of physical cores, not a lock on the machine:
+
+```sh
+CORES_TITLE="<session title>" CORES_LINK="<session, PR or issue>" cores -n 4 -- ./build.sh
+cores --all -- ./build/compiler parallel < list
+```
+
+A job waits for every older one and for its cores, then runs pinned to both
+threads of each, at niceness 19, with `CORES` set to its count, so tools that
+size themselves by the CPUs they may run on (`nproc`, `parallel`'s `--jobs`,
+lanes) fit the grant; pass `--jobs "$CORES"` or `--lanes "$CORES"` where a tool
+takes a count. Single-threaded commands don't queue. Ask for the cores the run
+can use, hold them per run rather than around a series, and let a nested
+`cores` inside a job run at once on the job's cores. `cores status` shows who
+holds and who waits; `cores away` and `cores here` are the owner's switch
+between lending every core and keeping two for interactive use. None of this
+replaces the 9700X's lock: benchmark timings still come from there.
 
 ## Agent memory
 
@@ -1131,6 +1205,26 @@ each bounded by its depth argument. The 9700X job runs
 `test-call-graph` and the check after the build; the check, which captures the
 units' IR at once, takes about 2 s.
 
+The same command checks that no command splits a static variable between
+translation units, which the homes of `main.c`'s modules could do (`main.c`:
+a command runs in its own unit's code and in the homes of the modules it
+calls, each with its own copies of the static variables). From each command,
+each function that a unit's `main_command` calls or names, it walks every
+function and variable the command may reach: through calls, into other units
+as they resolve, and through the functions and variables that function bodies
+and variable initializers name (a function passed as a lane group's entry, a
+table of pointers), and through aliases to the variables they lead to, each
+target in its alias's own module, but not through quoted strings (inline
+assembly templates, section names). A variable that is a unit's own
+(`internal` or `private`) and `global` rather than `constant`, reached in two
+units' copies by the same name, is reported once, at the first command that
+splits it: `split state: unit.ll:command reaches a.ll:name from a.ll:function,
+and b.ll:name from b.ll:function`, and fails the check. A variable that units
+share (defined in one and declared in the others, as `lane.c`'s thread
+context) is never split. A home's function that splits one is one to compile
+in every unit again, or whose module's state its units must share. The summary
+line counts the split variables.
+
 `./build/compiler test-call-graph` (about 0.4 s) checks the report, exactly,
 on IR of the call forms clang writes and of what must be left out, a
 self-call, a two-function cycle, a cycle with a chord (whose path must be the
@@ -1143,7 +1237,17 @@ strong definition elsewhere, in both orders, replaced weak bodies, two units' co
 allowed by one entry, a cycle grown past its entry with an unused entry, a
 cycle through two units' static functions of the same name that entries naming
 it once mustn't match, malformed IR, and a chain of a million functions and a
-ring of 100,000, deeper than a recursive walk's stack.
+ring of 100,000, deeper than a recursive walk's stack. Then the split-state
+walk: a table that the driver's unit writes and a home reads (split), each
+unit's own state (not), two commands each with its own unit's copy (not),
+copies reached through a function passed as an argument and through a constant
+table of pointers (split, each reported at its own command), a constant and a
+shared variable of one name in both units, and a variable that only an inline
+assembly template, a section's name and a quoted name spell (not), the driver's
+copy reached through an alias of it and through a chain of two whose middle
+one's name another unit's external variable has, beside two aliases of each
+other (split), and a static function's thread-local static compiled in both
+units (split).
 
 ## Lexer tests
 
@@ -1797,10 +1901,11 @@ rounds and the random inputs.
 
 The command deliberately starts without a team so it can test both cold
 `lane_run` and explicit `lane_team_start`/`lane_team_stop` lifetimes. Do not
-wrap the main command dispatcher in a team: included copies of `lane.c` have
-separate thread-local contexts. Parallel command handlers own their team in
-the translation unit that runs their operations. An operation's phases stay
-direct calls within its whole-operation lane entry.
+wrap the main command dispatcher in a team: `main.c`'s units share one thread
+context, but the benchmarks' units, which the dispatcher also runs, have
+contexts of their own. Parallel command handlers own their team in the code
+that runs their operations. An operation's phases stay direct calls within its
+whole-operation lane entry.
 
 ## Deterministic output tests
 
@@ -3351,9 +3456,10 @@ identifier must get the same id and every token the same leading-space bit, on:
 - 300,000 random spellings that grow the table three times;
 - growth after 1, 4, 15, 16, 31, 32, 63 or 64 new names, with preceding-batch
   repeats and long common-prefix names, then the same input again;
-- 22 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
-  and trigraphs; comments; UCNs; identifiers of 62 to 65 bytes), each at all 64
-  misalignments from a cache line;
+- 30 boundary fixtures (splices between and inside tokens, with `\r\n`, blanks
+  and trigraphs; comments; UCNs; named UCNs, which stay as written, apart from
+  the `\u`, `\U` and UTF-8 spellings of their characters (#452); identifiers of
+  62 to 65 bytes), each at all 64 misalignments from a cache line;
 - identifiers of every length from 1 to 130 bytes with a line splice (four
   spellings, one a trigraph's) at every position inside, or a UCN at every
   position, each followed by the same identifier written plainly: 50,570
@@ -3429,6 +3535,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
     diagnostic/location comparisons; contextual recovery beyond 8/64/256
     repairs with earlier macro snapshots retained, and failure injection for
     allocation, data-index exhaustion and an unchanged recovery mask (#285);
+  - named UCNs (`\N{...}`, #452), refused where the lexer reads one in a token
+    (an identifier, a pp-number or an unknown token): in active text, a macro's
+    definition once and an unused argument, `#if` and `#elif` lines, after line
+    splices and as a trigraph, beside `\u`, `\U` and UTF-8 spellings, and with
+    names no character has; and no error in a skipped group, a literal or a
+    comment, whose `-E` text is clang's;
   - `#embed`: its data, parameters, errors and files, and where `-E` prints it;
   - #119's includes, in files and links the case makes: header names written out
     and computed, `#include_next` through three directories, an inactive group's
@@ -3450,6 +3562,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
+  `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
+  its error, three columns before it (clang reads one past an identifier's first character silently); one in an
+  identifier of 40,000, each an error within 10 s (`pp_test_named_ucn_scaling`); and one, or a trigraph's `??/`,
+  across the edges of the 64-byte chunks, the 4 KB words of refinement's backslash bitmap and 4 KB windows, by
+  both kernels, whole and a window at a time (`pp_test_named_ucn_boundaries`);
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that
@@ -3495,7 +3613,15 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
   language modes: every record must be the whole file's, byte for byte; and the
   scan for a line end that isn't a splice's (`pp_window_has_line_end`) against a
-  byte at a time, on random bytes ending at a `PROT_NONE` page;
+  byte at a time, on random bytes ending at a `PROT_NONE` page; and 11 files
+  made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
+  64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
+  alone, a `\r` last), whose line ends `pp_count_lines` must count from many
+  starts to every end, as a count a byte at a time does (a `\r\n` at its `\n`,
+  so not by a query that ends at the `\n`), the line pages counted whole and in
+  two windows cut around each line end, `pp_page_line` at every byte, and
+  `pp_line_of`'s lines and columns near each line end from the cursor and from
+  the pages;
 - with files, each file with `-E`'s options (`-I`, `-isystem`, `-D`, `-std=`,
   `-ffreestanding`, `-target TRIPLE`, ...), by both kernels, which must agree;
   `--window-bytes N` (ours alone, like `--location-limit`) sends every file of
@@ -3857,10 +3983,12 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   takes; and the oracle itself: clang given an option it doesn't know must
   count as no answer, and an error in a header a file includes must reject the
   file;
-- fixtures: four trees checked by hand, parent by parent, among them #127's
+- fixtures: five trees checked by hand, parent by parent, among them #127's
   comma case (`f(a ? b, c : d, e)` has two arguments), its cast case (`(T) * p`
-  is a cast where `T` names a type and a product where it doesn't) and a
-  declarator's spine (`(*a[3])(double)`: array, pointer, function);
+  is a cast where `T` names a type and a product where it doesn't), a
+  declarator's spine (`(*a[3])(double)`: array, pointer, function) and computed
+  gotos (`goto *p ? p : p`: the `*` the goto's child and the whole expression
+  its own), which the vector path must build without its fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
   `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
@@ -3948,15 +4076,62 @@ measures the synthetic index/query handoff and completeness checks; use
 9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
 source reader's retained events, declaration types, tag completion positions
 and body slots through `c_check_environment.c`; `test-checker` checks their
-scratch lifetime and scalar/vector replay. Actual deferred body/effect
-checking and corpus acceptance are still pending.
+scratch lifetime and scalar/vector replay. `c_check_deferred.c` is their
+consumer: the deferred reader below ("Deferred function bodies").
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
 `c_check_body_bindings.c` supplies the next independent name-resolution
 consumer: private per-body views/replay, source-position file fallbacks and
 stable declaration identities. `test-checker` compares both kernels on
 reversed one/eight-lane body schedules and guarded columns.
-[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract and the
-semantic/type/effect/corpus integration still required for #113.
+[docs/c-body-bindings.md](docs/c-body-bindings.md) records its contract.
+
+## Deferred function bodies
+
+`src/buster/compiler/c_check_deferred.c` is #113's deferred reader:
+`check_input_deferred` checks a unit as `check_input` does, but reads each
+file-scope function body apart from the top level, out of order on any number
+of lanes, from the reader's state at the body's opening (the history's heads,
+a view of the top level's table), and merges the bodies in source order
+(`c_types.c`'s change records and `type_replay`), into source order's result.
+A unit it can't merge yet (a body with a declaration with linkage, a
+transparent union or an intrinsic, a completion of its parameter-list tag, an
+error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
+
+The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
+of the bodies' tokens beyond twice the largest body's, no more than its lanes
+or the bodies: a lane's copy of the reader and its wake-up must be paid for by
+its share of the walks, and a woken lane reads at about half the first lane's
+speed.
+
+`./build/compiler test-checker-deferred [--keep]` checks 39 fixtures of the
+issue's cases through the scalar path, the vector path and the deferred reader
+on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
+the deferred result must be the vector path's column for column, merged or
+left to source order as each fixture says, on every lane its bodies can take
+and by the lanes' rule, its reader copied only by lanes that take a part. Six
+fixtures of bodies of known tokens must take the rule's lanes on each side of
+its steps. Each that merges must give source order's result again with its
+merge failing after the replay, and count as a resource failure with its
+state's allocation failing; timed, one lane must wait for no other and eight
+lanes' dispatch and wake-up must fall within their span; and the benchmark's
+`--cpus` parser must refuse 65 CPUs without a write past its room for 64.
+`test-checker-corpus --deferred N
+[--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
+comparison, on every lane the bodies can take up to N, and tallies the units
+left to source order by reason. `./build/compiler benchmark-checker-deferred
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [-E's options] file...`
+times source order's reader against the deferred one on one lane and on up to
+N, with the parse, the top level, the bodies' walks, their position checks, the
+lanes' span and the merge apart, and what a lane costs: its copy of the reader,
+`lane_run`'s dispatch and the other lanes' wake-up. Its passes take the six
+orders of its three readings in turn, so `--passes` is a multiple of six (24).
+`--every-lane` runs every lane the bodies can take, whatever
+their tokens; `--cpus` pins the command to the first
+CPU and a lane team to the list (on the 9700X, `--cpus 2,0,1,3,4,5,6,7` under
+its lock). The 9700X job runs the fixtures, c-testsuite and the frozen SQLite
+source with `--deferred 8`, and the benchmark where the checker changes.
+[docs/c-deferred-bodies.md](docs/c-deferred-bodies.md) has
+the design, the corpora and the measurements.
 
 `./build/compiler test-bindings [--seed N]` checks the standalone scoped C
 binding kernels: stack replay and the vector batch against an independent
@@ -4079,8 +4254,9 @@ others, its measurements are informational.
 
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
-[--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options]
-file-or-directory...` checks each file as the driver does and compares it with
+[--symbols] [--symbols-minimum N] [--seed N] [--deferred N [--deferred-bindings
+stacks|batch|direct]] [--keep] [preprocessor options] file-or-directory...`
+checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
@@ -4115,8 +4291,8 @@ mutants of the units it found no difference in (#133's last "Done when" item,
 It prints each kind's sites, mutants, clang's rejections and differences, and
 exits with status 1 on any difference. `docs/c-checker.md` ("Corpus comparison
 and semantic mutations") has the four corpora's configurations, the campaigns'
-counts and the three base differences left (Lua's labels as values, and two
-of #148's builtins in the libc corpus). The 9700X job's test step checks 8
+counts and the two base differences left (two of #148's builtins in the libc
+corpus; Lua's labels as values agree since #133 took them). The 9700X job's test step checks 8
 mutants of the frozen SQLite source and 96 of the oracle's four musl sources
 with seed 133; a run that differs fails it, and `--keep` with `--minimize`
 reproduces it locally.
@@ -4201,10 +4377,9 @@ and the program runs: each side checks every argument, result, hidden pointer,
 (#137), against clang and against GCC at 16 bytes, put this compiler on our
 side: a world of what its C passes (integers to 64 bits, enums, pointers,
 `float`, `double`, `long double` and the records, arrays and aligned typedefs of
-them, aligned to 16 at most), without what its front end doesn't take yet (C23's enums of a
-fixed underlying type, an attribute after a bit-field's width, which goes
-before its type instead, a struct whose only named member is a flexible array
-member), and
+them, aligned to 16 at most, with C23's enums of a fixed underlying type,
+structs whose only named member is a flexible array member and bit-fields'
+attributes after their widths), and
 signatures within Tier 0's depths (13 integer arguments, long doubles among them,
 and 15 floating ones); our
 caller and callee per signature as C, which this executable (or `--buster

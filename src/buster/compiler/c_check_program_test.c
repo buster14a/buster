@@ -277,7 +277,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
-        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, true) &&
+        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
                              check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
@@ -379,7 +379,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     CheckProgramCode failed_code = { 0 };
                     const uint64_t emission_mark = output.length;
                     const bool failed_code_ok = check_program_emit(&failed_code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                                   &output, &empty, &scratch, NULL, true);
+                                                                   &output, &empty, &scratch, NULL, NULL, true);
                     check_test_expect(test, !failed_code_ok && failed_code.status == CHECK_PROGRAM_RESOURCE && failed_code.link.symbols.count == 0 &&
                                            failed_code.lowered.functions == 0 && output.length == emission_mark && empty.length == 17 && scratch.length == 0,
                                       "code byte exhaustion rolls back Link, ABI, atoms and bytes together");
@@ -989,6 +989,30 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
+    // GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
+    // through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
+    check_test_program_source(test,
+        "static int run(const unsigned char*c,int n){static const void*const t[]={&&add,&&mul,&&jump,&&end,&&dup};"
+        "int acc=n;int pc=0;void*last=&&end;goto*t[c[pc]];"
+        "add:acc+=c[pc+1];pc+=2;goto*t[c[pc]];"
+        "mul:acc*=c[pc+1];pc+=2;goto*t[c[pc]];"
+        "jump:pc=c[pc+1];goto*(pc>8?&&end:t[c[pc]]);"
+        "dup:acc+=acc;pc+=1;last=&&dup;goto*t[c[pc]];"
+        "end:return last==&&dup?acc+1000:acc;}"
+        "int tested(int n){static const unsigned char p[]={0,3,1,5,4,2,9,0,100,3};static const unsigned char q[]={1,2,0,7,3};"
+        "void*out=&&done;int r=run(p,n)*31+run(q,n);"
+        "for(int i=0;i<3;i++){int v[(n&3)+1];v[0]=i;r+=v[0];if(i==1)goto*out;}r=-1;"
+        "done:return r;}",
+        "labels-as-values-dispatch", clang);
+    // A computed goto's operand is the whole expression after its `*` (#431's review): through ?: of an int's condition,
+    // a void *'s sum, a comma and an assignment, each where `*` taken as the operand's prefix would read another value.
+    check_test_program_source(test,
+        "int tested(int n){void*t[2]={&&even,&&odd};void*p=t[n&1];int r=0,k=0;goto*p+0;"
+        "even:r+=2;k+=1;goto*k<3?t[0]:&&odd;"
+        "odd:r+=3;k+=1;goto*k<5?t[1]+0:&&last;"
+        "last:if(r>12)goto*r++,&&done;goto*p=&&done;"
+        "done:return r*100+k*10+(p==&&done);}",
+        "labels-as-values-whole-operand", clang);
     {
         char source[4096];
         uint32_t length = 0;

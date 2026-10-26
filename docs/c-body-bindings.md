@@ -104,7 +104,7 @@ the locked host. All 36 source measurement processes matched; the large
 vector pipeline measured 66.444–67.839 ns/token on one lane and 63.055–63.408
 on eight. The measurement guide records costs, states, memory and revision
 boundaries. Subsequent main integration and actual parser-trace test additions
-require fresh qualification. Independent
-name resolution alone does not satisfy #113: complete top-level initializer
-checking, private body types, source-order effects/output reconciliation and
-actual deferred semantic/IR/corpus equivalence remain required.
+require fresh qualification. #113's deferred
+reader ([the deferred bodies guide](c-deferred-bodies.md)) reads each body with
+the checker's own walk instead, on private types, and merges the bodies in
+source order; this helper's resolution stays a separate consumer.

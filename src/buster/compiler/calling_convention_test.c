@@ -3423,14 +3423,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         };
     }
     uint32_t total = count;
-    // (In a compiled world after a named member: this compiler's checker refuses a struct whose only named member is a
-    // flexible array member, which clang takes as an extension, unnamed bit-fields before it or not.)
-    bool named = !world->compiled;
-    for (uint32_t m = 0; m + 1 < count; m += 1)
-    {
-        named |= members[m].name != 0;
-    }
-    if (!world->gcc && !is_union && count > (world->compiled ? 1u : 0u) && named && type_test_below(random, 16) == 0)
+    if (!world->gcc && !is_union && count > 0 && type_test_below(random, 16) == 0)
     {
         const TypeId element = abi_test_world_pick(world, random, true);
         const TypeId open = type_incomplete_array(table, type_unqualified(element));
@@ -5940,7 +5933,6 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     {
         world.gcc = gcc;
         world.compiled = compiled;
-        world.types.compiled = compiled;
         abi_test_world_build(&world, seed, 600);
         // GCC's worlds have neither nullptr_t nor packing, and compiled ones neither nullptr_t nor the directed records.
         TypeId directed[BUSTER_ABI_TEST_DIRECTED];

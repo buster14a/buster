@@ -27,7 +27,11 @@ The producer supplies a `DebugUnit`:
 
 The offsets must be produced **after branch sizing**, from the actual encoded
 instruction boundaries. Each function currently has one source file, without
-column numbers or row flags. Functions may be in any final address order.
+column numbers. A function may mark the row where its body starts
+(`DebugFunction.prologue_end`, one more than the row's index, 0 for none):
+`DW_LNS_set_prologue_end` goes before that row, where gdb (13 and later) and
+lldb put a breakpoint on the function. Functions may be in any final address
+order.
 Zero-row functions and an empty unit are valid. Every line sequence explicitly
 sets its zero-based file index, including file zero, and ends at the function's
 exclusive end.
@@ -113,6 +117,78 @@ The format constants follow the [DWARF 5 specification](https://dwarfstd.org/doc
 sections 3.1, 3.3, 6.2, 7.5, 7.27 and 7.28. This is original implementation and
 fixture code; no external implementation or generated external bytes are
 incorporated.
+
+## The C driver's `-g` (#395)
+
+`./build/compiler -g -o program file.c` links an executable with a unit of
+the program's source functions (`c_check_debug.c`), which
+`ExecutableOptions.debug` attaches. Its rows come from three passes, each a
+vector path with an exact twin that `--scalar` takes, into the same bytes:
+
+- **Raw rows**, in `check_program_emit` after branch sizing: each typed
+  entry's first record (`Tier0Code.entry_records`) at its byte offset, with
+  the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`;
+  saved with each lowering task so that an operation's entry takes its own
+  node's token, not its last operand's, and a call's its callee's, as GCC and
+  clang place a call across lines), kept where the next entry's code
+  starts elsewhere: an entry fused into its consumer starts none of its own.
+  The prologue's row, at offset 0, takes the declaration's token, and the
+  epilogue's the closing brace's.
+- **Lines**: a row's token's presumed line, as the diagnostics place it:
+  where its outermost macro expansion was invoked, or where it was written,
+  after `#line`. The places of a function's declaration and closing brace
+  bound every row's searches: a row between them in one file's range, with no
+  `#line` between them, finds its history run, its macro chain's place and
+  its line 16 rows at a time over just the function's runs and lines. A row
+  from a file the body includes, or past a `#line` inside it, or with a chain
+  of more than 8 links, takes the exact path.
+- **Kept rows**: those in the function's file (a line sequence has one; a
+  row of an included file's code is left out) whose line differs from the
+  kept row before's, and the row where the body starts, whatever its line,
+  which the function marks `prologue_end`. A file is one key per name (a
+  hash table of the files' paths and the `#line`s' names), so that two
+  `#line`s naming one file keep their rows together, and the unit's file
+  table is built by key without comparing names.
+
+The lowering and its loop over tasks are each compiled twice from one
+always-inlined body (`check_program_lower_body`, `check_lower_drain_body`):
+`check_program_lower` and `check_lower_drain`, which every compile without
+`-g` runs, keep no tokens, and `check_program_lower_sources` and
+`check_lower_drain_sources`, `-g`'s, keep them. The flag is a constant in
+each, so that the plain copies are the code a compile ran before this
+feature. It cost every compile while it was a value: clang kept the flag and
+the tokens' column live across the lowering's loops and spilled more, and a
+branch on it at every entry cost about as much as the store it skipped, as
+did saving the token with every push and restoring it at every pop. Only
+`-g`'s drain sets each task's token as it pops it: an expression's node's, a
+statement's own, or for any other task the one it was pushed under. The
+tokens settle lazily (`check_lower_settle`): when the token changes, the
+entries written and the tasks pushed since it last changed take it, so that
+no entry or push spends anything on them. The helpers both copies share only
+test the flag where a call or an initializer part changes the token in the
+middle of a task, and at a function's start and end. Each copy inlines the
+tasks' work and `tier0_validate` as clang inlines them into code it compiles
+once (six task functions are `always_inline`, and the lowering calls
+`tier0_validate_inline`): with a call in each copy, it left them out of line,
+and a compile without `-g` took 2% more cycles. The
+emission reserves the raw rows and writes each function's out of line
+(`check_program_emit_reserve_rows`, `check_program_emit_body_rows`). On the
+9700X, a compile without `-g` of a generated program of 31,269 lines retired
+0.004% more instructions than main, took 0.42% more wall time and wrote
+main's executable; with `-g` it took 7.2% more
+([the record](https://github.com/buster14a/buster-performance/tree/fec2430fdab625676f82a1226607b3ca885b1288/docs/measurements/c-driver-dwarf-395-2026-10-25)).
+
+A function is named by its identifier, at its declaration's line, in the
+file of its declaration (a header's for a function a header defines, a
+`#line`'s name after one); the unit's first file is the translation unit's.
+`-c -g` writes an object without DWARF: the object writer has no debug
+sections or relocations for them yet. `test-check-debug [--cross-check]`
+checks each pass's twins (at `PROT_NONE` pages), the lines against
+`pp_presumed` on fixtures and generated programs, the fixtures' functions'
+rows, and with `--cross-check` the executable through `llvm-dwarfdump
+--verify` and gdb: a line's breakpoint, a function's on its first
+statement, a step over an untaken branch and a backtrace's lines, the
+header's function in the header.
 
 ## Row emission and measurement
 
@@ -214,14 +290,12 @@ The merged [Tier 0 PR #303](https://github.com/buster14a/buster/pull/303),
 rechecked on main at `9857e71781447f697da87809f3262b15a82145f6`, contains real
 prologue and epilogue production. `Tier0Frame` records the frame size and
 callee-save mask; `tier0_emit_prologue` pushes those registers and reserves
-the frame, and `tier0_emit_epilogue` reverses both. However, `Tier0Code`
-exports only instruction records, branch columns, symbolic references and
-status. It does not export source-entry-to-record locations, the frame
-description or the record ends of the saves, stack adjustments and restores.
-
-Source-row integration still needs the Tier 0 producer to retain source-entry
-to instruction-record locations, then convert those positions to byte offsets
-after branch sizing. The separate [native unwind adapter](unwind.md) derives
+the frame, and `tier0_emit_epilogue` reverses both. `Tier0Code` exports
+instruction records, branch columns, symbolic references, status and each
+typed entry's first record (`entry_records`), which the C driver's `-g` turns
+into byte offsets after branch sizing and source rows ("The C driver's `-g`"
+above). It does not export the frame description or the record ends of the
+saves, stack adjustments and restores. The separate [native unwind adapter](unwind.md) derives
 bounded fixed-frame events from valid, finalized Tier0 instruction records.
 It is opt-in and does not decode emitted bytes or repeat the producer's generic
 validation. Its additional effects/control-flow scan is charged in the
@@ -237,6 +311,7 @@ their addresses, written after the units before it. `test-streaming
 --cross-check` has `llvm-dwarfdump --verify` check the units together, gdb
 give every frame its function's line and perf's samples lines; the linker
 design's "Streaming the output" has the comparison against writing at the
-end. Its rows are a line per function, until Tier 0 gives source rows. The
-direct path's executable of the same code takes the same units through
-`executable_write`, which finalizes each at its functions' places.
+end. Its programs are generated typed streams, without source tokens, so its
+rows stay a line per function. The direct path's executable of the same code
+takes the same units through `executable_write`, which finalizes each at its
+functions' places.

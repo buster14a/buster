@@ -9,6 +9,8 @@
 // Rows are contiguous columns, with each function owning its next row range; offsets are nondecreasing and less than
 // the function size. Files are zero-based, lines are in [0, INT32_MAX], and a sequence has one file. The line program
 // explicitly selects that file, avoiding DWARF 5's initial file register of 1. Functions need not be in address order.
+// A function may mark the row where its body starts (DebugFunction.prologue_end): DW_LNS_set_prologue_end before that
+// row, where gdb and lldb put a breakpoint on the function.
 // Four rows at a time: form the address/line deltas, spread their seven-bit groups with vpmultishiftqb, select their
 // valid bytes and compact directly into the line program. No temporary encoded rows or per-row allocations. The
 // exact path independently writes each opcode and LEB128 value; tails use it too. All vector loads/stores are bounded.
@@ -52,6 +54,9 @@ struct DebugFunction
     uint32_t row_count;
     uint32_t file;
     uint32_t line;
+    // One more than the index, among the function's rows, of the row where its prologue ends and its body starts, which
+    // gets DW_LNS_set_prologue_end; 0 for none.
+    uint32_t prologue_end;
 };
 
 typedef struct DebugUnit DebugUnit;
@@ -145,12 +150,17 @@ static void debug_length(DebugWriter* writer, uint64_t offset, uint64_t value)
     }
 }
 
-static void debug_row_scalar(DebugWriter* writer, uint32_t offset, int32_t line)
+// A row, its offset and line from the row before's; `prologue_end` marks it the function body's start.
+static void debug_row_scalar(DebugWriter* writer, uint32_t offset, int32_t line, bool prologue_end)
 {
     debug_integer(writer, 2, 1); // DW_LNS_advance_pc
     debug_uleb(writer, offset);
     debug_integer(writer, 3, 1); // DW_LNS_advance_line
     debug_sleb(writer, line);
+    if (prologue_end)
+    {
+        debug_integer(writer, 10, 1); // DW_LNS_set_prologue_end
+    }
     debug_integer(writer, 1, 1); // DW_LNS_copy
 }
 
@@ -238,23 +248,30 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
         uint32_t row = 0;
         uint32_t offset = 0;
         int32_t line = 1;
-        for (; !exact && entry->row_count - row >= 4; row += 4)
+        // The body's row, which the vector path's groups stop before and the exact path writes with its flag.
+        const uint32_t body = entry->prologue_end != 0 ? entry->prologue_end - 1 : UINT32_MAX;
+        while (row < entry->row_count)
         {
-            const uint32_t first = entry->first_row + row;
-            const __m128i offsets = _mm_loadu_si128((const __m128i*)(unit->offsets + first));
-            const __m128i lines = _mm_loadu_si128((const __m128i*)(unit->lines + first));
-            const __m128i previous_offsets = _mm_insert_epi32(_mm_slli_si128(offsets, 4), offset, 0);
-            const __m128i previous_lines = _mm_insert_epi32(_mm_slli_si128(lines, 4), line, 0);
-            debug_rows_vector(writer, _mm_sub_epi32(offsets, previous_offsets), _mm_sub_epi32(lines, previous_lines));
-            offset = unit->offsets[first + 3];
-            line = (int32_t)unit->lines[first + 3];
-        }
-        for (; row < entry->row_count; row += 1)
-        {
-            const uint32_t index = entry->first_row + row;
-            debug_row_scalar(writer, unit->offsets[index] - offset, (int32_t)unit->lines[index] - line);
-            offset = unit->offsets[index];
-            line = (int32_t)unit->lines[index];
+            const uint32_t stop = body >= row && body < entry->row_count ? body : entry->row_count;
+            for (; !exact && stop - row >= 4; row += 4)
+            {
+                const uint32_t first = entry->first_row + row;
+                const __m128i offsets = _mm_loadu_si128((const __m128i*)(unit->offsets + first));
+                const __m128i lines = _mm_loadu_si128((const __m128i*)(unit->lines + first));
+                const __m128i previous_offsets = _mm_insert_epi32(_mm_slli_si128(offsets, 4), offset, 0);
+                const __m128i previous_lines = _mm_insert_epi32(_mm_slli_si128(lines, 4), line, 0);
+                debug_rows_vector(writer, _mm_sub_epi32(offsets, previous_offsets), _mm_sub_epi32(lines, previous_lines));
+                offset = unit->offsets[first + 3];
+                line = (int32_t)unit->lines[first + 3];
+            }
+            const uint32_t end = stop < entry->row_count ? stop + 1 : stop;
+            for (; row < end; row += 1)
+            {
+                const uint32_t index = entry->first_row + row;
+                debug_row_scalar(writer, unit->offsets[index] - offset, (int32_t)unit->lines[index] - line, row == body);
+                offset = unit->offsets[index];
+                line = (int32_t)unit->lines[index];
+            }
         }
         debug_integer(writer, 2, 1);
         debug_uleb(writer, entry->size - offset);
@@ -338,7 +355,7 @@ static DebugError debug_validate(const DebugUnit* unit)
     {
         const DebugFunction* entry = &unit->functions[function];
         valid = debug_valid_string(entry->name) && entry->size != 0 && entry->file < unit->file_count &&
-                entry->line <= INT32_MAX && entry->first_row == rows && entry->row_count <= unit->row_count - rows;
+                entry->line <= INT32_MAX && entry->first_row == rows && entry->row_count <= unit->row_count - rows && entry->prologue_end <= entry->row_count;
         uint32_t previous = 0;
         for (uint32_t row = 0; valid && row < entry->row_count; row += 1)
         {

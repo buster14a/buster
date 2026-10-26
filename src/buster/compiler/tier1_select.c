@@ -1049,7 +1049,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     for (uint32_t node = 0; error == TIER1_SELECT_OK && node < count; node += 1)
     {
         const uint32_t op = function->op[node];
-        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || (op == IR_CALL && !tier1_select_call_supported(function, node)))
+        if (op == IR_PHI || op == IR_CALL_INDIRECT || op == IR_SWITCH || op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE || (op == IR_CALL && !tier1_select_call_supported(function, node)))
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
         }

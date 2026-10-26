@@ -303,6 +303,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(void) { a: int x; }\n", "", 0 },
     { "[[deprecated]] int x; int y [[maybe_unused]];\n", "", 0 },
     { "enum E : int { A }; enum F : unsigned char;\n", "", 0 },
+    // A typedef's first declarator after an enum's underlying type and body is a type name (K3 skips the base).
+    { "typedef int U; typedef enum E : unsigned short { A } T; typedef enum : const U { B } V, W; int n = sizeof(T) + sizeof(V) + sizeof(W);\n", "", 0 },
+    // GNU attributes among an enum's base's specifiers, which clang takes as the base type's (#428's review): before,
+    // between and after them, with a body or without, and where a typedef's declarator follows the body (K3 skips them).
+    { "enum E : int __attribute__((unused)); enum F : int __attribute__((unused)) { A };\n", "", 0 },
+    { "enum G : __attribute__((unused)) unsigned __attribute__((unused)) char __attribute__((unused)) { B };\n", "", 0 },
+    { "typedef enum H : int __attribute__((unused)) { C } T; T t = C; int n = sizeof(T);\n", "", 0 },
     { "int x = (int){1}; int a[3] = { [1 ... 2] = 0 };\n", "", 0 },
     // GNU's single array designator may omit '=', including a range, a prefix operand and a braced initializer.
     { "int a[] = { [0] 1, [3] 4, [4] -1, [5] (int)2 };\n", "", 0 },
@@ -350,6 +357,13 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "struct T { int member = 1; };\n", "1:22: expected ';' at end of declaration list", 0 },
     { "union U { int (*callback)(void) = 0; };\n", "1:32: expected ';' at end of declaration list", 0 },
     { "struct V { int x:3 = 1; };\n", "1:19: expected ';' at end of declaration list", 0 },
+    // GNU attributes after a bit-field's width end it: the member's, more of them, then `,` or `;`, or the body's `}` after
+    // the last member (clang's warning). Anything else is a missing `;`, at the token for a `:` (clang's typo for one).
+    { "enum { N = 3 }; struct S { int a : 3 __attribute__((aligned(4))), b : N __attribute__((packed)) __attribute__(()); long : 0 __attribute__((aligned(8)));"
+      " char c : (1 + 2) __attribute__((unused)) };\n", "", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) + 1; };\n", "1:45: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) : 4; };\n", "1:46: expected ';' at end of declaration list", 0 },
+    { "struct S { int x : 3 __attribute__((packed)) [4]; };\n", "1:45: expected ';' at end of declaration list", 0 },
     { "int x y;\n", "1:6: expected ';' after top level declarator", 0 },
     { "void f(int a) { a + ; }\n", "1:21: expected expression", 0 },
     { "int f(void) { return 1 }\n", "1:23: expected ';' after return statement", 0 },
@@ -409,6 +423,16 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "asm(\"nop\") x;\n", "1:11: expected ';' after top-level asm block", 0 },
     { "_Static_assert(1, \"x\") int y;\n", "1:23: expected ';' after '_Static_assert'", 0 },
     { "void f(void) { goto x y; }\n", "1:22: expected ';' after goto statement", 0 },
+    // A computed goto's `*` takes the whole expression after it, as clang's ParseGotoStatement does: a conditional, a
+    // sum, a comma, an assignment, a `*` of its own and a group; and an operand must follow it.
+    { "void f(int n) { void *p = &&a; goto *p ? &&a : &&b; goto *p + 0; goto *n, p; goto *p = p; goto **(void **)&p; goto *(p); a: b:; }\n", "", 0 },
+    { "void f(void) { goto *; }\n", "1:22: expected expression", 0 },
+    { "void f(void *p) { goto * const p; }\n", "1:26: expected expression", 0 },
+    { "void f(void *p) { goto *p + ; }\n", "1:29: expected expression", 0 },
+    // Any other operator after goto is an error: the vector path gives it the `*`'s role, and its checks send it to the
+    // scalar parser.
+    { "void f(int x) { goto &x; }\n", "1:22: expected identifier", 0 },
+    { "void f(void) { a: goto &&a; }\n", "1:24: expected identifier", 0 },
     { "int x = __builtin_offsetof(int y, z);\n", "1:31: expected ','", 0 },
     { "void f(void) { switch(1) { default 1; } }\n", "1:35: expected ':' after 'default'", 0 },
     { "int x = _Generic(1, int 1);\n", "1:24: expected ':'", 0 },
@@ -735,13 +759,17 @@ static uint32_t parse_test_check_snippets(const char* directory, const char* cla
 // Trees checked by hand, which both paths must build: each fixture's parent of every token (-1 for the root). They
 // are the cases #127 names: `f(a ? b, c : d, e)` calls f with two arguments, `a ? (b, c) : d` and `e`; `(T) * p` is a
 // cast of `*p` where T names a type and a product where it doesn't; an if-statement with an else (c_parser.c's
-// example); and the declarator `(*a[3])(double)`, whose spine from the name out is array, pointer, function.
+// example); and the declarator `(*a[3])(double)`, whose spine from the name out is array, pointer, function. Then
+// #431's review's computed gotos: each `*` the goto's child and the whole expression after it the `*`'s (the `:` of
+// `p ? p : p`, the `+` of `p + 0` and the comma of `p, p`), which the vector path builds without its fallback.
 typedef struct ParseTestFixture ParseTestFixture;
 struct ParseTestFixture
 {
     const char* source;
     uint32_t count;
     int32_t parents[40];
+    // Whether the vector path must keep every top-level declaration (none for the scalar parser's fallback).
+    bool vector;
 };
 
 static const ParseTestFixture parse_test_fixtures[] =
@@ -753,6 +781,8 @@ static const ParseTestFixture parse_test_fixtures[] =
       { 38, 20, 20, 5, 3, 8, 5, 6, 11, 8, 9, 14, 11, 12, 17, 14, 15, 20, 17, 18, 0, 38, 25, 25, 25, 38, 27, 31, 29, 27, 29, 25, 25, 34, 37, 34, 35,
         32, -1 } },
     { "int (*a[3])(double);\n", 12, { 11, 7, 7, 6, 6, 6, 2, 10, 10, 10, 0, -1 } },
+    { "void f(void *p) { goto *p ? p : p; goto *p + 0; goto *p, p; }\n", 29,
+      { 28, 6, 6, 6, 3, 4, 0, 28, 15, 8, 13, 13, 13, 9, 13, 28, 21, 16, 19, 17, 19, 28, 27, 22, 25, 23, 25, 28, -1 }, true },
 };
 
 // Each fixture through both paths, against its parents.
@@ -787,6 +817,12 @@ static uint32_t parse_test_check_fixtures(const char* directory)
                 failures += 1;
                 printf("fixture %u (%s path): %s%s%u\n    %s", i, scalar ? "scalar" : "vector", parsed ? "" : "doesn't parse to its tokens",
                        parsed ? "the parent differs at token " : "", parsed ? first : 0, fixture->source);
+            }
+            else if (fixture->vector && scalar == 0 && parser.statistics.fallback_items != 0)
+            {
+                failures += 1;
+                printf("fixture %u: the vector path's checks sent %llu top-level declarations to the fallback\n    %s", i,
+                       (unsigned long long)parser.statistics.fallback_items, fixture->source);
             }
             parse_release(&parser);
             pp_release(&pp);

@@ -7,7 +7,8 @@
 //
 // The C lexer: turns unpreprocessed C or C++ source bytes into preprocessing tokens (translation phase 3) with
 // AVX-512, falling back to a scalar lexer for the rare lines the vectorized path can't handle. main.c includes this
-// file directly, and every function in it is static.
+// file directly, and every function in it is static, but for the entry points that take BUSTER_LEXER_ENTRY, which
+// main.c's units compile in one unit alone.
 //
 // Entry points: c_tokenize (the lexer), c_tokenize_scalar and c_tokenize_vectorized (each path alone, for testing),
 // and c_token_kind_name. Token i is source[starts[i] .. ends[i]] with kind kinds[i]. The output arrays need
@@ -41,7 +42,8 @@
 // what the comment-only chunk shortcut did, so that is gone); then C++'s raw string literals checked at literal
 // starts, chunks read in place from the source, the previous chunk's bitstrings carried as their last lanes, and a
 // one-permute byte shift; then (2026-10-22) raw string literals in C (C_TOKENIZER_RAW_STRINGS), found at prefixed
-// literals' starts by bitstrings. Measurements: docs/c-lexer.md.
+// literals' starts by bitstrings; then (2026-10-25) the entry points' linkage from BUSTER_LEXER_ENTRY (#270).
+// Measurements: docs/c-lexer.md.
 // Local changes (2026-10-25): guarded native/intrinsic bitstring operations preserve Clang's instruction selection
 // while supporting MSVC, with matching alignment, inlining, bit counts and compiler barriers.
 //
@@ -304,11 +306,18 @@
 //   - Digraphs have the kind of the punctuator they stand for (`<:` is `C_TOKEN_L_SQUARE`), like clang.
 //   - Header names aren't recognized: after `#include`, re-lex the `<...>` form from the source starting at the `<`.
 //   - A named universal character name `\N{...}` is accepted in an identifier if the name is written in capital
-//     letters, digits, spaces and hyphens; clang also checks that the name exists.
+//     letters, digits, spaces and hyphens; clang also checks that the name exists. The preprocessor refuses every named
+//     UCN its tokens have, at its backslash (#452): buster has no table of Unicode's character names to read one with.
 //
 // Requires Clang and AVX-512 F/BW/VL/VBMI/VBMI2/VPOPCNTDQ plus BMI2 (e.g. -march=znver4, znver5 or tigerlake).
 
 #include <stdint.h>
+
+// The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
+// unit of its own, such as a benchmark's, has them static, as every other function here.
+#ifndef BUSTER_LEXER_ENTRY
+#define BUSTER_LEXER_ENTRY static
+#endif
 
 // The kinds of preprocessing tokens. Each name is the clang token kind it matches (e.g. `C_TOKEN_STRING_LITERAL` is
 // clang's `string_literal`). The prefixed character constants and string literals follow their unprefixed kind in
@@ -450,7 +459,7 @@ typedef enum CTokenizerError
 #define BUSTER_LEX_RESTRICT restrict
 #endif
 
-static BUSTER_LEX_UNUSED int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // c_tokenize of the bytes from `begin` to `length` alone, as if the source ended at `length`: `begin` is 0 or the start
 // of a token that starts a logical line (BUSTER_C_TOKEN_START_OF_LINE). Every token before the last one that starts a
@@ -459,16 +468,16 @@ static BUSTER_LEX_UNUSED int64_t c_tokenize(const uint8_t* source, uint64_t leng
 // (pp_prepare_into). Not for a source that takes the scalar lexer whole (c_tokenize_scalar_only of the whole source):
 // those go to c_tokenize. Returns the number of tokens, written from kinds[0], starts[0] and ends[0] on (positions are
 // the source's), or C_TOKENIZER_ERROR_FILE_TOO_BIG; the arrays need BUSTER_C_TOKENIZER_CAPACITY(length - begin) entries.
-static BUSTER_LEX_UNUSED int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
                                                         uint32_t flags);
 
 // c_tokenize without the scalar lexer: returns C_TOKENIZER_ERROR_NEEDS_SCALAR for the rare inputs that need it for a
 // part (see c_tokenizer.c), with the output arrays clobbered. For testing and benchmarking.
-static BUSTER_LEX_UNUSED int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The same tokenization by a straightforward scalar lexer (which `c_tokenize` uses for the rare parts of a source
 // that its vectorized path doesn't handle). It writes exactly the returned number of tokens.
-static BUSTER_LEX_UNUSED int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags);
 
 // The clang name of a token kind (without the start-of-line bit), e.g. "raw_identifier" or "plusequal".
 static BUSTER_LEX_UNUSED const char* c_token_kind_name(uint8_t kind);
@@ -1653,7 +1662,7 @@ static uint8_t punctuator2(const ScalarLexer* lexer, uint64_t* position, int32_t
 // writing the tokens to `kinds`, `starts` and `ends` from `count` on. Stops at the end of the source, or after the
 // first newline at or past `stop_at` that is outside of tokens and comments: `resume` is then the position after it
 // (else the length). Returns the new count. c_tokenize uses this for the parts its vectorized path can't do.
-static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, uint64_t position, bool start_of_line, uint64_t stop_at,
+BUSTER_LEXER_ENTRY uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, uint64_t position, bool start_of_line, uint64_t stop_at,
                                  uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint64_t count, uint32_t flags, uint64_t* resume)
 {
     ScalarLexer lexer_value = {
@@ -1984,7 +1993,7 @@ static uint64_t c_tokenize_scalar_range(const uint8_t* source, uint64_t length, 
     return output.count;
 }
 
-static int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+BUSTER_LEXER_ENTRY int64_t c_tokenize_scalar(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
@@ -3654,7 +3663,7 @@ static bool c_tokenize_scalar_only(const uint8_t* source, uint64_t length, uint3
     return cplusplus_mode || (flags & C_TOKENIZER_NO_DOLLARS) != 0 || ((flags & C_TOKENIZER_TRIGRAPHS) && contains_trigraph(source, length));
 }
 
-static int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
@@ -3709,7 +3718,7 @@ static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t 
     return result;
 }
 
-static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
@@ -3732,7 +3741,7 @@ static int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds
     return result;
 }
 
-static int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)

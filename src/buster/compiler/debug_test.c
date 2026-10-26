@@ -65,7 +65,7 @@ static bool debug_test_rows(void)
             DebugWriter b = { .bytes = vector };
             for (uint32_t row = 0; row < 4; row += 1)
             {
-                debug_row_scalar(&a, delta[row], advance[row]);
+                debug_row_scalar(&a, delta[row], advance[row], false);
             }
             debug_rows_vector(&b, _mm_loadu_si128((const __m128i*)delta), _mm_loadu_si128((const __m128i*)advance));
             valid &= a.size == b.size && memcmp(scalar, vector, sizeof(scalar)) == 0;
@@ -104,7 +104,7 @@ static bool debug_test_random_rows(void)
             delta[row] = (uint32_t)(state >> 32);
             state = state * 6364136223846793005ull + 1442695040888963407ull;
             advance[row] = (int32_t)(state >> 32);
-            debug_row_scalar(&a, delta[row], advance[row]);
+            debug_row_scalar(&a, delta[row], advance[row], false);
         }
         debug_rows_vector(&b, _mm_loadu_si128((const __m128i*)delta), _mm_loadu_si128((const __m128i*)advance));
         valid &= a.size == b.size && memcmp(scalar, vector, sizeof(scalar)) == 0;
@@ -149,6 +149,7 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
     uint64_t file = 1;
     uint32_t function = 0;
     uint32_t row = 0;
+    bool prologue_end = false;
     bool valid = position <= section->size;
     while (valid && position < section->size)
     {
@@ -192,11 +193,19 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
         {
             file = debug_test_leb(section->bytes, section->size, &position, false, &valid);
         }
+        else if (opcode == 10)
+        {
+            prologue_end = true;
+        }
         else if (opcode == 1 && function < unit->function_count && row < unit->functions[function].row_count)
         {
+            // The row, with DW_LNS_set_prologue_end before it exactly when it is the function's body's (DW_LNS_copy then
+            // clears the flag).
             const DebugFunction* entry = &unit->functions[function];
             const uint32_t index = entry->first_row + row;
-            valid &= address == addresses[function] + unit->offsets[index] && line == unit->lines[index] && file == entry->file;
+            valid &= address == addresses[function] + unit->offsets[index] && line == unit->lines[index] && file == entry->file &&
+                     prologue_end == (row + 1 == entry->prologue_end);
+            prologue_end = false;
             row += 1;
         }
         else
@@ -257,6 +266,10 @@ static bool debug_test_units(void)
         }
         unit.row_count = count;
         functions[0].row_count = count;
+        // The body's row: none, the first, the second (as the C driver's functions with a prologue have it), a row past a
+        // vector group and the last.
+        const uint32_t bodies[] = { 0, 1, 2, 6, count };
+        functions[0].prologue_end = bodies[count % BUSTER_ARRAY_LENGTH(bodies)] <= count ? bodies[count % BUSTER_ARRAY_LENGTH(bodies)] : count;
         functions[1].first_row = count;
         functions[2].first_row = count;
         DebugOutput a = debug_test_output(a_bytes, a_addresses, 3);
@@ -297,6 +310,7 @@ static bool debug_test_units(void)
     {
         unit.row_count = 1;
         functions[0].row_count = 1;
+        functions[0].prologue_end = 0;
         functions[1].first_row = 1;
         functions[2].first_row = 1;
         offsets[0] = UINT32_MAX;
@@ -311,6 +325,10 @@ static bool debug_test_units(void)
         functions[1].file = 2;
         valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
         functions[1].file = 1;
+        // A body's row past the function's rows.
+        functions[0].prologue_end = 2;
+        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        functions[0].prologue_end = 1;
         unit.directory = (String8){
             .pointer = "a\0b",
             .length = 3,
@@ -327,7 +345,7 @@ static bool debug_test_units(void)
     }
     free(a_bytes);
     free(b_bytes);
-    printf("debug units: every tail through 129, line decoding, files, empty sequences, capacity, invalid input and late addresses: %s\n", valid ? "pass" : "FAIL");
+    printf("debug units: every tail through 129, line decoding, bodies' rows, files, empty sequences, capacity, invalid input and late addresses: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 

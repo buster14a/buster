@@ -144,8 +144,11 @@
 //   - STACK_SAVE: pushes the stack's position (`class` U64; `value` 0), which only STACK_RESTORE reads.
 //   - STACK_RESTORE: pops the operand (U64), a position STACK_SAVE pushed in this function, and releases what ALLOCA
 //     has reserved since (`class` U64; `value` 0): the end of a variable-length array's scope.
-// A function with any of the last three has a frame pointer, rbp, which then neither a depth nor a home takes: its
-// integer stack has one depth fewer.
+//   - JUMP_INDIRECT: pops the operand (U64), the address of one of the function's labels (Tier0Function.label_entries),
+//     and goes there (`class` U64; `value` 0): GNU C's goto *. At statement level, as the labels are: an address of a
+//     label is a GLOBAL_ADDRESS of the symbol a front end defines at its record (Tier0Code.label_records).
+// A function with ALLOCA, STACK_SAVE or STACK_RESTORE has a frame pointer, rbp, which then neither a depth nor a home
+// takes: its integer stack has one depth fewer.
 // Long double (F80) takes CONST (`value` an index into Tier0Function.x87_constants), DUP, NEG, CONVERT (to and from every
 // class; to an integer by truncation, as C converts), LOAD, STORE and SET (its 10 bytes at the address), ADD, SUB, MUL and
 // DIV, the compares (IEEE's, as the floating types'), CALL (arguments on the stack, a result in st0), DISCARD, JUMP_VALUE
@@ -154,7 +157,8 @@
 // the convention keeps (64-bit significands, rounding to nearest).
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
-// WebAssembly validator): tier0_validate checks it.
+// WebAssembly validator): tier0_validate checks it. A label of label_entries is a target JUMP_INDIRECT may reach, with
+// nothing on the stacks.
 #define BUSTER_TYPED_NONE 0
 #define BUSTER_TYPED_CONST 1
 #define BUSTER_TYPED_LOCAL 2
@@ -200,7 +204,8 @@
 #define BUSTER_TYPED_ALLOCA 42
 #define BUSTER_TYPED_STACK_SAVE 43
 #define BUSTER_TYPED_STACK_RESTORE 44
-#define BUSTER_TYPED_KINDS 45
+#define BUSTER_TYPED_JUMP_INDIRECT 45
+#define BUSTER_TYPED_KINDS 46
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -300,6 +305,14 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 // a CONST of class F80 is the one its value indexes. `x87` says whether the function has long double values at all: an
 // entry of class F80, or a long double result. A function with any has it, and only such a function has long double's
 // slots in its frame and its compile looks for long double's entries: one without them compiles as if Tier 0 had none.
+//
+// The labels whose addresses the code takes (GNU C's labels as values, which JUMP_INDIRECT goes to) are an optional
+// column too, 0 for a function without them: label_entries holds label_count entries' indices, each a statement's start
+// or the count for the function's end. Tier0Code.label_records gives each one's first record, where the front end
+// defines the symbol whose GLOBAL_ADDRESS is the label's address.
+//
+// entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
+// compile without it allocates and copies nothing for them.
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -336,6 +349,9 @@ struct Tier0Function
     const uint64_t* x87_constants;
     uint32_t x87_constant_count;
     bool x87;
+    const uint32_t* label_entries;
+    uint32_t label_count;
+    bool entry_records;
 };
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
@@ -395,9 +411,14 @@ typedef enum Tier0Error
 
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
-// end), and a LinkReference per symbolic field, its instruction a record index. `deferred` counts the entries the
-// vector path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose
-// values went to the deep slots (tier0_select_deep).
+// end), and a LinkReference per symbolic field, its instruction a record index. With Tier0Function.entry_records,
+// `entry_records` is each of the function's `entry_count` typed entries' first record, and one more, the epilogue's:
+// ascending, an entry that emits no record (a leaf fused into its consumer) at the next entry's; with branch sizing's
+// offsets, where each entry's code starts in bytes, which source rows give a debugger (debug.c, #395). Without it,
+// entry_records is null and entry_count 0. `deferred` counts the entries the vector path left to tier0_emit_deferred
+// (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
+// (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
+// in their order (0 for a function without them): the label's first record.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -408,6 +429,10 @@ struct Tier0Code
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    uint32_t* entry_records;
+    uint32_t entry_count;
+    uint32_t* label_records;
+    uint32_t label_count;
     uint32_t deferred;
     uint32_t deep;
     Tier0Error error;
@@ -2250,6 +2275,11 @@ static void tier0_define_templates(void)
     tier0_begin();
     tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_BRANCH));
     tier0_end(BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN, 0);
+    // JUMP_INDIRECT: to the address in the operand's register, without a fused operand, which would make it a jump through
+    // memory.
+    tier0_begin();
+    tier0_add(tier0_r(X86_FORM_JMP_RM64, BUSTER_TIER0_SOURCE_R1));
+    tier0_end(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN, 0);
     // RETURN of nothing.
     tier0_begin();
     tier0_add(tier0_branch(X86_FORM_JMP_REL8, BUSTER_TIER0_RECORD_END));
@@ -2688,6 +2718,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_ALLOCA] = BUSTER_TIER0_UNARY,
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_LEAF,
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_SINK,
+    [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SINK,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 2] = BUSTER_TIER0_UNARY,
@@ -2778,6 +2809,16 @@ static bool tier0_label(const uint64_t* labels, uint32_t entry)
     return ((labels[entry >> 6] >> (entry & 63)) & 1) != 0;
 }
 
+// The labels JUMP_INDIRECT may go to (Tier0Function.label_entries), a bit each, into `labels`.
+static void tier0_label_entries(const Tier0Function* function, uint64_t* labels)
+{
+    for (uint32_t k = 0; k < function->label_count; k += 1)
+    {
+        const uint32_t target = function->label_entries[k];
+        labels[target >> 6] |= 1ull << (target & 63);
+    }
+}
+
 // The entries a branch or a jump goes to, a bit each (the bit past the last entry is the function's end), into
 // `labels`, which has room for count + 1 bits and is zero.
 static void tier0_labels(const Tier0Function* function, uint64_t* labels)
@@ -2791,6 +2832,7 @@ static void tier0_labels(const Tier0Function* function, uint64_t* labels)
             labels[target >> 6] |= 1ull << (target & 63);
         }
     }
+    tier0_label_entries(function, labels);
 }
 
 // Which stack a class's values live on: 0 for none (VOID), 1 for the integer stack, 2 for the floating one.
@@ -6377,15 +6419,24 @@ static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* 
     entries->positions[function->count] = position;
 }
 
-// The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store.
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts)
+// The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store;
+// and the entries' first records (`entries` of them and the epilogue's) when asked for (`positions` not null).
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
 {
     code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
     code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+    // The entries' positions are final once measured: emission writes each entry's records from its position.
+    code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
     code->count = records;
-    return code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0;
+    code->entry_count = positions != 0 ? entries : 0;
+    const bool room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
+    if (room && positions != 0)
+    {
+        memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+    }
+    return room;
 }
 
 // A CHOICE record's context: whether its rm is a register (and rax), inc and dec allowed, and the flags live after it.
@@ -6663,7 +6714,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts))
+        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts, function->entry_records ? entries->positions : 0,
+                                        function->count))
         {
             error = TIER0_ERROR_MEMORY;
         }
@@ -6691,6 +6743,23 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
                 tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
             }
         }
+    }
+    return error;
+}
+
+// Each label's first record (Tier0Code.label_records), from the positions both paths give, after tier0_generate.
+static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
+{
+    Tier0Error error = TIER0_OK;
+    if (function->label_count != 0)
+    {
+        code->label_records = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, function->label_count);
+        error = code->label_records != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+        for (uint32_t k = 0; error == TIER0_OK && k < function->label_count; k += 1)
+        {
+            code->label_records[k] = entries->positions[function->label_entries[k]];
+        }
+        code->label_count = error == TIER0_OK ? function->label_count : 0;
     }
     return error;
 }
@@ -6726,6 +6795,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
         tier0_fuse_scalar(function, labels, &entries);
         tier0_depths_scalar(function, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, false);
+        error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
     }
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
@@ -6820,7 +6890,9 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
     }
 }
 
-static Tier0Check tier0_validate(const Tier0Function* function)
+// tier0_validate's body, for a caller that inlines it whatever the function's other callers make clang decide
+// (check_program_lower_body's two copies, #426).
+static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -6863,6 +6935,24 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 {
                     labels[function->values[i] >> 6] |= 1ull << (function->values[i] & 63);
                 }
+            }
+        }
+        if (function->label_count != 0 && function->label_entries == 0)
+        {
+            tier0_reject(&validator, 0, "the labels' count without their entries");
+        }
+        for (uint32_t k = 0; k < function->label_count && function->label_entries != 0 && validator.check.error == TIER0_OK; k += 1)
+        {
+            const uint32_t target = function->label_entries[k];
+            if (target > count)
+            {
+                tier0_reject(&validator, 0, "a label past the function's end");
+            }
+            else
+            {
+                // A JUMP_INDIRECT may arrive at any label, with nothing on the stacks: as if before the first entry.
+                labels[target >> 6] |= 1ull << (target & 63);
+                tier0_arrive(&validator, hashes, seen, target, 0);
             }
         }
         if (function->local_sizes != 0 && function->local_alignments == 0)
@@ -7170,6 +7260,18 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                 tier0_arrive(&validator, hashes, seen, (uint32_t)value, i);
                 validator.reachable = false;
                 break;
+            case BUSTER_TYPED_JUMP_INDIRECT:
+                // To one of the labels, which tier0_arrive found reached with nothing on the stacks.
+                if (tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+                {
+                    tier0_reject(&validator, i, "an indirect jump to something that isn't an address (U64), or with a value");
+                }
+                if (validator.depth != 0 || function->label_count == 0)
+                {
+                    tier0_reject(&validator, i, "an indirect jump with values left, or in a function without labels");
+                }
+                validator.reachable = false;
+                break;
             case BUSTER_TYPED_RETURN:
                 if (class != BUSTER_TYPED_CLASS_VOID && tier0_pop(&validator, i) != class)
                 {
@@ -7254,6 +7356,11 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     }
     scratch_end(scratch);
     return validator.check;
+}
+
+static Tier0Check tier0_validate(const Tier0Function* function)
+{
+    return tier0_validate_inline(function);
 }
 
 
@@ -7527,7 +7634,8 @@ static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
     }
 }
 
-// The labels, a bit per entry: the control entries' targets (found 64 at a time, then set one at a time: they are few).
+// The labels, a bit per entry: the control entries' targets (found 64 at a time, then set one at a time: they are few),
+// and the labels JUMP_INDIRECT may go to.
 static void tier0_vector_labels(const Tier0Function* function, uint64_t* labels)
 {
     const uint32_t count = function->count;
@@ -7544,6 +7652,7 @@ static void tier0_vector_labels(const Tier0Function* function, uint64_t* labels)
             control &= control - 1;
         }
     }
+    tier0_label_entries(function, labels);
 }
 
 // The fixed byte vectors of a variant code.
@@ -8537,6 +8646,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
         tier0_vector_fuse(function, &bits, &entries);
         tier0_vector_depths(function, &bits, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, true);
+        error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
     }
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);

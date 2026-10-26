@@ -1815,6 +1815,8 @@ struct CheckSourceFixture
     bool rejected;
     bool unsupported;
     bool extension;
+    // The C standard both sides check it in, GNU's dialect of it: 0 for gnu17, or 2023 for gnu23.
+    uint32_t standard;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1837,7 +1839,7 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     static Parser parsers[2];
     const PPOptions pp_options = {
         .language = {
-            .standard = 2017,
+            .standard = fixture->standard != 0 ? fixture->standard : 2017,
             .gnu = true
         },
         .no_standard_includes = true,
@@ -2329,6 +2331,336 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        {
+            // A GNU extension clang takes (a warning under -pedantic alone), with clang's layouts.
+            "struct whose only named member is a flexible array member",
+            "struct T { int a[]; }; struct U { int : 0; char c[]; }; struct V { char : 3; long l[]; };\n"
+            "struct W { struct T t; int b; }; struct T *p; int n = sizeof(struct T) + sizeof(struct U);\n"
+            "_Static_assert(sizeof(struct T) == 0 && _Alignof(struct T) == 4, \"T\");\n"
+            "_Static_assert(sizeof(struct U) == 0 && _Alignof(struct U) == 1, \"U\");\n"
+            "_Static_assert(sizeof(struct V) == 8 && _Alignof(struct V) == 8 && __builtin_offsetof(struct V, l) == 8, \"V\");\n"
+            "_Static_assert(sizeof(struct W) == 4, \"W\");\n",
+            false,
+            false
+        },
+        {
+            "flexible array member before another member",
+            "struct S { int a[]; int b; };\n",
+            true,
+            false
+        },
+        {
+            // C23's fixed underlying type, which clang takes in every mode: complete at its base (sizeof in its own list),
+            // its enumerators of its own type, the base's qualifiers dropped, an attribute before its name applied at the
+            // base, packed ignored, its declarations alone (here in a block, a new enum) keeping or making it.
+            "enum with a fixed underlying type",
+            "enum E : unsigned char { A = 255, B = 0 }; enum E : unsigned char; typedef unsigned int U;\n"
+            "_Static_assert(sizeof(enum E) == 1 && _Alignof(enum E) == 1 && _Generic(A, enum E: 1, default: 0) && _Generic(+A, int: 1, default: 0), \"E\");\n"
+            "enum F : long long { C = -1, D }; enum G : short; enum G : short { H = sizeof(enum G) }; enum I : const U { J = 4294967295u };\n"
+            "_Static_assert(sizeof(enum F) == 8 && D == 0 && H == 2 && J == 4294967295u && sizeof(enum I) == 4, \"F G I\");\n"
+            "enum K : _Bool { L, M }; enum N : signed char { O = -128, P = 127 }; enum : unsigned long { Q = 1ul << 63 }; enum R : unsigned { S = -1 };\n"
+            "_Static_assert(M == 1 && sizeof(enum K) == 1 && Q == 9223372036854775808ul && S == 4294967295u, \"K Q S\");\n"
+            "enum __attribute__((aligned(8))) T : char { V }; enum __attribute__((packed)) W : int { X }; enum Y : short { Z } __attribute__((packed));\n"
+            "_Static_assert(_Alignof(enum T) == 8 && sizeof(enum T) == 1 && sizeof(enum W) == 4 && sizeof(enum Y) == 2, \"T W Y\");\n"
+            "struct St { enum E e : 4; enum E f : 8; enum F g; }; _Static_assert(sizeof(struct St) == 16, \"St\");\n"
+            "int f(enum E e) { switch (e) { case A: return 1; case B: return 2; default: return 3; } }\n"
+            "unsigned g(void) { enum E e = A; enum E : unsigned char; return e + 1u; }\n"
+            "int h(enum N n) { return n == O ? 1 : n; }\n",
+            false,
+            false
+        },
+        {
+            // A fixed enum's enumerators are of its base's type in its list, and after it of the enum's in C23 alone, as
+            // clang 23 types them (#428's review): before C23, two such enums' enumerators of one base are of one type.
+            "fixed enum: enumerators of the base's type before C23",
+            "enum E : int { A, B = _Generic(A, int: 2, default: 3) }; enum F : int { C };\n"
+            "_Static_assert(B == 2 && _Generic(A, __typeof__(C): 1, default: 0) == 1 && _Generic(A, int: 1, default: 0), \"C17\");\n"
+            "enum G : unsigned char { D }; _Static_assert(_Generic(D, unsigned char: 1, default: 0) && _Generic(+D, int: 1, default: 0), \"G\");\n",
+            false,
+            false
+        },
+        {
+            "fixed enum: enumerators of the enum's type after its list in C23",
+            "enum E : int { A, B = _Generic(A, int: 2, default: 3) }; enum F : int { C };\n"
+            "_Static_assert(B == 2 && _Generic(A, __typeof__(C): 1, default: 0) == 0 && _Generic(A, enum E: 1, default: 0), \"C23\");\n"
+            "enum G : unsigned char { D }; _Static_assert(_Generic(D, enum G: 1, default: 0) && _Generic(+D, int: 1, default: 0), \"G\");\n",
+            false,
+            false,
+            .standard = 2023
+        },
+        {
+            // The same assertion in the other dialect: each must refuse it.
+            "fixed enum: C23's enumerator types refused before it",
+            "enum E : int { A }; enum F : int { C }; _Static_assert(_Generic(A, __typeof__(C): 1, default: 0) == 0, \"C17\");\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: earlier enumerator types refused in C23",
+            "enum E : int { A }; enum F : int { C }; _Static_assert(_Generic(A, __typeof__(C): 1, default: 0) == 1, \"C23\");\n",
+            true,
+            false,
+            .standard = 2023
+        },
+        {
+            // A negative value's significant bits, its sign not checked (clang's isRepresentableIntegerValue), and a
+            // value's active bits, less the sign bit of a signed type.
+            "fixed enum: an enumerator past its type",
+            "enum E : unsigned char {\n  A = 256\n};\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: the successor past its type",
+            "enum E : signed char {\n  A = 127,\n  B\n};\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: redeclared with another type",
+            "enum E : int;\nenum E : long { A };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: declared with a declarator",
+            "int a;\nenum E : int x;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: an enum without one given one",
+            "enum E { A };\nenum E : int;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: one with it defined without it",
+            "enum E : int;\nenum E { A };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: defined twice",
+            "enum E : int { A };\nenum E : int { B };\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: a floating type",
+            "int a;\nenum E : float { A };\n",
+            true,
+            false
+        },
+        {
+            // GNU attributes after a bit-field's width, the member's, as clang (and GCC) lay them out: aligned, packed (a
+            // compound width), two groups, an unnamed field's and an empty one; then widths of every form a width takes,
+            // which the parser's tree keeps whole apart from the attributes: _Generic alone and in a sum (#430's review),
+            // sizeof, a cast of a floating constant, __builtin_offsetof in ?: and __builtin_choose_expr.
+            "attributes after a bit-field's width",
+            "enum { N = 5 };\n"
+            "struct S { int a : 3 __attribute__((aligned(4))), b : 2; char c; };\n"
+            "struct T { char x; unsigned long y : 1 + 2 __attribute__((packed)); char z; };\n"
+            "struct U { char x; int y : N __attribute__((aligned(16))) __attribute__((unused)); char z : (N - 1) __attribute__(()); };\n"
+            "struct V { char x; long : 0 __attribute__((aligned(8))); char y; };\n"
+            "struct O { char a; int b; };\n"
+            "struct W { char x; unsigned a : _Generic(0, int: 3, default: 1) __attribute__((packed));\n"
+            "           unsigned b : _Generic(0L, int: 1, long: 2) + 3 __attribute__((aligned(8))); char y; };\n"
+            "struct X { char x; unsigned a : sizeof(short) * 2 __attribute__((aligned(4))), b : (int)2.5 + N __attribute__((packed));\n"
+            "           unsigned c : __builtin_offsetof(struct O, b) ? 6 : 1 __attribute__(()); unsigned d : __builtin_choose_expr(1, 7, 1.0) __attribute__((aligned(2))); };\n"
+            "_Static_assert(sizeof(struct S) == 4 && _Alignof(struct S) == 4, \"S\");\n"
+            "_Static_assert(sizeof(struct T) == 3 && _Alignof(struct T) == 1, \"T\");\n"
+            "_Static_assert(sizeof(struct U) == 32 && _Alignof(struct U) == 16, \"U\");\n"
+            "_Static_assert(sizeof(struct V) == 9 && _Alignof(struct V) == 1, \"V\");\n"
+            "_Static_assert(sizeof(struct W) == 16 && _Alignof(struct W) == 8, \"W\");\n"
+            "_Static_assert(sizeof(struct X) == 12 && _Alignof(struct X) == 4, \"X\");\n",
+            false,
+            false
+        },
+        {
+            // Its alignment applied after its body, which the enum's completion at its base came before: refused.
+            "fixed enum: aligned after its body",
+            "enum F : char { B } __attribute__((aligned(8)));\n",
+            true,
+            true
+        },
+        {
+            // #428's review: GNU attributes among the base's specifiers, which clang takes as the base type's and ignores
+            // (the base's own type kept), with a body, without and before a typedef's declarator; and the enum's
+            // references (`enum E x`) and declarations alone in another scope, which need no base.
+            "fixed enum: attributes in its base, and references without it",
+            "enum A : int __attribute__((unused)); enum B : int __attribute__((aligned(8))) { B0 };\n"
+            "typedef enum C : __attribute__((unused)) unsigned __attribute__((unused)) char __attribute__((mode(DI))) { C0 } T; T t = C0;\n"
+            "_Static_assert(sizeof(enum B) == 4 && _Alignof(enum B) == 4 && sizeof(T) == 1, \"B T\");\n"
+            "enum D : short; enum D d; enum D : short; void f(void) { enum D; enum D *p = 0; (void)p; }\n",
+            false,
+            false
+        },
+        {
+            // Attributes after a tag's name are the declaration's, not the tag's: before a `;` they make it a reference to
+            // the visible tag, not a new one in a block's scope, and not a declaration of a fixed enum alone, as clang has it.
+            "attributes after a tag's name: a reference",
+            "struct S { int a; };\n"
+            "void f(void) { struct S __attribute__((unused)); struct S s; s.a = 1; }\n"
+            "enum K : int; enum K __attribute__((unused)); void g(void) { enum K __attribute__((unused)); enum K k = 0; (void)k; }\n",
+            false,
+            false
+        },
+        {
+            // A declaration of it alone without its base, in its scope, before its body or after it: clang's
+            // "enumeration previously declared with fixed underlying type", at the name.
+            "fixed enum: declared alone without it",
+            "enum E : int;\nenum E;\n",
+            true,
+            false
+        },
+        {
+            "fixed enum: defined, then declared alone without it",
+            "enum E : int { A };\nenum E;\n",
+            true,
+            false
+        },
+        {
+            // restrict needs a pointer; const and volatile are dropped.
+            "fixed enum: restrict in its base",
+            "int a;\nenum E : restrict int { A };\n",
+            true,
+            false
+        },
+        {
+            // An attribute that makes the base a vector's: not an integer type.
+            "fixed enum: a vector in its base",
+            "int a;\nenum E : int __attribute__((vector_size(16))) { A };\n",
+            true,
+            false
+        },
+        {
+            // GNU C's labels as values (#133, Lua's interpreter): a static table of addresses of labels, a computed goto
+            // through it, through a local and through ?:, the addresses compared and stored, and a computed goto out of a
+            // variable-length array's block, which leaves its scope as clang lets it.
+            "labels as values",
+            "int f(int n, const unsigned char *code) {\n"
+            "    static const void *const table[] = { &&add, &&twice, &&done };\n"
+            "    void *last = &&done;\n"
+            "    int acc = n;\n"
+            "    goto *table[*code];\n"
+            "add:\n"
+            "    acc += code[1];\n"
+            "    code += 2;\n"
+            "    goto *table[*code];\n"
+            "twice:\n"
+            "    acc += acc;\n"
+            "    last = &&twice;\n"
+            "    code += 1;\n"
+            "    goto *(acc > 100 ? table[2] : table[*code]);\n"
+            "done:\n"
+            "    return last == &&twice ? acc : -acc;\n"
+            "}\n"
+            "int g(int n) {\n"
+            "    void *out = &&end;\n"
+            "    for (int i = 0; i < 3; i++) { int v[(n & 3) + 1]; v[0] = i; if (v[0] == 2) goto *out; }\n"
+            "    n = 0;\n"
+            "end:\n"
+            "    return n;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // An address of a label no function has: clang's "use of undeclared label", at the name.
+            "labels as values: an undeclared label",
+            "void f(void) {\n"
+            "    void *p = &&here;\n"
+            "    void *q = &&nowhere;\n"
+            "    goto *p;\n"
+            "here:\n"
+            "    (void)q;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // An address of a label outside a function's body.
+            "labels as values: outside a function",
+            "void f(void) { x: ; }\n"
+            "void *p = &&x;\n",
+            true,
+            false
+        },
+        {
+            // A computed goto in a function that takes no label's address.
+            "labels as values: a computed goto without labels",
+            "void f(void *p) {\n"
+            "    goto *p;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // A computed goto may go to any of its function's labels: not into a variable-length array's scope, nor into a
+            // statement expression.
+            "labels as values: into a variable-length array's scope",
+            "void f(int n) {\n"
+            "    void *p = &&inner;\n"
+            "    goto *p;\n"
+            "    { int v[n]; inner: v[0] = 1; }\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            "labels as values: into a statement expression",
+            "int f(void) {\n"
+            "    void *p = &&inner;\n"
+            "    goto *p;\n"
+            "    return ({ inner: 1; });\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // goto *'s operand converts to const void * as an assignment would: an integer is clang's error.
+            "labels as values: a computed goto of an integer",
+            "void f(int n) {\n"
+            "    void *p = &&here;\n"
+            "    goto *n;\n"
+            "here:\n"
+            "    (void)p;\n"
+            "}\n",
+            true,
+            false
+        },
+        {
+            // goto *'s operand is the whole expression after the `*` (#431's review), not the `*`'s operand: a conditional
+            // of an int's condition, one of a void *'s sum, a comma and an assignment, all of them pointers.
+            "labels as values: a computed goto's whole expression",
+            "int f(int n, void *p, int k) {\n"
+            "    void *t[2] = { &&even, &&odd };\n"
+            "    goto *(n & 1) ? t[1] : t[0];\n"
+            "even:\n"
+            "    goto *k ? p + 0 : &&odd;\n"
+            "odd:\n"
+            "    goto *n++, &&done;\n"
+            "done:\n"
+            "    goto *p = &&end;\n"
+            "end:\n"
+            "    return n;\n"
+            "}\n",
+            false,
+            false
+        },
+        {
+            // And a conditional of integers is an integer, clang's error.
+            "labels as values: a computed goto of a conditional's integer",
+            "void f(void *p) {\n"
+            "    void *q = &&here;\n"
+            "    goto *p ? 1 : 0;\n"
+            "here:\n"
+            "    (void)q;\n"
+            "}\n",
+            true,
+            false
+        },
         // A tag first named in a definition's parameter list has the body's scope too (C11 6.2.1p4), and ends with
         // it; a prototype's ends with the prototype (#435).
         {
@@ -2397,6 +2729,82 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // A prototype's tag in a constant expression's type name (a typeof's, a builtin's operand) ends at the
+        // prototype's `)` too (#437).
+        {
+            "typeof's prototype tag in a parameter list ends with the prototype",
+            "int f(typeof(int (*)(struct Z *)) g, struct Z *z) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "file-scope typeof's prototype tag ends with the prototype",
+            "typeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "block-scope typeof's prototype tag ends with the prototype",
+            "int f(void) {\n typeof(int (*)(struct Z *)) h = 0;\n struct Z *z = 0;\n return h(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype tag in a parameter list doesn't reach the body",
+            "int f(typeof(int (*)(struct Z *)) g) {\n struct Z *z = 0;\n return g(z); }\n",
+            true,
+            false
+        },
+        {
+            "typeof's prototype names the visible tag",
+            "struct Z;\ntypeof(int (*)(struct Z *)) g;\nstruct Z *z;\nint f(void) { return g(z); }\n",
+            false,
+            false
+        },
+        {
+            "builtin operands' prototype tags are each their own",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(struct Y *), int (*)(struct Y *)), \"distinct\");\n",
+            false,
+            false
+        },
+        {
+            "nested prototype's tag in a typeof ends with each prototype",
+            "typeof(int (*)(int (*)(struct Z *), struct Z *)) g;\nint h(struct Z *);\nint f(void) { return g(h, 0); }\n",
+            true,
+            false
+        },
+        {
+            "register parameter's prototype tag ends with the prototype",
+            "_Static_assert(!__builtin_types_compatible_p(int (*)(register struct S *), int (*)(struct S *)), \"distinct\");\n",
+            false,
+            false
+        },
+        // A C23 attribute's operand is read raw (#437's review): a list whose parameter starts with `register` or an
+        // attribute is a prototype there too, its tag ended at its `)`.
+        {
+            "raw register parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw attributed parameter's prototype tag ends with the prototype",
+            "[[gnu::aligned(sizeof(int (*)(__attribute__((unused)) struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
+        {
+            "raw function type of a register parameter",
+            "[[gnu::aligned(sizeof(int (register struct Z *)))]] int a;\nint (*g)(struct Z *);\nstruct Z *z;\nint f(void) { return g(z) + a; }\n",
+            true,
+            false,
+            false,
+            2023
+        },
     };
     enum
     {
@@ -2443,6 +2851,25 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         "-std=gnu17"
     };
     ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    // The fixtures in gnu23, again in their dialect.
+    char* c23_pointers[FILE_COUNT];
+    uint32_t c23_fixtures[FILE_COUNT];
+    ParseTestClang c23_outcomes[FILE_COUNT];
+    uint32_t c23_count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        c23_pointers[c23_count] = paths[i];
+        c23_fixtures[c23_count] = i;
+        c23_count += fixtures[i].standard == 2023 ? 1 : 0;
+    }
+    const char* c23_arguments[] = {
+        "-std=gnu23"
+    };
+    ready = ready && (c23_count == 0 || parse_test_clang(clang, c23_arguments, BUSTER_ARRAY_LENGTH(c23_arguments), c23_pointers, c23_count, c23_outcomes));
+    for (uint32_t k = 0; ready && k < c23_count; k += 1)
+    {
+        outcomes[c23_fixtures[k]] = c23_outcomes[k];
+    }
     check_test_expect(test, ready, "clang source oracle could not run");
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {
