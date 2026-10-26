@@ -246,7 +246,7 @@ static void check_test_program_atomic_alignment(CheckTest* test, const char* cla
         { "a cast of a char array's element", "char buffer[8];unsigned f(void){return __atomic_load_n((unsigned*)&buffer[1],__ATOMIC_RELAXED);}", true },
         { "a cast of an array plus 1", "char buffer[8];unsigned f(void){return __atomic_load_n((unsigned*)(buffer+1),__ATOMIC_RELAXED);}", true },
         { "a cast of a pointer plus 1", "unsigned long f(unsigned*p){return __atomic_load_n((unsigned long*)(p+1),__ATOMIC_RELAXED);}", false },
-        { "a pointer element's value", "unsigned f(unsigned**p,int i){return __atomic_load_n(p[i],__ATOMIC_RELAXED);}", false },
+        { "a pointer element's value, of a pointer type aligned to 1", "typedef unsigned*__attribute__((aligned(1)))UP;unsigned f(UP*p,int i){return __atomic_load_n(p[i],__ATOMIC_RELAXED);}", false },
         { "a variable aligned to 1", "int x __attribute__((aligned(1)));int f(void){return __atomic_load_n(&x,__ATOMIC_RELAXED);}", true },
         { "a member of a variable aligned to 2", "struct S{int a;int b;}s __attribute__((aligned(2)));int f(void){return __atomic_load_n(&s.b,__ATOMIC_RELAXED);}", true },
         { "an element of an array of 16 bytes", "char buffer[16];unsigned f(void){return __atomic_load_n((unsigned*)&buffer[4],__ATOMIC_RELAXED);}", false },
