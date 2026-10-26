@@ -2583,7 +2583,8 @@ spellings alone would miss this change (#272).
   in a token: an identifier, a pp-number or an unknown token (a name not
   written in capital letters, digits, spaces and hyphens, which is none of
   Unicode's). That error is at the UCN's backslash, where clang's `-pedantic`
-  warning is, and is diagnosed where clang's lexer would read the UCN, as an
+  warning is (clang reads one past an identifier's first character without
+  one), and is diagnosed where clang's lexer would read the UCN, as an
   invalid raw string literal's delimiter is: in active text, a directive's
   line, a macro's definition (once) and an unused argument, but not in a
   skipped group. One in a literal or a comment is no error here, as in clang's

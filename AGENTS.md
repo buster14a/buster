@@ -3518,7 +3518,7 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
   the named UCNs' places (`pp_test_named_ucns`): each error at its UCN's backslash, by both kernels, and with
   `--clang` where clang's `-pedantic` warning that a named UCN is its extension is, or for a name no character has
-  its error, three columns before it;
+  its error, three columns before it (clang reads one past an identifier's first character silently);
   the prelude's failures (#361): the command line's arena push and its `-D`/`-U` and
   `-include` files each failed in turn (the arena cut short, the data table full), each
   a fatal error that stops the prelude and fails the run, beside controls that

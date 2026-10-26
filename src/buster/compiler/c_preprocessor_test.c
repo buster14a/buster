@@ -4164,7 +4164,8 @@ static bool pp_test_raw_query_capacity(const char* directory, bool with_clang)
 }
 
 // #452's refusal of named universal character names (\N{...}): a case for pp_test_named_ucns, with the places
-// ("line:column" each, in order) of the errors it must give.
+// ("line:column" each, in order) of the errors it must give, each followed by '*' where clang reads the named UCN
+// without a diagnostic: past an identifier's first character (its tryConsumeIdentifierUCN reads it without a token).
 typedef struct PPNamedUcnCase PPNamedUcnCase;
 struct PPNamedUcnCase
 {
@@ -4234,8 +4235,9 @@ static uint32_t pp_test_named_unique(uint64_t* places, uint32_t count)
 // active text, a directive's line, a macro's definition once and an unused argument, and not in a skipped group, a
 // literal or a comment); with or without line splices, in an identifier, a pp-number and an unknown token, beside \u, \U
 // and UTF-8 spellings of the same character, which are no error. With `with_clang`, clang must put a diagnostic at each
-// of those places and no other: its -pedantic warning that a named UCN is its extension, for a name Unicode has, or its
-// error that a name is none, at the name, three columns after the backslash of the \N{ the cases write without splices.
+// of those places but the ones inside identifiers, and no other: its -pedantic warning that a named UCN is its extension,
+// for a name Unicode has, or its error that a name is none, at the name, three columns after the backslash of the \N{
+// the cases write without splices.
 // clang accepts a name Unicode has where buster refuses it, so the -E texts are never compared.
 static bool pp_test_named_ucns(const char* directory, bool with_clang)
 {
@@ -4265,13 +4267,13 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
                       "#endif\n"
                       "\"\\N{GREEK SMALL LETTER ALPHA}\" '\\N{DIGIT ZERO}' /* \\N{GREEK SMALL LETTER ALPHA} */ // \\N{DIGIT ZERO}\n",
             .standard = "gnu17",
-            .places = "1:2 2:2 3:1 4:2 6:2 8:11 11:6 12:5 13:7",
+            .places = "1:2* 2:2 3:1 4:2* 6:2* 8:11 11:6 12:5 13:7",
         },
         {
             .name = "a named UCN whose backslash is a trigraph",
             .source = "x?" "?/N{GREEK SMALL LETTER ALPHA} ?" "?/N{DIGIT ZERO}\n",
             .standard = "c17",
-            .places = "1:2 1:33",
+            .places = "1:2* 1:33",
         },
         {
             .name = "names Unicode doesn't have",
@@ -4291,6 +4293,9 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
         const int argument_count = pp_test_arguments(&test, directory, path, text, sizeof(text), arguments);
         uint64_t wanted[32];
         uint32_t wanted_count = 0;
+        // Those clang diagnoses too.
+        uint64_t diagnosed[32];
+        uint32_t diagnosed_count = 0;
         for (const char* at = cases[c].places; result && *at != 0;)
         {
             uint32_t row = 0;
@@ -4302,6 +4307,10 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
                 wanted[wanted_count] = (uint64_t)row << 32 | column;
                 wanted_count += 1;
                 at += used;
+                const bool silent = *at == '*';
+                diagnosed[diagnosed_count] = wanted[wanted_count - 1];
+                diagnosed_count += !silent;
+                at += silent;
             }
         }
         for (uint32_t k = 0; result && k < 2; k += 1)
@@ -4357,10 +4366,10 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
                      pp_test_named_places(clang.diagnostics, "warning: named escape sequences are a Clang extension", 0, places, BUSTER_ARRAY_LENGTH(places), &count) &&
                      pp_test_named_places(clang.diagnostics, "is not a valid Unicode character name", 3, places, BUSTER_ARRAY_LENGTH(places), &count);
             count = result ? pp_test_named_unique(places, count) : 0;
-            result = result && count == wanted_count && memcmp(places, wanted, count * sizeof(uint64_t)) == 0;
+            result = result && count == diagnosed_count && memcmp(places, diagnosed, count * sizeof(uint64_t)) == 0;
             if (!result)
             {
-                printf("named UCNs: %s: clang's diagnostics aren't at the %u places written for it:\n%s", cases[c].name, wanted_count,
+                printf("named UCNs: %s: clang's diagnostics aren't at the %u places written for it:\n%s", cases[c].name, diagnosed_count,
                        clang.diagnostics != 0 ? clang.diagnostics : "");
             }
             free(clang.text);

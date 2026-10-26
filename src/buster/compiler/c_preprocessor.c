@@ -2822,8 +2822,8 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
 
 // Adds an error of kind BUSTER_PP_NAMED_UCN_ERROR to the file's raw errors for each named UCN in an identifier, a
 // pp-number or an unknown token (pp_named_ucn_at), at its backslash, as clang places its -pedantic warning that a named
-// UCN is its extension, and those after pp_record_raw_errors's, in the arena they were just pushed to: the token
-// order the readers' search takes. Only a file with a candidate (`scan`, pp_scan_named_ucns) reads its bytes again, from
+// UCN is its extension (but past an identifier's first character, which clang reads without one), merged with
+// pp_record_raw_errors's, in the arena they were just pushed to, in the token order the readers' search takes. Only a file with a candidate (`scan`, pp_scan_named_ucns) reads its bytes again, from
 // the first candidate to the last. Returns false if the arena has no room.
 static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileData* data, const PPNamedUcnScan* scan)
 {
