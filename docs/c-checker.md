@@ -85,16 +85,30 @@ The combined `-c --dump-static` command validates the object and renders the
 same resolved `Link` before publishing the object file. Its data relocations
 therefore share the actual emitted functions' symbols.
 
-Semantic checking currently uses one C LP64 target model: signed plain `char`,
-32-bit `wchar_t`, 80-bit x87 `long double` stored in 16 bytes, and floating
-arithmetic evaluated in its source format. Options that advertise a different
-model are rejected before declaration elaboration. This includes unsigned
-plain `char`, short `wchar_t`, 64/128-bit `long double`, double/extended floating
-evaluation, and default extended evaluation when SSE is disabled. Explicit
-source-format evaluation is accepted. Assembly is outside this adapter, and
-the C language option parser does not admit C++ modes. The host compiler's
-`-funsigned-char` implementation flag does not select the input program's
-plain-char semantics.
+Semantic checking currently uses one C LP64 target model: 32-bit `wchar_t`,
+80-bit x87 `long double` stored in 16 bytes, and floating arithmetic evaluated
+in its source format, with plain `char` signed (x86-64's) or unsigned, as
+`-funsigned-char` and its spellings say. Options that advertise a different
+model are rejected before declaration elaboration. This includes short
+`wchar_t`, 64/128-bit `long double`, double/extended floating evaluation, and
+default extended evaluation when SSE is disabled. Explicit source-format
+evaluation is accepted. Assembly is outside this adapter, and the C language
+option parser does not admit C++ modes.
+
+Plain `char`'s signedness is the type table's (`TypeTable.char_unsigned`), which
+`check_input_run` sets from the unit's options, the deferred reader on the
+caller's table too, and `type_copy` keeps. Every phase reads it from there:
+`type_integer_properties` answers it, so the folding, conversions and
+comparisons, the initializers, a `mode` attribute's base (which keeps its
+signedness, an unsigned one's too) and the lowering's classes (U8 where it was
+I8) follow it, as does the convention's extension of a char argument
+(`abi_extension`, zero for unsigned). An ordinary character constant of one
+character is its char's value (`'\xff'` is 255 where char is unsigned, -1
+where it's signed); multicharacter, `u8`, `u`, `U` and `L` constants don't
+depend on it. `test-checker`'s fixtures check each against clang with
+`-funsigned-char`, and its program fixtures build clang's oracle with the
+fixture's own signedness (`-fsigned-char` but for those that ask otherwise),
+one of them from the same source both ways.
 
 ## Implementation boundary
 
@@ -677,6 +691,29 @@ What the lowering covers past scalars (#145's programs):
   table's pointers point at. Not yet: the difference of two labels' addresses
   as a static initializer's constant (GNU's relative jump tables), which clang
   folds and the checker refuses as not a constant.
+  The two control walks filter the parser's immutable kind/role columns in
+  bounded 64-byte blocks and visit exact events in source order: function
+  bodies, labels, cases, gotos and label addresses in the first walk; gotos,
+  label addresses and semicolons in the second. Masked tails need no padding;
+  the scalar option retains the original full traversals. Deferred masking,
+  branch priorities, body expiry and diagnostic order are unchanged.
+  The control reader counts resolved `&&label` expressions while finding their
+  targets (`CheckInput.label_address_count`) and reuses the loaded kind/role
+  facts in their consumers. A unit without one has no
+  addressed-label table or scan in `check_program`. A unit with one filters
+  64 kind/role bytes at a time, then marks only the selected targets, with an
+  exact scalar twin and a scalar tail requiring no input padding. The table
+  belongs to the program pass's scratch arena; an absent table means no label
+  needs a `CHECK_CONTROL_LABEL` entry.
+  In five paired rounds on the exclusively locked 9700X, exact source `f7af14f`
+  against `9de3d30` reduces frozen SQLite user instructions from 1,718,752,973
+  to 1,688,577,437 (−1.7557%), wall time from 147.964 to 146.825 ms and peak
+  RSS from 598,300 to 598,208 KiB. Required Lua and computed-goto dispatch
+  inputs show no consistent wall/RSS regression; dispatch cycles vary in sign.
+  The saving includes removing ordinary control-loop work, so it is not an
+  exact attribution of #431's older 13.3-million-instruction delta. The
+  [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
+  retain the limits and raw evidence for #449.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 

@@ -17,7 +17,8 @@
 //     at each target vector width, by the vector path and by the twin; calls whose locations clang and LLVM give (an
 //     UNCOUNTED argument's shift, the LARGER copies' slots, a SMALLER one's and a DEMOTED result among them); the
 //     levels across calls (abi_test_ordering); the walk without scratch memory for its stack (abi_test_short_scratch);
-//     and the walk over records that 2^64 paths lead to, under an alarm (abi_test_shared_records).
+//     the walk over records that 2^64 paths lead to, under an alarm (abi_test_shared_records); and plain char's
+//     extension, and an enum's of a fixed underlying char, with each signedness of char (abi_test_char_signedness).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
 //     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
@@ -46,7 +47,9 @@
 //     lose the other members' bits (abi_test_holds); an argument clang would pass as an i0 becomes a long, as does an
 //     unnamed one clang's va_arg reads elsewhere than its call puts it (abi_test_va_disagreement); bytes clang doesn't
 //     pass aren't checked (abi_test_mask_unpassed); and the C side copies a SMALLER type's LLVM bytes, which are all
-//     clang's objects of it hold (abi_test_c_size).
+//     clang's objects of it hold (abi_test_c_size). Then the extension runs, with plain char signed and unsigned
+//     (abi_test_cross_extension): the types clang extends, passed and returned between clang's code and the records'
+//     and this compiler's, both ways, at values with bits set past the type's.
 // The exit status is 1 if the arguments are invalid or a check fails.
 // With --cross-check, bounded child processes also check capture ownership with closed standard descriptors and
 // descriptor exhaustion, before running the ordinary six configurations.
@@ -3143,6 +3146,121 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
     }
 }
 
+// Plain char extends as the table's char is signed (TypeTable.char_unsigned, -funsigned-char), as clang's does, and so
+// does an enum of a fixed underlying char; the other character types, short and bool keep theirs. A call's locations
+// and result carry each one's: a char argument, and a char result, with every other type an argument after it.
+static void abi_test_char_signedness(AbiTestTally* tally)
+{
+    for (uint32_t unsigned_char = 0; unsigned_char < 2; unsigned_char += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            AbiTestTables tables;
+            if (abi_test_expect(tally, abi_test_tables_open(&tables, 64), "fixtures", "the tables can't be made"))
+            {
+                TypeTable* table = &tables.types.table;
+                table->char_unsigned = unsigned_char != 0;
+                const TypeId char_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 1);
+                const TypeId schar_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 2);
+                const bool complete = char_enum != 0 && schar_enum != 0 && type_enum_complete(table, char_enum, BUSTER_TYPE_CHAR, 0) &&
+                                      type_enum_complete(table, schar_enum, BUSTER_TYPE_SCHAR, 0);
+                const uint32_t plain = unsigned_char != 0 ? BUSTER_ABI_PASS_ZERO : BUSTER_ABI_PASS_SIGN;
+                const TypeId types[] = {
+                    BUSTER_TYPE_CHAR,
+                    char_enum,
+                    BUSTER_TYPE_SCHAR,
+                    schar_enum,
+                    BUSTER_TYPE_UCHAR,
+                    BUSTER_TYPE_SHORT,
+                    BUSTER_TYPE_USHORT,
+                    BUSTER_TYPE_BOOL,
+                };
+                const uint32_t extensions[] = {
+                    plain,
+                    plain,
+                    BUSTER_ABI_PASS_SIGN,
+                    BUSTER_ABI_PASS_SIGN,
+                    BUSTER_ABI_PASS_ZERO,
+                    BUSTER_ABI_PASS_SIGN,
+                    BUSTER_ABI_PASS_ZERO,
+                    BUSTER_ABI_PASS_ZERO,
+                };
+                const char* names[] = {
+                    "char",
+                    "enum : char",
+                    "signed char",
+                    "enum : signed char",
+                    "unsigned char",
+                    "short",
+                    "unsigned short",
+                    "bool",
+                };
+                const bool started = abi_test_expect(tally, complete && abi_test_tables_start(&tables, 16), "fixtures", "the char signedness tables can't be made");
+                if (started && path == 0)
+                {
+                    abi_classify_all(&tables.abi, table);
+                }
+                else if (started)
+                {
+                    abi_classify_all_scalar(&tables.abi, table);
+                }
+                const uint32_t counts[] = {
+                    BUSTER_ARRAY_LENGTH(types),
+                };
+                const TypeId results[] = {
+                    BUSTER_TYPE_CHAR,
+                };
+                const uint8_t variadic[] = {
+                    0,
+                };
+                const AbiSignatures signatures = {
+                    .results = results,
+                    .counts = counts,
+                    .named = counts,
+                    .variadic = variadic,
+                    .count = 1,
+                    .arguments = types,
+                };
+                AbiLocation locations[BUSTER_ARRAY_LENGTH(types)];
+                AbiCall calls[1];
+                if (started && path == 0)
+                {
+                    abi_assign(&tables.abi, signatures, locations, calls);
+                }
+                else if (started)
+                {
+                    abi_assign_scalar(&tables.abi, signatures, locations, calls);
+                }
+                for (uint32_t i = 0; started && i < BUSTER_ARRAY_LENGTH(types); i += 1)
+                {
+                    const uint32_t index = types[i] >> BUSTER_TYPE_INDEX_SHIFT;
+                    const uint32_t pass = tables.abi.pass[index];
+                    const uint8_t flag = extensions[i] == BUSTER_ABI_PASS_SIGN ? BUSTER_ABI_FLAG_SIGN : BUSTER_ABI_FLAG_ZERO;
+                    const uint8_t extension = BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO;
+                    // Six in the general registers, then two in stack slots, with the same flags.
+                    const uint8_t kind = i < 6 ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
+                    const bool same = (pass & (BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO)) == extensions[i] && (pass & BUSTER_ABI_PASS_MEMORY) == 0 &&
+                                      (tables.abi.results[index].flags & extension) == flag && locations[i].kind == kind &&
+                                      (locations[i].flags & extension) == flag;
+                    char detail[192];
+                    snprintf(detail, sizeof(detail), "%s with %s char (%s): pass %08x, result flags %02x, location kind %u flags %02x", names[i],
+                             unsigned_char != 0 ? "unsigned" : "signed", path == 0 ? "vector" : "scalar", pass, tables.abi.results[index].flags,
+                             locations[i].kind, locations[i].flags);
+                    abi_test_expect(tally, same, "fixtures", detail);
+                }
+                if (started)
+                {
+                    const uint8_t flag = unsigned_char != 0 ? BUSTER_ABI_FLAG_ZERO : BUSTER_ABI_FLAG_SIGN;
+                    abi_test_expect(tally, calls[0].result.kind == BUSTER_ABI_RESULT_REGISTERS && calls[0].result.registers[0] == BUSTER_ABI_RAX &&
+                                    (calls[0].result.flags & (BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == flag, "fixtures",
+                                    unsigned_char != 0 ? "a call's char result with unsigned char" : "a call's char result with signed char");
+                }
+                abi_test_tables_close(&tables);
+            }
+        }
+    }
+}
+
 static bool abi_test_fixtures(void)
 {
     AbiTestTally tally = { 0 };
@@ -3211,6 +3329,7 @@ static bool abi_test_fixtures(void)
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
     abi_test_shared_records(&tally);
+    abi_test_char_signedness(&tally);
     abi_test_report("fixtures", tally);
     return tally.failures == 0;
 }
@@ -4207,7 +4326,8 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 // and a mask says which of its bits mean something (not padding, nor a _BitInt's bits past its width). The records
 // pass through x86_encode, link_add_code_fixups and the object writer, and the C compiler's driver links the two
 // objects. It runs at each target vector width (-march=x86-64, x86-64-v3 and x86-64-v4), with clang (every type) and with
-// GCC (the types GCC passes as clang does). The six runs go at once, a child process each (abi_test_cross_check).
+// GCC (the types GCC passes as clang does), the compiled worlds' runs and the extension runs (abi_test_cross_extension)
+// beside them, at once, a child process each (abi_test_cross_check).
 
 #define BUSTER_ABI_TEST_SLOT 64
 #define BUSTER_ABI_TEST_FILL_ITEMS 4096
@@ -4216,8 +4336,8 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
 #define BUSTER_ABI_TEST_MAX_INSTRUCTIONS 1024
 // The runs: clang's, then GCC's, each at 16-, 32- and 64-byte vectors.
 #define BUSTER_ABI_TEST_CROSS_WIDTHS 3
-// clang's and GCC's runs at each width, then a compiled world's with each, at 16 bytes.
-#define BUSTER_ABI_TEST_CROSS_RUNS (2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 2)
+// clang's and GCC's runs at each width, then a compiled world's with each, at 16 bytes, then the extension runs.
+#define BUSTER_ABI_TEST_CROSS_RUNS (2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 4)
 // Tier 0's integer and floating depths (BUSTER_TIER0_INTEGER_DEPTHS and BUSTER_TIER0_FLOATING_DEPTHS; tier0_test.c,
 // which main.c includes after tier0.c and this file, checks them), which a compiled world's calls keep within.
 #define BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS 15
@@ -5890,8 +6010,9 @@ static bool abi_test_write_object(AbiTestCross* cross, const char* path, AbiTest
 }
 
 // A run of the cross-check, in a child process: its name in the report, its files' prefix, its C compiler and vector
-// width, and whether our side is C compiled by this compiler (a compiled world's). What the child writes to its
-// standard output and errors goes to memfds of its own, for the parent to print.
+// width, whether our side is C compiled by this compiler (a compiled world's), and whether it is an extension run, with
+// plain char signed or unsigned. What the child writes to its standard output and errors goes to memfds of its own, for
+// the parent to print.
 typedef struct AbiTestCrossRun AbiTestCrossRun;
 struct AbiTestCrossRun
 {
@@ -5900,23 +6021,31 @@ struct AbiTestCrossRun
     uint32_t vector_bytes;
     bool gcc;
     bool compiled;
+    bool extension;
+    bool char_unsigned;
     pid_t child;
     int output;
     int errors;
 };
 
 // Run `index` (clang's at 16-, 32- and 64-byte vectors, then GCC's, then a compiled world's against clang and against
-// GCC, at 16 bytes), not started.
+// GCC, at 16 bytes, then the extension runs with signed and with unsigned char), not started.
 static AbiTestCrossRun abi_test_cross_run(uint32_t index)
 {
+    const bool extension = index >= 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 2;
+    const bool char_unsigned = index == 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 3;
     const bool compiled = index >= 2 * BUSTER_ABI_TEST_CROSS_WIDTHS;
-    const bool gcc = compiled ? index == 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 1 : index >= BUSTER_ABI_TEST_CROSS_WIDTHS;
+    const bool gcc = !extension && (compiled ? index == 2 * BUSTER_ABI_TEST_CROSS_WIDTHS + 1 : index >= BUSTER_ABI_TEST_CROSS_WIDTHS);
     const AbiTestCrossRun run = {
-        .name = compiled ? (gcc ? "compiled gcc" : "compiled clang") : gcc ? "gcc" : "clang",
-        .file = compiled ? (gcc ? "compiled_gcc" : "compiled_clang") : gcc ? "gcc" : "clang",
+        .name = extension ? (char_unsigned ? "extension, unsigned char" : "extension, signed char") :
+                compiled ? (gcc ? "compiled gcc" : "compiled clang") : gcc ? "gcc" : "clang",
+        .file = extension ? (char_unsigned ? "extension_unsigned" : "extension_signed") :
+                compiled ? (gcc ? "compiled_gcc" : "compiled_clang") : gcc ? "gcc" : "clang",
         .vector_bytes = compiled ? 16u : 16u << (index % BUSTER_ABI_TEST_CROSS_WIDTHS),
         .gcc = gcc,
         .compiled = compiled,
+        .extension = extension,
+        .char_unsigned = char_unsigned,
         .child = -1,
         .output = -1,
         .errors = -1,
@@ -6198,6 +6327,390 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
     return result;
 }
 
+// The extension runs (#475's review): plain char with each signedness (TypeTable.char_unsigned, -funsigned-char), enums
+// of a fixed underlying char and signed char, the other character types, short, unsigned short and bool, passed and
+// returned between clang's code and ours, both ways, at values with bits set past the type's. Records check the
+// module's flags against clang's code: a callee that returns the 32 bits its argument arrives in, which must be the
+// extension the flags say clang's caller makes; a caller that extends as the flags say before calling clang's callee,
+// which takes the 32 bits as they come (`int f(char c) { return c; }` is a move); and, the control, one that extends the
+// other way, whose result must show it. C that this compiler compiles (the vector and the scalar paths into the same
+// bytes) checks Tier 0's code the same ways. clang's callee returns its result unextended, though its IR says signext or
+// zeroext (LLVM's x86-64 code ignores them on a result, and GCC's has no extension either): a caller extends what it
+// gets back itself, which results with bits set past the type's check, and the run counts the results clang returned
+// unextended.
+typedef struct AbiTestExtension AbiTestExtension;
+struct AbiTestExtension
+{
+    const char* name;
+    const char* spelling;
+    // The type's bits in its register: 8, 16, or 1 for bool.
+    uint32_t bits;
+};
+
+static const AbiTestExtension abi_test_extensions[] = {
+    { "char", "char", 8 },
+    { "schar", "signed char", 8 },
+    { "uchar", "unsigned char", 8 },
+    { "char_enum", "enum abi_char_enum", 8 },
+    { "schar_enum", "enum abi_schar_enum", 8 },
+    { "short", "short", 16 },
+    { "ushort", "unsigned short", 16 },
+    { "bool", "bool", 1 },
+};
+
+#define BUSTER_ABI_TEST_EXTENSIONS BUSTER_ARRAY_LENGTH(abi_test_extensions)
+
+// The records' callee, callers and result reader for each type, against clang's c_take_ and c_give_.
+static bool abi_test_extension_object(const char* path, const uint8_t* flags, AbiTestCode* code)
+{
+    const LinkCapacity capacity = {
+        .names = 8 * BUSTER_ABI_TEST_EXTENSIONS + 16,
+        .atoms = 4 * BUSTER_ABI_TEST_EXTENSIONS + 2,
+        .symbols = 8 * BUSTER_ABI_TEST_EXTENSIONS + 16,
+        .fixups = 4 * BUSTER_ABI_TEST_EXTENSIONS + 16,
+        .wide_addends = 2,
+        .priorities = 2,
+    };
+    Arena tables = arena_reserve(link_capacity_bytes(capacity));
+    Arena names = arena_reserve(64ull * capacity.names + 4096);
+    Arena bytes = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+    Arena objects = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+    Link link;
+    bool result = tables.base != 0 && names.base != 0 && bytes.base != 0 && objects.base != 0 && link_initialize(&link, &tables, &names, capacity);
+    for (uint32_t t = 0; result && t < BUSTER_ABI_TEST_EXTENSIONS; t += 1)
+    {
+        const uint8_t external = BUSTER_LINK_SYMBOL_NOTYPE | BUSTER_LINK_SYMBOL_GLOBAL;
+        const uint8_t function = BUSTER_LINK_SYMBOL_FUNCTION | BUSTER_LINK_SYMBOL_GLOBAL;
+        const char* prefixes[6] = {
+            "c_take_",
+            "c_give_",
+            "buster_raw_take_",
+            "buster_raw_call_",
+            "buster_raw_wrong_",
+            "buster_raw_result_",
+        };
+        SymbolId symbols[6] = { 0 };
+        for (uint32_t s = 0; s < 6; s += 1)
+        {
+            char name[64];
+            const int length = snprintf(name, sizeof(name), "%s%s", prefixes[s], abi_test_extensions[t].name);
+            const NameId id = link_add_name(&link, (const uint8_t*)name, (uint32_t)length);
+            symbols[s] = id != 0 ? link_add_symbol(&link, id, 0, 0, 0, s < 2 ? external : function, s < 2 ? BUSTER_LINK_SOURCE_NONE : BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            result = result && symbols[s] != 0;
+        }
+        // The callee: the 32 bits its argument arrived in.
+        code->count = 0;
+        code->reference_count = 0;
+        code->overflow = false;
+        abi_test_add(code, link_program_registers(X86_FORM_MOV_R32_RM32, X86_REGISTER_RAX, X86_REGISTER_RDI));
+        abi_test_add(code, link_program_bare(X86_FORM_RET));
+        result = result && abi_test_finish(&link, &bytes, code, symbols[2]);
+        // The callers: the value's bits extended as the flags say, and the other way, then clang's callee.
+        for (uint32_t wrong = 0; wrong < 2; wrong += 1)
+        {
+            const bool sign = (flags[t] == BUSTER_ABI_FLAG_SIGN) != (wrong != 0);
+            const bool word = abi_test_extensions[t].bits == 16;
+            const uint32_t form = sign ? (word ? X86_FORM_MOVSX_R32_RM16 : X86_FORM_MOVSX_R32_RM8) : word ? X86_FORM_MOVZX_R32_RM16 : X86_FORM_MOVZX_R32_RM8;
+            code->count = 0;
+            code->reference_count = 0;
+            code->overflow = false;
+            abi_test_add(code, link_program_registers(form, X86_REGISTER_RDI, X86_REGISTER_RDI));
+            abi_test_add(code, link_program_registers(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX));
+            abi_test_call(code, symbols[0]);
+            abi_test_add(code, link_program_registers(X86_FORM_POP_R64, 0, X86_REGISTER_RCX));
+            abi_test_add(code, link_program_bare(X86_FORM_RET));
+            result = result && abi_test_finish(&link, &bytes, code, symbols[3 + wrong]);
+        }
+        // The result reader: clang's result's 32 bits as they come back.
+        code->count = 0;
+        code->reference_count = 0;
+        code->overflow = false;
+        abi_test_add(code, link_program_registers(X86_FORM_PUSH_R64, 0, X86_REGISTER_RAX));
+        abi_test_call(code, symbols[1]);
+        abi_test_add(code, link_program_registers(X86_FORM_POP_R64, 0, X86_REGISTER_RCX));
+        abi_test_add(code, link_program_bare(X86_FORM_RET));
+        result = result && abi_test_finish(&link, &bytes, code, symbols[5]);
+    }
+    ObjectUnits units;
+    ObjectSymbols object_symbols;
+    result = result && link_check(&link) == LINK_ERROR_NONE && object_prepare(&units, &link, 1, &objects) && object_map_symbols(&object_symbols, &link, &objects);
+    if (result)
+    {
+        const ObjectOptions options = {
+            .function_sections = false,
+        };
+        const Object object = object_build(&link, &units, &object_symbols, 0, options, BUSTER_S8("calling_convention.c"), &objects);
+        result = object.error == OBJECT_ERROR_NONE && object_write_file(path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+    }
+    arena_release(&tables);
+    arena_release(&names);
+    arena_release(&bytes);
+    arena_release(&objects);
+    return result;
+}
+
+// The run's C files: clang's side (its callee and result of each type, the checks and main) and ours (Tier 0's callee,
+// result and callers of clang's), and the C extension each type's flags give its bits, and the other one.
+static void abi_test_extension_c(TypeTestText* text, TypeTestText* ours, const uint8_t* flags)
+{
+    const char* enums = "enum abi_char_enum : char { ABI_CHAR_ENUM };\nenum abi_schar_enum : signed char { ABI_SCHAR_ENUM };\n";
+    type_test_format(text, "#include <stdio.h>\n%s", enums);
+    type_test_format(ours, "%s", enums);
+    type_test_format(text, "static int abi_checks;\nstatic int abi_failures;\n");
+    type_test_format(text, "static void abi_extension_check(int good, const char* what, const char* type, long value, long got, long want)\n{\n");
+    type_test_format(text, "    abi_checks += 1;\n    if (!good && abi_failures < 40)\n    {\n");
+    type_test_format(text, "        printf(\"FAIL %%s, %%s, value %%#lx: got %%#lx, want %%#lx\\n\", what, type, value, got, want);\n    }\n");
+    type_test_format(text, "    abi_failures += !good;\n}\n");
+    for (uint32_t t = 0; t < BUSTER_ABI_TEST_EXTENSIONS; t += 1)
+    {
+        const char* n = abi_test_extensions[t].name;
+        const char* s = abi_test_extensions[t].spelling;
+        const char* bits = abi_test_extensions[t].bits == 16 ? "short" : "char";
+        const bool sign = flags[t] == BUSTER_ABI_FLAG_SIGN;
+        type_test_format(text, "\nint c_take_%s(%s x)\n{\n    return x;\n}\n%s c_give_%s(long v)\n{\n    return (%s)v;\n}\n", n, s, s, n, s);
+        type_test_format(text, "unsigned buster_raw_take_%s(%s x);\nint buster_raw_call_%s(long v);\nint buster_raw_wrong_%s(long v);\n", n, s, n, n);
+        type_test_format(text, "unsigned buster_raw_result_%s(long v);\nint buster_take_%s(%s x);\n%s buster_give_%s(long v);\n", n, n, s, s, n);
+        type_test_format(text, "int buster_call_take_%s(long v);\nint buster_call_give_%s(long v);\n", n, n);
+        type_test_format(text, "static unsigned abi_flags_%s(long v)\n{\n    return (unsigned)(int)(%s %s)(unsigned %s)v;\n}\n", n, sign ? "signed" : "unsigned", bits, bits);
+        type_test_format(text, "static unsigned abi_other_%s(long v)\n{\n    return (unsigned)(int)(%s %s)(unsigned %s)v;\n}\n", n, sign ? "unsigned" : "signed", bits, bits);
+        type_test_format(ours, "\nint c_take_%s(%s x);\n%s c_give_%s(long v);\n", n, s, s, n);
+        type_test_format(ours, "int buster_take_%s(%s x)\n{\n    return x;\n}\n%s buster_give_%s(long v)\n{\n    return (%s)v;\n}\n", n, s, s, n, s);
+        type_test_format(ours, "int buster_call_take_%s(long v)\n{\n    return c_take_%s((%s)v);\n}\n", n, n, s);
+        type_test_format(ours, "int buster_call_give_%s(long v)\n{\n    return c_give_%s(v);\n}\n", n, n);
+    }
+    type_test_format(text, "\nstatic const long abi_values[] = { 0, 1, 0x7f, 0x80, 0xff, 0x100, 0x17f, 0x1ff, 0x7fff, 0x8000, 0xffff, 0x10000, 0x18000, -1, -0x80, -0x81, 0x123456789 };\n");
+    type_test_format(text, "\nint main(void)\n{\n    unsigned long unextended = 0;\n");
+    type_test_format(text, "    for (unsigned long i = 0; i < sizeof(abi_values) / sizeof(abi_values[0]); i += 1)\n    {\n        const long v = abi_values[i];\n");
+    for (uint32_t t = 0; t < BUSTER_ABI_TEST_EXTENSIONS; t += 1)
+    {
+        const char* n = abi_test_extensions[t].name;
+        const char* s = abi_test_extensions[t].spelling;
+        type_test_format(text, "        {\n            const %s x = (%s)v;\n            const int want = x;\n            const long value = x;\n", s, s);
+        type_test_format(text, "            const unsigned arrived = buster_raw_take_%s(x);\n", n);
+        type_test_format(text, "            abi_extension_check(arrived == abi_flags_%s(value), \"clang's caller extends as the flags say\", \"%s\", v, arrived, abi_flags_%s(value));\n", n, s, n);
+        type_test_format(text, "            const int taken = buster_raw_call_%s(value);\n", n);
+        type_test_format(text, "            abi_extension_check(taken == want, \"clang's callee takes the flags' extension\", \"%s\", v, taken, want);\n", s);
+        type_test_format(text, "            if (abi_flags_%s(value) != abi_other_%s(value))\n            {\n                const int wrong = buster_raw_wrong_%s(value);\n", n, n, n);
+        type_test_format(text, "                abi_extension_check(wrong != want, \"the other extension shows in clang's callee\", \"%s\", v, wrong, want);\n            }\n", s);
+        // A bool's result is its low byte alone (the psABI's bit 0, bits 1 to 7 zero), not its register's truth.
+        const char* low = abi_test_extensions[t].bits == 1 ? "unsigned char" : s;
+        type_test_format(text, "            const unsigned returned = buster_raw_result_%s(v);\n", n);
+        type_test_format(text, "            abi_extension_check((%s)returned == (%s)x, \"clang's result's bits\", \"%s\", v, returned, (unsigned)want);\n", low, low, s);
+        type_test_format(text, "            unextended += returned != abi_flags_%s(value);\n", n);
+        type_test_format(text, "            const int ours = buster_take_%s(x);\n", n);
+        type_test_format(text, "            abi_extension_check(ours == want, \"our callee\", \"%s\", v, ours, want);\n", s);
+        type_test_format(text, "            const int given = buster_give_%s(v);\n", n);
+        type_test_format(text, "            abi_extension_check(given == want, \"our result\", \"%s\", v, given, want);\n", s);
+        type_test_format(text, "            const int called = buster_call_take_%s(v);\n", n);
+        type_test_format(text, "            abi_extension_check(called == want, \"our caller extends an argument\", \"%s\", v, called, want);\n", s);
+        type_test_format(text, "            const int extended = buster_call_give_%s(v);\n", n);
+        type_test_format(text, "            abi_extension_check(extended == want, \"our caller extends a result\", \"%s\", v, extended, want);\n        }\n", s);
+    }
+    type_test_format(text, "    }\n    printf(\"checks %%d failures %%d, %%lu of clang's results unextended\\n\", abi_checks, abi_failures, unextended);\n");
+    type_test_format(text, "    return abi_failures != 0;\n}\n");
+}
+
+// An extension run: the module's flags for each type at a table's signedness, the C files, our side's C compiled by
+// `buster` (by both paths) and the records' object, linked by clang's driver with clang's side, and run.
+static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, AbiTestCrossRun run, const char* buster, const char* directory, bool keep)
+{
+    char detail[512];
+    bool result = false;
+    AbiTestTables tables;
+    if (abi_test_expect(tally, abi_test_tables_open(&tables, 64), "cross-check", "the extension run's tables can't be made"))
+    {
+        TypeTable* table = &tables.types.table;
+        table->char_unsigned = run.char_unsigned;
+        const TypeId char_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 1);
+        const TypeId schar_enum = type_tag(table, BUSTER_TYPE_KIND_ENUM, 2);
+        const bool complete = char_enum != 0 && schar_enum != 0 && type_enum_complete(table, char_enum, BUSTER_TYPE_CHAR, 0) &&
+                              type_enum_complete(table, schar_enum, BUSTER_TYPE_SCHAR, 0);
+        const TypeId types[BUSTER_ABI_TEST_EXTENSIONS] = {
+            BUSTER_TYPE_CHAR,
+            BUSTER_TYPE_SCHAR,
+            BUSTER_TYPE_UCHAR,
+            char_enum,
+            schar_enum,
+            BUSTER_TYPE_SHORT,
+            BUSTER_TYPE_USHORT,
+            BUSTER_TYPE_BOOL,
+        };
+        uint8_t flags[BUSTER_ABI_TEST_EXTENSIONS] = { 0 };
+        result = complete && abi_test_tables_start(&tables, 16);
+        if (result)
+        {
+            // Each type the argument and the result of a call of its own: its location's flags, which a caller reads.
+            abi_classify_all(&tables.abi, table);
+            uint32_t counts[BUSTER_ABI_TEST_EXTENSIONS];
+            uint8_t variadic[BUSTER_ABI_TEST_EXTENSIONS] = { 0 };
+            for (uint32_t t = 0; t < BUSTER_ABI_TEST_EXTENSIONS; t += 1)
+            {
+                counts[t] = 1;
+            }
+            const AbiSignatures signatures = {
+                .results = types,
+                .counts = counts,
+                .named = counts,
+                .variadic = variadic,
+                .count = BUSTER_ABI_TEST_EXTENSIONS,
+                .arguments = types,
+            };
+            AbiLocation locations[BUSTER_ABI_TEST_EXTENSIONS];
+            AbiCall calls[BUSTER_ABI_TEST_EXTENSIONS];
+            abi_assign(&tables.abi, signatures, locations, calls);
+            for (uint32_t t = 0; t < BUSTER_ABI_TEST_EXTENSIONS; t += 1)
+            {
+                flags[t] = locations[t].flags & (BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO);
+                result = result && locations[t].kind == BUSTER_ABI_LOCATION_REGISTERS && locations[t].registers[0] == BUSTER_ABI_RDI &&
+                         (flags[t] == BUSTER_ABI_FLAG_SIGN || flags[t] == BUSTER_ABI_FLAG_ZERO);
+            }
+        }
+        snprintf(detail, sizeof(detail), "%s: every type must be an extended argument in rdi", run.name);
+        abi_test_expect(tally, result, "cross-check", detail);
+        // Each text grows in an arena of its own; the files' complaints and bytes are read into the first.
+        Arena text_arena = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+        Arena our_arena = arena_reserve(BUSTER_ABI_TEST_ARENA_BYTES);
+        TypeTestText text = {
+            .arena = &text_arena,
+            .valid = true,
+        };
+        TypeTestText our_text = {
+            .arena = &our_arena,
+            .valid = true,
+        };
+        char source[BUSTER_ABI_TEST_PATH_BYTES];
+        char ours[BUSTER_ABI_TEST_PATH_BYTES];
+        char object[BUSTER_ABI_TEST_PATH_BYTES];
+        char scalar_object[BUSTER_ABI_TEST_PATH_BYTES];
+        char records[BUSTER_ABI_TEST_PATH_BYTES];
+        char program[BUSTER_ABI_TEST_PATH_BYTES];
+        char output[BUSTER_ABI_TEST_PATH_BYTES];
+        char errors[BUSTER_ABI_TEST_PATH_BYTES];
+        snprintf(source, sizeof(source), "%s/%s_%u.c", directory, run.file, run.vector_bytes);
+        snprintf(ours, sizeof(ours), "%s/%s_%u_buster.c", directory, run.file, run.vector_bytes);
+        snprintf(object, sizeof(object), "%s/%s_%u_buster.o", directory, run.file, run.vector_bytes);
+        snprintf(scalar_object, sizeof(scalar_object), "%s/%s_%u_buster_scalar.o", directory, run.file, run.vector_bytes);
+        snprintf(records, sizeof(records), "%s/%s_%u_records.o", directory, run.file, run.vector_bytes);
+        snprintf(program, sizeof(program), "%s/%s_%u", directory, run.file, run.vector_bytes);
+        snprintf(output, sizeof(output), "%s/%s_%u.out", directory, run.file, run.vector_bytes);
+        snprintf(errors, sizeof(errors), "%s/%s_%u.err", directory, run.file, run.vector_bytes);
+        if (result)
+        {
+            abi_test_extension_c(&text, &our_text, flags);
+            result = text.valid && our_text.valid && type_test_write_file(source, &text) && type_test_write_file(ours, &our_text);
+            snprintf(detail, sizeof(detail), "%s: the C files can't be written", run.name);
+            abi_test_expect(tally, result, "cross-check", detail);
+        }
+        char* signedness = run.char_unsigned ? "-funsigned-char" : "-fsigned-char";
+        if (result)
+        {
+            // Our side's C, by the vector paths and by the scalar ones, into the same bytes.
+            char* build[] = {
+                (char*)buster,
+                "--verify",
+                "-std=gnu23",
+                "-w",
+                signedness,
+                "-c",
+                "-o",
+                object,
+                ours,
+                0,
+            };
+            const int built = type_test_run(build, output, errors);
+            const String8 complaints = type_test_read_file(&text_arena, errors);
+            result = built == 0;
+            snprintf(detail, sizeof(detail), "%s: this compiler can't compile our side (status %d): %.300s", run.name, built, complaints.length != 0 ? complaints.pointer : "");
+            abi_test_expect(tally, result, "cross-check", detail);
+        }
+        if (result)
+        {
+            char* scalar_build[] = {
+                (char*)buster,
+                "--verify",
+                "--scalar",
+                "-std=gnu23",
+                "-w",
+                signedness,
+                "-c",
+                "-o",
+                scalar_object,
+                ours,
+                0,
+            };
+            const int scalar_built = type_test_run(scalar_build, output, errors);
+            const String8 vector_bytes_object = type_test_read_file(&text_arena, object);
+            const String8 scalar_bytes_object = type_test_read_file(&text_arena, scalar_object);
+            result = scalar_built == 0 && vector_bytes_object.length != 0 && vector_bytes_object.length == scalar_bytes_object.length &&
+                     memcmp(vector_bytes_object.pointer, scalar_bytes_object.pointer, vector_bytes_object.length) == 0;
+            snprintf(detail, sizeof(detail), "%s: the scalar paths' object (status %d) isn't the vector paths' bytes", run.name, scalar_built);
+            abi_test_expect(tally, result, "cross-check", detail);
+        }
+        AbiTestCode* code = result ? malloc(sizeof(AbiTestCode)) : 0;
+        if (result)
+        {
+            result = code != 0 && abi_test_extension_object(records, flags, code);
+            snprintf(detail, sizeof(detail), "%s: the records' object can't be built", run.name);
+            abi_test_expect(tally, result, "cross-check", detail);
+        }
+        free(code);
+        if (result)
+        {
+            char* compile[] = {
+                (char*)compiler,
+                "-std=gnu23",
+                "-O1",
+                "-fno-strict-aliasing",
+                "-march=x86-64",
+                signedness,
+                "-w",
+                "-o",
+                program,
+                source,
+                object,
+                records,
+                0,
+            };
+            const int linked = type_test_run(compile, output, errors);
+            const String8 complaints = type_test_read_file(&text_arena, errors);
+            result = linked == 0;
+            snprintf(detail, sizeof(detail), "%s: compiling and linking failed: %.300s", run.name, complaints.length != 0 ? complaints.pointer : "");
+            abi_test_expect(tally, result, "cross-check", detail);
+        }
+        if (result)
+        {
+            char* arguments[] = {
+                program,
+                0,
+            };
+            const int ran = type_test_run(arguments, output, errors);
+            const String8 printed = type_test_read_file(&text_arena, output);
+            const char* summary = printed.length != 0 ? strstr(printed.pointer, "checks ") : 0;
+            result = ran == 0 && summary != 0;
+            snprintf(detail, sizeof(detail), "%s: the program failed (status %d):\n%.4000s", run.name, ran, printed.length != 0 ? printed.pointer : "");
+            if (abi_test_expect(tally, result, "cross-check", detail))
+            {
+                printf("%-34s %s: %u types, %.*s", "cross-check", run.name, (uint32_t)BUSTER_ABI_TEST_EXTENSIONS, (int)(printed.pointer + printed.length - summary), summary);
+            }
+        }
+        if (!keep && tally->failures == 0)
+        {
+            unlink(source);
+            unlink(ours);
+            unlink(object);
+            unlink(scalar_object);
+            unlink(records);
+            unlink(program);
+            unlink(output);
+            unlink(errors);
+        }
+        arena_release(&text_arena);
+        arena_release(&our_arena);
+        abi_test_tables_close(&tables);
+    }
+    return result;
+}
+
 // A capture must never occupy a standard descriptor: replay would otherwise write back into the capture when the
 // caller closed stdout or stderr, and the child's dup2 calls could overwrite the other capture.
 static int abi_test_cross_capture(const char* name)
@@ -6228,7 +6741,11 @@ static AbiTestCrossRun abi_test_cross_start(uint32_t index, AbiTestTally* tally,
     if (run.child == 0)
     {
         const bool redirected = dup2(run.output, STDOUT_FILENO) == STDOUT_FILENO && dup2(run.errors, STDERR_FILENO) == STDERR_FILENO;
-        if (redirected)
+        if (redirected && run.extension)
+        {
+            abi_test_cross_extension(tally, clang, run, buster, directory, keep);
+        }
+        else if (redirected)
         {
             abi_test_cross(tally, seed + run.vector_bytes + (run.compiled ? 7 : 0), count, run.gcc ? gcc : clang, run, buster, directory, keep);
         }
@@ -6293,7 +6810,7 @@ static void abi_test_cross_finish(AbiTestTally* tally, AbiTestCrossRun run, cons
     }
 }
 
-// The eight runs are independent, each with a world and files of its own, and each takes about its compiler's time, so
+// The ten runs are independent, each with a world and files of its own, and each takes about its compiler's time, so
 // they run at once, a child process each. The parent prints each one's output and adds its tally in the runs' order, so
 // the lines and counts are those of the runs one after another; a run that fails keeps its files.
 static bool abi_test_cross_check(uint64_t seed, uint32_t count, const char* clang, const char* gcc, const char* buster, bool keep)
@@ -6385,8 +6902,8 @@ static bool abi_test_cross_standard_descriptors(uint32_t closed)
     return same;
 }
 
-// Verify that all eight runs reached the failing compiler, then remove only their known files in this test's private
-// TMPDIR. A setup failure also exits 1, but cannot leave all 32 files. The ordinary cross-check keeps its failed runs.
+// Verify that all ten runs reached the failing compiler, then remove only their known files in this test's private
+// TMPDIR. A setup failure also exits 1, but cannot leave all 40 files. The ordinary cross-check keeps its failed runs.
 static bool abi_test_cross_descriptor_files(const char* temporary)
 {
     DIR* root = opendir(temporary);
@@ -6485,7 +7002,7 @@ static bool abi_test_cross_descriptors(void)
             char detail[128];
             snprintf(detail, sizeof(detail), "closed mask %u: the failing compiler must exit 1 and leave the standard descriptors unchanged", closed);
             abi_test_expect(&tally, waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 1, "cross-check descriptors", detail);
-            abi_test_expect(&tally, abi_test_cross_descriptor_files(directory), "cross-check descriptors", "all eight failed runs must retain their files");
+            abi_test_expect(&tally, abi_test_cross_descriptor_files(directory), "cross-check descriptors", "all ten failed runs must retain their files");
         }
         for (rlim_t descriptors = 3; descriptors <= 4; descriptors += 1)
         {

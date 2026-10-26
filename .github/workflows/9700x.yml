@@ -151,21 +151,19 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Build only the compiler executable, and beside it the external Clang pragma token oracle
+      - name: Build the external Clang pragma token oracle and the compiler executable
         # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
-        # build.sh). The build runs a compile per core, leaving the cores' other threads to spare, so the oracle builds
-        # meanwhile, outside build/, which build.sh makes anew and which must hold the compiler alone.
+        # build.sh). Run the builds serially in CPUs 0-7, including their linkers, leaving the other online CPUs for
+        # supporting processes. The oracle stays outside build/, which build.sh makes anew and which must hold the compiler alone.
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
-          bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 &
-          building=$!
-          BUSTER_DEBUG_INFO=0 ./build.sh
-          test -x build/compiler
-          test "$(find build -type f -executable | wc -l)" -eq 1
           status=0
-          wait "$building" || status=$?
+          taskset -c 0-7 bash tools/build-preprocessor-pragma-oracle.sh "$oracle" > "$RUNNER_TEMP/oracle.log" 2>&1 || status=$?
           cat "$RUNNER_TEMP/oracle.log"
           test "$status" -eq 0
+          BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh
+          test -x build/compiler
+          test "$(find build -type f -executable | wc -l)" -eq 1
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
@@ -244,19 +242,14 @@ jobs:
           git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
           git -C build/c-testsuite checkout -q FETCH_HEAD
 
-      - name: Run the tests at once
-        # Tests don't need the machine to themselves, unlike the benchmarks after them, which run one at a time and
-        # pinned. build/compiler parallel (AGENTS.md, "The parallel runner") runs each test below in a bash of its own,
-        # as a step's `run` runs, one per core of the CPUs the job may use and unpinned (test-lanes and test-files run
-        # lanes of their own), and prints each test's output in a group of its own in this order, then names the tests
-        # that failed. A test still running after 180 s is killed and fails. They come in the order of their times
-        # in the job, the longest first, so that they start first: in the order before, the longest started among
-        # the last and the step took 64 s. Started together, the longest run slower (the checker's four commands took
-        # 50 s as one entry, where they had taken 33 to 37 s), so a test is one command where it can be, and the
-        # step's bound is its longest one and the tests' 310 s on 8 jobs, about 39 s. A new test goes where its time
-        # puts it.
+      - name: Run the tests within the host budget
+        # One test command at a time: suites such as test-lanes and test-files start lanes of their own, and the
+        # call-graph check starts compiler captures. Running those commands together multiplies their CPU and memory
+        # budgets. Inherit the CPUs 0-7 pool for every descendant, with each command's existing 180 s timeout and own parallelism;
+        # the shared host lock also
+        # excludes benchmarks and other CI jobs for this job.
         run: |
-          ./build/compiler parallel --github --timeout 180 <<'TESTS'
+          taskset -c 0-7 ./build/compiler parallel --jobs 1 --github --timeout 180 <<'TESTS'
           == Test typed postorder checking and source fixtures
           ./build/compiler test-checker --seed 133
           == Test the preprocessor's cases against clang

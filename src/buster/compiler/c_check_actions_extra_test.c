@@ -508,7 +508,7 @@ static void check_test_gnu_actions(CheckTest* test, TypeTable* table)
         result = check_test_action(test, table, action);
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == BUSTER_TYPE_VOID, "GNU discarded void indirection can be explicitly converted to void");
     }
-    const CheckLiteral escape = check_literal_character((const uint8_t*)"'\\e'", 4, false);
+    const CheckLiteral escape = check_literal_character((const uint8_t*)"'\\e'", 4, false, false);
     check_test_expect(test, escape.valid && escape.integer == 27, "GNU escape character uses target ESC code 27");
     const TypeId void_pointer = type_pointer(table, BUSTER_TYPE_VOID);
     const TypeId function_pointer = type_pointer(table, function);
