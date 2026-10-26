@@ -866,7 +866,11 @@ designs and the compilers already built this way.
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
   them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. Values past the
+  parameters objects and its constants an optional column. The 128-bit
+  integers (I128 and U128, `__int128`'s) live in the same slots, each entry of
+  them deferred too, their halves through scratch registers; a front end
+  divides them, converts them to and from floating values and passes them
+  through calls and 16-byte objects, as clang's code does. Values past the
   depth tables (15 integer, 14 with a frame pointer, and 16 floating ones)
   live in the frame's deep slots, a slot per depth: the entries whose values
   cross that line or that use registers past it are deferred, their operands
@@ -4523,7 +4527,18 @@ must truncate and leave the control word as it was; and
 from them (integers, floats, doubles, compares) from inputs of every class,
 through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions
 both ways and calls of C functions, against the check's own stack machine. The
-programs must reach every kind and conversion of the class.
+programs must reach every kind and conversion of the class. Then the `int128`
+check (`tier0_int128_test.c`) does the same for the 128-bit integers, I128 and
+U128, against clang's `__int128`: each break of the classes' rules refused at
+its entry; a stack of a memory class's values up to the last 16-byte slot,
+which runs, and one past it, which both paths refuse (for long double too);
+functions of 128-bit parameters and results in register pairs and on the
+stack, called from C, and calling C; and `--count` random programs over every
+kind of the classes, shifts by constant and variable counts and conversions to
+and from the other integers, under live values where `MUL` saves rax and rdx
+and a shift rcx. Only the programs both paths compiled, that ran and matched
+the check's stack machine count toward its coverage, which must reach every
+kind, conversion and save.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
