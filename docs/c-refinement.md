@@ -585,7 +585,7 @@ the directive tables, and no more lexing.
 
 ### Whole-process cost (#451 part 1, 2026-10-26)
 
-[The record](https://github.com/buster14a/buster-performance/tree/codex/449-450-451-performance-20261026/docs/measurements/window-process-451-part1-2026-10-26)
+[The record](https://github.com/buster14a/buster-performance/tree/7ed12470d4615af85f9a7590f82a8ec8e3b12795/docs/measurements/window-process-451-part1-2026-10-26)
 compares the default 128 KB windows with `--window-bytes 2000000000` (whole
 files) in one executable of `9de3d30ba437b381394095d7a77635a2e877435d`, built
 on the 9700X with clang 23.1.1 and `BUSTER_DEBUG_INFO=0`. It reuses #408's
