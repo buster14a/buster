@@ -1783,6 +1783,13 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
     if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
         check_lower_address(writer, value->object, value->offset);
+        // An lvalue's constant address is the object's, which its caller takes, whatever the object's type. An rvalue's is
+        // its value: an address cast to `long` (`(long)&x`, which the checker keeps as a constant: a cast to 64 bits) is
+        // the address's bits in the cast's class.
+        if (value->category == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
     }
     else if (check_lower_complex(writer->program->types, value->type))
     {

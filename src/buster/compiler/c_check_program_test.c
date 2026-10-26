@@ -693,6 +693,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{return a+b+c+d+e+f+g+h+i+j;}int tested(int n){return (int)helper(n,1,2,3,4,5,6,7,8,9);}", "floating-stack-arguments", clang);
     check_test_program_source(test,
         "int tested(int n){int x=n;int*p=&x;int a=(*p)++;int b=++*p;*p+=3;return a+2*b+4*x;}", "addressed-local-updates", clang);
+    // An address constant cast to an integer type, of a class other than a pointer's (musl's syscalls take one).
+    check_test_program_source(test,
+        "volatile int lock;long sys(long n,long a){return n*3+(a&7);}long base(void){return (long)&lock;}"
+        "int tested(int n){long a=(long)&lock;long b=(long)(&lock+2);int c=(int)(long)&lock;return (int)(b-a)+(c==(int)a)+(base()==a)+(int)sys(n,(long)&lock)-(int)((long)&lock&7);}",
+        "address-constants-as-integers", clang);
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
