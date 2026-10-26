@@ -156,15 +156,17 @@
 // class; to an integer by truncation, as C converts), LOAD, STORE and SET (its 10 bytes at the address), ADD, SUB, MUL and
 // DIV, the compares (IEEE's, as the floating types'), CALL (arguments on the stack, a result in st0), DISCARD, JUMP_VALUE
 // and RETURN (in st0). Its locals and parameters are objects and its globals are reached through their addresses: no
-// LOCAL, STORE_LOCAL, SET_LOCAL, GLOBAL, STORE_GLOBAL or SET_GLOBAL of F80. Its arithmetic is the x87's at the control word
-// the convention keeps (64-bit significands, rounding to nearest).
+// GLOBAL, STORE_GLOBAL or SET_GLOBAL of F80, and LOCAL, STORE_LOCAL and SET_LOCAL of F80 only on an object of at least 16
+// bytes, whose first 10 they read or write (a front end's temporaries of the class, and its locals'). Its arithmetic is
+// the x87's at the control word the convention keeps (64-bit significands, rounding to nearest).
 // The 128-bit integers (I128 and U128) take CONST (`value` the low 64 bits, sign-extended for I128 and zero-extended for
 // U128: a front end builds a wider constant of them), DUP, NEG, NOT, CONVERT (to and from the classes I8 to U64, which
 // keeps the low bits, and between the two), LOAD, STORE and SET (16 bytes at the address), ADD, SUB, MUL, AND, OR, XOR, SHL
 // and SHR (by a count of a class I8 to U64, below 128; SHR by the class's signedness), the compares, DISCARD and
-// JUMP_VALUE, with the same rules for their locals and globals as long double's. A front end divides them, converts them
-// to and from the floating classes, and passes and returns them through calls of its runtime's functions and objects: an
-// argument, a parameter or a result of one is a 16-byte object, two INTEGER eightbytes as the convention passes it.
+// JUMP_VALUE, with the same rules for their locals and globals as long double's: LOCAL, STORE_LOCAL and SET_LOCAL of them
+// read or write an object's first 16 bytes. A front end divides them, converts them to and from the floating classes,
+// and passes and returns them through calls of its runtime's functions and objects: an argument, a parameter or a result
+// of one is a 16-byte object, two INTEGER eightbytes as the convention passes it.
 // A target `value` is an entry's index, or the entry count for the function's end. Every target is the start of a
 // statement or of an arm, and the stacks there must hold the same values whichever way control arrives (as in a
 // WebAssembly validator): tier0_validate checks it. A label of label_entries is a target JUMP_INDIRECT may reach, with
@@ -2613,6 +2615,7 @@ static void tier0_define_templates(void)
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET, BUSTER_TYPED_ADD,
         BUSTER_TYPED_SUB,   BUSTER_TYPED_MUL, BUSTER_TYPED_DIV, BUSTER_TYPED_EQ,   BUSTER_TYPED_NE,    BUSTER_TYPED_LT,  BUSTER_TYPED_LE,
         BUSTER_TYPED_GT,    BUSTER_TYPED_GE,  BUSTER_TYPED_CALL,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_SET_LOCAL,
     };
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(x87_kinds); k += 1)
     {
@@ -2642,6 +2645,7 @@ static void tier0_define_templates(void)
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_NOT, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET,
         BUSTER_TYPED_ADD,   BUSTER_TYPED_SUB, BUSTER_TYPED_MUL, BUSTER_TYPED_AND, BUSTER_TYPED_OR,   BUSTER_TYPED_XOR,   BUSTER_TYPED_SHL,
         BUSTER_TYPED_SHR,   BUSTER_TYPED_EQ,  BUSTER_TYPED_NE,  BUSTER_TYPED_LT,  BUSTER_TYPED_LE,   BUSTER_TYPED_GT,    BUSTER_TYPED_GE,
+        BUSTER_TYPED_LOCAL, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_SET_LOCAL,
     };
     for (uint32_t class = BUSTER_TYPED_CLASS_I128; class <= BUSTER_TYPED_CLASS_U128; class += 1)
     {
@@ -3273,6 +3277,15 @@ struct Tier0Frame
 static bool tier0_memory_function(const Tier0Function* function)
 {
     return function->x87 || function->int128;
+}
+
+// Whether LOCAL, STORE_LOCAL and SET_LOCAL of memory class `class` may name local `local` (below the count): an object
+// of at least a slot's bytes, but an address-only one (a va_list's, a variadic frame's anchor), whose first bytes the
+// entries read and write, as a front end's temporaries of the class and its locals are.
+static bool tier0_memory_object(const Tier0Function* function, uint64_t local, uint32_t class)
+{
+    return tier0_class_memory(class) && tier0_is_object(function, local) && function->local_sizes[local] >= BUSTER_TIER0_MEMORY_SLOT_BYTES &&
+           (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0;
 }
 
 // The registers each depth table's prefix covers, as a register set.
@@ -4439,8 +4452,9 @@ static void tier0_int128_take(Tier0Int128Plan* plan, int32_t from, uint32_t fixe
 }
 
 // Entry i's plan (Tier0Int128Plan), from its kind and its depth d before it:
-//   - CONST: the register at d where the low half is past a sign-extended imm32; DUP and LOAD: the one at d (LOAD's
-//     address is at d − 1); STORE and SET: the one at d − 1 (the address is at d − 2);
+//   - CONST: the register at d where the low half is past a sign-extended imm32; DUP, LOAD and LOCAL: the one at d
+//     (LOAD's address is at d − 1); STORE and SET: the one at d − 1 (the address is at d − 2); STORE_LOCAL and
+//     SET_LOCAL: the one at d − 1, whose value is in its slot;
 //   - MUL: two from d − 2, none of them rax or rdx, which hold values below the operands from depths 3 and 5 on (rax is
 //     depth 0's register, rdx depth 2's);
 //   - SHL and SHR: three from d − 2, none of them rcx (depth 1's register, its count's at depth 2, holding a value below
@@ -4458,11 +4472,11 @@ static Tier0Int128Plan tier0_int128_plan(const Tier0Function* function, const Ti
     {
         tier0_int128_take(&plan, depth, 0, tier0_fits_int32((int64_t)function->values[i]) ? 0 : 1);
     }
-    else if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOAD)
+    else if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_LOCAL)
     {
         tier0_int128_take(&plan, depth, 0, 1);
     }
-    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET)
+    else if (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
     {
         tier0_int128_take(&plan, depth - 1, 0, 1);
     }
@@ -4497,7 +4511,7 @@ static Tier0Int128Plan tier0_int128_plan(const Tier0Function* function, const Ti
 // integer result (− 1, and for a U64 the register at its depth too) and a conversion's floating result (the floating
 // stack's depth). A 128-bit integer's: its plan's registers (tier0_int128_plan), and rax and rdx for MUL and rcx for a
 // shift into `clobbers`, with `fixed` set where it saves one of them in the fixed slots. And into `slot_top`, the slot
-// it writes at its own depth: a leaf's (CONST, DUP), and a long double's from a floating value, which moves to the
+// it writes at its own depth: a leaf's (CONST, DUP, LOCAL), and a long double's from a floating value, which moves to the
 // integer stack. Every other slot an entry writes is one at a depth an operand's register had first, which a register's
 // top counts: so the slots past the integer table's count (as many as there are slots) show in `slot_top` and the tops.
 static void tier0_memory_tops(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, int32_t* integer_top, int32_t* floating_top,
@@ -4506,7 +4520,7 @@ static void tier0_memory_tops(const Tier0Function* function, const Tier0Entries*
     const int32_t depth = entries->depths[i];
     const uint32_t kind = entries->key_kinds[i];
     const uint32_t class = entries->key_classes[i];
-    const bool leaf = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_DUP;
+    const bool leaf = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOCAL;
     const bool moved = kind == BUSTER_TYPED_CONVERT && tier0_class_x87(class) && tier0_class_floating(entries->variants[i]);
     int32_t integer = -1;
     int32_t floating = -1;
@@ -4913,7 +4927,8 @@ static void tier0_x87_truncate(Tier0Writer* writer, uint8_t scratch)
 // an integer or a floating class), leaving the x87 stack empty. With d the entry's integer depth:
 //   - CONST: its constant's 10 bytes stored into slot d as immediates;
 //   - LOAD, STORE, SET: the value through the address in the register at d − 1 (or d − 2, a store's), STORE's kept in
-//     slot d − 2 too; DUP: slot d − 1 copied into slot d; NEG: fchs;
+//     slot d − 2 too; DUP: slot d − 1 copied into slot d; LOCAL: its object's 10 bytes into slot d; STORE_LOCAL and
+//     SET_LOCAL: slot d − 1 into its object; NEG: fchs;
 //   - ADD, SUB, MUL, DIV: slots d − 2 and d − 1 into st1 and st0, then faddp (fsubp, fmulp, fdivp) st(1), st(0), whose
 //     st(1) − st(0) is the first operand less the last, into slot d − 2;
 //   - the compares: fucomip of the operands in the order that makes each condition one that unordered operands fail
@@ -4927,7 +4942,8 @@ static void tier0_x87_truncate(Tier0Writer* writer, uint8_t scratch)
 //     fistp into temporary 2 under the control word's truncation (tier0_x87_truncate), and for a U64 a value of 2^63 or
 //     more less 2^63 first, its top bit set after (fcmovbe chooses what to take away, setbe and shl the bit, both from one
 //     fucomi with 2^63, through temporary 3 and the register at d).
-static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
+static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                           Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
     const uint32_t class = entries->key_classes[i];
@@ -4970,6 +4986,16 @@ static void tier0_emit_x87(const Tier0Function* function, const Tier0Entries* en
     {
         tier0_put(writer, tier0_memory_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
         tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, depth, 0));
+    }
+    else if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    {
+        // The object's first 10 bytes into slot d, or slot d − 1's into them (tier0_memory_object's).
+        const Tier0Home home = homes[function->values[i]];
+        const bool local = kind == BUSTER_TYPED_LOCAL;
+        tier0_put(writer, local ? tier0_instruction(X86_FORM_FLD_M80, 0, home.reg, home.mode, home.displacement, 0)
+                                : tier0_memory_slot(X86_FORM_FLD_M80, frame, depth - 1, 0));
+        tier0_put(writer, local ? tier0_memory_slot(X86_FORM_FSTP_M80, frame, depth, 0)
+                                : tier0_instruction(X86_FORM_FSTP_M80, 0, home.reg, home.mode, home.displacement, 0));
     }
     else if (kind == BUSTER_TYPED_NEG)
     {
@@ -5098,7 +5124,8 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
     {
         count = 3;
     }
-    else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_DUP)
+    else if (kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ||
+             kind == BUSTER_TYPED_SET_LOCAL)
     {
         count = 2;
     }
@@ -5132,7 +5159,8 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 //   - CONST: the value's halves stored into slot d as sign-extended immediates, the low one through s0 (movabs) where it
 //     is past one; DUP: slot d − 1 copied into slot d through s0; LOAD: the 16 bytes at the address in the register at
 //     d − 1 into slot d − 1, through s0; STORE and SET: slot d − 1 to the address in the register at d − 2, through s0,
-//     STORE's into slot d − 2 too;
+//     STORE's into slot d − 2 too; LOCAL: its object's 16 bytes into slot d, through s0; STORE_LOCAL and SET_LOCAL: slot
+//     d − 1 into its object, through s0;
 //   - NEG: the low half's neg, the carry added into the high half (adc 0), then its neg, in place; NOT: each half's not;
 //   - ADD, SUB, AND, OR, XOR: each half of the last operand through s0 into the first's, in place, the high halves with
 //     the carry (adc, sbb), which mov leaves alone;
@@ -5148,7 +5176,8 @@ static uint32_t tier0_count_x87(const Tier0Entries* entries, uint32_t i)
 //   - CONVERT from an integer class at d − 1: the value sign- or zero-extended to 64 bits in its register, stored as the
 //     low half, then its sign (sar 63) or zero as the high half; to an integer class, the low half loaded into the
 //     register at d − 1, whose low bits the class keeps; between I128 and U128, nothing.
-static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
+static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
+                              Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
     const uint32_t class = entries->key_classes[i];
@@ -5203,6 +5232,20 @@ static void tier0_emit_int128(const Tier0Function* function, const Tier0Entries*
             {
                 tier0_put(writer, tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth - 2, half, s0));
             }
+        }
+    }
+    else if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
+    {
+        // The object's first 16 bytes into slot d, or slot d − 1's into them (tier0_memory_object's).
+        const Tier0Home home = homes[function->values[i]];
+        const bool local = kind == BUSTER_TYPED_LOCAL;
+        for (uint32_t half = 0; half < 2; half += 1)
+        {
+            const int32_t displacement = home.displacement + 8 * (int32_t)half;
+            tier0_put(writer, local ? tier0_instruction(X86_FORM_MOV_R64_RM64, s0, home.reg, home.mode, displacement, 0)
+                                    : tier0_int128_half(X86_FORM_MOV_R64_RM64, frame, depth - 1, half, s0));
+            tier0_put(writer, local ? tier0_int128_half(X86_FORM_MOV_RM64_R64, frame, depth, half, s0)
+                                    : tier0_instruction(X86_FORM_MOV_RM64_R64, s0, home.reg, home.mode, displacement, 0));
         }
     }
     else if (kind == BUSTER_TYPED_NEG)
@@ -5376,7 +5419,8 @@ static uint32_t tier0_count_int128(const Tier0Function* function, const Tier0Ent
     {
         count = tier0_fits_int32((int64_t)function->values[i]) ? 2 : 3;
     }
-    else if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET)
+    else if (kind == BUSTER_TYPED_DUP || kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ||
+             kind == BUSTER_TYPED_SET_LOCAL)
     {
         count = 4;
     }
@@ -5964,11 +6008,11 @@ static inline __attribute__((always_inline)) void tier0_emit_deferred_entry(cons
     }
     else if (memory && tier0_int128_entry(entries, i))
     {
-        tier0_emit_int128(function, entries, frame, i, writer);
+        tier0_emit_int128(function, entries, frame, homes, i, writer);
     }
     else if (memory && tier0_memory_entry(entries, i))
     {
-        tier0_emit_x87(function, entries, frame, i, writer);
+        tier0_emit_x87(function, entries, frame, homes, i, writer);
     }
     else if (kind == BUSTER_TYPED_DIV || kind == BUSTER_TYPED_MOD)
     {
@@ -7615,8 +7659,9 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             case BUSTER_TYPED_LOCAL:
             case BUSTER_TYPED_LOCAL_ADDRESS:
                 if (value >= function->local_count ||
-                    (kind == BUSTER_TYPED_LOCAL && (function->local_classes[value] != class || tier0_is_object(function, value) ||
-                                                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0)) ||
+                    (kind == BUSTER_TYPED_LOCAL && !tier0_memory_object(function, value, class) &&
+                     (function->local_classes[value] != class || tier0_is_object(function, value) ||
+                      (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0)) ||
                     (kind == BUSTER_TYPED_LOCAL_ADDRESS && (class != BUSTER_TYPED_CLASS_U64 || (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0)))
                 {
                     tier0_reject(&validator, i, "a local reference that doesn't match its local");
@@ -7702,8 +7747,10 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             case BUSTER_TYPED_SET_GLOBAL:
             {
                 const bool local = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
-                const bool bad_target = local ? value >= function->local_count || function->local_classes[value] != class || tier0_is_object(function, value) ||
-                                                    (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0
+                const bool bad_target = local ? value >= function->local_count ||
+                                                    (!tier0_memory_object(function, value, class) &&
+                                                     (function->local_classes[value] != class || tier0_is_object(function, value) ||
+                                                      (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0))
                                               : value == 0 || value > UINT32_MAX || tier0_class_memory(class);
                 if (tier0_pop(&validator, i) != class || bad_target)
                 {

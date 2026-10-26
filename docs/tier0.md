@@ -26,7 +26,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
   structs returned in x87 registers ("Long double", below).
 - **128-bit integers** (#136): `__int128`'s and `unsigned __int128`'s classes, I128 and U128, whose values live in the
-  slots long double's do ("128-bit integers", below). #133's producer doesn't lower them yet.
+  slots long double's do ("128-bit integers", below), which #133's producer lowers `__int128` to ([the checker
+  guide](c-checker.md)'s "Backend handoff").
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
@@ -290,9 +291,11 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
   stack empty, so that nothing lives there across entries, calls or joins. Every F80 entry is deferred: emitted by
   `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a time, as calls are.
 - **Its locals and parameters are objects** of 16 bytes aligned to 16, and its globals are reached through their
-  addresses: there is no `LOCAL`, `STORE_LOCAL`, `SET_LOCAL`, `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a
-  front end reads one with `LOAD` and writes it with `STORE` or `SET`, the address first. A parameter's home is its
-  incoming stack slot, whose place is a multiple of 16.
+  addresses: there is no `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a front end reads a global with `LOAD` and
+  writes it with `STORE` or `SET`, the address first. `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of F80 name an object of
+  at least 16 bytes (`tier0_memory_object`), whose first 10 they read or write, an `fld` and an `fstp` between it and
+  the value's slot: a front end's locals of the class, and its temporaries of it, objects of their own. A parameter's
+  home is its incoming stack slot, whose place is a multiple of 16.
 - **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
   the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
   slot.
@@ -333,9 +336,11 @@ depth's 16-byte slot (`Tier0Frame.memory_area`, long double's `x87_area` before 
 half at 8, so that calls and the arms of `?:` need nothing of their own for it.
 
 - **Their locals and parameters are objects** of 16 bytes, and their globals are reached through their addresses, as
-  long double's are: a front end reads one with `LOAD` and writes it with `STORE` or `SET`, the address first.
+  long double's are: `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of them copy an object's first 16 bytes to or from the
+  value's slot through a scratch register (the depth register the value's slot leaves free), and a global is read with
+  `LOAD` and written with `STORE` or `SET`, the address first.
 - **The kinds:** `CONST` (its `value` the low 64 bits, sign-extended for I128 and zero-extended for U128: a front end
-  builds a wider constant from halves), `DUP`, `NEG`, `NOT`, `CONVERT` (to and from the classes I8 to U64, the low bits
+  builds a wider constant from halves), `DUP`, `LOCAL`, `STORE_LOCAL`, `SET_LOCAL`, `NEG`, `NOT`, `CONVERT` (to and from the classes I8 to U64, the low bits
   kept and an integer sign- or zero-extended as its class says; between I128 and U128, nothing), `LOAD`, `STORE` and
   `SET` (16 bytes at the address), `ADD`, `SUB`, `MUL`, `AND`, `OR`, `XOR`, `SHL` and `SHR` (by a count of a class I8 to
   U64, below 128; `SHR` arithmetic for I128), the six compares, `DISCARD` and `JUMP_VALUE`.
@@ -362,7 +367,9 @@ half at 8, so that calls and the arms of `?:` need nothing of their own for it.
   depth past the 15 slots (`slot_top`, `TIER0_ERROR_DEPTH`). Before, a stack of 15 long double constants wrote past
   the slot area.
 
-`tier0_validate` refuses a local of the classes that isn't an object, a global read as a value, `DIV` and `MOD` of them,
+`tier0_validate` refuses a local of the classes that isn't an object, a `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of them
+of anything but an object of at least 16 bytes (a value's local, a smaller object, a `va_list`), a global read as a
+value, `DIV` and `MOD` of them,
 a conversion between them and a floating class, a call's argument or result of them, a `RETURN` of them, and an entry
 of the classes in a function without `int128`. `interpreter.c` and `ir_lower.c` refuse them, as they refuse F80.
 
@@ -847,9 +854,11 @@ Before the programs, checks of their own:
   - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
     long double; an integer, a float or a double converted from one; a compare's result), from inputs of every class,
     through constants, arithmetic, `?:`, `DUP`, `STORE`'s kept value, conversions both ways (unsigned 64-bit ones past
-    2^63 too) and calls of C functions through their addresses, against the check's own stack machine over the stream.
-    The programs must reach every kind and conversion of the class. A program past the depth tables is counted, not
-    compiled.
+    2^63 too), calls of C functions through their addresses and frame objects (four, of 16 to 32 bytes aligned to 8 or
+    16, given values first, read by `LOCAL`, written by `STORE_LOCAL` and `SET_LOCAL` and copied out at the end), against
+    the check's own stack machine over the stream. A program past the depth tables is counted, not compiled. The programs
+    compiled, run and checked must reach every kind and conversion of the class, in bitmaps of their own (`CALL`'s and
+    `JUMP_VALUE`'s bits had been two conversions' too).
 - **int128** (`tier0_int128_test.c`), the 128-bit integers compiled by both paths into the same records, encoded by both
   encoders into the same bytes and run natively in a child, called from C through function pointers, so that the file's
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
@@ -864,11 +873,11 @@ Before the programs, checks of their own:
   - **programs:** 300 random functions (`--count`) of statements that each write a value into 16 bytes of an output (a
     128-bit integer of either class, an integer of a class I8 to U64 converted from one, a compare's result), through
     constants (low halves past a sign-extended imm32 among them), arithmetic, shifts by constant and variable counts,
-    `?:`, `DUP`, `STORE`'s kept value and conversions both ways, under live values at the depths where `MUL` saves rax
-    and rdx and a shift rcx, against the check's own stack machine over the stream. A program counts toward the
-    coverage only once both paths compiled it, it ran and every output matched, and then only the entries the stack
-    machine ran: those must reach, for each class apart (their signed and unsigned code differs), every kind, every
-    conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
+    `?:`, `DUP`, `STORE`'s kept value, conversions both ways and frame objects (as the x87 check's), under live values at
+    the depths where `MUL` saves rax and rdx and a shift rcx, against the check's own stack machine over the stream. A
+    program counts toward the coverage only once both paths compiled it, it ran and every output matched, and then only
+    the entries the stack machine ran: those must reach, for each class apart (their signed and unsigned code differs),
+    every kind, every conversion to and from it, each of the saves and both arms of a `?:`, in bitmaps of their own.
 
   Every function must compile: an error of both paths alike fails the check, but a depth past the slots in a random
   program, which is counted.

@@ -3504,7 +3504,7 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         const bool gcc_member = code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_FLOAT16;
         const TypeId builtin = BUSTER_TYPE_BUILTIN(code);
         const bool valid = type_is_valid(table, builtin);
-        const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 8) ||
+        const bool compiled = !world->compiled || (valid && ((type_kind(table, builtin) == BUSTER_TYPE_KIND_INTEGER && type_size(table, builtin) <= 16) ||
                                                              builtin == BUSTER_TYPE_FLOAT || builtin == BUSTER_TYPE_DOUBLE || builtin == BUSTER_TYPE_LONG_DOUBLE));
         if (valid && code != BUSTER_TYPE_CODE_NULLPTR && (!world->gcc || (!clang_only && !gcc_member)) && compiled)
         {
@@ -3920,16 +3920,16 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
 }
 
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a struct or a union aligned
-// to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a struct
+// or a union aligned to 16 at most.
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
     const uint8_t kind = table->types.kind[resolved];
     const bool scalar = (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] <= 8) || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER ||
                         (kind == BUSTER_TYPE_KIND_FLOATING && (table->types.code[resolved] == BUSTER_TYPE_CODE_FLOAT || table->types.code[resolved] == BUSTER_TYPE_CODE_DOUBLE));
-    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_LONG_DOUBLE) || kind == BUSTER_TYPE_KIND_STRUCT ||
-                      kind == BUSTER_TYPE_KIND_UNION;
+    const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[resolved] == BUSTER_TYPE_CODE_LONG_DOUBLE) ||
+                      (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
 }
 
@@ -4892,11 +4892,11 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->variadic = variadic;
         uint32_t offset = 0;
         // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
-        // value on the integer one), and copies its aggregates through each stack's first free register (#136); past
-        // them it takes values to its frame's deep slots, but not a call's aggregates or a function's long doubles. Our
-        // caller's `r = c_callee(...)` holds r's address under them when the result is a struct, a union or a long double.
-        // So in a compiled world an argument past 13 integer or 15 floating ones becomes one of the other stack's (21 named
-        // and 6 unnamed fit both).
+        // value on the integer one, as a 128-bit integer's), and copies its aggregates through each stack's first free
+        // register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or a
+        // function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under them
+        // when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an argument
+        // past 13 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
         uint32_t depths[2] = { 0, 0 };
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
