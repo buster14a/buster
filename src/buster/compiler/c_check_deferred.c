@@ -330,7 +330,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->linked_types = reader->linked_declarations != 0 ? check_deferred_copy(arena, top->linked_types, names, names, sizeof(TypeId)) : 0;
     reader->builtin_names = reader->linked_types != 0 ? check_deferred_copy(arena, top->builtin_names, names, names, sizeof(uint16_t)) : 0;
     reader->tag_completions = reader->builtin_names != 0 ? check_deferred_copy(arena, top->tag_completions, top->types->tags.count, tags, sizeof(uint32_t)) : 0;
-    valid = reader->tag_completions != 0;
+    // Whether each enum has a fixed base: the top level's for its tags, and the lane's own for those its bodies make,
+    // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
+    reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
+    valid = reader->enum_fixed != 0;
     if (valid && top->intrinsic_names != 0)
     {
         // The intrinsics' cache, which the lane fills for the names it meets, and their tables, which a body that uses

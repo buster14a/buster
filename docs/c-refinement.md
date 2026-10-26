@@ -232,8 +232,10 @@ An identifier's lookup key is its spelling after translation phases 1 and 2:
 trigraphs (when enabled) and line splices are removed, and each UCN becomes the
 UTF-8 of its code point, as clang interns it. So `fo\<newline>o` is `foo`, and
 `é`, `é` and `\U000000E9` are one identifier. A named UCN (`\N{...}`)
-stays as written, because the table has no character names (an open question in
-#116).
+stays as written, without its line splices, because the table has no character
+names (an open question in #116). The preprocessor refuses an identifier with
+one, so no identifier spelled that way reaches the compiler (#452, and
+"Not yet" in [the preprocessor's design](c-preprocessor.md)).
 
 Differences from #116's sketch, each deliberate:
 
@@ -582,6 +584,72 @@ refining: for its twelve files of 256 to 850 KB, whose columns and source the L3
 cache holds whole, windows about break even. On `sqlite3.c` the same build took
 0.14 ms less refining (1.388-1.389 ms against 1.529-1.533), 0.018 ms more for
 the directive tables, and no more lexing.
+
+### Whole-process cost (#451 part 1, 2026-10-26)
+
+[The record](https://github.com/buster14a/buster-performance/tree/7ed12470d4615af85f9a7590f82a8ec8e3b12795/docs/measurements/window-process-451-part1-2026-10-26)
+compares the default 128 KB windows with `--window-bytes 2000000000` (whole
+files) in one executable of `9de3d30ba437b381394095d7a77635a2e877435d`, built
+on the 9700X with clang 23.1.1 and `BUSTER_DEBUG_INFO=0`. It reuses #408's
+frozen SQLite and `main.c` sources, with the latter's `-march=native -Isrc
+-fwrapv -funsigned-char --predefines predefines.h`. Each command ran alone
+under the shared lock on CPU 2. Five rounds of `time-runs` each had two
+warmups and 21 fresh processes per variant, with the paired order rotated.
+The numbers below are medians of the five round medians; RSS is Linux
+`wait4`'s peak resident set in KiB. All 840 timed processes exited zero.
+
+| Whole process | Wall ms, whole → windows | Change | Peak RSS KiB, whole → windows | Minor faults, whole → windows |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite `-E -o /dev/null` | 18.903 → 18.636 | −1.41% | 57,188 → 59,240 | 795 → 795 |
+| SQLite `-fsyntax-only` | 147.744 → 147.565 | −0.12% | 593,904 → 595,948 | 1,594 → 1,595 |
+| `main.c` `-E -o /dev/null` | 77.755 → 77.954 | +0.26% | 144,228 → 144,180 | 1,915 → 1,914 |
+| `main.c` `parse -fsyntax-only` | 78.979 → 79.180 | +0.25% | 429,212 → 431,276 | 2,147 → 2,153 |
+
+Every timed process had zero major faults. SQLite's `-E` round medians were
+18.863–18.959 ms whole and 18.618–18.704 ms windowed. The other workloads'
+round ranges overlap: the checker has no established wall-time win, and the
+two `main.c` medians are about 0.20 ms slower. Windowing adds
+about 2 MiB to the measured peak of SQLite's two commands and `main.c`'s
+parser; `main.c`'s preprocessing peak is effectively unchanged.
+
+Five alternating process pairs of `benchmark-preprocessor --only vectorized`
+also ran on each input, each with its warmup and 21 passes. The phase and
+release medians, in ms, were:
+
+| Interval | SQLite, whole → windows | `main.c`, whole → windows |
+| --- | ---: | ---: |
+| Read | 0.697 → 0.662 | 3.360 → 3.354 |
+| Lex | 2.369 → 2.345 | 5.421 → 5.482 |
+| Refine | 1.482 → 1.383 | 5.100 → 5.061 |
+| Directive tables | 0.289 → 0.346 | 0.355 → 0.390 |
+| Main loop/setup | 5.870 → 5.423 | 31.673 → 31.729 |
+| Preprocessing total | 10.699 → 10.163 | 45.889 → 46.017 |
+| Printing, timed separately | 4.364 → 4.541 | 25.737 → 25.629 |
+| Release, timed separately | 0.446 → 0.417 | 1.513 → 1.513 |
+
+These independent medians need not sum. The preprocessing timer excludes
+printing and release; printing here is `-E -P`, while the whole `-E` processes
+also print line markers. Release covers `pp_release` and `intern_release`,
+not process exit or every scratch mapping: `scratch_end` returns an arena's
+length without unmapping it. The process measurements above include exit.
+The reports give 118.92 → 118.24 instructions per input token on SQLite and
+226.37 → 226.66 on `main.c`, with unchanged input/output token counts.
+
+The scratch words and line pages stay. They retain a window's results until
+the whole-file positions are known and let line queries avoid rescanning
+cold source. The measured tradeoff is a 0.267 ms SQLite preprocessing saving
+and about 2 MiB of extra peak memory in three commands, with about 0.20 ms
+added on `main.c`. This evidence does not justify a more complicated storage
+scheme; part 1 makes no source change. The windowed directive interval also
+includes #439's page-line counting, so its increase is not an isolated
+measurement of #451 part 2. Finding that cost and avoiding long-line relexing
+remain parts 2 and 3, which this comparison does not resolve.
+
+All nine acceptance commands passed on the 9700X: the preprocessor and
+per-file fixtures, refinement on 442 files, both frozen inputs with 64-byte
+windows and whole files (0 of 1 differ in each comparison), and each through
+`test-files` on every tested lane count. The frozen source manifest was
+unchanged after the campaign; the record retains these logs and dependencies.
 
 ## Where the time went
 

@@ -152,7 +152,10 @@ prototype's parameters, and the tags its list declares, end at its `)`. A
 definition's are declared again at its body's opening, as clang has them, since
 the body's scope is theirs too (C11 6.2.1p4): in
 `int f(struct T *p) { struct T *q = p; ... }` the body's `struct T` is the
-parameter's (#435).
+parameter's (#435). A prototype in a constant expression's type name (a
+typeof's, a builtin's operand) ends its tags at its `)` as well, in the
+evaluator's binding walks (`c_check_constant.c`): `typeof(int (*)(struct Z *))`'s
+`struct Z` isn't a later one's (#437).
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
@@ -684,6 +687,10 @@ The test command fails if the oracle cannot run. It covers:
   Clang object bytes and relocations, guarded batches and transaction rollback,
   signed bit-precise storage and deterministic x87 padding. Character UCN tests
   distinguish GNU17 constraints from GNU23 acceptance.
+- Named UCNs (`\N{...}`), which clang reads as its extension in C, are refused
+  alike in identifiers and `#if`'s character constants (the preprocessor's
+  errors) and in literals (`invalid or unsupported literal`), at their places
+  (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that

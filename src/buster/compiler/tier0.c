@@ -310,6 +310,9 @@ _Static_assert(BUSTER_TIER0_KINDS <= BUSTER_TYPED_KIND_LIMIT, "Tier 0's own kind
 // column too, 0 for a function without them: label_entries holds label_count entries' indices, each a statement's start
 // or the count for the function's end. Tier0Code.label_records gives each one's first record, where the front end
 // defines the symbol whose GLOBAL_ADDRESS is the label's address.
+//
+// entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
+// compile without it allocates and copies nothing for them.
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -348,6 +351,7 @@ struct Tier0Function
     bool x87;
     const uint32_t* label_entries;
     uint32_t label_count;
+    bool entry_records;
 };
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
@@ -407,11 +411,14 @@ typedef enum Tier0Error
 
 // A function's code: `count` records (prologue, body, epilogue), the branches' record indices and targets (contract 1:
 // every branch a rel8 with displacement 0, indices ascending, a target the record its label marks or the count for the
-// end), and a LinkReference per symbolic field, its instruction a record index. `deferred` counts the entries the
-// vector path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose
-// values went to the deep slots (tier0_select_deep). `label_records` has a record index for each of
-// Tier0Function.label_entries, label_count of them in their order (0 for a function without them): the label's first
-// record.
+// end), and a LinkReference per symbolic field, its instruction a record index. With Tier0Function.entry_records,
+// `entry_records` is each of the function's `entry_count` typed entries' first record, and one more, the epilogue's:
+// ascending, an entry that emits no record (a leaf fused into its consumer) at the next entry's; with branch sizing's
+// offsets, where each entry's code starts in bytes, which source rows give a debugger (debug.c, #395). Without it,
+// entry_records is null and entry_count 0. `deferred` counts the entries the vector path left to tier0_emit_deferred
+// (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
+// (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
+// in their order (0 for a function without them): the label's first record.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -422,6 +429,8 @@ struct Tier0Code
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
+    uint32_t* entry_records;
+    uint32_t entry_count;
     uint32_t* label_records;
     uint32_t label_count;
     uint32_t deferred;
@@ -6410,15 +6419,24 @@ static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* 
     entries->positions[function->count] = position;
 }
 
-// The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store.
-static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts)
+// The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store;
+// and the entries' first records (`entries` of them and the epilogue's) when asked for (`positions` not null).
+static bool tier0_push_output(Tier0Code* code, Arena* output, uint32_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
 {
     code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)records + BUSTER_TIER0_TEMPLATE_RECORDS);
     code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 1);
     code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+    // The entries' positions are final once measured: emission writes each entry's records from its position.
+    code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
     code->count = records;
-    return code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0;
+    code->entry_count = positions != 0 ? entries : 0;
+    const bool room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
+    if (room && positions != 0)
+    {
+        memcpy(code->entry_records, positions, ((uint64_t)entries + 1) * sizeof(uint32_t));
+    }
+    return room;
 }
 
 // A CHOICE record's context: whether its rm is a register (and rax), inc and dec allowed, and the flags live after it.
@@ -6696,7 +6714,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
-        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts))
+        if (!room || !tier0_push_output(code, output, entries->positions[function->count] + epilogue, counts, function->entry_records ? entries->positions : 0,
+                                        function->count))
         {
             error = TIER0_ERROR_MEMORY;
         }
@@ -6871,7 +6890,9 @@ static void tier0_arrive(Tier0Validator* validator, uint64_t* hashes, uint8_t* s
     }
 }
 
-static Tier0Check tier0_validate(const Tier0Function* function)
+// tier0_validate's body, for a caller that inlines it whatever the function's other callers make clang decide
+// (check_program_lower_body's two copies, #426).
+static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -7335,6 +7356,11 @@ static Tier0Check tier0_validate(const Tier0Function* function)
     }
     scratch_end(scratch);
     return validator.check;
+}
+
+static Tier0Check tier0_validate(const Tier0Function* function)
+{
+    return tier0_validate_inline(function);
 }
 
 

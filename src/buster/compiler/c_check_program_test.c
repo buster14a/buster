@@ -277,7 +277,7 @@ static void check_test_program_source(CheckTest* test, const char* source, const
         }
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
-        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, true) &&
+        const bool emitted = lowered && check_program_emit(&code, &program, &parser, &identifiers, data.capacity, path == 0, &output, &bytes, &scratch, NULL, NULL, true) &&
                              check_data_publish(&data, &types.table, &stream, program.object_symbols, program.object_count, &code.link, 0, &bytes, &scratch, &emission);
         snprintf(description, sizeof(description), "%s: shared code/data Link emits through real ABI/Tier0/encoder consumers", name);
         check_test_expect(test, emitted, description);
@@ -379,7 +379,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
                     CheckProgramCode failed_code = { 0 };
                     const uint64_t emission_mark = output.length;
                     const bool failed_code_ok = check_program_emit(&failed_code, &program, &parser, &identifiers, (LinkCapacity){ 0 }, path == 0,
-                                                                   &output, &empty, &scratch, NULL, true);
+                                                                   &output, &empty, &scratch, NULL, NULL, true);
                     check_test_expect(test, !failed_code_ok && failed_code.status == CHECK_PROGRAM_RESOURCE && failed_code.link.symbols.count == 0 &&
                                            failed_code.lowered.functions == 0 && output.length == emission_mark && empty.length == 17 && scratch.length == 0,
                                       "code byte exhaustion rolls back Link, ABI, atoms and bytes together");

@@ -15,6 +15,10 @@ struct CheckProgramLowered
     CheckProgramHelpers helpers;
     SymbolId errno_symbol;
     TypeId errno_pointer_type;
+    // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
+    // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
+    // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
+    uint32_t** entry_tokens;
     uint32_t runtime_symbol_count;
     uint32_t count;
     CheckProgramStatus status;
@@ -103,6 +107,12 @@ struct CheckLowerWriter
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
+    // Each entry's source token (CheckProgramLowered.entry_tokens), when `sources` asks for them: the entries before
+    // `filled` have theirs, and the ones after it take `source` when it next changes (check_lower_settle).
+    uint32_t* tokens;
+    // With `sources`, the token each task was pushed under, for the tasks before `settled`; the ones after it were pushed
+    // under `source`.
+    uint32_t* task_sources;
     uint32_t* labels;
     uint32_t* label_heads;
     uint32_t* stack_parents;
@@ -147,6 +157,13 @@ struct CheckLowerWriter
     uint32_t miscellaneous_count;
     uint32_t floating_count;
     uint32_t token;
+    // With `sources`, the token whose lowering writes the next entries: an expression's node's, a statement's, a call's
+    // callee's or an initializer part's, and for any other task the one it was pushed under, so that an operation's entry,
+    // written after its operands', takes its own node's token (check_lower_drain_sources). `filled` and `settled` count
+    // the entries and the tasks that have theirs (check_lower_settle).
+    uint32_t source;
+    uint32_t filled;
+    uint32_t settled;
     uint32_t stack_head;
     uint32_t stack_count;
     bool reachable;
@@ -179,6 +196,7 @@ struct CheckLowerWriter
     bool x87;
     bool scalar;
     bool track;
+    bool sources;
     // The function's labels whose addresses the program takes (CHECK_CONTROL_LABEL with a symbol): each one's control
     // entry, then its entry (Tier0Function.label_entries), and the room for them, one per control entry.
     uint32_t* label_entries;
@@ -477,6 +495,39 @@ static void check_lower_place(CheckLowerWriter* writer, uint32_t label)
             writer->label_heads[label] = writer->stack_head;
         }
         writer->reachable = true;
+    }
+}
+
+// Before the token changes (CheckLowerWriter.source), the entries written and the tasks pushed since it last changed
+// take it, so that no entry or push spends anything on the tokens.
+static inline __attribute__((always_inline)) void check_lower_settle(CheckLowerWriter* writer)
+{
+    for (uint32_t e = writer->filled; e < writer->count; e += 1)
+    {
+        writer->tokens[e] = writer->source;
+    }
+    writer->filled = writer->count;
+    for (uint32_t t = writer->settled; t < writer->depth; t += 1)
+    {
+        writer->task_sources[t] = writer->source;
+    }
+    writer->settled = writer->depth;
+}
+
+// The token whose lowering writes the next entries (CheckLowerWriter.source). Out of line, as only -g reaches it.
+static __attribute__((noinline)) void check_lower_change_source(CheckLowerWriter* writer, uint32_t token)
+{
+    check_lower_settle(writer);
+    writer->source = token;
+}
+
+// The token whose lowering writes the next entries, where a call or an initializer part sets it in the middle of a task,
+// and at a function's start and end: a lowering without the tokens (`sources`) only tests the flag.
+static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
+{
+    if (writer->sources)
+    {
+        check_lower_change_source(writer, token);
     }
 }
 
@@ -828,7 +879,8 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
 // `keep` (an assignment's value): one COPY, or COPYs of up to BUSTER_TIER0_MAX_COPY_BYTES each, the source's address
 // in a temporary between them. A kept destination's address goes in a temporary too, pushed again after the last COPY:
 // its consumer's class is read from the entry before it (tier0_validate), which a COPY, of class VOID, can't give.
-static void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
 {
     if (size == 0)
     {
@@ -1092,7 +1144,8 @@ static void check_lower_bit_read(CheckLowerWriter* writer, uint32_t packed)
 // The value on top of the stack, in the field's class, stored into the bit-field whose first byte's address local
 // `address` holds: its low `width` bits kept in a temporary; the unit read, the field's bits cleared and the value's
 // put in their place; the unit written back by its pieces. The value as the field now reads it stays unless `discard`.
-static void check_lower_bit_store(CheckLowerWriter* writer, uint32_t packed, uint32_t address, bool discard)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLowerWriter* writer, uint32_t packed, uint32_t address, bool discard)
 {
     const CheckLowerBitField field = check_lower_bit_unpack(packed);
     const uint32_t bytes = (field.shift + field.width + 7) / 8;
@@ -1211,7 +1264,8 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
     }
 }
 
-static void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
     const TypeTable* types = writer->program->types;
     const uint8_t source = check_lower_value_class(types, from);
@@ -1325,6 +1379,9 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
     const CheckStream* stream = writer->program->stream;
     const TypeTable* types = writer->program->types;
     const uint32_t callee = graph->operand0[node];
+    // The call's entries are its callee's line's, as GCC and clang place a call (the call's own node is its closing
+    // parenthesis, which a call across lines ends on).
+    check_lower_source(writer, graph->tokens[callee]);
     CheckValue value = stream->values[callee];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
     bool mangled = false;
@@ -1577,7 +1634,8 @@ static void check_lower_math(CheckLowerWriter* writer, uint32_t node, const Chec
     }
 }
 
-static void check_lower_terminate(CheckLowerWriter* writer)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_terminate(CheckLowerWriter* writer)
 {
     // Tier0 has ordinary calls and jumps. A terminal native helper traps; this self edge also prevents its
     // typed CFG from reaching the continuation. The validator checks unreachable expressions from an empty
@@ -2085,7 +2143,8 @@ static void check_lower_floating_recipe(CheckLowerWriter* writer, const CBuiltin
     check_lower_builtin_finish(writer, &buffer, result, type);
 }
 
-static void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
     const uint8_t class = (uint8_t)call->argument_class;
@@ -2314,7 +2373,8 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
     }
 }
 
-static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -2799,11 +2859,34 @@ static void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
     }
 }
 
-static void check_lower_drain(CheckLowerWriter* writer)
+// The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
+// own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
+// it last changed).
+static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t index = writer->depth;
+    const uint32_t token = task.kind == CHECK_LOWER_EXPRESSION ? program->input->graph.tokens[task.node] :
+                           task.kind == CHECK_LOWER_CONTROL ? program->controls[writer->body->first + task.node].token :
+                           index < writer->settled ? writer->task_sources[index] : writer->source;
+    writer->settled = index < writer->settled ? index : writer->settled;
+    check_lower_settle(writer);
+    writer->source = token;
+}
+
+// The tasks' loop, as check_lower_drain and check_lower_drain_sources compile it: with `sources`, each task's token set
+// before it runs (check_lower_task_source). A constant in each, so that the plain loop does none of it.
+static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources)
 {
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         const CheckLowerTask task = writer->tasks[--writer->depth];
+        if (sources)
+        {
+            check_lower_task_source(writer, task);
+        }
+        // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
+        // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (task.kind == CHECK_LOWER_INSTRUCTION)
         {
             check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
@@ -2882,6 +2965,17 @@ static void check_lower_drain(CheckLowerWriter* writer)
             check_lower_expand(writer, task);
         }
     }
+}
+
+static void check_lower_drain(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, false);
+}
+
+// The tasks' loop for -g's rows (check_program_lower_sources): a copy of its own (check_lower_drain_body).
+static __attribute__((noinline)) void check_lower_drain_sources(CheckLowerWriter* writer)
+{
+    check_lower_drain_body(writer, true);
 }
 
 // An initializer's value, converted to its part's type: its expression, or the object an overloaded function's
@@ -3009,6 +3103,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         {
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
+            check_lower_source(writer, write->token);
             if (object)
             {
                 check_lower_object_part(writer, control.target, part, local);
@@ -3390,7 +3485,12 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
     return calls;
 }
 
-static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
+// The lowering, as check_program_lower and check_program_lower_sources compile it: with `sources`, each function's entries'
+// source tokens too (CheckProgramLowered.entry_tokens). It is a constant in each, so that the plain lowering, every
+// compile's without -g, carries none of the tokens' state through its loops: a flag clang can't fold there made it spill
+// more in them, which every compile paid (#426).
+static inline __attribute__((always_inline)) bool check_program_lower_body(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
+                                                                          Arena* output, Arena* scratch)
 {
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -3465,12 +3565,14 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     BUSTER_CHECK_LOWER_ABI(variadic, uint8_t, abi_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
     CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar,
-                                .x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0 };
+                                .sources = sources, .x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0 };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer.field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer.field != 0
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, sources ? capacity : 1);
+    BUSTER_CHECK_LOWER_COLUMN(task_sources, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_heads, uint32_t, track ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(stack_parents, uint32_t, track ? capacity : 1);
@@ -3529,7 +3631,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     uint32_t* local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
-    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0);
+    lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+    valid = valid && signatures != 0 && incoming != 0 && local_first != 0 && local_next != 0 && (program->body_count == 0 || lowered->functions != 0) &&
+            (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -3576,6 +3680,11 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.count = 0;
         writer.label_entry_count = 0;
         writer.depth = 0;
+        if (sources)
+        {
+            writer.filled = 0;
+            writer.settled = 0;
+        }
         writer.local_count = 0;
         writer.call_count = 0;
         writer.argument_count = 0;
@@ -3592,6 +3701,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         writer.body = program->bodies + b;
         writer.result = result;
         writer.token = body.declaration;
+        check_lower_source(&writer, body.declaration);
         writer.hidden = BUSTER_CHECK_NONE;
         writer.variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         writer.save_anchor = BUSTER_CHECK_NONE;
@@ -3745,13 +3855,27 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         }
         for (uint32_t i = 0; i < body.entry_count && lowered->status == CHECK_PROGRAM_OK; i += 1)
         {
+            if (sources)
+            {
+                // A statement's entries are its token's (check_lower_task_source sets a nested one's).
+                check_lower_change_source(&writer, program->controls[body.first + i].token);
+            }
             check_lower_control(&writer, i);
-            check_lower_drain(&writer);
+            if (sources)
+            {
+                check_lower_drain_sources(&writer);
+            }
+            else
+            {
+                check_lower_drain(&writer);
+            }
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
         const bool falls = writer.track ? writer.reachable || writer.label_heads[body.count] != BUSTER_CHECK_NONE :
                                           writer.count == 0 || writer.kinds[writer.count - 1] != BUSTER_TYPED_RETURN;
         check_lower_place(&writer, body.count);
+        // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer).
+        check_lower_source(&writer, program->parser->tree.parents[body.opening]);
         for (uint32_t local = 0; local < writer.local_count; local += 1)
         {
             if (writer.indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)
@@ -3774,7 +3898,14 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         else if (aggregate_result && falls)
         {
             check_lower_return_aggregate(&writer, BUSTER_CHECK_NONE);
-            check_lower_drain(&writer);
+            if (sources)
+            {
+                check_lower_drain_sources(&writer);
+            }
+            else
+            {
+                check_lower_drain(&writer);
+            }
         }
         for (uint32_t i = 0; i < writer.count && lowered->status == CHECK_PROGRAM_OK; i += 1)
         {
@@ -3847,6 +3978,21 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
         BUSTER_CHECK_LOWER_COPY(label_entries, label_entries, uint32_t, writer.label_entry_count);
         function->label_count = writer.label_entry_count;
 #undef BUSTER_CHECK_LOWER_COPY
+        if (sources && lowered->status == CHECK_PROGRAM_OK)
+        {
+            // The last entries' token, the closing brace's.
+            check_lower_settle(&writer);
+            uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)writer.count + 1);
+            if (tokens != 0)
+            {
+                memcpy(tokens, writer.tokens, (uint64_t)writer.count * sizeof(uint32_t));
+                lowered->entry_tokens[b] = tokens;
+            }
+            else
+            {
+                check_lower_fail(&writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own
         // call, which abi_assign gives below.
         incoming[b] = writer.save_anchor != BUSTER_CHECK_NONE;
@@ -3928,7 +4074,9 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
                     function->parameters = parameters;
                 }
             }
-            const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate(function) : (Tier0Check){ .error = TIER0_OK };
+            // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
+            // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
+            const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate_inline(function) : (Tier0Check){ .error = TIER0_OK };
             if (check.error != TIER0_OK)
             {
                 lowered->status = CHECK_PROGRAM_INVALID;
@@ -3955,4 +4103,17 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
     }
     arena_pop_to(scratch, temporary);
     return valid;
+}
+
+static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
+{
+    return check_program_lower_body(lowered, program, scalar, false, output, scratch);
+}
+
+// The lowering with each function's entries' source tokens (CheckProgramLowered.entry_tokens), for -g's rows: a copy of
+// its own (check_program_lower_body).
+static __attribute__((noinline)) bool check_program_lower_sources(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output,
+                                                                  Arena* scratch)
+{
+    return check_program_lower_body(lowered, program, scalar, true, output, scratch);
 }
