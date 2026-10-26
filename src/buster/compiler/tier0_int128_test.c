@@ -10,6 +10,8 @@
 //     every class, through constants, arithmetic, shifts by constant and variable counts, ?:, DUP, STORE's kept value and
 //     conversions both ways, under live values (an output's address, an integer added after) at the depths of MUL's rax
 //     and rdx and a shift's rcx, against this file's own stack machine over the same stream (tier0_test_int128_interpret);
+//   - boundaries: each 128-bit class's compares and shifts right (and left, by a variable count) on pairs of boundary
+//     values, against the interpreter and against C's own operators;
 //   - functions of 128-bit parameters and results, which the convention passes as two INTEGER eightbytes in registers or
 //     on the stack (Tier 0 takes them as 16-byte objects, as a front end hands them), and functions calling C functions
 //     of them, called from C on boundary values;
@@ -659,26 +661,34 @@ static void tier0_test_int128_run_body(const void* code, Tier0TestInt128Shared* 
     body(shared->in, shared->ints, shared->out);
 }
 
-// What the programs reach, which the default count must cover whole, in bitmaps of their own so that no bit of one
-// stands for another's: each kind of 128-bit integer entry (CONST, DUP, NEG, NOT, LOAD, STORE, SET, ADD to XOR but
-// division, the shifts, each compare, JUMP_VALUE), each conversion to one and from one, by the other class, and MUL's and
-// the shifts' saves of rax, rdx and rcx.
+// What the programs reach, which the default count must cover whole, for each 128-bit class apart (index 0 I128, 1 U128:
+// their signed and unsigned code differs), in bitmaps of their own so that no bit of one stands for another's: each kind
+// of entry of the class (CONST, DUP, NEG, NOT, LOAD, STORE, SET, ADD to XOR but division, the shifts, JUMP_VALUE, and
+// each compare of two values of it), each conversion to it by its source class and from it by its destination class, and
+// MUL's and the shifts' saves of rax, rdx and rcx.
 typedef struct Tier0TestInt128Reach Tier0TestInt128Reach;
 struct Tier0TestInt128Reach
 {
     // A bit per kind, below BUSTER_TYPED_KIND_LIMIT.
-    uint64_t kinds;
-    // A bit per class, below BUSTER_TYPED_CLASS_LIMIT: converted to a 128-bit class, and from one.
-    uint16_t to;
-    uint16_t from;
+    uint64_t kinds[2];
+    // A bit per class, below BUSTER_TYPED_CLASS_LIMIT: converted to the 128-bit class (its source), and from it (its
+    // destination).
+    uint16_t to[2];
+    uint16_t from[2];
     // A bit per fixed register saved, BUSTER_TIER0_TEST_INT128_SAVE_*.
-    uint8_t saves;
+    uint8_t saves[2];
 };
 
 #define BUSTER_TIER0_TEST_INT128_SAVE_RAX 1
 #define BUSTER_TIER0_TEST_INT128_SAVE_RDX 2
 #define BUSTER_TIER0_TEST_INT128_SAVE_RCX 4
 #define BUSTER_TIER0_TEST_INT128_SAVES 7
+
+// A 128-bit class's index in Tier0TestInt128Reach's arrays.
+static uint32_t tier0_test_int128_index(uint32_t class)
+{
+    return class == BUSTER_TYPED_CLASS_U128 ? 1 : 0;
+}
 
 static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Program* program)
 {
@@ -689,29 +699,32 @@ static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Progr
         const uint32_t kind = program->kinds[i];
         const uint32_t class = program->classes[i];
         const uint32_t operand = i > 0 ? program->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
-        const bool wide = tier0_class_int128(class) || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && tier0_class_int128(operand));
+        const bool compare = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && tier0_class_int128(operand);
+        const bool wide = tier0_class_int128(class) || compare;
+        // The 128-bit class the entry's code is for: a compare's operands', or its own.
+        const uint32_t index = tier0_test_int128_index(compare ? operand : class);
         if (kind == BUSTER_TYPED_CONVERT && tier0_class_int128(class))
         {
-            reached.to |= (uint16_t)(1u << operand);
+            reached.to[index] |= (uint16_t)(1u << operand);
         }
         else if (kind == BUSTER_TYPED_CONVERT && tier0_class_int128(operand))
         {
-            reached.from |= (uint16_t)(1u << class);
+            reached.from[tier0_test_int128_index(operand)] |= (uint16_t)(1u << class);
         }
         else if (wide)
         {
-            reached.kinds |= 1ull << kind;
+            reached.kinds[index] |= 1ull << kind;
         }
         // The integer stack's depth before the entry, by the stream's own effects (no fusion: the programs' 128-bit
         // entries absorb nothing, nor does the integer that sits under them).
         if (wide && kind == BUSTER_TYPED_MUL)
         {
-            reached.saves |= depth > 2 ? BUSTER_TIER0_TEST_INT128_SAVE_RAX : 0;
-            reached.saves |= depth > 4 ? BUSTER_TIER0_TEST_INT128_SAVE_RDX : 0;
+            reached.saves[index] |= depth > 2 ? BUSTER_TIER0_TEST_INT128_SAVE_RAX : 0;
+            reached.saves[index] |= depth > 4 ? BUSTER_TIER0_TEST_INT128_SAVE_RDX : 0;
         }
         if (wide && (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR))
         {
-            reached.saves |= depth > 3 ? BUSTER_TIER0_TEST_INT128_SAVE_RCX : 0;
+            reached.saves[index] |= depth > 3 ? BUSTER_TIER0_TEST_INT128_SAVE_RCX : 0;
         }
         const Tier0Shape shape = tier0_shapes[kind];
         const bool returns_nothing = kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID;
@@ -722,7 +735,7 @@ static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Progr
     return reached;
 }
 
-// Every kind and conversion the programs are meant to reach (tier0_test_int128_reached's bits).
+// Every kind, conversion and save the programs are meant to reach, for each class (tier0_test_int128_reached's bits).
 static Tier0TestInt128Reach tier0_test_int128_wanted(void)
 {
     static const uint8_t kinds[] = {
@@ -732,26 +745,42 @@ static Tier0TestInt128Reach tier0_test_int128_wanted(void)
         BUSTER_TYPED_JUMP_VALUE,
     };
     Tier0TestInt128Reach wanted = { 0 };
-    wanted.saves = BUSTER_TIER0_TEST_INT128_SAVES;
-    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+    for (uint32_t index = 0; index < 2; index += 1)
     {
-        wanted.kinds |= 1ull << kinds[k];
+        const uint32_t class = index == 0 ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_U128;
+        wanted.saves[index] = BUSTER_TIER0_TEST_INT128_SAVES;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+        {
+            wanted.kinds[index] |= 1ull << kinds[k];
+        }
+        for (uint32_t integer = BUSTER_TYPED_CLASS_I8; integer <= BUSTER_TYPED_CLASS_U64; integer += 1)
+        {
+            wanted.to[index] |= (uint16_t)(1u << integer);
+            wanted.from[index] |= (uint16_t)(1u << integer);
+        }
+        wanted.to[index] |= (uint16_t)(1u << tier0_test_int128_other(class));
     }
-    for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
-    {
-        wanted.to |= (uint16_t)(1u << class);
-        wanted.from |= (uint16_t)(1u << class);
-    }
-    wanted.to |= (uint16_t)(1u << BUSTER_TYPED_CLASS_I128 | 1u << BUSTER_TYPED_CLASS_U128);
     return wanted;
+}
+
+// Adds what one checked program reached.
+static void tier0_test_int128_reach(Tier0TestInt128Reach* reached, const Tier0TestInt128Reach* program)
+{
+    for (uint32_t index = 0; index < 2; index += 1)
+    {
+        reached->kinds[index] |= program->kinds[index];
+        reached->to[index] |= program->to[index];
+        reached->from[index] |= program->from[index];
+        reached->saves[index] |= program->saves[index];
+    }
 }
 
 // A function compiled by both paths, which must make the same code, its records valid, its branches sized, and encoded by
 // both encoders into `image` (the vector one's) and `scratch` (the scalar one's), which must be the same bytes. Returns
-// the code's length, 0 for a failure, and in *error Tier 0's error (a depth past the slots is one both paths give alike,
-// not a failure).
+// the code's length, 0 for a failure, and in *error Tier 0's error. Any error is a failure but, with `depth_allowed`, a
+// depth past the slots, which both paths give alike for a random program that stacks too many values.
 static uint32_t tier0_test_int128_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, uint8_t* scratch,
-                                         Tier0Error* error)
+                                         bool depth_allowed, Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
     const Tier0Code scalar = tier0_compile_scalar(function, arena);
@@ -759,6 +788,8 @@ static uint32_t tier0_test_int128_encode(Tier0TestTally* tally, const char* name
     *error = scalar.error;
     bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "int128", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)",
                                    name, check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
+    ready = ready && tier0_test_expect(tally, scalar.error == TIER0_OK || (depth_allowed && scalar.error == TIER0_ERROR_DEPTH), "int128",
+                                       "%s: both paths refuse it with error %d at entry %u", name, scalar.error, scalar.node);
     ready = ready && scalar.error == TIER0_OK;
     ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
@@ -773,6 +804,133 @@ static uint32_t tier0_test_int128_encode(Tier0TestTally* tally, const char* name
     ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(image, scratch, (size_t)vector_length) == 0, "int128",
                                        "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
     return ready ? (uint32_t)vector_length : 0;
+}
+
+// A program's code (`length` bytes at `image`) run natively on the inputs in `shared`, and by the interpreter on the same
+// ones: every output slot it wrote must have the interpreter's bytes. Returns whether it ran and every output matched.
+static bool tier0_test_int128_check(Tier0TestTally* tally, const char* name, const Tier0TestInt128Program* program, const uint8_t* image, uint32_t length,
+                                    Tier0TestInt128Shared* shared)
+{
+    memset(shared->out, 0xa5, sizeof(shared->out));
+    const bool ran = tier0_test_expect(tally, tier0_test_int128_native(image, length, tier0_test_int128_run_body, shared), "int128", "%s: the native run failed",
+                                       name);
+    uint8_t expected[sizeof(shared->out)];
+    memset(expected, 0xa5, sizeof(expected));
+    const uint64_t parameters[3] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)expected };
+    const bool interpreted = tier0_test_expect(tally, tier0_test_int128_interpret(program, parameters), "int128", "%s: the interpreter can't run it", name);
+    bool same = ran && interpreted;
+    for (uint32_t o = 0; o < BUSTER_TIER0_TEST_INT128_OUTPUTS && ran && interpreted; o += 1)
+    {
+        const uint32_t class = program->outputs[o];
+        const uint32_t bytes = tier0_class_bytes(class);
+        same = tier0_test_expect(tally, memcmp(shared->out + 16 * o, expected + 16 * o, bytes) == 0, "int128", "%s: output %u (class %u) differs from the interpreter's",
+                                 name, o, class) &&
+               same;
+    }
+    return same;
+}
+
+// Boundaries: for each 128-bit class and each pair (a, b) of boundary values, a program writes a's six compares with b,
+// a shifted right by the constant counts around the halves' edges, and a shifted right and left by variable counts.
+// Each output must be the interpreter's and, apart from it, what C's own operators give: __int128's signed compares and
+// arithmetic shift, unsigned __int128's unsigned ones and logical shift.
+#define BUSTER_TIER0_TEST_INT128_BOUNDARIES 10
+
+static void tier0_test_int128_boundaries(Tier0TestTally* tally, const Tier0TestInt128Abi* abi, Tier0TestInt128Shared* shared)
+{
+    static const uint8_t counts[6] = { 0, 1, 63, 64, 65, 127 };
+    // The variable counts: two right shifts, then two left ones.
+    static const uint64_t variable[4] = { 127, 64, 1, 127 };
+    const Tier0TestWide minimum = (Tier0TestWide)1 << 127;
+    const Tier0TestWide values[BUSTER_TIER0_TEST_INT128_BOUNDARIES] = {
+        0, 1, ~(Tier0TestWide)0, minimum - 1, minimum, (Tier0TestWide)1 << 63, (Tier0TestWide)1 << 64, ~(Tier0TestWide)0 << 64, ((Tier0TestWide)1 << 64) - 1,
+        ~(Tier0TestWide)0 << 63,
+    };
+    Tier0TestInt128Program* program = calloc(1, sizeof(Tier0TestInt128Program));
+    uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
+    Arena arena = arena_reserve(1ull << 24);
+    const bool ready = tier0_test_expect(tally, program != 0 && image != 0 && arena.base != 0, "int128", "no memory");
+    for (uint32_t index = 0; index < 2 && ready; index += 1)
+    {
+        const uint32_t class = index == 0 ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_U128;
+        const bool is_signed = class == BUSTER_TYPED_CLASS_I128;
+        memset(program, 0, sizeof(*program));
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            tier0_test_int128_element(program, 2, k, 16);
+            tier0_test_int128_element(program, 0, 0, 16);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_test_int128_element(program, 0, 1, 16);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_EQ + k, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_I32, 0);
+            program->outputs[k] = BUSTER_TYPED_CLASS_I32;
+        }
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            tier0_test_int128_element(program, 2, 6 + k, 16);
+            tier0_test_int128_element(program, 0, 0, 16);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, counts[k]);
+            tier0_test_int128_emit(program, BUSTER_TYPED_SHR, class, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_SET, class, 0);
+            program->outputs[6 + k] = (uint8_t)class;
+        }
+        for (uint32_t k = 0; k < 4; k += 1)
+        {
+            tier0_test_int128_element(program, 2, 12 + k, 16);
+            tier0_test_int128_element(program, 0, 0, 16);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, class, 0);
+            tier0_test_int128_element(program, 1, k, 8);
+            tier0_test_int128_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 127);
+            tier0_test_int128_emit(program, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_int128_emit(program, k < 2 ? BUSTER_TYPED_SHR : BUSTER_TYPED_SHL, class, 0);
+            tier0_test_int128_emit(program, BUSTER_TYPED_SET, class, 0);
+            program->outputs[12 + k] = (uint8_t)class;
+        }
+        tier0_test_int128_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        char name[64];
+        snprintf(name, sizeof(name), "boundaries of class %u", class);
+        arena_pop_to(&arena, 0);
+        const Tier0Function function = tier0_test_int128_function(program, abi);
+        Tier0Error error = TIER0_OK;
+        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        for (uint32_t pair = 0; pair < BUSTER_TIER0_TEST_INT128_BOUNDARIES * BUSTER_TIER0_TEST_INT128_BOUNDARIES && length != 0; pair += 1)
+        {
+            const Tier0TestWide a = values[pair / BUSTER_TIER0_TEST_INT128_BOUNDARIES];
+            const Tier0TestWide b = values[pair % BUSTER_TIER0_TEST_INT128_BOUNDARIES];
+            memset(shared->in, 0, sizeof(shared->in));
+            memset(shared->ints, 0, sizeof(shared->ints));
+            shared->in[0] = a;
+            shared->in[1] = b;
+            memcpy(shared->ints, variable, sizeof(variable));
+            char case_name[96];
+            snprintf(case_name, sizeof(case_name), "%s, values %u and %u", name, pair / BUSTER_TIER0_TEST_INT128_BOUNDARIES, pair % BUSTER_TIER0_TEST_INT128_BOUNDARIES);
+            const bool same = tier0_test_int128_check(tally, case_name, program, image, length, shared);
+            const bool less = is_signed ? (__int128)a < (__int128)b : a < b;
+            const bool compares[6] = { a == b, a != b, less, less || a == b, !less && a != b, !less };
+            for (uint32_t k = 0; k < 6 && same; k += 1)
+            {
+                int32_t result = 0;
+                memcpy(&result, shared->out + 16 * k, sizeof(result));
+                tier0_test_expect(tally, result == (int32_t)compares[k], "int128", "%s: compare %u gives %d", case_name, k, result);
+            }
+            for (uint32_t k = 0; k < 10 && same; k += 1)
+            {
+                const uint32_t n = k < 6 ? counts[k] : (uint32_t)(variable[k - 6] & 127);
+                const bool left = k >= 8;
+                const Tier0TestWide expected = left ? a << n : is_signed ? (Tier0TestWide)((__int128)a >> n) : a >> n;
+                Tier0TestWide result = 0;
+                memcpy(&result, shared->out + 16 * (6 + k), sizeof(result));
+                tier0_test_expect(tally, result == expected, "int128", "%s: the shift %s by %u gives %016" PRIx64 "%016" PRIx64 ", %016" PRIx64 "%016" PRIx64 " expected",
+                                  case_name, left ? "left" : "right", n, (uint64_t)(result >> 64), (uint64_t)result, (uint64_t)(expected >> 64), (uint64_t)expected);
+            }
+        }
+    }
+    arena_release(&arena);
+    free(image);
+    free(program);
 }
 
 // Random programs: each generated, compiled and encoded, then run natively on random inputs and by the interpreter on the
@@ -799,7 +957,7 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         }
         const Tier0Function function = tier0_test_int128_function(program, abi);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, true, &error);
         *too_deep += error == TIER0_ERROR_DEPTH ? 1 : 0;
         *entries += program->count;
         if (length == 0)
@@ -814,42 +972,28 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         {
             shared->ints[k] = tier0_test_int128_random64(&state);
         }
-        memset(shared->out, 0xa5, sizeof(shared->out));
-        const bool ran = tier0_test_expect(tally, tier0_test_int128_native(image, length, tier0_test_int128_run_body, shared), "int128", "%s: the native run failed",
-                                           name);
-        uint8_t expected[sizeof(shared->out)];
-        memset(expected, 0xa5, sizeof(expected));
-        const uint64_t parameters[3] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)expected };
-        const bool interpreted = tier0_test_expect(tally, tier0_test_int128_interpret(program, parameters), "int128", "%s: the interpreter can't run it", name);
-        bool same = ran && interpreted;
-        for (uint32_t o = 0; o < BUSTER_TIER0_TEST_INT128_OUTPUTS && ran && interpreted; o += 1)
-        {
-            const uint32_t class = program->outputs[o];
-            const uint32_t bytes = tier0_class_bytes(class);
-            same = tier0_test_expect(tally, memcmp(shared->out + 16 * o, expected + 16 * o, bytes) == 0, "int128", "%s: output %u (class %u) differs from the interpreter's",
-                                     name, o, class) &&
-                   same;
-        }
+        const bool same = tier0_test_int128_check(tally, name, program, image, length, shared);
         // Only a program compiled, run and checked counts toward what the programs reach: a refused one (a depth past
         // the slots) emitted none of its code.
         if (same)
         {
             const Tier0TestInt128Reach program_reached = tier0_test_int128_reached(program);
-            reached.kinds |= program_reached.kinds;
-            reached.to |= program_reached.to;
-            reached.from |= program_reached.from;
-            reached.saves |= program_reached.saves;
+            tier0_test_int128_reach(&reached, &program_reached);
         }
     }
     const Tier0TestInt128Reach wanted = tier0_test_int128_wanted();
-    const uint64_t missing_kinds = wanted.kinds & ~reached.kinds;
-    const uint32_t missing_to = wanted.to & ~reached.to;
-    const uint32_t missing_from = wanted.from & ~reached.from;
-    const uint32_t missing_saves = wanted.saves & ~reached.saves;
-    const bool missing = missing_kinds != 0 || missing_to != 0 || missing_from != 0 || missing_saves != 0;
-    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_INT128_PROGRAMS || !missing, "int128",
-                      "the checked programs don't reach every kind, conversion and save (missing kinds %#" PRIx64 ", conversions to %#x and from %#x, saves %#x)",
-                      missing_kinds, missing_to, missing_from, missing_saves);
+    for (uint32_t index = 0; index < 2; index += 1)
+    {
+        const uint64_t missing_kinds = wanted.kinds[index] & ~reached.kinds[index];
+        const uint32_t missing_to = wanted.to[index] & ~reached.to[index];
+        const uint32_t missing_from = wanted.from[index] & ~reached.from[index];
+        const uint32_t missing_saves = wanted.saves[index] & ~reached.saves[index];
+        const bool missing = missing_kinds != 0 || missing_to != 0 || missing_from != 0 || missing_saves != 0;
+        tier0_test_expect(tally, count < BUSTER_TIER0_TEST_INT128_PROGRAMS || !missing, "int128",
+                          "the checked programs don't reach every kind, conversion and save of %s (missing kinds %#" PRIx64
+                          ", conversions to it from %#x and from it to %#x, saves %#x)",
+                          index == 0 ? "I128" : "U128", missing_kinds, missing_to, missing_from, missing_saves);
+    }
     arena_release(&arena);
     free(image);
     free(program);
@@ -1160,7 +1304,7 @@ static void tier0_test_int128_functions(Tier0TestTally* tally, const Tier0TestIn
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_int128_written_function(&written, abi, signatures[which], 16);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_int128_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
+        const uint32_t length = tier0_test_int128_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
         const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_int128_native(image, length, runs[which], shared), "int128", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < 16 && ran; k += 1)
         {
@@ -1251,7 +1395,7 @@ static void tier0_test_int128_slots(Tier0TestTally* tally, const Tier0TestInt128
             tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector) && (fits ? scalar.error == TIER0_OK : scalar.error == TIER0_ERROR_DEPTH), "int128",
                               "%s: the paths give %d and %d", name, scalar.error, vector.error);
             Tier0Error error = TIER0_OK;
-            const uint32_t length = fits ? tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error) : 0;
+            const uint32_t length = fits ? tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error) : 0;
             memset(shared->out, 0xa5, sizeof(shared->out));
             const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_int128_native(image, length, tier0_test_int128_run_slots, shared), "int128",
                                                               "%s: the native run failed", name);
@@ -1436,6 +1580,7 @@ static void tier0_test_int128(Tier0TestTally* tally, Tier0Tables* tables, uint64
         tier0_test_int128_rules(tally, &abi);
         tier0_test_int128_slots(tally, &abi, shared);
         tier0_test_int128_functions(tally, &abi, shared);
+        tier0_test_int128_boundaries(tally, &abi, shared);
         tier0_test_int128_programs(tally, &abi, seed, count, shared, too_deep, entries);
     }
     if (shared != MAP_FAILED)
