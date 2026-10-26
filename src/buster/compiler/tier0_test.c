@@ -29,9 +29,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
-// The calling convention's compiled worlds keep their calls within Tier 0's depths (calling_convention_test.c).
+// The calling convention's compiled worlds keep their calls within Tier 0's depths, and their types within its objects'
+// alignments (calling_convention_test.c).
 _Static_assert(BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS == BUSTER_TIER0_INTEGER_DEPTHS && BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS == BUSTER_TIER0_FLOATING_DEPTHS,
                "the compiled worlds' depths must be Tier 0's");
+_Static_assert(BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 == BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2, "the compiled worlds' alignments must be Tier 0's");
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally

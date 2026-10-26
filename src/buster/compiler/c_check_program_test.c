@@ -919,6 +919,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "A64 pass(A64 y,int k){y.c+=(char)k;y.d*=2;return y;}"
         "int tested(int n){A32 p=make(n);A64 q={(char)n,n*0.25};A32 r=make(n+5);A64 t=pass(q,n);return (int)take(p,n,t,r)+(int)t.d;}",
         "aggregates-aligned-past-16-by-value", clang);
+    // A variadic definition whose named argument is aligned to 32 (on its caller's stack, aligned to 32 at the call): its
+    // incoming area so aligned, and the unnamed arguments after it, each read at its own alignment.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(32) long a;int b;}A32;typedef struct{_Alignas(64) char c;long d;}A64;"
+        "long sum(int count,A32 first,...){__builtin_va_list ap;__builtin_va_start(ap,first);long s=first.a+first.b+(long)((unsigned long)&first&31)*1000;"
+        "for(int i=0;i<count;i++){A64 x=__builtin_va_arg(ap,A64);s+=x.c+x.d*(i+1);}long last=__builtin_va_arg(ap,long);__builtin_va_end(ap);return s+last;}"
+        "int tested(int n){A32 f={n,n+1};A64 x={(char)n,n*3L};A64 y={(char)(n+1),n*5L};return (int)(sum(2,f,x,y,(long)n*7)%1000003);}",
+        "variadic-named-argument-aligned-past-16", clang);
     // Parameters of types aligned past 8 bytes: objects of their alignment, from a register's part or an 8-byte stack slot.
     check_test_program_source(test,
         "typedef int aligned_int __attribute__((aligned(32)));typedef double aligned_double __attribute__((aligned(16)));"
@@ -1514,11 +1522,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, true, 0, 1);
-    // A variadic function's named arguments aligned past 16 bytes, which Tier 0's incoming variadic frame doesn't take.
-    check_test_program_boundary_reason(test,
-                                       "typedef struct{_Alignas(32) long a;}A;int tested(int n,A a,...){__builtin_va_list ap;__builtin_va_start(ap,a);"
-                                       "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x+(int)a.a;}",
-                                       "variadic-named-arguments-aligned-past-16", true, false, 0, 1, "variadic functions with named arguments aligned past 16 bytes");
+
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);
     check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",

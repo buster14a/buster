@@ -4907,13 +4907,6 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
                     function->parameters = parameters;
                 }
             }
-            // Tier 0's incoming variadic frame takes the convention's 16 bytes' alignment of the named arguments alone.
-            if (function->incoming_variadic != 0 && function->incoming_variadic->stack_alignment_log2 > BUSTER_ABI_STACK_ALIGNMENT_LOG2)
-            {
-                lowered->status = CHECK_PROGRAM_UNSUPPORTED;
-                lowered->token = program->bodies[b].declaration;
-                lowered->reason = "variadic functions with named arguments aligned past 16 bytes";
-            }
             // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
             // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
             const Tier0Check check = lowered->status == CHECK_PROGRAM_OK ? tier0_validate_inline(function) : (Tier0Check){ .error = TIER0_OK };

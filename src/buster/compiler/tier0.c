@@ -398,8 +398,10 @@ static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Functio
     const AbiCall* incoming = function->incoming_variadic;
     if (incoming != 0)
     {
+        // The incoming area at 16 bytes' alignment, or a named argument's past it, which raises it.
         valid = valid && incoming->integer_registers <= BUSTER_ABI_INTEGER_ARGUMENTS && incoming->vector_registers <= BUSTER_ABI_VECTOR_ARGUMENTS &&
-            incoming->stack_alignment_log2 == BUSTER_ABI_STACK_ALIGNMENT_LOG2 && incoming->stack_bytes % BUSTER_ABI_SLOT_BYTES == 0 && incoming->stack_bytes <= INT32_MAX;
+            incoming->stack_alignment_log2 >= BUSTER_ABI_STACK_ALIGNMENT_LOG2 && incoming->stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 &&
+            incoming->stack_bytes % BUSTER_ABI_SLOT_BYTES == 0 && incoming->stack_bytes <= INT32_MAX;
     }
     for (uint32_t local = 0; valid && local < function->local_count; local += 1)
     {
@@ -768,14 +770,16 @@ static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0P
 }
 
 // Whether parameter `p` keeps its incoming stack bytes as its home: a value on the stack, or an aggregate on the stack
-// whole at a multiple of its alignment (the incoming area starts at a multiple of 16, or of an argument's alignment past
-// it, which its caller's outgoing area keeps: AbiCall.stack_alignment_log2). The prologue copies the others'
-// slots into their objects: the high eightbyte alone, and two eightbytes that LLVM put in slots of 8 bytes each when it
-// had no register left for them, whatever the aggregate's alignment.
+// whole at a multiple of its alignment, to 16 (the incoming area starts at a multiple of 16). The prologue copies the
+// others' slots into their objects: the high eightbyte alone, two eightbytes that LLVM put in slots of 8 bytes each when
+// it had no register left for them, whatever the aggregate's alignment, and an object aligned past 16, whose caller
+// aligns its slot only as far as its type's own alignment goes (an aligned typedef passes as its base: AbiCall's
+// stack_alignment_log2), into the realigned frame.
 static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
 {
     const AbiLocation location = function->parameters[p];
-    const bool aligned = tier0_is_object(function, p) && location.stack_offset % (1u << function->local_alignments[p]) == 0;
+    const uint32_t alignment_log2 = tier0_is_object(function, p) ? function->local_alignments[p] : 0;
+    const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
