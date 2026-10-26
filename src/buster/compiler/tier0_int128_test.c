@@ -659,13 +659,30 @@ static void tier0_test_int128_run_body(const void* code, Tier0TestInt128Shared* 
     body(shared->in, shared->ints, shared->out);
 }
 
-// What the programs reach, which the default count must cover whole: each kind of 128-bit integer entry (CONST, DUP, NEG,
-// NOT, LOAD, STORE, SET, ADD to XOR but division, the shifts, each compare, JUMP_VALUE), each conversion to one and from
-// one, by the other class (bit 32 + class: to; bit 48 + class: from), and MUL's and the shifts' saves of rax, rdx and rcx
-// (bits 60, 61 and 62).
-static uint64_t tier0_test_int128_reached(const Tier0TestInt128Program* program)
+// What the programs reach, which the default count must cover whole, in bitmaps of their own so that no bit of one
+// stands for another's: each kind of 128-bit integer entry (CONST, DUP, NEG, NOT, LOAD, STORE, SET, ADD to XOR but
+// division, the shifts, each compare, JUMP_VALUE), each conversion to one and from one, by the other class, and MUL's and
+// the shifts' saves of rax, rdx and rcx.
+typedef struct Tier0TestInt128Reach Tier0TestInt128Reach;
+struct Tier0TestInt128Reach
 {
-    uint64_t reached = 0;
+    // A bit per kind, below BUSTER_TYPED_KIND_LIMIT.
+    uint64_t kinds;
+    // A bit per class, below BUSTER_TYPED_CLASS_LIMIT: converted to a 128-bit class, and from one.
+    uint16_t to;
+    uint16_t from;
+    // A bit per fixed register saved, BUSTER_TIER0_TEST_INT128_SAVE_*.
+    uint8_t saves;
+};
+
+#define BUSTER_TIER0_TEST_INT128_SAVE_RAX 1
+#define BUSTER_TIER0_TEST_INT128_SAVE_RDX 2
+#define BUSTER_TIER0_TEST_INT128_SAVE_RCX 4
+#define BUSTER_TIER0_TEST_INT128_SAVES 7
+
+static Tier0TestInt128Reach tier0_test_int128_reached(const Tier0TestInt128Program* program)
+{
+    Tier0TestInt128Reach reached = { 0 };
     int32_t depth = 0;
     for (uint32_t i = 0; i < program->count; i += 1)
     {
@@ -675,26 +692,26 @@ static uint64_t tier0_test_int128_reached(const Tier0TestInt128Program* program)
         const bool wide = tier0_class_int128(class) || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && tier0_class_int128(operand));
         if (kind == BUSTER_TYPED_CONVERT && tier0_class_int128(class))
         {
-            reached |= 1ull << (32 + operand);
+            reached.to |= (uint16_t)(1u << operand);
         }
         else if (kind == BUSTER_TYPED_CONVERT && tier0_class_int128(operand))
         {
-            reached |= 1ull << (48 + class);
+            reached.from |= (uint16_t)(1u << class);
         }
         else if (wide)
         {
-            reached |= 1ull << kind;
+            reached.kinds |= 1ull << kind;
         }
         // The integer stack's depth before the entry, by the stream's own effects (no fusion: the programs' 128-bit
         // entries absorb nothing, nor does the integer that sits under them).
         if (wide && kind == BUSTER_TYPED_MUL)
         {
-            reached |= depth > 2 ? 1ull << 60 : 0;
-            reached |= depth > 4 ? 1ull << 61 : 0;
+            reached.saves |= depth > 2 ? BUSTER_TIER0_TEST_INT128_SAVE_RAX : 0;
+            reached.saves |= depth > 4 ? BUSTER_TIER0_TEST_INT128_SAVE_RDX : 0;
         }
         if (wide && (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR))
         {
-            reached |= depth > 3 ? 1ull << 62 : 0;
+            reached.saves |= depth > 3 ? BUSTER_TIER0_TEST_INT128_SAVE_RCX : 0;
         }
         const Tier0Shape shape = tier0_shapes[kind];
         const bool returns_nothing = kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID;
@@ -706,7 +723,7 @@ static uint64_t tier0_test_int128_reached(const Tier0TestInt128Program* program)
 }
 
 // Every kind and conversion the programs are meant to reach (tier0_test_int128_reached's bits).
-static uint64_t tier0_test_int128_wanted(void)
+static Tier0TestInt128Reach tier0_test_int128_wanted(void)
 {
     static const uint8_t kinds[] = {
         BUSTER_TYPED_CONST, BUSTER_TYPED_DUP, BUSTER_TYPED_NEG, BUSTER_TYPED_NOT, BUSTER_TYPED_LOAD, BUSTER_TYPED_STORE, BUSTER_TYPED_SET,
@@ -714,16 +731,18 @@ static uint64_t tier0_test_int128_wanted(void)
         BUSTER_TYPED_SHR,   BUSTER_TYPED_EQ,  BUSTER_TYPED_NE,  BUSTER_TYPED_LT,  BUSTER_TYPED_LE,   BUSTER_TYPED_GT,    BUSTER_TYPED_GE,
         BUSTER_TYPED_JUMP_VALUE,
     };
-    uint64_t wanted = 1ull << 60 | 1ull << 61 | 1ull << 62;
+    Tier0TestInt128Reach wanted = { 0 };
+    wanted.saves = BUSTER_TIER0_TEST_INT128_SAVES;
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
     {
-        wanted |= 1ull << kinds[k];
+        wanted.kinds |= 1ull << kinds[k];
     }
     for (uint32_t class = BUSTER_TYPED_CLASS_I8; class <= BUSTER_TYPED_CLASS_U64; class += 1)
     {
-        wanted |= 1ull << (32 + class) | 1ull << (48 + class);
+        wanted.to |= (uint16_t)(1u << class);
+        wanted.from |= (uint16_t)(1u << class);
     }
-    wanted |= 1ull << (32 + BUSTER_TYPED_CLASS_I128) | 1ull << (32 + BUSTER_TYPED_CLASS_U128);
+    wanted.to |= (uint16_t)(1u << BUSTER_TYPED_CLASS_I128 | 1u << BUSTER_TYPED_CLASS_U128);
     return wanted;
 }
 
@@ -762,7 +781,7 @@ static uint32_t tier0_test_int128_encode(Tier0TestTally* tally, const char* name
 static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt128Abi* abi, uint64_t seed, uint32_t count, Tier0TestInt128Shared* shared,
                                        uint32_t* too_deep, uint64_t* entries)
 {
-    uint64_t reached = 0;
+    Tier0TestInt128Reach reached = { 0 };
     Tier0TestInt128Program* program = calloc(1, sizeof(Tier0TestInt128Program));
     uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);
     Arena arena = arena_reserve(1ull << 26);
@@ -778,7 +797,6 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         {
             continue;
         }
-        reached |= tier0_test_int128_reached(program);
         const Tier0Function function = tier0_test_int128_function(program, abi);
         Tier0Error error = TIER0_OK;
         const uint32_t length = tier0_test_int128_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, &error);
@@ -803,17 +821,35 @@ static void tier0_test_int128_programs(Tier0TestTally* tally, const Tier0TestInt
         memset(expected, 0xa5, sizeof(expected));
         const uint64_t parameters[3] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)expected };
         const bool interpreted = tier0_test_expect(tally, tier0_test_int128_interpret(program, parameters), "int128", "%s: the interpreter can't run it", name);
+        bool same = ran && interpreted;
         for (uint32_t o = 0; o < BUSTER_TIER0_TEST_INT128_OUTPUTS && ran && interpreted; o += 1)
         {
             const uint32_t class = program->outputs[o];
             const uint32_t bytes = tier0_class_bytes(class);
-            tier0_test_expect(tally, memcmp(shared->out + 16 * o, expected + 16 * o, bytes) == 0, "int128", "%s: output %u (class %u) differs from the interpreter's", name,
-                              o, class);
+            same = tier0_test_expect(tally, memcmp(shared->out + 16 * o, expected + 16 * o, bytes) == 0, "int128", "%s: output %u (class %u) differs from the interpreter's",
+                                     name, o, class) &&
+                   same;
+        }
+        // Only a program compiled, run and checked counts toward what the programs reach: a refused one (a depth past
+        // the slots) emitted none of its code.
+        if (same)
+        {
+            const Tier0TestInt128Reach program_reached = tier0_test_int128_reached(program);
+            reached.kinds |= program_reached.kinds;
+            reached.to |= program_reached.to;
+            reached.from |= program_reached.from;
+            reached.saves |= program_reached.saves;
         }
     }
-    const uint64_t missing = tier0_test_int128_wanted() & ~reached;
-    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_INT128_PROGRAMS || missing == 0, "int128",
-                      "the programs don't reach every kind, conversion and save (tier0_test_int128_reached's bits %#" PRIx64 " missing)", missing);
+    const Tier0TestInt128Reach wanted = tier0_test_int128_wanted();
+    const uint64_t missing_kinds = wanted.kinds & ~reached.kinds;
+    const uint32_t missing_to = wanted.to & ~reached.to;
+    const uint32_t missing_from = wanted.from & ~reached.from;
+    const uint32_t missing_saves = wanted.saves & ~reached.saves;
+    const bool missing = missing_kinds != 0 || missing_to != 0 || missing_from != 0 || missing_saves != 0;
+    tier0_test_expect(tally, count < BUSTER_TIER0_TEST_INT128_PROGRAMS || !missing, "int128",
+                      "the checked programs don't reach every kind, conversion and save (missing kinds %#" PRIx64 ", conversions to %#x and from %#x, saves %#x)",
+                      missing_kinds, missing_to, missing_from, missing_saves);
     arena_release(&arena);
     free(image);
     free(program);
