@@ -317,6 +317,7 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         { "int f(struct P*p){return __builtin_constant_p(&p->w);}\n", 1 },
         { "int*f(struct P*p){return __builtin_choose_expr(0,(int*)0,&p->w);}\n", 1 },
         { "int*f(struct P*p){return _Generic(0,int:&p->w);}\n", 1 },
+        { "enum{VALUE=_Generic(1,int:7,default:1/0)}; _Static_assert(VALUE==7,\"generic\"); int*f(struct P*p){return &p->w;}\n", 1 },
         { "#pragma GCC diagnostic ignored \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 0 },
         { "#pragma GCC diagnostic error \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 1, true },
         { "#pragma GCC diagnostic ignored \"-Weverything\"\n#pragma GCC diagnostic warning \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n", 1 },

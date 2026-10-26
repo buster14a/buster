@@ -135,6 +135,12 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
     return valid;
 }
 
+static uint32_t check_input_packed_selection(const CheckInputReader* reader, uint32_t token)
+{
+    const uint32_t selected = reader->selected_tokens[token];
+    return selected != BUSTER_CHECK_NONE ? selected & ~CHECK_INPUT_SOURCE_SELECTION : BUSTER_CHECK_NONE;
+}
+
 static void check_input_packed_unwrap(const CheckInputReader* reader, uint32_t* first, uint32_t* end)
 {
     const Parser* parser = reader->parser;
@@ -155,9 +161,9 @@ static void check_input_packed_unwrap(const CheckInputReader* reader, uint32_t* 
             changed = true;
         }
         else if (*first + 1 < *end && parser->tree.roles[*first + 1] == PARSE_ROLE_OPEN_KEYWORD &&
-                 parser->tree.parents[*first + 1] == *end - 1 && reader->selected_tokens[*end - 1] != BUSTER_CHECK_NONE)
+                 parser->tree.parents[*first + 1] == *end - 1 && check_input_packed_selection(reader, *end - 1) != BUSTER_CHECK_NONE)
         {
-            const uint32_t selected = reader->selected_tokens[*end - 1];
+            const uint32_t selected = check_input_packed_selection(reader, *end - 1);
             *first = check_input_first_token(reader, selected);
             *end = reader->ends[selected] + 1;
             changed = true;
@@ -514,7 +520,7 @@ static CheckInputPackedContexts check_input_packed_contexts(CheckInputReader* re
             {
                 check_input_packed_exclude(events, count, token + 2, parser->tree.parents[token + 1]);
             }
-            const uint32_t selected = reader->selected_tokens[token];
+            const uint32_t selected = check_input_packed_selection(reader, token);
             if (selected != BUSTER_CHECK_NONE)
             {
                 const uint32_t keyword = reader->first_child[token];
@@ -555,7 +561,7 @@ static CheckInputPackedContexts check_input_packed_contexts(CheckInputReader* re
         memset(events, 0xff, (uint64_t)count * sizeof(uint32_t));
         for (uint32_t token = 0; token < count; token += 1)
         {
-            const uint32_t selected = reader->selected_tokens[token];
+            const uint32_t selected = check_input_packed_selection(reader, token);
             if (selected != BUSTER_CHECK_NONE)
             {
                 events[selected] = token;

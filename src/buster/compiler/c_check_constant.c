@@ -1478,9 +1478,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
-                if (reader->selected_tokens != NULL)
+                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root;
+                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
                 }
             }
             if (valid && input->proof_values != 0)
@@ -1557,9 +1557,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
-                if (reader->selected_tokens != NULL)
+                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root;
+                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
                 }
             }
             if (valid && input->proof_values != 0)

@@ -6,6 +6,10 @@
 // bracket depths and are never used as semantic dependency levels. Unsupported declarators and statements fail
 // explicitly; no unresolved name or unrecognized syntax acquires an invented int type.
 
+// Parser token indices are below 1 << 30. The high bit distinguishes a source-only selection retained by a
+// declaration/type-query proof from an evaluated selection that may supply an expression graph operand.
+#define CHECK_INPUT_SOURCE_SELECTION 0x80000000u
+
 typedef enum CheckInputMessage
 {
     CHECK_INPUT_UNSUPPORTED,
@@ -276,7 +280,7 @@ struct CheckInputReader
     uint8_t* designator_valid;
     uint32_t* designator_tokens;
     uint32_t* designator_ranges;
-    uint32_t* selected_tokens;
+    uint32_t* selected_tokens; // NONE, a runtime operand token, or SOURCE_SELECTION | a proof-only operand token.
     uint32_t* selection_type_ends;
     TypeId* selection_types;
     CheckValue* cached_constants;
@@ -3557,7 +3561,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 graph->leaves[node] = reader->cached_constants[reader->constant_present[token] - 1];
             }
         }
-        else if (reader->selected_tokens[token] != BUSTER_CHECK_NONE)
+        else if (reader->selected_tokens[token] < parser->tokens.count)
         {
             const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
             supported = selected != BUSTER_CHECK_NONE;
