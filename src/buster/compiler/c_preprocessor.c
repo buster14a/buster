@@ -7068,7 +7068,9 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
                         {
                             out->count -= 1;
                             PPToken moved = right;
-                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | (next_space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                            // As for an argument placed first, clang clears its line start, including one retained
+                            // while an outer argument expanded (BUSTER_PP_LINE_SPACE).
+                            moved.flags = (uint8_t)((moved.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | (next_space ? BUSTER_PP_SPACE : 0) | BUSTER_PP_FROM_MACRO);
                             if (!right_single)
                             {
                                 moved.origin = pp_history_substitution(pp, right.origin, macro->base + pp->datas[macro->data].starts[next->token]);
@@ -8867,7 +8869,7 @@ static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PP
                 // or moved past the empty operands before it.
                 const bool argument = ((template->parameter_mask >> items[0]) & 1) != 0;
                 const uint8_t placed = argument ? (uint8_t)(first.flags & ~(BUSTER_PP_START_OF_LINE | BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE)) : 0;
-                const uint8_t moved = (uint8_t)(first.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE));
+                const uint8_t moved = (uint8_t)(first.flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE));
                 operators->kinds[j] = first.kind;
                 operators->flags[j] = (uint8_t)((items[0] == j ? placed : moved) | BUSTER_PP_FROM_MACRO);
                 operators->values[j] = first.value;
@@ -8897,10 +8899,9 @@ static bool pp_template_operators(const Preprocessor* pp, PPMacroId id, const PP
                         operators->ends[items[k]] = (uint16_t)joined;
                     }
                 }
-                // pp_paste's token: its flags are the first token's leading space and line start as it was placed or moved.
-                const bool moved = items[0] != j;
+                // A placed or moved first operand has lost its line start before pp_paste reads it.
                 operators->kinds[j] = name ? C_TOKEN_RAW_IDENTIFIER : C_TOKEN_NUMERIC_CONSTANT;
-                operators->flags[j] = (uint8_t)((moved ? first.flags & BUSTER_PP_LINE_SPACE : 0) | BUSTER_PP_FROM_MACRO);
+                operators->flags[j] = BUSTER_PP_FROM_MACRO;
                 operators->locations[j] = first.location;
                 operators->begins[j] = (uint16_t)begin;
                 operators->pasted |= (uint16_t)bit;

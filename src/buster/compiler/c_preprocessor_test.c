@@ -1261,8 +1261,8 @@ static const PPTestCase pp_test_cases[] = {
     // Arguments that start a line, placed first, moved past an empty operand and pasted, from a file's text and from an
     // expansion, where a token that started a line inside an argument has BUSTER_PP_LINE_SPACE.
     { "pastes on new lines",
-      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r))\n",
-      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >]\n", false },
+      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((,\ny)) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r)) WQ((, ,\nr))\n",
+      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [y] < < y > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >] [r] [< r >]\n", false },
     // A chain that makes no token leaves the space pending before it to the next token, which starts a run, and at the
     // end to the token after the expansion.
     { "pastes that make nothing among other tokens",
@@ -1803,6 +1803,22 @@ static const PPTestCase pp_test_cases[] = {
     // after it (seed 14's case 452, C23).
     { "line markers: a paste of a line among a macro's arguments", "#define E(a) X a ## a .\nx \\\ny \\\nE(f\nz)\n", 0, "c17", "x y X f zf z .", false, 0, 0, 0,
       "# 1 \"%d/case.c\"\n\nx y X f\nzf z .\n" },
+    // A token moved past an empty ## operand loses its line start, including one that an outer expansion retained
+    // as LINE_SPACE (#476). The first call leaves the output on a line before the second call's name: a retained line
+    // start would move the token to that name's line. Check both positions in a chain, pastes and a first output token.
+    {
+        .name = "line markers: moved argument tokens after empty paste operands",
+        .source = "#define C(a, b) a ## b\n#define D(a, b) < a ## b >\n#define D3(a, b, c) < a ## b ## c >\n"
+                  "#define WP(a) <D a>\n#define WQ(a) <D3 a>\n#define WC(a) C a\n"
+                  "WP(\n1) WP((,\ny))\nWQ(\n1) WQ((, ,\nr))\n"
+                  "WP(\n1) WP((\nx, ))\nWP(\n1) WP((\nx,\ny))\nWQ(\n1) WQ((,\nq, r))\n"
+                  "WC(\n1) WC((,\ny))\nWP(1) WP((,\ny))\nWP((,\ny))\nD(,\ny)\n",
+        .standard = "c17",
+        .expected = "<D 1> < < y > > <D3 1> < < r > > <D 1> < < x > > <D 1> < < xy > > <D3 1> < < qr > > "
+                    "C 1 y <D 1> < < y > > < < y > > < y >",
+        .markers = "# 1 \"%d/case.c\"\n\n\n\n\n\n\n<D 1> < < y > >\n\n\n<D3 1> < < r > >\n\n\n<D 1> < < x > >\n"
+                   "\n\n<D 1> < < xy > >\n\n\n\n<D3 1> < < qr > >\n\n\nC 1 y\n\n\n<D 1> < < y > >\n\n< < y > >\n\n< y >\n",
+    },
     // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
     // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
     // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
