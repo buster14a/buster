@@ -5,6 +5,8 @@
 // code and CFI; this imports them, attaches the caller's debug bytes through ExecutableOptions.debug, and leaves the
 // native executable for the same GDB/perf consumer checks. Every lane/exact write must reproduce the complete file
 // over poisoned output. The source debug sections remain untouched, including when a descriptor is refused.
+// debug_test_object_write is the object writer's half: the same code as a relocatable object of the object writer's,
+// with the units' DWARF relocated (ObjectOptions.debug, #395), for a linker to link into the consumers' executable.
 
 static SymbolId debug_native_symbol(const Link* link, String8 name)
 {
@@ -683,4 +685,98 @@ static bool debug_test_native_units(const char* object_path, const char* executa
     }
     arena_release(&arena);
     return executable_test_report(&tally) && ready;
+}
+
+// The fixture's code (GNU as's object at `object_path`, imported) as an object of the object writer's at
+// `output_path`, with the units `units`, written one after another at their bases into `outputs`' buffers (as
+// debug_test_native_units takes them), relocated against its .text: a linker's link of it must hold the units finalized
+// at the functions' addresses, as GNU ld's link of the fixture does (debug_test_same_debug). Refused descriptors are
+// object_debug_test.c's.
+static bool debug_test_object_write(const char* object_path, const char* output_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count)
+{
+    ExecutableTestTally tally = { .check = "debug object" };
+    Arena arena = arena_reserve(64ull << 20);
+    const String8 object = object_test_read_file(&arena, object_path);
+    LinkCapacity capacity = { 0 };
+    Link link = { 0 };
+    ImportObject imported = { 0 };
+    bool ready = object.pointer != 0 && unit_count >= 1 && unit_count <= 2 && import_object_capacity(object, &capacity).error == IMPORT_ERROR_NONE;
+    ready = ready && link_initialize(&link, &arena, &arena, capacity) &&
+            import_object(&link, object, 0, BUSTER_LINK_SOURCE_PROGRAM, &arena, &imported).error == IMPORT_ERROR_NONE && link_check(&link) == LINK_ERROR_NONE;
+    uint32_t total = 0;
+    for (uint32_t unit = 0; unit < unit_count; unit += 1)
+    {
+        total += units[unit].function_count;
+    }
+    SymbolId* functions = BUSTER_ARENA_PUSH_ARRAY(&arena, SymbolId, total + 1);
+    uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, total + 1);
+    uint32_t counts[2] = { 0 };
+    uint32_t fields[2 * BUSTER_OBJECT_DEBUG_FIELDS] = { 0 };
+    ready = ready && functions != 0 && positions != 0;
+    // The functions and their line addresses, in the whole .debug_line; each unit's fields, in the whole .debug_info.
+    uint32_t function = 0;
+    for (uint32_t unit = 0; ready && unit < unit_count; unit += 1)
+    {
+        counts[unit] = units[unit].function_count;
+        const uint64_t line_base = (uint64_t)(outputs[unit].sections[DEBUG_SECTION_LINE].bytes - outputs[0].sections[DEBUG_SECTION_LINE].bytes);
+        const uint64_t info_base = (uint64_t)(outputs[unit].sections[DEBUG_SECTION_INFO].bytes - outputs[0].sections[DEBUG_SECTION_INFO].bytes);
+        for (uint32_t i = 0; ready && i < units[unit].function_count; i += 1)
+        {
+            functions[function] = debug_native_symbol(&link, units[unit].functions[i].name);
+            positions[function] = (uint32_t)(line_base + outputs[unit].line_addresses[i]);
+            ready = functions[function] != 0;
+            function += 1;
+        }
+        for (uint32_t field = 0; field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            fields[BUSTER_OBJECT_DEBUG_FIELDS * unit + field] = (uint32_t)(info_base + outputs[unit].fields[DEBUG_SECTION_ABBREV + field]);
+        }
+    }
+    ObjectDebug debug = {
+        .functions = functions,
+        .line_addresses = positions,
+        .function_count = total,
+        .unit_functions = unit_count == 2 ? counts : 0,
+        .unit_count = unit_count == 2 ? 2 : 0,
+        .fields = fields,
+    };
+    for (uint32_t section = 0; ready && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        const DebugSection* last = &outputs[unit_count - 1].sections[section];
+        debug.sections[section] = (String8){
+            .pointer = (char*)outputs[0].sections[section].bytes,
+            .length = (uint64_t)(last->bytes + last->size - outputs[0].sections[section].bytes),
+        };
+    }
+    ObjectUnits object_units = { 0 };
+    ObjectSymbols symbols = { 0 };
+    ready = ready && object_prepare(&object_units, &link, 1, &arena) && object_map_symbols(&symbols, &link, &arena);
+    const ObjectOptions options = { .debug = &debug };
+    const Object built = ready ? object_build(&link, &object_units, &symbols, 0, options, BUSTER_S8("fixture.s"), &arena) : (Object){ 0 };
+    ready = ready && built.error == OBJECT_ERROR_NONE && object_write_file(output_path, built.bytes, built.size) == OBJECT_ERROR_NONE;
+    executable_test_expect(&tally, ready, "the fixture's code and its units' DWARF as an object", unit_count);
+    arena_release(&arena);
+    return executable_test_report(&tally) && ready;
+}
+
+// Whether two executables, at `a` and `b`, have the same five debug sections, byte for byte.
+static bool debug_test_same_debug(const char* a, const char* b)
+{
+    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    Arena arena = arena_reserve(64ull << 20);
+    const String8 files[2] = { object_test_read_file(&arena, a), object_test_read_file(&arena, b) };
+    const ExecutableTestImage images[2] = { executable_test_image(files[0]), executable_test_image(files[1]) };
+    bool result = files[0].pointer != 0 && files[1].pointer != 0 && images[0].valid && images[1].valid;
+    for (uint32_t section = 0; result && section < BUSTER_ARRAY_LENGTH(names); section += 1)
+    {
+        const Elf64_Shdr* headers[2] = { executable_test_section(&images[0], names[section]), executable_test_section(&images[1], names[section]) };
+        result = headers[0] != 0 && headers[1] != 0 && headers[0]->sh_size == headers[1]->sh_size;
+        for (uint32_t side = 0; result && side < 2; side += 1)
+        {
+            result = headers[side]->sh_offset <= files[side].length && headers[side]->sh_size <= files[side].length - headers[side]->sh_offset;
+        }
+        result = result && memcmp(files[0].pointer + headers[0]->sh_offset, files[1].pointer + headers[1]->sh_offset, headers[0]->sh_size) == 0;
+    }
+    arena_release(&arena);
+    return result;
 }

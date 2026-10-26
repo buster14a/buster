@@ -325,7 +325,8 @@ designs and the compilers already built this way.
   lowering every definition, referenced or not (#129's test option; `-c` and
   the direct path lower only what the unit's roots reach,
   `check_program_select`), and `-g` attaching DWARF of its functions' source
-  lines (`c_check_debug.c`, #395; `-c -g` writes no DWARF yet). `./build/compiler parse
+  lines (`c_check_debug.c`, #395), to the executable and with `-c` to the
+  object (`ObjectOptions.debug`). `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
@@ -473,9 +474,13 @@ designs and the compilers already built this way.
 - `src/buster/compiler/object_writer.c` is the object writer: an ELF
   relocatable object per unit of the representation (`object_prepare` once per
   link, then `object_build` per object, `object_write_file`, and
-  `object_write_units` for a group of lanes). `object_writer_test.c` holds its
-  tests (`main.c` includes it; `./build/compiler test-object-writer` runs them)
-  and `object_writer_benchmark.c` provides `benchmark-object-writer`.
+  `object_write_units` for a group of lanes), with the DWARF of a unit's
+  functions where `ObjectOptions.debug` gives it (#395: debug.c's sections and
+  the relocations a linker resolves, `ObjectDebug`). `object_writer_test.c`
+  holds its tests and `object_debug_test.c` those of its DWARF, which need
+  debug.c's units (`main.c` includes both; `./build/compiler
+  test-object-writer` runs them), and `object_writer_benchmark.c` provides
+  `benchmark-object-writer`.
 - `src/buster/compiler/import.c` holds the import path's readers: ELF
   relocatable objects into the representation, archives' members and symbol
   index, shared libraries' exports at their default versions (indexed by name
@@ -580,10 +585,12 @@ designs and the compilers already built this way.
   producer built whole instead (`link-foreign`'s), with the references the
   layout decides as columns the writer patches on its lanes.
   `test-debug --cross-check` checks original fixtures, as one unit and as two,
-  with readelf, GDB and perf; `benchmark-debug` measures validation through
-  address finalization. [The debug guide](docs/debug.md) records the contract
-  and a function's body's row (`DebugFunction.prologue_end`); `streaming.c`
-  makes a unit per 256 functions as they compile.
+  with readelf, GDB and perf, linked by GNU ld, by the native writer and from
+  the object writer's objects (`ObjectOptions.debug`) by GNU ld and lld;
+  `benchmark-debug` measures validation through address finalization. [The
+  debug guide](docs/debug.md) records the contract and a function's body's row
+  (`DebugFunction.prologue_end`); `streaming.c` makes a unit per 256 functions
+  as they compile.
 - `src/buster/compiler/c_check_debug.c` is the C driver's `-g` (#395): each
   typed entry's code start after branch sizing (`Tier0Code.entry_records`) and
   the token whose lowering wrote it (`CheckProgramLowered.entry_tokens`) make
@@ -596,11 +603,14 @@ designs and the compilers already built this way.
   `check_lower_drain`) and with them (`check_program_lower_sources`,
   `check_lower_drain_sources`), so that a compile without `-g` runs the code
   it ran before.
+  `-c -g` writes the same unit into the object, relocated.
   `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
   the lines against `pp_presumed` on fixtures (a computed goto among them)
   and generated programs, that lowering with the tokens changes no typed
   function, and with `--cross-check` the executable through
-  `llvm-dwarfdump --verify` and gdb.
+  `llvm-dwarfdump --verify` and gdb, and the `-c -g` object, the executable's
+  unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
+  the same way.
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -2078,6 +2088,17 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   IFUNC against the IFUNC. Then an arena too small for an object
   (`OBJECT_ERROR_FULL`), an addend past int64 (`OBJECT_ERROR_RANGE`), and links
   with an absolute symbol, referenced and not, which `object_prepare` refuses;
+- debug (`object_debug_test.c`, #395): each unit of those sets and of the link
+  made by hand with a debug.c unit of its functions (`ObjectOptions.debug`),
+  shuffled, as one unit and as two, finalized at random addresses, with and
+  without function sections, checked as above and against what the test
+  works out again from the descriptor: the five sections after the sections
+  of atoms, their bytes with the fields and address slots zero, each field an
+  `R_X86_64_32` against its section's symbol with what it held, and each
+  function's slot and line address an `R_X86_64_64` against its section's
+  symbol at its offset; the descriptor's bytes as they were; and 26 changed
+  descriptors, and an IFUNC's, which `object_build` refuses
+  (`OBJECT_ERROR_DEBUG`) with nothing on the arena;
 - many sections: one unit of 33,000 functions in sections of their own, 66,041
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;
@@ -2119,7 +2140,14 @@ segment off its alignment when told where: seed 1's `static-defaults` with
     symbol where the writer, like GNU as for an instruction, names the
     section's. So a relocation's target is compared by where it points, but
     its form must be the same for the GOT, TLS and size types and into
-    `SHF_MERGE` sections.
+    `SHF_MERGE` sections;
+  - the objects with DWARF of the defaults and of many units (one debug unit
+    for an even unit, two for an odd one), with and without function
+    sections, listed by both tools and linked by GNU ld, lld and mold with
+    `-static -e _start` into programs that print what they should, whose
+    DWARF `llvm-dwarfdump --verify` passes and is the objects'
+    contributions, relocated where each linker put them (needs
+    `llvm-dwarfdump` too).
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. `--seed N` changes the programs. On the

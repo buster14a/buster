@@ -9,6 +9,9 @@
 //     TEXT atom, .text.<the name of its symbol at offset 0>, each followed by its .rela section if its atoms have
 //     fixups. In a section, each atom starts at the next multiple of its alignment, in id order, and the gaps are int3
 //     in code and zero elsewhere;
+//   - with ObjectOptions.debug, the DWARF of the unit's functions (#395): debug.c's .debug_info, .debug_abbrev,
+//     .debug_line, .debug_addr and .debug_rnglists, unallocated, each followed by its .rela section if it has
+//     relocations (ObjectDebug says which);
 //   - .note.GNU-stack, without which linkers assume the code needs an executable stack, and .comment;
 //   - .symtab, then .symtab_shndx when a section's index reaches SHN_LORESERVE (65,280), .strtab and .shstrtab.
 // The symbols are, in order: the null symbol; an STT_FILE with the source's name; the section symbols relocations refer
@@ -55,13 +58,13 @@
 //
 // main.c includes this file after link.c, whose representation it reads, and lane.c, whose arenas and lanes it uses.
 // Layout, in this order:
-//   - API: ObjectError, ObjectOptions, ObjectUnits, the symbol codes (BUSTER_OBJECT_SYMBOL_*), ObjectSymbols, Object
-//     and the entry points' prototypes.
+//   - API: ObjectError, ObjectDebug, ObjectOptions, ObjectUnits, the symbol codes (BUSTER_OBJECT_SYMBOL_*),
+//     ObjectSymbols, Object and the entry points' prototypes.
 //   - Formats: object_class_sections, object_relocation_types and the names of the other sections.
 //   - Preparing: object_prepare and object_map_symbols.
 //   - Building: ObjectSection, ObjectBuilder, object_count_sections,
-//     object_count_symbols, object_place, the fill (object_fill_sections, object_fill_relocations,
-//     object_fill_symbols, object_fill_headers) and object_build.
+//     object_count_symbols, object_count_debug, object_place, the fill (object_fill_sections, object_fill_relocations,
+//     object_fill_debug, object_fill_symbols, object_fill_headers) and object_build.
 //   - Writing: object_write_file and object_write_units.
 
 #include <stdint.h>
@@ -93,7 +96,46 @@ typedef enum ObjectError
     OBJECT_ERROR_RANGE,
     // A system call failed writing the file; errno says why.
     OBJECT_ERROR_FILE,
+    // ObjectOptions.debug isn't the DWARF of the unit's functions as ObjectDebug describes it.
+    OBJECT_ERROR_DEBUG,
 } ObjectError;
+
+// debug.c's sections, in its order (DebugSectionKind), and the fields of a unit's .debug_info that point into the other
+// four (debug.c's DebugOutput.fields, of .debug_abbrev, .debug_line, .debug_addr and .debug_rnglists).
+#define BUSTER_OBJECT_DEBUG_SECTIONS 5
+#define BUSTER_OBJECT_DEBUG_FIELDS 4
+#define BUSTER_OBJECT_DEBUG_INFO 0
+#define BUSTER_OBJECT_DEBUG_LINE 2
+#define BUSTER_OBJECT_DEBUG_ADDR 3
+
+// The DWARF of the unit's functions (#395), as debug.c writes it before final layout, in units, as ExecutableDebug takes
+// them: each section's slice the units' contributions one after another, each unit after the first written at its
+// contributions' places (DebugOutput.bases), and `functions` and `line_addresses` the units' functions one unit after
+// another, unit k having unit_functions[k] of them (unit_count 0: one unit of all of them), each line address an offset
+// in the whole .debug_line slice. The object holds the five sections, unallocated, and the relocations a linker
+// resolves where it puts the object's contributions and functions:
+//   - each unit's four fields that point into its other sections (`fields`, unit k's from 4k: its DebugOutput.fields of
+//     .debug_abbrev, .debug_line, .debug_addr and .debug_rnglists, in that order, as offsets in the whole .debug_info
+//     slice), an R_X86_64_32 against that section's symbol, with the offset the field holds as its addend;
+//   - each function's address, in its unit's .debug_addr contribution (unit k's after the earlier units' 8 + 8n bytes:
+//     function i of it 8 + 8i into it) and in .debug_line at its line address, an R_X86_64_64 against its section's
+//     symbol with its offset there as the addend, as GNU as relocates a label at a function's start: its own
+//     definition's address, which no other definition of its name takes over.
+// Those fields hold zero in the object, where the relocations put their values. The functions are ordinary ones
+// (BUSTER_LINK_SYMBOL_FUNCTION) the unit defines in TEXT atoms: object_build refuses a descriptor that isn't the unit's,
+// or whose fields, addresses or line addresses aren't where debug.c puts them, with OBJECT_ERROR_DEBUG. The caller
+// keeps the slices and columns alive and unchanged through object_build.
+typedef struct ObjectDebug ObjectDebug;
+struct ObjectDebug
+{
+    String8 sections[BUSTER_OBJECT_DEBUG_SECTIONS];
+    const SymbolId* functions;
+    const uint32_t* line_addresses;
+    uint32_t function_count;
+    const uint32_t* unit_functions;
+    uint32_t unit_count;
+    const uint32_t* fields;
+};
 
 // Optional producer-owned descriptors, indexed by AtomId. Each described atom is already a complete section.
 // Names are counted slices, not NUL-terminated strings. A non-null table must cover every atom including id 0.
@@ -116,6 +158,8 @@ struct ObjectOptions
     // Optional bytes indexed by SymbolId: discard a marked local unless a relocation needs its own symbol.
     const uint8_t* temporary_symbols;
     uint32_t temporary_symbol_count;
+    // The DWARF of the unit's functions, or null for none: one unit's, which object_build refuses for any other.
+    const ObjectDebug* debug;
 };
 
 // What object_prepare finds once for a link, which every unit's object reads.
@@ -358,6 +402,14 @@ static const char* const object_trailing_sections[] = {
     ".shstrtab",
 };
 #define BUSTER_OBJECT_EXTENDED_SECTION ".symtab_shndx"
+// debug.c's sections' names, in its order (ObjectDebug.sections').
+static const char* const object_debug_sections[BUSTER_OBJECT_DEBUG_SECTIONS] = {
+    ".debug_info",
+    ".debug_abbrev",
+    ".debug_line",
+    ".debug_addr",
+    ".debug_rnglists",
+};
 // A function section's name: this, then its atom's name.
 #define BUSTER_OBJECT_FUNCTION_SECTION_PREFIX ".text."
 #define BUSTER_OBJECT_FUNCTION_SECTION_PREFIX_BYTES (sizeof(BUSTER_OBJECT_FUNCTION_SECTION_PREFIX) - 1)
@@ -649,6 +701,14 @@ struct ObjectBuilder
     uint64_t global_base;
     uint64_t undefined_base;
     uint64_t symbol_count;
+    // With ObjectOptions.debug, each of its sections' index, its .rela section's (0 without relocations), its section
+    // symbol's (0 for .debug_info, which no field points into; object_count_debug sets the others to 1 first), its
+    // name's offset in .shstrtab and its relocations.
+    uint32_t debug_index[BUSTER_OBJECT_DEBUG_SECTIONS];
+    uint32_t debug_relocation_index[BUSTER_OBJECT_DEBUG_SECTIONS];
+    uint32_t debug_symbol[BUSTER_OBJECT_DEBUG_SECTIONS];
+    uint32_t debug_name[BUSTER_OBJECT_DEBUG_SECTIONS];
+    uint64_t debug_relocations[BUSTER_OBJECT_DEBUG_SECTIONS];
     // The string tables' sizes.
     uint64_t names_size;
     uint64_t section_names_size;
@@ -886,6 +946,123 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     return result;
 }
 
+// A unit's function count in an ObjectDebug (every function for a descriptor of one unit).
+static uint32_t object_debug_unit_functions(const ObjectDebug* debug, uint32_t unit)
+{
+    return debug->unit_count != 0 ? debug->unit_functions[unit] : debug->function_count;
+}
+
+// Whether ObjectOptions.debug is the DWARF of the built unit's functions as ObjectDebug describes it: the slices not
+// empty and within DWARF32's offsets; the units' function counts adding up to the functions; each unit's .debug_info
+// contribution (its unit_length, and as many bytes) holding its four fields in order, the abbreviation offset's 8 bytes
+// in, each holding an offset at most its section's size; each unit's .debug_addr contribution its header (unit_length
+// 4 + 8n, DWARF 5, 8-byte addresses, no segment selector) and its addresses, the contributions filling both slices; the
+// line addresses ascending, each a DW_LNE_set_address operand inside .debug_line; and each function an ordinary function
+// the unit defines in a TEXT atom, at an offset inside it. The format is debug.c's: these bounds keep a malformed
+// descriptor's relocations inside its sections and on the unit's definitions.
+static bool object_debug_valid(const ObjectBuilder* builder)
+{
+    const ObjectDebug* debug = builder->options.debug;
+    const Link* link = builder->link;
+    bool valid = true;
+    for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+    {
+        valid &= debug->sections[section].pointer != 0 && debug->sections[section].length != 0 && debug->sections[section].length < 0xfffffff0u;
+    }
+    const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+    valid &= (debug->function_count == 0 || (debug->functions != 0 && debug->line_addresses != 0)) && (debug->unit_count == 0 || debug->unit_functions != 0) &&
+             debug->fields != 0;
+    const String8 infos = debug->sections[BUSTER_OBJECT_DEBUG_INFO];
+    const String8 addresses = debug->sections[BUSTER_OBJECT_DEBUG_ADDR];
+    uint64_t functions = 0;
+    uint64_t info = 0;
+    uint64_t addr = 0;
+    for (uint32_t unit = 0; valid && unit < units; unit += 1)
+    {
+        const uint64_t count = object_debug_unit_functions(debug, unit);
+        uint32_t info_length = 0;
+        uint32_t addr_length = 0;
+        uint16_t version = 0;
+        valid = info + 4 <= infos.length && addr + 8 + 8 * count <= addresses.length;
+        if (valid)
+        {
+            memcpy(&info_length, infos.pointer + info, 4);
+            memcpy(&addr_length, addresses.pointer + addr, 4);
+            memcpy(&version, addresses.pointer + addr + 4, 2);
+            valid = info_length <= infos.length - info - 4 && addr_length == 4 + 8 * count && version == 5 && addresses.pointer[addr + 6] == 8 &&
+                    addresses.pointer[addr + 7] == 0;
+        }
+        const uint64_t end = info + 4 + info_length;
+        uint64_t previous = info + 4;
+        for (uint32_t field = 0; valid && field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            const uint64_t at = debug->fields[(uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * unit + field];
+            uint32_t value = 0;
+            valid = at >= previous && at + 4 <= end && (field != 0 || at == info + 8);
+            if (valid)
+            {
+                // A unit without functions points its address base at the end of its address table's header, which may
+                // end the section.
+                memcpy(&value, infos.pointer + at, 4);
+                valid = value <= debug->sections[field + 1].length;
+            }
+            previous = at + 4;
+        }
+        functions += count;
+        info = end;
+        addr += 8 + 8 * count;
+    }
+    valid &= functions == debug->function_count && info == infos.length && addr == addresses.length;
+    const String8 line = debug->sections[BUSTER_OBJECT_DEBUG_LINE];
+    uint64_t previous_end = 0;
+    for (uint32_t function = 0; valid && function < debug->function_count; function += 1)
+    {
+        const SymbolId symbol = debug->functions[function];
+        const uint64_t offset = debug->line_addresses[function];
+        valid = symbol != 0 && symbol < link->symbols.count && builder->units->symbol_info[symbol] >> 32 == builder->unit && offset >= 3 && offset >= previous_end &&
+                offset + 8 <= line.length;
+        if (valid)
+        {
+            const AtomId atom = link->symbols.atom[symbol];
+            valid = link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION &&
+                    link->symbols.value[symbol] < link->atoms.size[atom] && line.pointer[offset - 3] == 0 && line.pointer[offset - 2] == 9 && line.pointer[offset - 1] == 2;
+        }
+        previous_end = offset + 8;
+    }
+    return valid;
+}
+
+// With ObjectOptions.debug: whether it is valid (OBJECT_ERROR_DEBUG if not), each of its sections' relocations, and the
+// section symbols they refer to: those of the four sections the units' fields point into, and each function's section's.
+static bool object_count_debug(ObjectBuilder* builder)
+{
+    const ObjectDebug* debug = builder->options.debug;
+    const bool result = debug == 0 || object_debug_valid(builder);
+    memset(builder->debug_relocations, 0, sizeof(builder->debug_relocations));
+    memset(builder->debug_symbol, 0, sizeof(builder->debug_symbol));
+    if (debug != 0 && result)
+    {
+        const uint64_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+        builder->debug_relocations[BUSTER_OBJECT_DEBUG_INFO] = BUSTER_OBJECT_DEBUG_FIELDS * units;
+        builder->debug_relocations[BUSTER_OBJECT_DEBUG_LINE] = debug->function_count;
+        builder->debug_relocations[BUSTER_OBJECT_DEBUG_ADDR] = debug->function_count;
+        for (uint32_t section = BUSTER_OBJECT_DEBUG_INFO + 1; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
+        {
+            builder->debug_symbol[section] = 1;
+        }
+        for (uint32_t function = 0; function < debug->function_count; function += 1)
+        {
+            const AtomId atom = builder->link->symbols.atom[debug->functions[function]];
+            builder->sections[builder->units->atom_section[atom]].symbol = 1;
+        }
+    }
+    if (!result)
+    {
+        builder->error = OBJECT_ERROR_DEBUG;
+    }
+    return result;
+}
+
 // The length of a section of atoms' name, which a function section takes from its atom's.
 static uint64_t object_section_name_bytes(const ObjectBuilder* builder, const ObjectSection* section)
 {
@@ -923,6 +1100,19 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
         name += bytes + (section->fixup_count != 0 ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0);
         section->symbol = section->symbol != 0 ? (uint32_t)symbol : 0;
         symbol += section->symbol != 0 ? 1 : 0;
+        result = result && index < UINT32_MAX && name < UINT32_MAX;
+    }
+    // The DWARF's sections, the same way, after them.
+    for (uint32_t s = 0; builder->options.debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+    {
+        const bool relocated = builder->debug_relocations[s] != 0;
+        builder->debug_index[s] = (uint32_t)index;
+        builder->debug_relocation_index[s] = relocated ? (uint32_t)(index + 1) : 0;
+        builder->debug_name[s] = (uint32_t)(name + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0));
+        index += relocated ? 2 : 1;
+        name += strlen(object_debug_sections[s]) + 1 + (relocated ? BUSTER_OBJECT_RELA_PREFIX_BYTES : 0);
+        builder->debug_symbol[s] = builder->debug_symbol[s] != 0 ? (uint32_t)symbol : 0;
+        symbol += builder->debug_symbol[s] != 0 ? 1 : 0;
         result = result && index < UINT32_MAX && name < UINT32_MAX;
     }
     // .symtab_shndx only when a section's index needs it.
@@ -983,6 +1173,28 @@ static bool object_place(ObjectBuilder* builder, Arena* scratch)
                     .sh_size = section->fixup_count * sizeof(Elf64_Rela),
                     .sh_link = builder->symbol_table_index,
                     .sh_info = section->index,
+                    .sh_addralign = 8,
+                    .sh_entsize = sizeof(Elf64_Rela),
+                };
+            }
+        }
+        for (uint32_t s = 0; builder->options.debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+        {
+            headers[builder->debug_index[s]] = (Elf64_Shdr){
+                .sh_name = builder->debug_name[s],
+                .sh_type = SHT_PROGBITS,
+                .sh_size = builder->options.debug->sections[s].length,
+                .sh_addralign = 1,
+            };
+            if (builder->debug_relocation_index[s] != 0)
+            {
+                headers[builder->debug_relocation_index[s]] = (Elf64_Shdr){
+                    .sh_name = builder->debug_name[s] - (uint32_t)BUSTER_OBJECT_RELA_PREFIX_BYTES,
+                    .sh_type = SHT_RELA,
+                    .sh_flags = SHF_INFO_LINK,
+                    .sh_size = builder->debug_relocations[s] * sizeof(Elf64_Rela),
+                    .sh_link = builder->symbol_table_index,
+                    .sh_info = builder->debug_index[s],
                     .sh_addralign = 8,
                     .sh_entsize = sizeof(Elf64_Rela),
                 };
@@ -1171,6 +1383,69 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
     }
 }
 
+// The DWARF's sections and their relocations (ObjectDebug): the descriptor's bytes with its fields and address slots
+// zeroed, each unit's fields relocated against the sections they point into, by the offsets they held, and each
+// function's address slot and line address against its section's symbol, in unit order.
+static void object_fill_debug(const ObjectBuilder* builder, uint8_t* bytes)
+{
+    const ObjectDebug* debug = builder->options.debug;
+    const Link* link = builder->link;
+    const ObjectUnits* units = builder->units;
+    const Elf64_Shdr* headers = builder->headers;
+    uint8_t* contents[BUSTER_OBJECT_DEBUG_SECTIONS];
+    for (uint32_t s = 0; s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+    {
+        contents[s] = bytes + headers[builder->debug_index[s]].sh_offset;
+        memcpy(contents[s], debug->sections[s].pointer, debug->sections[s].length);
+    }
+    Elf64_Rela* fields = (Elf64_Rela*)(bytes + headers[builder->debug_relocation_index[BUSTER_OBJECT_DEBUG_INFO]].sh_offset);
+    for (uint64_t f = 0; f < builder->debug_relocations[BUSTER_OBJECT_DEBUG_INFO]; f += 1)
+    {
+        const uint32_t at = debug->fields[f];
+        uint32_t value = 0;
+        memcpy(&value, contents[BUSTER_OBJECT_DEBUG_INFO] + at, 4);
+        memset(contents[BUSTER_OBJECT_DEBUG_INFO] + at, 0, 4);
+        fields[f] = (Elf64_Rela){
+            .r_offset = at,
+            .r_info = ELF64_R_INFO(builder->debug_symbol[f % BUSTER_OBJECT_DEBUG_FIELDS + 1], R_X86_64_32),
+            .r_addend = value,
+        };
+    }
+    const bool any = debug->function_count != 0;
+    Elf64_Rela* lines = any ? (Elf64_Rela*)(bytes + headers[builder->debug_relocation_index[BUSTER_OBJECT_DEBUG_LINE]].sh_offset) : 0;
+    Elf64_Rela* slots = any ? (Elf64_Rela*)(bytes + headers[builder->debug_relocation_index[BUSTER_OBJECT_DEBUG_ADDR]].sh_offset) : 0;
+    const uint32_t unit_count = debug->unit_count != 0 ? debug->unit_count : 1;
+    uint32_t function = 0;
+    uint64_t base = 0;
+    for (uint32_t unit = 0; unit < unit_count; unit += 1)
+    {
+        const uint32_t count = object_debug_unit_functions(debug, unit);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const SymbolId symbol = debug->functions[function];
+            const AtomId atom = link->symbols.atom[symbol];
+            const uint64_t info = ELF64_R_INFO(builder->sections[units->atom_section[atom]].symbol, R_X86_64_64);
+            const int64_t addend = (int64_t)(units->atom_offset[atom] + link->symbols.value[symbol]);
+            const uint64_t slot = base + 8 + 8ull * i;
+            const uint32_t line = debug->line_addresses[function];
+            memset(contents[BUSTER_OBJECT_DEBUG_ADDR] + slot, 0, 8);
+            memset(contents[BUSTER_OBJECT_DEBUG_LINE] + line, 0, 8);
+            slots[function] = (Elf64_Rela){
+                .r_offset = slot,
+                .r_info = info,
+                .r_addend = addend,
+            };
+            lines[function] = (Elf64_Rela){
+                .r_offset = line,
+                .r_info = info,
+                .r_addend = addend,
+            };
+            function += 1;
+        }
+        base += 8 + 8ull * count;
+    }
+}
+
 // Copies a name of `bytes` bytes, its NUL among them: one masked 64-byte load and store for a name of up to 64 bytes,
 // as most C names are, rather than a call to memcpy, and memcpy for a longer one. A masked load and store touch nothing
 // past `bytes`, so they are safe at the end of a page.
@@ -1237,6 +1512,20 @@ static void object_fill_symbols(const ObjectBuilder* builder, uint8_t* bytes)
             if (extended != 0 && section->index >= SHN_LORESERVE)
             {
                 extended[section->symbol] = section->index;
+            }
+        }
+    }
+    for (uint32_t s = 0; builder->options.debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+    {
+        if (builder->debug_symbol[s] != 0)
+        {
+            entries[builder->debug_symbol[s]] = (Elf64_Sym){
+                .st_info = ELF64_ST_INFO(STB_LOCAL, STT_SECTION),
+                .st_shndx = object_symbol_section_index(builder->debug_index[s]),
+            };
+            if (extended != 0 && builder->debug_index[s] >= SHN_LORESERVE)
+            {
+                extended[builder->debug_symbol[s]] = builder->debug_index[s];
             }
         }
     }
@@ -1368,6 +1657,17 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
             name += bytes_with_nul;
         }
     }
+    for (uint32_t s = 0; builder->options.debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+    {
+        if (builder->debug_relocation_index[s] != 0)
+        {
+            memcpy(names + name, BUSTER_OBJECT_RELA_PREFIX, BUSTER_OBJECT_RELA_PREFIX_BYTES);
+            name += BUSTER_OBJECT_RELA_PREFIX_BYTES;
+        }
+        const uint64_t bytes_with_nul = strlen(object_debug_sections[s]) + 1;
+        memcpy(names + name, object_debug_sections[s], bytes_with_nul);
+        name += bytes_with_nul;
+    }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(object_trailing_sections); i += 1)
     {
         const uint64_t bytes_with_nul = strlen(object_trailing_sections[i]) + 1;
@@ -1411,6 +1711,7 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
     }
     built = built && object_count_sections(&builder);
     built = built && object_count_symbols(&builder, scratch.arena);
+    built = built && object_count_debug(&builder);
     built = built && object_place(&builder, scratch.arena);
     uint8_t* bytes = built ? arena_push(arena, builder.size, 64) : 0;
     if (built && bytes == 0)
@@ -1434,14 +1735,23 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         memset(bytes + end, 0, builder.headers_offset - end);
         object_fill_sections(&builder, bytes);
         object_fill_relocations(&builder, bytes);
+        if (options.debug != 0)
+        {
+            object_fill_debug(&builder, bytes);
+        }
         object_fill_symbols(&builder, bytes);
         object_fill_headers(&builder, bytes);
+        uint64_t debug_relocations = 0;
+        for (uint32_t s = 0; s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+        {
+            debug_relocations += builder.debug_relocations[s];
+        }
         result = (Object){
             .bytes = bytes,
             .size = builder.size,
             .section_count = builder.header_count,
             .symbol_count = builder.symbol_count,
-            .relocation_count = builder.fixup_count,
+            .relocation_count = builder.fixup_count + debug_relocations,
         };
     }
     result.error = builder.error;

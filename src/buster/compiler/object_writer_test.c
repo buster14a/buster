@@ -24,6 +24,8 @@
 //     against its TLS symbol over a zero field (not a frozen offset), each call through the GOT as
 //     R_X86_64_GOTPCRELX, and each reference to a local IFUNC against the IFUNC. Then links with an absolute symbol,
 //     which object_prepare refuses.
+//   - Debug: units' objects with the DWARF of their functions (ObjectOptions.debug), compared as above and with what
+//     object_debug_test.c works out again from the descriptor, and the descriptors object_build refuses.
 //   - Many sections: one unit of BUSTER_OBJECT_TEST_MANY_FUNCTIONS functions in sections of their own, past
 //     SHN_LORESERVE: e_shnum and e_shstrndx in section 0, SHN_XINDEX and .symtab_shndx, compared as above.
 //   - Lanes: every unit's object (a trailing one without atoms among them) written by object_write_units in groups of 1,
@@ -43,7 +45,9 @@
 //         a program whose main calls a local IFUNC directly and through a pointer (object_test_ifunc_link), which
 //         must exit with BUSTER_OBJECT_TEST_IFUNC_STATUS;
 //       - GNU as assembles each program's units as link_test_print_program writes them, and its objects must match
-//         the writer's (object_test_same_as; the comment that opens its part of the file says where they may differ).
+//         the writer's (object_test_same_as; the comment that opens its part of the file says where they may differ);
+//       - objects with DWARF, listed by both tools and linked by GNU ld, lld and mold, whose programs' DWARF
+//         llvm-dwarfdump --verify passes and is the objects', relocated (object_debug_test.c).
 // The objects and programs go in a new directory under $TMPDIR (or /tmp), removed at the end unless --keep. The exit
 // status is 1 if the arguments are invalid or a check fails.
 //
@@ -609,9 +613,10 @@ static bool object_test_same_symbol(const ObjectView* view, uint64_t index, cons
 }
 
 // Checks unit `unit`'s object, as `view` read it, against the representation: everything is worked out again here
-// from the link alone (the orientation comment of object_writer.c says what the object holds, in what order).
-static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, uint32_t unit, bool function_sections, ObjectTestCounts* counts,
-                                Arena* arena)
+// from the link alone (the orientation comment of object_writer.c says what the object holds, in what order), but the
+// DWARF's `debug_headers` sections after the sections of atoms, which object_test_debug_compare checks.
+static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, uint32_t unit, bool function_sections, uint64_t debug_headers,
+                                ObjectTestCounts* counts, Arena* arena)
 {
     const LinkAtoms* atoms = &link->atoms;
     const LinkSymbols* symbols = &link->symbols;
@@ -728,7 +733,8 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
         }
     }
 
-    // The trailing sections.
+    // The trailing sections, after the DWARF's.
+    index += debug_headers;
     static const char* const trailing[] = {
         ".note.GNU-stack",
         ".comment",
@@ -1764,8 +1770,14 @@ static String8 object_test_source_name(char* buffer, uint64_t size, uint32_t uni
     return result;
 }
 
-// Builds unit `unit`'s object in memory, reads it back and compares it with the representation. It builds it again
-// over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the same: object_build writes every byte.
+// The DWARF's checks, in object_debug_test.c, which main.c includes after debug.c.
+static bool object_test_debug_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, const ObjectDebug* debug);
+static bool object_test_debug(uint64_t seed, Arena* arena);
+static bool object_test_debug_cross_check(uint64_t seed, const char* directory, bool keep, Arena* arena);
+
+// Builds unit `unit`'s object in memory, reads it back and compares it with the representation, and with its DWARF's
+// descriptor if it has one. It builds it again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the
+// same: object_build writes every byte.
 static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUnits* units, ObjectSymbols* symbols, uint32_t unit, ObjectOptions options,
                              ObjectTestCounts* counts, Arena* arena)
 {
@@ -1799,7 +1811,10 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
             printf("  unit %u: %s\n", unit, error);
         }
         object_test_expect(tally, result, "object_view_open", unit);
-        result = result && object_test_compare(tally, &view, link, unit, options.function_sections, counts, arena);
+        // The DWARF's five sections, .debug_info's relocations, and .debug_line's and .debug_addr's with functions.
+        const uint64_t debug_headers = options.debug == 0 ? 0 : 6 + (options.debug->function_count != 0 ? 2 : 0);
+        result = result && object_test_compare(tally, &view, link, unit, options.function_sections, debug_headers, counts, arena);
+        result = result && (options.debug == 0 || object_test_debug_compare(tally, &view, link, options.debug));
         const char* file_name = result ? object_view_string(view.symbol_names, view.symbol_names_size, view.symbols[1].st_name) : 0;
         object_test_expect(tally, !result || (file_name != 0 && strcmp(file_name, source) == 0), "STT_FILE's name", unit);
         object_test_expect(tally, !result || (object.section_count == view.section_count && object.symbol_count == view.symbol_count && object.size == view.length),
@@ -3158,12 +3173,14 @@ static int run_object_writer_tests(int argc, char** argv)
     else
     {
         bool passed = object_test_objects(seed, &arena);
+        passed = object_test_debug(seed, &arena) && passed;
         passed = object_test_many_sections(seed, &arena) && passed;
         passed = object_test_lanes(seed, id_order, directory, keep, &arena) && passed;
         passed = object_test_files(directory, &arena) && passed;
         if (cross_check)
         {
             passed = object_test_cross_check(seed, directory, keep, &arena) && passed;
+            passed = object_test_debug_cross_check(seed, directory, keep, &arena) && passed;
         }
         if (keep)
         {

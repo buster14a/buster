@@ -1,0 +1,893 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// The object writer's DWARF (ObjectOptions.debug, #395), for test-object-writer. main.c includes this file after
+// debug.c and executable_test.c, whose units (debug_write) and ELF reading (executable_test_image) it uses;
+// object_writer_test.c, which declares its entry points, calls object_test_debug, object_test_debug_compare (from
+// object_test_unit) and, with --cross-check, object_test_debug_cross_check. The checks:
+//   - Objects: each unit of test-link's sets and of the link made by hand, its ordinary functions in TEXT atoms, in an
+//     order the seed shuffles, as a debug.c unit and as two (the second written at the first's sizes), each function
+//     with up to four rows at random offsets inside it, of random lines in a file of two, finalized at random addresses
+//     (so that the object must zero its address slots), with and without function sections: object_test_unit's checks
+//     (every byte written, object_view_open's rules, object_test_compare with the DWARF's sections between the sections
+//     of atoms and the trailing ones), and object_test_debug_compare's, which works the DWARF out again from the
+//     descriptor and the object's own symbols: the five sections after the sections of atoms, unallocated, each
+//     followed by its relocations where it has them (.debug_info's always, .debug_line's and .debug_addr's with
+//     functions); the descriptor's bytes with the fields and address slots zeroed; each field an R_X86_64_32 against its
+//     section's symbol with the value it held as its addend; and each function's address slot (in its unit's
+//     .debug_addr contribution) and line address an R_X86_64_64 against the symbol of the section its definition is in,
+//     with its st_value as the addend. A descriptor of one unit whose unit_functions say so is the same object.
+//   - Refusals: 26 changes to a valid descriptor of two units (sections missing, empty, cut or too long; columns
+//     missing; counts that don't add up or move a unit's .debug_addr header; headers, unit lengths, fields and field
+//     values that aren't debug.c's; line addresses that aren't operands, aren't ascending or end past .debug_line; and
+//     functions that are no symbol, another unit's, not functions, data and an IFUNC), each OBJECT_ERROR_DEBUG with
+//     nothing pushed on the arena and the descriptor's bytes as they were.
+//   - With --cross-check, which needs readelf, llvm-readobj, llvm-dwarfdump, ld.bfd, ld.lld and mold: the units' objects
+//     of two of test-link's static sets, each with its DWARF (one debug unit for an even unit, two for an odd one),
+//     with and without function sections, listed by readelf and llvm-readobj (object_test_listing), and linked by
+//     each linker into a program that prints what it should, whose DWARF llvm-dwarfdump --verify finds no error in,
+//     and whose five sections are the objects' contributions one after another: each object's bytes, each field
+//     holding its target section's contribution's offset plus what it held, and each address slot and line address
+//     its function's address in the program's .symtab.
+
+// The splitmix64 step: the tests' random numbers, from the seed.
+static uint64_t object_test_debug_random(uint64_t* state)
+{
+    *state += 0x9e3779b97f4a7c15ull;
+    uint64_t z = *state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+
+// One object's DWARF: its sections' bytes (one buffer each, the units' contributions one after another), the
+// descriptor over them and the columns it points at, which live on the arena the descriptor was made on.
+typedef struct ObjectTestDebug ObjectTestDebug;
+struct ObjectTestDebug
+{
+    ObjectDebug descriptor;
+    uint32_t unit_functions[2];
+    uint32_t fields[2 * BUSTER_OBJECT_DEBUG_FIELDS];
+};
+
+// The DWARF of unit `unit`'s functions (the ordinary ones in TEXT atoms, among the symbols object_prepare grouped by
+// unit, shuffled), as `unit_count` debug.c units (1 or 2, the second the functions after the first half, written at
+// the first's sizes), finalized at random addresses; on `arena`. A unit without functions gets units of none. False if
+// the arena has no room or debug.c refuses a unit.
+static bool object_test_debug_make(ObjectTestDebug* debug, const Link* link, const ObjectUnits* units, uint32_t unit, uint32_t unit_count, uint64_t* random,
+                                   Arena* arena)
+{
+    const LinkSymbols* symbols = &link->symbols;
+    const uint32_t* begin = units->symbol_begin + 2 * (uint64_t)unit;
+    const uint64_t defined = begin[2] - begin[0];
+    SymbolId* functions = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, defined + 1);
+    uint32_t* line_addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, defined + 1);
+    DebugFunction* entries = BUSTER_ARENA_PUSH_ARRAY(arena, DebugFunction, defined + 1);
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 4 * defined + 1);
+    uint32_t* lines = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 4 * defined + 1);
+    uint64_t* addresses = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, defined + 1);
+    *debug = (ObjectTestDebug){ 0 };
+    bool valid = functions != 0 && line_addresses != 0 && entries != 0 && offsets != 0 && lines != 0 && addresses != 0;
+    uint32_t count = 0;
+    for (uint32_t i = begin[0]; valid && i < begin[2]; i += 1)
+    {
+        const SymbolId symbol = units->symbols[i];
+        if (link->atoms.class[symbols->atom[symbol]] == BUSTER_LINK_CLASS_TEXT && (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION)
+        {
+            functions[count] = symbol;
+            count += 1;
+        }
+    }
+    // Shuffled: debug.c's functions may be in any order of addresses, and the relocations follow the descriptor's.
+    for (uint32_t i = count; i > 1; i -= 1)
+    {
+        const uint32_t j = (uint32_t)(object_test_debug_random(random) % i);
+        const SymbolId swapped = functions[i - 1];
+        functions[i - 1] = functions[j];
+        functions[j] = swapped;
+    }
+    static const String8 files[] = { BUSTER_S8("object_debug.c"), BUSTER_S8("object_debug.h") };
+    const uint32_t half = unit_count == 2 ? count / 2 : count;
+    const uint32_t first[2] = { 0, half };
+    const uint32_t end[2] = { half, count };
+    uint32_t row_first[3] = { 0, 0, 0 };
+    uint32_t rows = 0;
+    for (uint32_t f = 0; valid && f < count; f += 1)
+    {
+        row_first[1] = f == half ? rows : row_first[1];
+        const SymbolId symbol = functions[f];
+        const AtomId atom = symbols->atom[symbol];
+        const uint64_t room = link->atoms.size[atom] - symbols->value[symbol];
+        const uint64_t size = symbols->size[symbol] != 0 ? symbols->size[symbol] : room != 0 ? room : 1;
+        const NameId name = symbols->name[symbol];
+        const uint32_t row_count = (uint32_t)(object_test_debug_random(random) % 5);
+        // Offsets ascending inside the function (an insertion sort of a few), and lines anywhere, 0 among them.
+        for (uint32_t r = 0; r < row_count; r += 1)
+        {
+            uint32_t offset = (uint32_t)(object_test_debug_random(random) % size);
+            uint32_t at = rows + r;
+            while (at > rows && offsets[at - 1] > offset)
+            {
+                offsets[at] = offsets[at - 1];
+                at -= 1;
+            }
+            offsets[at] = offset;
+            lines[rows + r] = (uint32_t)(object_test_debug_random(random) % 4000);
+        }
+        entries[f] = (DebugFunction){
+            .name = { .pointer = name != 0 ? (char*)link->names.bytes[name] : 0, .length = name != 0 ? link->names.length[name] : 0 },
+            .size = (uint32_t)size,
+            .first_row = rows - row_first[f < half ? 0 : 1],
+            .row_count = row_count,
+            .file = (uint32_t)(object_test_debug_random(random) & 1),
+            .line = (uint32_t)(object_test_debug_random(random) % 4000),
+            .prologue_end = row_count != 0 ? (uint32_t)(object_test_debug_random(random) % (row_count + 1)) : 0,
+        };
+        addresses[f] = 0x400000 + (object_test_debug_random(random) & 0xffffff);
+        rows += row_count;
+    }
+    row_first[1] = half == count ? rows : row_first[1];
+    row_first[2] = rows;
+    // Each unit measured, then the sections' buffers, then each unit written at its bases there and finalized.
+    DebugUnit parts[2];
+    DebugOutput outputs[2];
+    uint64_t sizes[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t k = 0; valid && k < unit_count; k += 1)
+    {
+        parts[k] = (DebugUnit){
+            .directory = BUSTER_S8("/object/debug"),
+            .files = files,
+            .file_count = BUSTER_ARRAY_LENGTH(files),
+            .functions = entries + first[k],
+            .function_count = end[k] - first[k],
+            .offsets = offsets + row_first[k],
+            .lines = lines + row_first[k],
+            .row_count = row_first[k + 1] - row_first[k],
+        };
+        outputs[k] = (DebugOutput){
+            .line_addresses = line_addresses + first[k],
+            .address_capacity = end[k] - first[k],
+        };
+        memcpy(outputs[k].bases, sizes, sizeof(sizes));
+        valid = debug_write(&parts[k], &outputs[k], false) == DEBUG_ERROR_CAPACITY;
+        for (uint32_t s = 0; valid && s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            sizes[s] += outputs[k].sections[s].size;
+        }
+    }
+    uint8_t* bytes[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t s = 0; valid && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        bytes[s] = arena_push(arena, sizes[s], 8);
+        valid = bytes[s] != 0;
+    }
+    for (uint32_t k = 0; valid && k < unit_count; k += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            outputs[k].sections[s].bytes = bytes[s] + outputs[k].bases[s];
+            outputs[k].sections[s].capacity = outputs[k].sections[s].size;
+        }
+        valid = debug_write(&parts[k], &outputs[k], false) == DEBUG_OK && debug_finalize(&parts[k], &outputs[k], addresses + first[k]) == DEBUG_OK;
+        for (uint32_t i = first[k]; valid && i < end[k]; i += 1)
+        {
+            line_addresses[i] += (uint32_t)outputs[k].bases[DEBUG_SECTION_LINE];
+        }
+        for (uint32_t field = 0; valid && field < BUSTER_OBJECT_DEBUG_FIELDS; field += 1)
+        {
+            debug->fields[BUSTER_OBJECT_DEBUG_FIELDS * k + field] = (uint32_t)outputs[k].bases[DEBUG_SECTION_INFO] + outputs[k].fields[DEBUG_SECTION_ABBREV + field];
+        }
+        debug->unit_functions[k] = end[k] - first[k];
+    }
+    debug->descriptor = (ObjectDebug){
+        .functions = functions,
+        .line_addresses = line_addresses,
+        .function_count = count,
+        .unit_functions = unit_count == 2 ? debug->unit_functions : 0,
+        .unit_count = unit_count == 2 ? 2 : 0,
+        .fields = debug->fields,
+    };
+    for (uint32_t s = 0; valid && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        debug->descriptor.sections[s] = (String8){ .pointer = (char*)bytes[s], .length = sizes[s] };
+    }
+    return valid;
+}
+
+// A copy of a descriptor's bytes, on `arena`, to check later that object_build left them alone (an executable may take
+// the same unit after an object has).
+static bool object_test_debug_snapshot(const ObjectDebug* debug, String8* copies, Arena* arena)
+{
+    bool result = true;
+    for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        copies[s] = (String8){ .pointer = arena_push(arena, debug->sections[s].length, 8), .length = debug->sections[s].length };
+        result = copies[s].pointer != 0;
+        if (result)
+        {
+            memcpy(copies[s].pointer, debug->sections[s].pointer, copies[s].length);
+        }
+    }
+    return result;
+}
+
+static bool object_test_debug_unchanged(const ObjectDebug* debug, const String8* copies)
+{
+    bool result = true;
+    for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        result = debug->sections[s].length == copies[s].length && memcmp(debug->sections[s].pointer, copies[s].pointer, copies[s].length) == 0;
+    }
+    return result;
+}
+
+// A unit's function count in a descriptor (ObjectDebug's rule, written again here).
+static uint32_t object_test_debug_unit_functions(const ObjectDebug* debug, uint32_t unit)
+{
+    return debug->unit_count != 0 ? debug->unit_functions[unit] : debug->function_count;
+}
+
+// The STT_SECTION symbol of a view's section `section`, or 0.
+static uint64_t object_test_debug_section_symbol(const ObjectView* view, uint64_t section)
+{
+    uint64_t result = 0;
+    for (uint64_t i = 1; i < view->symbol_count; i += 1)
+    {
+        result = ELF64_ST_TYPE(view->symbols[i].st_info) == STT_SECTION && object_view_symbol_section(view, i) == section ? i : result;
+    }
+    return result;
+}
+
+// Checks an object's DWARF, as `view` read it, against the descriptor it was built with (see the file's comment).
+static bool object_test_debug_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, const ObjectDebug* debug)
+{
+    static const char* const names[BUSTER_DEBUG_SECTIONS] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    const uint64_t failures = tally->failures;
+    const uint32_t unit_count = debug->unit_count != 0 ? debug->unit_count : 1;
+    const uint64_t relocation_counts[BUSTER_DEBUG_SECTIONS] = {
+        [DEBUG_SECTION_INFO] = (uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * unit_count,
+        [DEBUG_SECTION_LINE] = debug->function_count,
+        [DEBUG_SECTION_ADDR] = debug->function_count,
+    };
+    // The five sections in debug.c's order, each followed by its relocations where it has them, then .note.GNU-stack.
+    uint64_t index = object_test_section_named(view, names[0], false);
+    uint64_t sections[BUSTER_DEBUG_SECTIONS] = { 0 };
+    uint64_t relocations[BUSTER_DEBUG_SECTIONS] = { 0 };
+    bool placed = index != 0;
+    for (uint32_t s = 0; placed && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        const Elf64_Shdr* header = index < view->section_count ? &view->sections[index] : 0;
+        const char* name = header != 0 ? object_view_section_name(view, index) : 0;
+        placed = name != 0 && strcmp(name, names[s]) == 0 && header->sh_type == SHT_PROGBITS && header->sh_flags == 0 && header->sh_addralign == 1 &&
+                 header->sh_size == debug->sections[s].length && header->sh_link == 0 && header->sh_info == 0 && header->sh_entsize == 0;
+        sections[s] = index;
+        index += 1;
+        if (placed && relocation_counts[s] != 0)
+        {
+            const Elf64_Shdr* rela = index < view->section_count ? &view->sections[index] : 0;
+            const char* rela_name = rela != 0 ? object_view_section_name(view, index) : 0;
+            placed = rela_name != 0 && strncmp(rela_name, ".rela", 5) == 0 && strcmp(rela_name + 5, names[s]) == 0 && rela->sh_type == SHT_RELA &&
+                     rela->sh_info == sections[s] && rela->sh_link == view->symbol_table_index && rela->sh_size == relocation_counts[s] * sizeof(Elf64_Rela);
+            relocations[s] = index;
+            index += 1;
+        }
+    }
+    const char* after = placed && index < view->section_count ? object_view_section_name(view, index) : 0;
+    object_test_expect(tally, placed && after != 0 && strcmp(after, ".note.GNU-stack") == 0, "the DWARF's sections and their relocations, after the sections of atoms", 0);
+    // Their bytes: the descriptor's, with each field, address slot and line address zero.
+    const uint8_t* contents[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t s = 0; placed && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        contents[s] = view->file + view->sections[sections[s]].sh_offset;
+    }
+    bool zeroed = placed;
+    uint8_t* zero_map[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t s = 0; zeroed && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        zero_map[s] = calloc(debug->sections[s].length + 1, 1);
+        zeroed = zero_map[s] != 0;
+    }
+    for (uint64_t f = 0; zeroed && f < (uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * unit_count; f += 1)
+    {
+        memset(zero_map[DEBUG_SECTION_INFO] + debug->fields[f], 1, 4);
+    }
+    uint64_t slot_base = 0;
+    uint32_t function = 0;
+    for (uint32_t unit = 0; zeroed && unit < unit_count; unit += 1)
+    {
+        const uint32_t count = object_test_debug_unit_functions(debug, unit);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            memset(zero_map[DEBUG_SECTION_ADDR] + slot_base + 8 + 8ull * i, 1, 8);
+            memset(zero_map[DEBUG_SECTION_LINE] + debug->line_addresses[function], 1, 8);
+            function += 1;
+        }
+        slot_base += 8 + 8ull * count;
+    }
+    for (uint32_t s = 0; zeroed && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        for (uint64_t at = 0; zeroed && at < debug->sections[s].length; at += 1)
+        {
+            zeroed = contents[s][at] == (zero_map[s][at] != 0 ? 0 : (uint8_t)debug->sections[s].pointer[at]);
+        }
+    }
+    for (uint32_t s = 0; s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        free(zero_map[s]);
+    }
+    object_test_expect(tally, zeroed, "the DWARF's bytes, with the fields and address slots zero", 0);
+    // The section symbols: the four sections the fields point into have one each, .debug_info none.
+    uint64_t symbols[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t s = 0; placed && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        symbols[s] = object_test_debug_section_symbol(view, sections[s]);
+    }
+    object_test_expect(tally, placed && symbols[DEBUG_SECTION_INFO] == 0 && symbols[DEBUG_SECTION_ABBREV] != 0 && symbols[DEBUG_SECTION_LINE] != 0 &&
+                                  symbols[DEBUG_SECTION_ADDR] != 0 && symbols[DEBUG_SECTION_RNGLISTS] != 0,
+                       "the section symbols of the sections the fields point into", 0);
+    // Each field: an R_X86_64_32 against its section's symbol, with the offset it held.
+    const Elf64_Rela* fields = placed ? (const Elf64_Rela*)(view->file + view->sections[relocations[DEBUG_SECTION_INFO]].sh_offset) : 0;
+    for (uint64_t f = 0; fields != 0 && f < (uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * unit_count; f += 1)
+    {
+        uint32_t value = 0;
+        memcpy(&value, debug->sections[DEBUG_SECTION_INFO].pointer + debug->fields[f], 4);
+        const uint64_t target = symbols[DEBUG_SECTION_ABBREV + f % BUSTER_OBJECT_DEBUG_FIELDS];
+        object_test_expect(tally, fields[f].r_offset == debug->fields[f] && ELF64_R_TYPE(fields[f].r_info) == R_X86_64_32 && ELF64_R_SYM(fields[f].r_info) == target &&
+                                      fields[f].r_addend == (int64_t)value,
+                           "a field's relocation, against its section's symbol", f);
+    }
+    // Each function's address slot and line address: an R_X86_64_64 against its section's symbol, at its st_value.
+    const Elf64_Rela* lines = placed && debug->function_count != 0 ? (const Elf64_Rela*)(view->file + view->sections[relocations[DEBUG_SECTION_LINE]].sh_offset) : 0;
+    const Elf64_Rela* slots = placed && debug->function_count != 0 ? (const Elf64_Rela*)(view->file + view->sections[relocations[DEBUG_SECTION_ADDR]].sh_offset) : 0;
+    slot_base = 0;
+    function = 0;
+    for (uint32_t unit = 0; slots != 0 && unit < unit_count; unit += 1)
+    {
+        const uint32_t count = object_test_debug_unit_functions(debug, unit);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const NameId name = link->symbols.name[debug->functions[function]];
+            char text[256];
+            snprintf(text, sizeof(text), "%.*s", (int)link->names.length[name], (const char*)link->names.bytes[name]);
+            const uint64_t own = object_test_symbol(view, text, 0, 0);
+            const Elf64_Sym* entry = own != 0 ? &view->symbols[own] : 0;
+            const uint64_t symbol = entry != 0 ? object_test_debug_section_symbol(view, object_view_symbol_section(view, own)) : 0;
+            const bool slot = symbol != 0 && slots[function].r_offset == slot_base + 8 + 8ull * i && ELF64_R_TYPE(slots[function].r_info) == R_X86_64_64 &&
+                              ELF64_R_SYM(slots[function].r_info) == symbol && slots[function].r_addend == (int64_t)entry->st_value;
+            const bool line = symbol != 0 && lines[function].r_offset == debug->line_addresses[function] && ELF64_R_TYPE(lines[function].r_info) == R_X86_64_64 &&
+                              ELF64_R_SYM(lines[function].r_info) == symbol && lines[function].r_addend == (int64_t)entry->st_value;
+            object_test_expect(tally, entry != 0 && ELF64_ST_TYPE(entry->st_info) == STT_FUNC && slot && line,
+                               "a function's address slot and line address, against its definition's section", function);
+            function += 1;
+        }
+        slot_base += 8 + 8ull * count;
+    }
+    return tally->failures == failures;
+}
+
+// A symbol of the link by name, or 0.
+static SymbolId object_test_debug_named(const Link* link, const char* text)
+{
+    SymbolId result = 0;
+    const uint64_t length = strlen(text);
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const NameId name = link->symbols.name[symbol];
+        result = name != 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], text, length) == 0 ? symbol : result;
+    }
+    return result;
+}
+
+// The refusals (see the file's comment), on the link made by hand: unit 0's two functions as two debug units, each
+// change made to a copy of the descriptor, its columns and the bytes it changes, then unit 2's with its IFUNC.
+static void object_test_debug_refusals(ObjectTestTally* tally, const Link* hand, ObjectUnits* units, ObjectSymbols* symbols, uint64_t* random, Arena* arena)
+{
+    const uint64_t length = arena->length;
+    ObjectTestDebug debug;
+    const bool made = object_test_debug_make(&debug, hand, units, 0, 2, random, arena) && debug.descriptor.function_count == 2;
+    object_test_expect(tally, made, "a descriptor of unit 0's two functions, as two units", 0);
+    const ObjectDebug valid = debug.descriptor;
+    const SymbolId far = object_test_debug_named(hand, "far");
+    const SymbolId inside = object_test_debug_named(hand, "inside");
+    const SymbolId small = object_test_debug_named(hand, "small");
+    const SymbolId chosen = object_test_debug_named(hand, "chosen");
+    // The section bytes a change may edit, copied, and the columns.
+    uint8_t* copies[BUSTER_DEBUG_SECTIONS] = { 0 };
+    bool copied = made && far != 0 && inside != 0 && small != 0 && chosen != 0;
+    for (uint32_t s = 0; copied && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        copies[s] = arena_push(arena, valid.sections[s].length, 8);
+        copied = copies[s] != 0;
+    }
+    SymbolId functions[2];
+    uint32_t lines[2];
+    uint32_t counts[2];
+    uint32_t fields[2 * BUSTER_OBJECT_DEBUG_FIELDS];
+    const uint32_t changes = 26;
+    for (uint32_t change = 0; copied && change < changes; change += 1)
+    {
+        ObjectDebug bad = valid;
+        for (uint32_t s = 0; s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            memcpy(copies[s], valid.sections[s].pointer, valid.sections[s].length);
+            bad.sections[s].pointer = (char*)copies[s];
+        }
+        memcpy(functions, valid.functions, sizeof(functions));
+        memcpy(lines, valid.line_addresses, sizeof(lines));
+        memcpy(counts, valid.unit_functions, sizeof(counts));
+        memcpy(fields, valid.fields, sizeof(fields));
+        bad.functions = functions;
+        bad.line_addresses = lines;
+        bad.unit_functions = counts;
+        bad.fields = fields;
+        uint32_t word = 0;
+        switch (change)
+        {
+            case 0:
+                bad.sections[DEBUG_SECTION_INFO].pointer = 0;
+                break;
+            case 1:
+                bad.sections[DEBUG_SECTION_ABBREV].length = 0;
+                break;
+            case 2:
+                bad.sections[DEBUG_SECTION_ADDR].length -= 1;
+                break;
+            case 3:
+                bad.sections[DEBUG_SECTION_LINE].length = 0xfffffff0u;
+                break;
+            case 4:
+                bad.functions = 0;
+                break;
+            case 5:
+                bad.line_addresses = 0;
+                break;
+            case 6:
+                bad.unit_functions = 0;
+                break;
+            case 7:
+                bad.fields = 0;
+                break;
+            case 8:
+                counts[0] += 1;
+                break;
+            case 9:
+                counts[0] += 1;
+                counts[1] -= 1;
+                break;
+            case 10:
+                memcpy(&word, copies[DEBUG_SECTION_ADDR], 4);
+                word += 8;
+                memcpy(copies[DEBUG_SECTION_ADDR], &word, 4);
+                break;
+            case 11:
+                copies[DEBUG_SECTION_ADDR][4] = 4;
+                break;
+            case 12:
+                memcpy(&word, copies[DEBUG_SECTION_INFO], 4);
+                word += 1;
+                memcpy(copies[DEBUG_SECTION_INFO], &word, 4);
+                break;
+            case 13:
+                fields[0] += 4;
+                break;
+            case 14:
+                fields[1] = valid.fields[2];
+                fields[2] = valid.fields[1];
+                break;
+            case 15:
+                memcpy(&word, copies[DEBUG_SECTION_INFO], 4);
+                fields[3] = word + 4 - 2;
+                break;
+            case 16:
+                word = (uint32_t)valid.sections[DEBUG_SECTION_LINE].length + 1;
+                memcpy(copies[DEBUG_SECTION_INFO] + fields[1], &word, 4);
+                break;
+            case 17:
+                lines[0] += 1;
+                break;
+            case 18:
+                lines[0] = valid.line_addresses[1];
+                lines[1] = valid.line_addresses[0];
+                break;
+            case 19:
+                lines[1] = (uint32_t)valid.sections[DEBUG_SECTION_LINE].length - 7;
+                break;
+            case 20:
+                functions[0] = 0;
+                break;
+            case 21:
+                functions[0] = hand->symbols.count;
+                break;
+            case 22:
+                functions[0] = far;
+                break;
+            case 23:
+                functions[0] = inside;
+                break;
+            case 24:
+                functions[0] = small;
+                break;
+            default:
+                bad.sections[DEBUG_SECTION_RNGLISTS].pointer = 0;
+                break;
+        }
+        const uint64_t before = arena->length;
+        const ObjectOptions options = { .debug = &bad };
+        const Object refused = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
+        object_test_expect(tally, refused.error == OBJECT_ERROR_DEBUG && refused.bytes == 0 && arena->length == before, "a descriptor object_build refuses", change);
+    }
+    // The descriptor itself, unchanged by any of it, still builds.
+    if (copied)
+    {
+        const uint64_t before = arena->length;
+        const ObjectOptions options = { .debug = &valid };
+        const Object built = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
+        object_test_expect(tally, built.error == OBJECT_ERROR_NONE, "the descriptor the changes started from", 0);
+        arena_pop_to(arena, before);
+    }
+    // An IFUNC, unit 2's: refused too, and its descriptor without it taken.
+    ObjectTestDebug ifunc;
+    const bool ifunc_made = object_test_debug_make(&ifunc, hand, units, 2, 1, random, arena) && ifunc.descriptor.function_count == 1;
+    object_test_expect(tally, ifunc_made, "a descriptor of unit 2's function", 0);
+    if (ifunc_made)
+    {
+        const uint64_t before = arena->length;
+        ObjectDebug taken = ifunc.descriptor;
+        const ObjectOptions options = { .debug = &taken };
+        const Object built = object_build(hand, units, symbols, 2, options, BUSTER_S8("u2.c"), arena);
+        object_test_expect(tally, built.error == OBJECT_ERROR_NONE, "unit 2's descriptor", 0);
+        arena_pop_to(arena, before);
+        SymbolId ifunc_function = chosen;
+        taken.functions = &ifunc_function;
+        const Object refused = object_build(hand, units, symbols, 2, options, BUSTER_S8("u2.c"), arena);
+        object_test_expect(tally, refused.error == OBJECT_ERROR_DEBUG && refused.bytes == 0 && arena->length == before, "a descriptor of an IFUNC", 0);
+        // Another unit's object: unit 0's, with unit 2's descriptor.
+        taken.functions = ifunc.descriptor.functions;
+        const Object other = object_build(hand, units, symbols, 0, options, BUSTER_S8("u0.c"), arena);
+        object_test_expect(tally, other.error == OBJECT_ERROR_DEBUG && other.bytes == 0 && arena->length == before, "another unit's descriptor", 0);
+    }
+    arena_pop_to(arena, length);
+}
+
+static bool object_test_debug(uint64_t seed, Arena* arena)
+{
+    ObjectTestTally tally = {
+        .check = "debug",
+    };
+    uint64_t random = seed ^ 0x6f626a6563742d67ull;
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
+    uint64_t objects = 0;
+    uint64_t functions = 0;
+    for (uint32_t i = 0; i < BUSTER_LINK_TEST_ALL_PROGRAMS; i += 1)
+    {
+        LinkProgram program;
+        const bool generated = link_program_generate(&program, options[i]);
+        object_test_expect(&tally, generated, names[i], i);
+        const uint64_t length = arena->length;
+        ObjectUnits units;
+        ObjectSymbols symbols;
+        const bool prepared = generated && object_prepare(&units, &program.link, options[i].units, arena) && object_map_symbols(&symbols, &program.link, arena);
+        object_test_expect(&tally, !generated || prepared, "object_prepare", i);
+        for (uint32_t unit = 0; prepared && unit < units.count; unit += 1)
+        {
+            for (uint32_t parts = 1; parts <= 2; parts += 1)
+            {
+                const uint64_t before = arena->length;
+                ObjectTestDebug debug;
+                String8 copies[BUSTER_DEBUG_SECTIONS];
+                const bool made = object_test_debug_make(&debug, &program.link, &units, unit, parts, &random, arena) &&
+                                  object_test_debug_snapshot(&debug.descriptor, copies, arena);
+                object_test_expect(&tally, made, "the unit's DWARF", unit);
+                for (uint32_t sections = 0; made && sections < 2; sections += 1)
+                {
+                    const ObjectOptions object_options = {
+                        .function_sections = sections == 1,
+                        .debug = &debug.descriptor,
+                    };
+                    ObjectTestCounts counts = { 0 };
+                    object_test_unit(&tally, &program.link, &units, &symbols, unit, object_options, &counts, arena);
+                    objects += 1;
+                    functions += debug.descriptor.function_count;
+                }
+                object_test_expect(&tally, !made || object_test_debug_unchanged(&debug.descriptor, copies), "the descriptor's bytes as they were", unit);
+                arena_pop_to(arena, before);
+            }
+        }
+        // One unit, said so by unit_functions: the same object as a descriptor without them.
+        if (prepared)
+        {
+            const uint64_t before = arena->length;
+            ObjectTestDebug debug;
+            const bool made = object_test_debug_make(&debug, &program.link, &units, 0, 1, &random, arena);
+            const uint32_t all = debug.descriptor.function_count;
+            ObjectDebug counted = debug.descriptor;
+            counted.unit_functions = &all;
+            counted.unit_count = 1;
+            const ObjectOptions plain = { .debug = &debug.descriptor };
+            const ObjectOptions said = { .debug = &counted };
+            const Object first = made ? object_build(&program.link, &units, &symbols, 0, plain, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
+            const Object second = made ? object_build(&program.link, &units, &symbols, 0, said, BUSTER_S8("u0.c"), arena) : (Object){ 0 };
+            object_test_expect(&tally, made && first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE && first.size == second.size &&
+                                           memcmp(first.bytes, second.bytes, first.size) == 0,
+                               "one unit, said so, is the same object", i);
+            arena_pop_to(arena, before);
+        }
+        arena_pop_to(arena, length);
+        link_program_release(&program);
+    }
+    // The link made by hand: every unit (1 and 3 without atoms, unit 2 with an IFUNC beside its function), then the
+    // refusals.
+    const uint64_t length = arena->length;
+    Link hand;
+    ObjectUnits units;
+    ObjectSymbols symbols;
+    const bool prepared = object_test_hand_link(&hand, arena) && object_prepare(&units, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, arena) &&
+                          object_map_symbols(&symbols, &hand, arena);
+    object_test_expect(&tally, prepared, "the link made by hand", 0);
+    for (uint32_t unit = 0; prepared && unit < units.count; unit += 1)
+    {
+        for (uint32_t parts = 1; parts <= 2; parts += 1)
+        {
+            const uint64_t before = arena->length;
+            ObjectTestDebug debug;
+            String8 copies[BUSTER_DEBUG_SECTIONS];
+            const bool made = object_test_debug_make(&debug, &hand, &units, unit, parts, &random, arena) && object_test_debug_snapshot(&debug.descriptor, copies, arena);
+            object_test_expect(&tally, made, "the hand link unit's DWARF", unit);
+            for (uint32_t sections = 0; made && sections < 2; sections += 1)
+            {
+                const ObjectOptions object_options = {
+                    .function_sections = sections == 1,
+                    .debug = &debug.descriptor,
+                };
+                ObjectTestCounts counts = { 0 };
+                object_test_unit(&tally, &hand, &units, &symbols, unit, object_options, &counts, arena);
+                objects += 1;
+                functions += debug.descriptor.function_count;
+            }
+            object_test_expect(&tally, !made || object_test_debug_unchanged(&debug.descriptor, copies), "the descriptor's bytes as they were", unit);
+            arena_pop_to(arena, before);
+        }
+    }
+    if (prepared)
+    {
+        object_test_debug_refusals(&tally, &hand, &units, &symbols, &random, arena);
+    }
+    arena_pop_to(arena, length);
+    printf("  %llu objects with DWARF, of %llu functions\n", (unsigned long long)objects, (unsigned long long)functions);
+    return object_test_report(&tally);
+}
+
+// The sections of a linked program, `file`, by debug.c's kinds, or false if one is missing or outside the file.
+static bool object_test_debug_linked(String8 file, String8* sections)
+{
+    static const char* const names[BUSTER_DEBUG_SECTIONS] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    const ExecutableTestImage image = executable_test_image(file);
+    bool result = image.valid;
+    for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        const Elf64_Shdr* header = executable_test_section(&image, names[s]);
+        result = header != 0 && header->sh_offset <= file.length && header->sh_size <= file.length - header->sh_offset;
+        sections[s] = result ? (String8){ .pointer = file.pointer + header->sh_offset, .length = header->sh_size } : (String8){ 0 };
+    }
+    return result;
+}
+
+// A linked program's symbol named `name`'s value: its .symtab's, which a static link writes; 0 if it has none.
+static uint64_t object_test_debug_address(String8 file, const String8 name)
+{
+    const ExecutableTestImage image = executable_test_image(file);
+    const Elf64_Shdr* table = image.valid ? executable_test_section(&image, ".symtab") : 0;
+    const Elf64_Shdr* strings = table != 0 && table->sh_link < image.header->e_shnum ? &image.section_headers[table->sh_link] : 0;
+    uint64_t result = 0;
+    for (uint64_t i = 1; strings != 0 && result == 0 && i < table->sh_size / sizeof(Elf64_Sym); i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, file.pointer + table->sh_offset + i * sizeof(symbol), sizeof(symbol));
+        const char* text = symbol.st_name < strings->sh_size ? file.pointer + strings->sh_offset + symbol.st_name : 0;
+        result = text != 0 && ELF64_ST_TYPE(symbol.st_info) == STT_FUNC && strlen(text) == name.length && memcmp(text, name.pointer, name.length) == 0 ? symbol.st_value : 0;
+    }
+    return result;
+}
+
+// Whether a linked program's DWARF is its objects' (see the file's comment), `debugs[unit]` unit `unit`'s object's.
+static bool object_test_debug_program(String8 file, const Link* link, const ObjectTestDebug* debugs, uint32_t unit_count)
+{
+    String8 sections[BUSTER_DEBUG_SECTIONS];
+    bool result = object_test_debug_linked(file, sections);
+    uint64_t bases[BUSTER_DEBUG_SECTIONS] = { 0 };
+    for (uint32_t unit = 0; unit < unit_count; unit += 1)
+    {
+        for (uint32_t s = 0; s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            bases[s] += debugs[unit].descriptor.sections[s].length;
+        }
+    }
+    for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+    {
+        result = sections[s].length == bases[s];
+    }
+    memset(bases, 0, sizeof(bases));
+    for (uint32_t unit = 0; result && unit < unit_count; unit += 1)
+    {
+        const ObjectDebug* debug = &debugs[unit].descriptor;
+        uint8_t* expected[BUSTER_DEBUG_SECTIONS] = { 0 };
+        for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            expected[s] = malloc(debug->sections[s].length + 1);
+            result = expected[s] != 0;
+            if (result)
+            {
+                memcpy(expected[s], debug->sections[s].pointer, debug->sections[s].length);
+            }
+        }
+        const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+        for (uint64_t f = 0; result && f < (uint64_t)BUSTER_OBJECT_DEBUG_FIELDS * units; f += 1)
+        {
+            uint32_t value = 0;
+            memcpy(&value, expected[DEBUG_SECTION_INFO] + debug->fields[f], 4);
+            value += (uint32_t)bases[DEBUG_SECTION_ABBREV + f % BUSTER_OBJECT_DEBUG_FIELDS];
+            memcpy(expected[DEBUG_SECTION_INFO] + debug->fields[f], &value, 4);
+        }
+        uint64_t slot_base = 0;
+        uint32_t function = 0;
+        for (uint32_t k = 0; result && k < units; k += 1)
+        {
+            const uint32_t count = object_test_debug_unit_functions(debug, k);
+            for (uint32_t i = 0; result && i < count; i += 1)
+            {
+                const NameId name = link->symbols.name[debug->functions[function]];
+                const uint64_t address = object_test_debug_address(file, (String8){ .pointer = (char*)link->names.bytes[name], .length = link->names.length[name] });
+                result = address != 0;
+                memcpy(expected[DEBUG_SECTION_ADDR] + slot_base + 8 + 8ull * i, &address, 8);
+                memcpy(expected[DEBUG_SECTION_LINE] + debug->line_addresses[function], &address, 8);
+                function += 1;
+            }
+            slot_base += 8 + 8ull * count;
+        }
+        for (uint32_t s = 0; result && s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            result = memcmp(sections[s].pointer + bases[s], expected[s], debug->sections[s].length) == 0;
+            bases[s] += debug->sections[s].length;
+        }
+        for (uint32_t s = 0; s < BUSTER_DEBUG_SECTIONS; s += 1)
+        {
+            free(expected[s]);
+        }
+    }
+    return result;
+}
+
+static bool object_test_debug_cross_check(uint64_t seed, const char* directory, bool keep, Arena* arena)
+{
+    ObjectTestTally tally = {
+        .check = "debug cross-check",
+    };
+    static const char* const linkers[] = { "ld.bfd", "ld.lld", "mold" };
+    uint64_t random = seed ^ 0x6c696e6b65642d67ull;
+    LinkProgramOptions options[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* names[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    const char* directories[BUSTER_LINK_TEST_ALL_PROGRAMS];
+    link_test_all_options(options, names, directories, seed, BUSTER_OBJECT_TEST_FUNCTIONS);
+    // The defaults and many units: static programs without libc.
+    static const uint32_t sets[] = { 0, 2 };
+    uint32_t linked = 0;
+    for (uint32_t set = 0; set < BUSTER_ARRAY_LENGTH(sets); set += 1)
+    {
+        const uint32_t i = sets[set];
+        LinkProgram program;
+        const bool generated = link_program_generate(&program, options[i]);
+        object_test_expect(&tally, generated, names[i], i);
+        const uint64_t length = arena->length;
+        ObjectUnits units;
+        ObjectSymbols symbols;
+        const bool prepared = generated && object_prepare(&units, &program.link, options[i].units, arena) && object_map_symbols(&symbols, &program.link, arena);
+        const uint32_t count = prepared ? units.count : 0;
+        ObjectTestDebug* debugs = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, ObjectTestDebug, count) : 0;
+        char* paths = prepared ? arena_push(arena, (uint64_t)count * BUSTER_OBJECT_TEST_PATH_BYTES, 1) : 0;
+        char** arguments = prepared ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 8) : 0;
+        bool ready = debugs != 0 && paths != 0 && arguments != 0;
+        object_test_expect(&tally, ready, "the objects' DWARF and paths", i);
+        for (uint32_t unit = 0; ready && unit < count; unit += 1)
+        {
+            ready = object_test_debug_make(&debugs[unit], &program.link, &units, unit, 1 + unit % 2, &random, arena);
+            object_test_expect(&tally, ready, "a unit's DWARF", unit);
+        }
+        char output_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+        char error_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+        char program_path[BUSTER_OBJECT_TEST_PATH_BYTES];
+        snprintf(output_path, sizeof(output_path), "%s/debug-%s.out", directory, directories[i]);
+        snprintf(error_path, sizeof(error_path), "%s/debug-%s.err", directory, directories[i]);
+        snprintf(program_path, sizeof(program_path), "%s/debug-%s", directory, directories[i]);
+        for (uint32_t sections = 0; ready && sections < 2; sections += 1)
+        {
+            // Each unit's object, with its DWARF, listed by both tools.
+            for (uint32_t unit = 0; ready && unit < count; unit += 1)
+            {
+                char* path = paths + (uint64_t)unit * BUSTER_OBJECT_TEST_PATH_BYTES;
+                snprintf(path, BUSTER_OBJECT_TEST_PATH_BYTES, "%s/debug-%s%s_u%u.o", directory, directories[i], sections == 1 ? "-sections" : "", unit);
+                const ObjectOptions object_options = {
+                    .function_sections = sections == 1,
+                    .debug = &debugs[unit].descriptor,
+                };
+                const uint64_t before = arena->length;
+                char source[32];
+                const Object object = object_build(&program.link, &units, &symbols, unit, object_options, object_test_source_name(source, sizeof(source), unit), arena);
+                ready = object.error == OBJECT_ERROR_NONE && object_write_file(path, object.bytes, object.size) == OBJECT_ERROR_NONE;
+                object_test_expect(&tally, ready, "writing an object with its DWARF", unit);
+                ObjectView view;
+                char error[512];
+                if (ready && object_view_open(&view, object.bytes, object.size, false, error, sizeof(error)))
+                {
+                    object_test_listing(&tally, "readelf", &view, path, output_path, error_path, arena);
+                    object_test_listing(&tally, "llvm-readobj", &view, path, output_path, error_path, arena);
+                }
+                arena_pop_to(arena, before);
+            }
+            // Each linker's program: it runs, its DWARF verifies, and it is the objects'.
+            for (uint32_t l = 0; ready && l < BUSTER_ARRAY_LENGTH(linkers); l += 1)
+            {
+                uint32_t argument = 0;
+                arguments[argument++] = (char*)linkers[l];
+                arguments[argument++] = "-static";
+                arguments[argument++] = "-e";
+                arguments[argument++] = "_start";
+                arguments[argument++] = "-o";
+                arguments[argument++] = program_path;
+                for (uint32_t unit = 0; unit < count; unit += 1)
+                {
+                    arguments[argument++] = paths + (uint64_t)unit * BUSTER_OBJECT_TEST_PATH_BYTES;
+                }
+                arguments[argument] = 0;
+                unlink(program_path);
+                const uint64_t before = arena->length;
+                const int status = object_test_run(arguments, output_path, error_path);
+                const String8 errors = object_test_read_file(arena, error_path);
+                const bool clean = status == 0 && errors.pointer != 0 && errors.length == 0;
+                if (!clean)
+                {
+                    printf("  %s with DWARF: %s exited with %d: %.*s\n", directories[i], linkers[l], status, errors.pointer != 0 ? (int)(errors.length < 500 ? errors.length : 500) : 0,
+                           errors.pointer != 0 ? errors.pointer : "");
+                }
+                object_test_expect(&tally, clean, "a link of objects with DWARF without errors or warnings", l);
+                char* run[] = { program_path, 0 };
+                const int run_status = clean ? object_test_run(run, output_path, error_path) : -1;
+                const String8 output = clean ? object_test_read_file(arena, output_path) : (String8){ 0 };
+                object_test_expect(&tally, run_status == 0 && output.pointer != 0 && output.length == BUSTER_LINK_PROGRAM_OUTPUT_BYTES &&
+                                               memcmp(output.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES) == 0,
+                                   "the program runs and prints what it should", l);
+                char* verify[] = { "llvm-dwarfdump", "--verify", program_path, 0 };
+                const int verified = clean ? object_test_run(verify, output_path, error_path) : -1;
+                const String8 report = clean ? object_test_read_file(arena, output_path) : (String8){ 0 };
+                const bool no_errors = verified == 0 && report.pointer != 0 && strstr(report.pointer, "No errors.") != 0;
+                if (clean && !no_errors)
+                {
+                    printf("  %s linked by %s: llvm-dwarfdump --verify: %.*s\n", directories[i], linkers[l], report.pointer != 0 ? (int)(report.length < 600 ? report.length : 600) : 0,
+                           report.pointer != 0 ? report.pointer : "");
+                }
+                object_test_expect(&tally, no_errors, "llvm-dwarfdump --verify finds no error", l);
+                const String8 file = clean ? object_test_read_file(arena, program_path) : (String8){ 0 };
+                object_test_expect(&tally, file.pointer != 0 && object_test_debug_program(file, &program.link, debugs, count),
+                                   "the program's DWARF is its objects', relocated where the linker put them", l);
+                linked += clean ? 1 : 0;
+                arena_pop_to(arena, before);
+            }
+            for (uint32_t unit = 0; !keep && unit < count; unit += 1)
+            {
+                unlink(paths + (uint64_t)unit * BUSTER_OBJECT_TEST_PATH_BYTES);
+            }
+        }
+        if (!keep)
+        {
+            unlink(program_path);
+            unlink(output_path);
+            unlink(error_path);
+        }
+        arena_pop_to(arena, length);
+        link_program_release(&program);
+    }
+    printf("  objects with DWARF of %u sets linked %u times, by GNU ld, lld and mold\n", (uint32_t)BUSTER_ARRAY_LENGTH(sets), linked);
+    return object_test_report(&tally);
+}

@@ -3195,6 +3195,14 @@ builds an object in its scratch arena and writes it with one `pwrite`.
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
   named symbol at offset 0. Each section is followed by its `.rela.<section>`
   if its atoms have fixups;
+- with `ObjectOptions.debug`, the DWARF of the unit's functions (#395):
+  debug.c's `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_addr` and
+  `.debug_rnglists`, unallocated, `.debug_info` followed by its relocations
+  (each unit's fields that point into the other four, `R_X86_64_32` against
+  their sections' symbols), and with functions `.debug_line` and
+  `.debug_addr` by theirs (each function's address, `R_X86_64_64` against its
+  section's symbol). [The debug guide](debug.md) ("Relocatable objects") has
+  the rules;
 - `.note.GNU-stack`, which must be there or linkers assume an executable
   stack, and `.comment`;
 - `.symtab`, `.symtab_shndx` when it is needed, `.strtab` and `.shstrtab`,
@@ -3206,9 +3214,8 @@ contents start in the file at a multiple of its alignment, as GNU as places
 them, up to 4 KB: linkers copy contents from any offset, and more would only
 pad the file. The generated programs' `.eh_frame` atoms ("The unwind
 tables") give each object a `.eh_frame` and its `.rela.eh_frame`. Not yet:
-`.debug_*`, which waits for DWARF (step 9), and priorities in
-`.init_array`'s and `.fini_array`'s names, which the representation doesn't
-have.
+priorities in `.init_array`'s and `.fini_array`'s names, which the
+representation doesn't have.
 
 **Symbols:**
 
