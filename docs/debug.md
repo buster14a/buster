@@ -168,14 +168,15 @@ no entry or push spends anything on them. The helpers both copies share only
 test the flag where a call or an initializer part changes the token in the
 middle of a task, and at a function's start and end. Each copy inlines the
 tasks' work and `tier0_validate` as clang inlines them into code it compiles
-once (`[[clang::always_inline]]` at the calls): with a call in each copy, it
-left them out of line, and a compile without `-g` took 2% more cycles. The
+once (six task functions are `always_inline`, and the lowering calls
+`tier0_validate_inline`): with a call in each copy, it left them out of line,
+and a compile without `-g` took 2% more cycles. The
 emission reserves the raw rows and writes each function's out of line
 (`check_program_emit_reserve_rows`, `check_program_emit_body_rows`). On the
 9700X, a compile without `-g` of a generated program of 31,269 lines retired
-0.045% fewer instructions than main, took 0.37% more wall time and wrote
-main's executable; with `-g` it took 7.1% more
-([the record](https://github.com/buster14a/buster-performance/tree/d7d14b414fdfe0cfc0e9a030b3148b3dacb1d1ba/docs/measurements/c-driver-dwarf-395-2026-10-25)).
+0.004% more instructions than main, took 0.42% more wall time and wrote
+main's executable; with `-g` it took 7.2% more
+([the record](https://github.com/buster14a/buster-performance/tree/fec2430fdab625676f82a1226607b3ca885b1288/docs/measurements/c-driver-dwarf-395-2026-10-25)).
 
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a
