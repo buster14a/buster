@@ -3638,9 +3638,11 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   constructs left open at the end), each prepared whole by both kernels and a
   window at a time (`pp_prepare_windows`) in windows of 1 byte to 8 KB, in five
   language modes: every record must be the whole file's, byte for byte; and
-  where a window is cut, after its last line end that isn't a splice's
-  (`pp_window_cut`), against a byte at a time, on random bytes ending at a
-  `PROT_NONE` page and starting at the end of one; and 11 files
+  where a window is cut before a long line (`pp_window_cut`), against a byte at
+  a time, on random bytes ending at a `PROT_NONE` page and starting at the end
+  of one, and on 9 windows worked out by hand, one faulting if the scan passes
+  its last line end; and the directives' places (`pp_directive_places`) against
+  their bit-at-a-time twin, each output ending at a `PROT_NONE` page; and 11 files
   made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
   64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
   alone, a `\r` last), whose line ends `pp_count_lines` must count from many
