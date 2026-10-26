@@ -1165,7 +1165,14 @@ disagree with itself.
 - **Enums:** GCC ignores `aligned` on an enum, and gives one whose values no
   64-bit type holds `__int128`, where clang gives it `long`.
 - **Bit-fields:** GCC places a bit-field of an aligned typedef by the
-  typedef's alignment, clang by its type's. And GCC 16 gives a `_BitInt(128)`
+  typedef's alignment, clang by its type's. Clang checks that a bit-field fits
+  its type's storage unit before it aligns the field as an `aligned` attribute
+  on it says, and GCC after: a field aligned below its type's alignment, which
+  crosses the unit only once aligned, is moved to the next unit by GCC and
+  left across it by clang. So
+  `struct { char c; unsigned long f : 45 __attribute__((aligned(4))); }` has
+  `f` at byte 8 in GCC and at byte 4 in clang, and GCC's worlds give a
+  bit-field no alignment below its type's. And GCC 16 gives a `_BitInt(128)`
   bit-field of all 128 bits, at an offset 16 divides, TImode's alignment, 16,
   which raises its record's: `struct { _BitInt(128) x : 128; char c; }` is 32
   bytes aligned to 16 there, and 24 aligned to 8 to clang (and to GCC with a
@@ -1465,16 +1472,20 @@ Intel SDE for its AVX-512), the compiled runs pass at seeds 1 to 11, with both
 paths' objects the same bytes every time: against clang, 4,400 signatures of
 26,801 arguments, 60,660 checks; against GCC's worlds, compiled there by GCC 13
 (`-std=gnu2x` for `-std=gnu23`), 4,400 signatures of 25,907 arguments, 58,842
-checks.
+checks. On the 7940HS (2026-10-26, clang 23.1.4 and GCC 16.2.1), once the
+compiled worlds took `__int128` and `_Complex`, all eight runs pass at seeds 1
+to 100: 320,000 signatures and 4,465,433 checks, of which the compiled runs'
+are 80,000 signatures and 1,080,346 checks.
 
 With the defaults (seed 1), each run has 400 signatures of 2,200 to 2,600
-arguments, and the six runs make about 34,300 checks; on the 9700X the whole
-`--cross-check` takes 4.8 s, about a clang run's time. The runs are
-independent and nearly all of each one's time is its compiler's, so they go at
-once, a child process each (one after another, they took 18.1 s); the test
-prints their lines and adds their counts in the runs' order (clang's, then
-GCC's, each at 16, 32 and 64 bytes), and a run that fails keeps its files.
-Seeds 1 to 100 pass, with clang 23.1.3 and GCC 16.2.1.
+arguments, and the eight runs make about 45,000 checks; on the 9700X the six
+record runs took 4.8 s, about a clang run's time. The runs are independent
+and nearly all of each one's time is its compiler's, so they go at once, a
+child process each (the six one after another took 18.1 s); the test prints
+their lines and adds their counts in the runs' order (clang's, then GCC's,
+each at 16, 32 and 64 bytes, then the compiled runs against clang and against
+GCC), and a run that fails keeps its files. The record runs passed seeds 1 to
+100 with clang 23.1.3 and GCC 16.2.1, before the compiled runs.
 
 Capture descriptors stay above stderr, even when the command starts with
 standard streams closed. Before the ordinary cross-check, bounded child

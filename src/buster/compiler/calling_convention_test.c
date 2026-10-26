@@ -3343,8 +3343,9 @@ static bool abi_test_fixtures(void)
 // members of no size (GCC ignores them where clang makes a wide record or offset 16 MEMORY), misaligned members (GCC
 // checks a member's scalars against their sizes, and no _BitInt, where clang checks each member's alignment), so no
 // packing and no alignment a typedef lowers; and what GCC lays out otherwise: arrays whose element's size isn't a
-// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, _BitInt(128) bit-fields of all 128 bits
-// (GCC aligns them to 16 at an offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
+// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, bit-fields aligned below their types'
+// alignment (abi_test_world_record has the rule), _BitInt(128) bit-fields of all 128 bits (GCC aligns them to 16 at an
+// offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
 // declaration spells a vector: GCC applies a declarator's attributes before the vector_size of its specifiers, so it
 // drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`.
 
@@ -3533,11 +3534,19 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         }
         type = world->gcc && type_size(table, type) == 0 ? BUSTER_TYPE_CHAR : type;
         const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
+        const uint8_t alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0;
+        // Clang checks that a bit-field fits its type's storage unit before it aligns the field as its attribute says,
+        // and GCC after: a field aligned below its type, which crosses the unit only once aligned, is moved to the next
+        // unit by GCC and left across it by clang. `char c; unsigned long f : 45 __attribute__((aligned(4)))` has f at
+        // byte 8 in GCC and at byte 4 in clang, and `char c; unsigned f : 20 __attribute__((aligned(2)))` at byte 4 and
+        // at byte 2. So GCC's worlds give a bit-field no alignment below its type's (after the same draws; a member's
+        // alignment is its log2 + 1).
+        const bool lowered = width != BUSTER_TYPE_NOT_BIT_FIELD && alignment_log2 != 0 && alignment_log2 - 1u < type_alignment_log2(table, type);
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
             .type = type,
             .bit_width = width,
-            .alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0,
+            .alignment_log2 = world->gcc && lowered ? 0 : alignment_log2,
             .packed = !unnamed && type_test_below(random, 16) == 0 && !world->gcc,
         };
     }
