@@ -1133,8 +1133,9 @@ there at a time, so everything takes one lock:
   step that doesn't run its `MEASURE` name's `./build/compiler benchmark-NAME`
   (or `measure-NAME`) as a command line of its own, after only its indentation,
   a `run:` and a `taskset -c CPUS` (the selector finds a step's benchmarks by
-  those lines, not by a comment or a string that spells one; a mutant with
-  `benchmark-types` commented out must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
+  those lines, not by a comment, a string or a here-document's body that
+  spells one; mutants with `benchmark-types` commented out or in a
+  here-document must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
   `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
