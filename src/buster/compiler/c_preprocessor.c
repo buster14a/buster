@@ -3075,13 +3075,16 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
 // aren't line splices': a '\n' that doesn't follow a backslash, nor a '\r' after one, and a '\r' that doesn't follow a
 // backslash and isn't the start of a "\r\n" in the window, 64 bytes at a time from its end. The lexer drops the tokens
 // from the last line it lexes on, which the next window lexes again, so:
-// - with no line end, `at`: the window's line goes on through splices alone (a macro defined over many lines) and would
-//   keep no token, so it is doubled unlexed;
-// - past the last line end when what follows it, which the window's end cuts and the next window would lex again, is
-//   longer than `longest_tail` (BUSTER_PP_WINDOW_TAIL_BYTES) and than the line that ends there, which is lexed again
-//   instead: the start of a line longer than most, which x86_64_encoder.c's BUSTER_X86_VECTOR_FORMS (157 KB on 1,695
-//   lines) had 110 KB of lexed twice (#451);
-// - `end` otherwise, with one line end or a short line after the last, which the next window lexes again.
+// - `end` when the part of a line after the last line end, which the next window lexes again, is no longer than
+//   `longest_tail` (BUSTER_PP_WINDOW_TAIL_BYTES): an ordinary window, which needs no line end before it, so the scan
+//   stops there;
+// - past the last line end when that part, which the window's end cuts, is longer, and the line that ends there,
+//   which is lexed again instead, is shorter: the start of a line longer than most, which x86_64_encoder.c's
+//   BUSTER_X86_VECTOR_FORMS (157 KB on 1,695 lines) had 110 KB of lexed twice (#451);
+// - `at`, so that the window is doubled unlexed, when it has no line end (its line goes on through splices alone, as a
+//   macro defined over many lines does, and would keep no token) or only the one before that part (lexed, the window
+//   would keep its first line and lex the long one's start again);
+// - `end` otherwise, a line before the last line end longer than the part after it.
 // A splice the lexer takes otherwise (with blanks after the backslash, or a trigraph's) counts as a line end here; the
 // cut only spares work, and the tokens are the same wherever it falls.
 static uint64_t pp_window_cut(const uint8_t* bytes, uint64_t at, uint64_t end, uint64_t longest_tail)
@@ -3090,7 +3093,7 @@ static uint64_t pp_window_cut(const uint8_t* bytes, uint64_t at, uint64_t end, u
     uint64_t last = UINT64_MAX;
     uint64_t before = UINT64_MAX;
     uint64_t chunk_end = end;
-    while (before == UINT64_MAX && chunk_end > at)
+    while (before == UINT64_MAX && chunk_end > at && (last == UINT64_MAX || end - 1 - last > longest_tail))
     {
         const uint64_t base = chunk_end - at >= 64 ? chunk_end - 64 : at;
         const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)(chunk_end - base));
@@ -3117,7 +3120,7 @@ static uint64_t pp_window_cut(const uint8_t* bytes, uint64_t at, uint64_t end, u
         chunk_end = base;
     }
     const uint64_t tail = last != UINT64_MAX ? end - 1 - last : 0;
-    return last == UINT64_MAX ? at : before != UINT64_MAX && tail > longest_tail && last - before < tail ? last + 1 : end;
+    return last == UINT64_MAX || (tail > longest_tail && before == UINT64_MAX) ? at : tail > longest_tail && last - before < tail ? last + 1 : end;
 }
 
 // The line ends in the 64-byte block at `base` of a file that lie in [begin, end), as pp_count_lines counts them but for a

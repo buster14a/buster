@@ -16,7 +16,7 @@
 // (pp_test_line_ends, #441): a "\r\n" counts at its '\n', so a query that ends at the '\n' counts no line end there.
 //
 // Layout: the random sources, the preparations and their comparison, the line pages, lines in units, the windows' cut
-// (pp_window_cut) against a byte-at-a-time one, the directives' places (pp_directive_places) against their twin, line
+// (pp_window_cut) against a byte-at-a-time one and on windows made by hand, the directives' places (pp_directive_places) against their twin, line
 // ends at a query's end, and pp_test_windows.
 
 #include <stdint.h>
@@ -579,7 +579,7 @@ static uint64_t pp_window_test_cut(const uint8_t* bytes, uint64_t at, uint64_t e
         last = line_end ? p : last;
     }
     const uint64_t tail = last != UINT64_MAX ? end - 1 - last : 0;
-    return last == UINT64_MAX ? at : before != UINT64_MAX && tail > longest_tail && last - before < tail ? last + 1 : end;
+    return last == UINT64_MAX || (tail > longest_tail && before == UINT64_MAX) ? at : tail > longest_tail && last - before < tail ? last + 1 : end;
 }
 
 // pp_window_cut against the byte-at-a-time cut: random bytes of backslashes, line ends ("\r\n" among them), blanks and
@@ -635,6 +635,98 @@ static uint64_t pp_window_test_line_ends(uint64_t* random, uint64_t* checks)
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, room + 2 * page_bytes);
+    }
+    return failures;
+}
+
+// A window for pp_window_test_cut_fixtures: `length` bytes of 'x' with a line end at each of `places` (a '\n', or a
+// "\r\n" ending there when `crlf`), and splices ("\\\n") at `splices`.
+typedef struct PPWindowCutFixture PPWindowCutFixture;
+struct PPWindowCutFixture
+{
+    const char* name;
+    uint32_t length;
+    uint32_t places[2];
+    uint32_t place_count;
+    bool crlf;
+    // The cut by hand: the window's length (`end`), 0 (`at`, doubled unlexed), or a place.
+    uint32_t expected;
+};
+
+// pp_window_cut on windows made by hand, against the cut worked out by hand and the byte-at-a-time one, with the
+// longest tail BUSTER_PP_WINDOW_TAIL_BYTES: a short tail after a line far longer, whose bytes before the line end's chunk
+// are in a PROT_NONE page, so that a scan past the line end faults (a short tail needs no line end before it); one line
+// end and a long tail (doubled unlexed), also as "\r\n"; a short line and a long tail (cut after it); a line longer than
+// the long tail (lexed to the end); no line end, only splices (doubled); and tails at the bound and one past it. Returns
+// the differences and adds the checks to `checks`.
+static uint64_t pp_window_test_cut_fixtures(uint64_t* checks)
+{
+    const uint32_t tail = BUSTER_PP_WINDOW_TAIL_BYTES;
+    static const PPWindowCutFixture fixtures[] = {
+        { "one line end, then a long tail", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 50 }, 1, false, 0 },
+        { "one \"\\r\\n\", then a long tail", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 50 }, 1, true, 0 },
+        { "a short line, then a long tail", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 50, 100 }, 2, false, 101 },
+        { "a short line ending \"\\r\\n\", then a long tail", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 50, 100 }, 2, true, 101 },
+        { "a line longer than the long tail after it", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 10, 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 500 }, 2, false,
+          3 * BUSTER_PP_WINDOW_TAIL_BYTES },
+        { "no line end, only splices", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 0 }, 0, false, 0 },
+        { "a short line, then a tail at the bound", 3 * BUSTER_PP_WINDOW_TAIL_BYTES, { 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 92, 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 1 }, 2,
+          false, 3 * BUSTER_PP_WINDOW_TAIL_BYTES },
+        { "a short line, then a tail one past the bound", 3 * BUSTER_PP_WINDOW_TAIL_BYTES,
+          { 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 92, 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 2 }, 2, false, 2 * BUSTER_PP_WINDOW_TAIL_BYTES - 1 },
+    };
+    uint64_t failures = 0;
+    uint8_t* bytes = malloc(3 * BUSTER_PP_WINDOW_TAIL_BYTES);
+    for (uint32_t f = 0; bytes != 0 && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    {
+        const PPWindowCutFixture* fixture = fixtures + f;
+        memset(bytes, 'x', fixture->length);
+        for (uint32_t s = 300; s + 2 < fixture->length; s += 997)
+        {
+            bytes[s] = '\\';
+            bytes[s + 1] = '\n';
+        }
+        for (uint32_t i = 0; i < fixture->place_count; i += 1)
+        {
+            bytes[fixture->places[i]] = '\n';
+            bytes[fixture->places[i] - 1] = fixture->crlf ? '\r' : 'x';
+        }
+        const uint64_t expected = fixture->expected;
+        const uint64_t vector = pp_window_cut(bytes, 0, fixture->length, tail);
+        const uint64_t scalar = pp_window_test_cut(bytes, 0, fixture->length, tail);
+        *checks += 1;
+        if ((vector != expected || scalar != expected) && !pp_test_quiet)
+        {
+            printf("windows: the cut of \"%s\" is at %lu, a byte at a time at %lu, by hand at %lu\n", fixture->name, (unsigned long)vector, (unsigned long)scalar,
+                   (unsigned long)expected);
+        }
+        failures += vector != expected || scalar != expected;
+    }
+    failures += bytes == 0;
+    free(bytes);
+    // The short tail after a long line: the window starts in a PROT_NONE page, and its line end and tail are in the
+    // readable page after it, past that page's first chunk (whose look-behind would read the page before).
+    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 3 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = mapping != MAP_FAILED && mprotect(mapping, page_bytes, PROT_NONE) == 0 && mprotect(mapping + 2 * page_bytes, page_bytes, PROT_NONE) == 0;
+    if (guarded)
+    {
+        uint8_t* page = mapping + page_bytes;
+        memset(page, 'x', page_bytes);
+        const uint64_t place = page_bytes - 1 - (tail - 101);
+        page[place] = '\n';
+        const uint64_t cut = pp_window_cut(mapping, 0, 2 * page_bytes, tail);
+        *checks += 1;
+        if (cut != 2 * page_bytes && !pp_test_quiet)
+        {
+            printf("windows: the cut of a short tail after a long line is at %lu, not at the window's end\n", (unsigned long)cut);
+        }
+        failures += cut != 2 * page_bytes;
+    }
+    failures += !guarded;
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 3 * page_bytes);
     }
     return failures;
 }
@@ -906,7 +998,7 @@ static bool pp_test_windows(uint64_t seed)
     }
     uint64_t random = seed ^ 0x116116116ull;
     uint64_t line_end_checks = 0;
-    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks);
+    const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks);
     uint64_t place_checks = 0;
     const uint64_t place_failures = pp_window_test_places(&random, &place_checks);
     uint64_t failures = 0;
