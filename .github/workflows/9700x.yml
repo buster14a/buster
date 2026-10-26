@@ -1141,26 +1141,21 @@ jobs:
           sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
           printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
           options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
-          reference=()
-          if tcc="$(command -v tcc)"; then
-              "$tcc" -v
-              reference=(--reference "$tcc")
-          else
-              echo "tcc isn't installed: measuring without the reference"
-          fi
-          taskset -c 2 ./build/compiler measure-compile --runs 11 "${reference[@]}" -- "${options[@]}"
+          # tcc is the comparison's reference: the step fails without it.
+          tcc="$(command -v tcc)"
+          "$tcc" -v
+          sha256sum "$tcc"
+          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
           # The counters of 11 default compiles, user and kernel apart, and the functions their samples fall in.
           out="$RUNNER_TEMP/compile-time"
           mkdir -p "$out"
           events=task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u
           if taskset -c 2 perf stat -r 11 -e "$events" -- ./build/compiler "${options[@]}" -o "$out/sqlite3.o"; then
-              if [ "${#reference[@]}" -ne 0 ]; then
-                  taskset -c 2 perf stat -r 11 -e "$events" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
-              fi
+              taskset -c 2 perf stat -r 11 -e "$events" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
               taskset -c 2 perf record -q -F 20000 -o "$out/perf.data" -- \
                   bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
               perf report -i "$out/perf.data" --stdio --no-children --sort dso --percent-limit 0.5 2> /dev/null | grep -v '^#' | sed '/^$/d'
-              perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 2> /dev/null | grep -v '^#' | sed '/^$/d' | head -n 80
+              perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 2> /dev/null | grep -v '^#' | sed -n '/^$/d; 1,80p'
           else
               echo "perf can't count here: the stage report above stands alone"
           fi

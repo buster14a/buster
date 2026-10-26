@@ -333,11 +333,12 @@ static const ChangesModule changes_modules[] = {
         .name = "files",
         .sources = "c_files[a-z_]*",
     },
-    // #518's attribution of sqlite3.c's compile: the driver's stage clock and measure-compile, which time the whole
-    // compiler, the same for every pull request but one that changes how it is timed. The daily run measures main.
+    // #518's attribution of sqlite3.c's compile: the driver's stage clock, the places that mark its stages (the driver
+    // and the emission) and measure-compile, which time the whole compiler, the same for every pull request but one
+    // that changes how it is timed. The daily run measures main.
     {
         .name = "compile_time",
-        .sources = "c_check_clock|compile_measure",
+        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|compile_measure",
     },
 };
 
@@ -1522,6 +1523,16 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/compile_measure.c",
         .outputs_true = "code compile_time",
         .outputs_false = "checker files",
+    },
+    {
+        .name = "the driver's stage marks",
+        .files = "src/buster/compiler/c_checker_driver.c",
+        .outputs_true = "code compile_time",
+    },
+    {
+        .name = "the emission's stage marks",
+        .files = "src/buster/compiler/c_check_program_emit.c",
+        .outputs_true = "code compile_time check_debug",
     },
     {
         .name = "the compiler's code outside the attribution's sources",

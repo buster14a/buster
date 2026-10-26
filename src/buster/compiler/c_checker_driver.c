@@ -842,10 +842,20 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
 static int run_check_command(int count, char** arguments, bool executable)
 {
-    // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command; the stages
-    // take it only with the option.
-    CheckClock clock_storage;
-    check_clock_start(&clock_storage);
+    // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
+    // option: a compile without it reads neither the clocks nor its resource use. A value that spells the option (`-o
+    // --time-stages`) starts the clock too, which the arguments' loop below doesn't then hand to the stages.
+    bool time_stages = false;
+    for (int i = 0; i < count; i += 1)
+    {
+        time_stages |= strcmp(arguments[i], "--time-stages") == 0;
+    }
+    CheckClock clock_storage = { 0 };
+    if (time_stages)
+    {
+        check_clock_start(&clock_storage);
+    }
+    time_stages = false;
     int result = 1;
     Arena arena = arena_reserve(1ull << 36);
     Arena scratch = arena_reserve(1ull << 36);
@@ -868,7 +878,6 @@ static int run_check_command(int count, char** arguments, bool executable)
     bool lower_all = false;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
     // error after the command (#518).
-    bool time_stages = false;
     // The direct path's -l libraries and -L directories, which every other mode leaves alone.
     CheckDriverLibraries libraries = {
         .names = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),

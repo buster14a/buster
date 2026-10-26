@@ -7,7 +7,7 @@
 //
 // Runs this executable on ARGUMENT... -o DIR/default.o, the default compile, and on --time-stages ARGUMENT...
 // -o DIR/stages.o, whose report (c_check_clock.c) says where its time went; and with --reference, PATH on ARGUMENT...
-// -o DIR/reference.o (`tcc` with `-c ...`, say). The warm-ups run in that order, then `--runs` rounds (11) in an order
+// -o DIR/reference.o (`tcc` with `-c ...`, say), a name without a slash looked up in PATH as a shell does. The warm-ups run in that order, then `--runs` rounds (11) in an order
 // that rotates by round (profile_ab_tree's), so that no compile always follows the same one. Each process's wall time
 // is from fork to wait4's return, and wait4's rusage gives its user and system time, peak resident set and page faults.
 // It prints every run, each compile's medians with their ranges, what --time-stages costs (its median against the
@@ -62,7 +62,7 @@ static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, cha
         const int errors = open(m->errors, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
         if (null != -1 && errors != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(null, STDOUT_FILENO) != -1 && dup2(errors, STDERR_FILENO) != -1)
         {
-            execv(executable, argv);
+            execvp(executable, argv);
         }
         _exit(127);
     }
