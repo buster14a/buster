@@ -7,6 +7,10 @@
 // data_capacity reserves the data consumer's atoms/fixups; that consumer defines its already-created symbols.
 // The caller performs final link_check after both publications. Output tables/names and byte arenas are distinct
 // from scratch; all three roll back on failure. Backend template initialization precedes concurrent workers.
+// With `unwind`, every function's unwind table too (#395): its frame as Tier 0 published it (unwind_tier0_frame), at
+// its records' ends after branch sizing, written after the last function (unwind_write) as one EH_FRAME atom, a CIE
+// and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
+// each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
 
 // What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
 // program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
@@ -164,7 +168,7 @@ static __attribute__((noinline)) void check_program_emit_body_rows(CheckProgramR
 // `rows`, each source body's raw source rows too (c_check_debug.c), from `output`.
 static bool check_program_emit(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                               CheckProgramBinding* binding, CheckProgramRows* rows, bool verify)
+                               CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
@@ -175,6 +179,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     if (valid && !tier0_initialized)
     {
         valid = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
+        result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
+    }
+    if (valid && unwind && !unwind_ready)
+    {
+        valid = unwind_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
     }
     if (valid)
@@ -360,7 +369,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     // An executable's link has room for the runtime's records too: the crt objects', and the archives' members' that the
     // names the unit refers to without defining them may load (bind_capacity_needed), its symbols' and the runtime
-    // functions' the lowering calls.
+    // functions' the lowering calls. With unwind tables, it has room for their EH_FRAME atom and a fixup per function.
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
     String8* externals = binding != NULL && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + result->lowered.runtime_symbol_count + 1) : 0;
@@ -385,8 +394,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups;
+    const uint64_t frames = unwind ? (uint64_t)count + helpers->count : 0;
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0);
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.symbols;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.names;
@@ -561,6 +571,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         result->reason = "binding against the C runtime failed";
         valid = false;
     }
+    // With unwind tables, each function's frame, as its code is sized, the bodies' then the helpers'.
+    UnwindFunction* frame_table = valid && frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, UnwindFunction, frames) : 0;
+    valid = valid && (frames == 0 || frame_table != 0);
     // The labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols).
     uint32_t labels = 0;
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
@@ -594,6 +607,19 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             if (valid && source_body && rows != NULL)
             {
                 check_program_emit_body_rows(rows, program, parser, result->lowered.entry_tokens[b], code, b, offsets, (uint32_t)length, scalar);
+            }
+            if (valid && unwind)
+            {
+                // A prologue or epilogue that isn't the frame Tier 0 published is the compiler's own failure; and with
+                // --verify, so is a frame the analyzer proves otherwise from the records, where it takes the function
+                // (a fixed frame's, and not a computed goto's).
+                valid = length <= INT32_MAX && unwind_tier0_frame(code, offsets, (uint32_t)length, &frame_table[b]) == UNWIND_OK;
+                UnwindFunction proven;
+                const UnwindError analyzed = !valid || !verify ? UNWIND_ERROR_UNSUPPORTED :
+                                             scalar ? unwind_tier0_scalar(code, offsets, (uint32_t)length, &proven) :
+                                                      unwind_tier0(code, offsets, (uint32_t)length, &proven);
+                valid = valid && (analyzed != UNWIND_OK || memcmp(&proven, &frame_table[b], sizeof(proven)) == 0);
+                result->reason = valid ? result->reason : "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
             }
             if (valid)
             {
@@ -630,6 +656,26 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             }
         }
         arena_pop_to(scratch, work_mark);
+    }
+    // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
+    // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
+    if (valid && frames != 0)
+    {
+        UnwindOutput tables = { .location_capacity = (uint32_t)frames, .shared = true };
+        valid = unwind_write(frame_table, (uint32_t)frames, &tables, scalar) == UNWIND_ERROR_CAPACITY;
+        uint32_t* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, frames) : 0;
+        uint8_t* table_bytes = valid ? arena_push(bytes, tables.size, 8) : 0;
+        tables.bytes = table_bytes;
+        tables.capacity = tables.size;
+        tables.locations = locations;
+        valid = locations != 0 && table_bytes != 0 && unwind_write(frame_table, (uint32_t)frames, &tables, scalar) == UNWIND_OK;
+        const AtomId atom = valid ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
+        valid = atom != 0;
+        for (uint32_t f = 0; valid && f < frames; f += 1)
+        {
+            const SymbolId symbol = f < count ? program->object_symbols[program->bodies[f].object] : helpers->items[f - count].symbol;
+            valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
+        }
     }
     if (!valid)
     {
