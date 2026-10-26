@@ -4382,6 +4382,69 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
     return failures == 0;
 }
 
+// An identifier of BUSTER_PP_TEST_NAMED_UCNS named UCNs in a row (#455's review): each an error, by both kernels (the
+// vectorized ones prepare its file of about 1.1 MB a window at a time, after its refinement, and the scalar ones whole,
+// before it), in time in proportion to its length. Finding each UCN's identifier's end from its start took time in
+// proportion to the square of it: about 40,000 times the identifier's bytes, tens of seconds, well past the bound. The
+// errors are counted, not printed (PPOptions.quiet): a column is found by reading back to its line's start.
+#define BUSTER_PP_TEST_NAMED_UCNS 40000
+#define BUSTER_PP_TEST_NAMED_UCN_SECONDS 10.0
+
+static bool pp_test_named_ucn_scaling(const char* directory)
+{
+    static const char ucn[] = "\\N{GREEK SMALL LETTER ALPHA}";
+    const uint32_t length = 1 + BUSTER_PP_TEST_NAMED_UCNS * (uint32_t)(sizeof(ucn) - 1) + 1;
+    char* source = malloc(length);
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/case.c", directory);
+    bool result = source != 0;
+    if (result)
+    {
+        source[0] = 'x';
+        for (uint32_t i = 0; i < BUSTER_PP_TEST_NAMED_UCNS; i += 1)
+        {
+            memcpy(source + 1 + i * (sizeof(ucn) - 1), ucn, sizeof(ucn) - 1);
+        }
+        source[length - 1] = '\n';
+        result = pp_test_write_bytes(path, source, length);
+    }
+    free(source);
+    char standard[] = "-std=gnu17";
+    char* arguments[] = { standard, path, 0 };
+    for (uint32_t k = 0; result && k < 2; k += 1)
+    {
+        Arena arena = arena_reserve(1ull << 20);
+        PPOptions options;
+        const char* input;
+        const char* output;
+        bool markers;
+        result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        options.scalar = k == 1;
+        options.quiet = true;
+        static InternTable table;
+        static Preprocessor pp;
+        struct timespec begin;
+        struct timespec end;
+        clock_gettime(CLOCK_MONOTONIC, &begin);
+        const bool ready = result && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const bool ran = ready && pp_run(&pp, path);
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        const double seconds = (double)(end.tv_sec - begin.tv_sec) + (double)(end.tv_nsec - begin.tv_nsec) * 1e-9;
+        const uint32_t errors = ready ? pp.errors : 0;
+        if (ready)
+        {
+            pp_release(&pp);
+            intern_release(&table);
+        }
+        result = ready && !ran && errors == BUSTER_PP_TEST_NAMED_UCNS && seconds < BUSTER_PP_TEST_NAMED_UCN_SECONDS;
+        printf("named UCNs: %u in one identifier (%s kernels): %u errors in %.3f s%s\n", BUSTER_PP_TEST_NAMED_UCNS, k == 0 ? "vectorized" : "scalar", errors,
+               seconds, result ? "" : ", not one each in time");
+        arena_release(&arena);
+    }
+    unlink(path);
+    return result;
+}
+
 // The count limit is gone, but real allocation/index exhaustion and an unchanged mask still fail closed. Restore
 // injected capacities before release; no failed repair may publish a new data index or overwrite a canonical view.
 static bool pp_test_raw_recovery_failures(void)
@@ -6755,6 +6818,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_raw_query_capacity(directory, with_clang);
         passed_all &= pp_test_raw_recovery_failures();
         passed_all &= pp_test_named_ucns(directory, with_clang);
+        passed_all &= pp_test_named_ucn_scaling(directory);
         passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)

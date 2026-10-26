@@ -2763,8 +2763,12 @@ static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t b
 // byte. A UCN in a literal or a comment is in none: #if refuses one in a character constant when it reads it
 // (pp_parse_ucn), and the checker one in a literal. Within a token, a named UCN is one whenever its name is written with
 // capital letters, digits, spaces and hyphens (read_ucn: buster doesn't know which names Unicode has), and an unknown token
-// of its own otherwise, which clang refuses too, as no character's name.
-static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position)
+// of its own otherwise, which clang refuses too, as no character's name. An identifier's end (which its id may have
+// replaced already) is found once: `*identifier` is the identifier whose end `*identifier_end` is, from an earlier call
+// (BUSTER_PP_NONE for none), so that the candidates of an identifier with many named UCNs, which come in order, take
+// time in proportion to its length, not to the square of it.
+static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position, uint32_t* identifier,
+                            uint32_t* identifier_end)
 {
     // As pp_file_lexer reads the file.
     const ScalarLexer lexer = {
@@ -2804,8 +2808,12 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     }
     else if (kind == C_TOKEN_RAW_IDENTIFIER)
     {
-        // Its end, which its id may have replaced already.
-        result = start < refine_identifier_end(data->bytes, data->length, data->starts[t], refine_flags);
+        if (*identifier != t)
+        {
+            *identifier = t;
+            *identifier_end = refine_identifier_end(data->bytes, data->length, data->starts[t], refine_flags);
+        }
+        result = start < *identifier_end;
     }
     else if (kind == C_TOKEN_NUMERIC_CONSTANT)
     {
@@ -2836,13 +2844,15 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
         result = errors != 0;
         const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
         uint32_t named = 0;
+        uint32_t identifier = BUSTER_PP_NONE;
+        uint32_t identifier_end = 0;
         for (uint64_t b = scan->first; result && b <= scan->last; b += 64)
         {
             for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs, prepare->vectorized); bits != 0; bits &= bits - 1)
             {
                 uint32_t token = 0;
                 uint64_t position = 0;
-                if (pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position))
+                if (pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position, &identifier, &identifier_end))
                 {
                     errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = BUSTER_PP_NAMED_UCN_ERROR };
                     named += 1;
