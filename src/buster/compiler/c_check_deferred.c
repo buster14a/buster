@@ -141,6 +141,9 @@ struct CheckDeferredLane
     uint64_t position_ns;
     uint64_t walk_ns;
     uint64_t copy_ns;
+    // With `timing`, when the lane reached the partition: CLOCK_MONOTONIC's nanoseconds, for CheckDeferred's dispatch_ns
+    // and wake_ns.
+    uint64_t arrived_ns;
 };
 
 struct CheckDeferred
@@ -186,8 +189,10 @@ struct CheckDeferred
     // With `timing` (benchmark-checker-deferred), nanoseconds: the top level's walk with the setup before it, the file
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
-    // what a lane costs: its copy of the reader, summed over the lanes that copied it, and the first lane's wait at the
-    // partition for every lane to start, a wake-up's.
+    // what a lane costs: its copy of the reader, summed over the lanes that copied it; lane_run's dispatch, from its call
+    // to the first lane's arrival at the partition (the first lane's pinning, and the others' wake calls); and their
+    // wake-up, from the first lane's arrival to the last one's: the first lane's wait at the partition's sync, without
+    // the partition's own work, and none on one lane.
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
@@ -210,6 +215,7 @@ struct CheckDeferred
     uint64_t walk_ns;
     uint64_t position_ns;
     uint64_t copy_ns;
+    uint64_t dispatch_ns;
     uint64_t wake_ns;
 };
 
@@ -702,13 +708,9 @@ static void check_deferred_lane(void* argument)
     CheckDeferred* deferred = run->deferred;
     const uint32_t index = lane_index();
     CheckDeferredLane* lane = deferred->lane_states + index;
-    const uint64_t entered = deferred->timing && index == 0 ? check_deferred_now() : 0;
+    // The partition's sync is the first that every lane reaches: the first lane waits there for the last to arrive.
+    lane->arrived_ns = deferred->timing ? check_deferred_now() : 0;
     const uint64_t parts = lane_parts_by_cost(deferred->costs, deferred->body_count, deferred->boundaries, deferred->orders[index]);
-    // The partition's sync is the first that every lane reaches: the first lane waits there for the others to wake.
-    if (entered != 0)
-    {
-        deferred->wake_ns = check_deferred_now() - entered;
-    }
     while (deferred->hold_lanes && index != 0 && __atomic_load_n(&deferred->held, __ATOMIC_ACQUIRE) == 0)
     {
         // A test's wait, which yields: the tests may run more lanes than CPUs.
@@ -1276,9 +1278,14 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->reason = valid && !ran ? "the lanes couldn't start" : deferred->reason;
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
+    // The first lane reaches the partition after lane_run's dispatch, and the last one after the others' wake-up; a
+    // lane that didn't run arrived nowhere (0).
+    const uint64_t first_arrival = deferred->lane_states[0].arrived_ns;
+    uint64_t last_arrival = first_arrival;
     for (uint32_t lane = 0; lane < deferred->lanes && lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
     {
         const CheckDeferredLane* state = deferred->lane_states + lane;
+        last_arrival = state->arrived_ns > last_arrival ? state->arrived_ns : last_arrival;
         deferred->bodies += state->bodies;
         deferred->body_tokens += state->body_tokens;
         deferred->history_reads += state->history_reads;
@@ -1288,6 +1295,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->walk_ns += state->walk_ns;
         deferred->copy_ns += state->copy_ns;
     }
+    deferred->dispatch_ns = first_arrival != 0 ? first_arrival - lanes_begin : 0;
+    deferred->wake_ns = first_arrival != 0 ? last_arrival - first_arrival : 0;
     for (uint32_t b = 0; valid && b < deferred->body_count; b += 1)
     {
         valid = !deferred->results[b].unsupported;

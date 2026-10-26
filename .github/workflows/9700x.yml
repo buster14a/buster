@@ -1239,8 +1239,9 @@ jobs:
           taskset -c 2 ./build/compiler benchmark-checker-source --only vector --after-scalar 100 "${source[@]}"
 
       - name: Benchmark the deferred bodies' reader on frozen SQLite
-        # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart.
-        # The command and lane 0 run on CPU 2, the other lanes on one CPU of each other core the job may use.
+        # #113: source order's reader against the deferred one on one lane and on eight, with its position checks apart,
+        # in twice the six orders of its readings (--passes is a multiple of six). The command and lane 0 run on CPU 2,
+        # the other lanes on one CPU of each other core the job may use.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',checker-deferred,')
         run: |
           unset CPATH C_INCLUDE_PATH
@@ -1260,7 +1261,7 @@ jobs:
           ' | head -n 7 | paste -sd, -)"
           test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          ./build/compiler benchmark-checker-deferred --passes 9 --lanes 8 --cpus "2,$others" "${source[@]}"
+          ./build/compiler benchmark-checker-deferred --passes 12 --lanes 8 --cpus "2,$others" "${source[@]}"
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
