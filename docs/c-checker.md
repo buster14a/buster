@@ -608,6 +608,14 @@ What the lowering covers past scalars (#145's programs):
   table's pointers point at. Not yet: the difference of two labels' addresses
   as a static initializer's constant (GNU's relative jump tables), which clang
   folds and the checker refuses as not a constant.
+  The control reader counts resolved `&&label` expressions while finding their
+  targets (`CheckInput.label_address_count`); the kind/role checks use the
+  columns already loaded by each token walk. A unit without one has no
+  addressed-label table or scan in `check_program`. A unit with one filters
+  64 kind/role bytes at a time, then marks only the selected targets, with an
+  exact scalar twin and a scalar tail requiring no input padding. The table
+  belongs to the program pass's scratch arena; an absent table means no label
+  needs a `CHECK_CONTROL_LABEL` entry.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 

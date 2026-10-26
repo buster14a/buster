@@ -11,6 +11,57 @@
 #include "c_check_program_helpers_test.c"
 #include "c_check_program_diagnostic_test.c"
 
+static void check_test_program_addressed(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[3] = { 0 };
+    bool ready = true;
+    for (uint32_t column = 0; column < 3; column += 1)
+    {
+        mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[column] != MAP_FAILED && ready;
+        if (mappings[column] != MAP_FAILED)
+        {
+            ready = mprotect(mappings[column] + page, page, PROT_NONE) == 0 && ready;
+        }
+    }
+    check_test_expect(test, ready, "label address columns have protected tails");
+    for (uint32_t count = 0; ready && count <= 129; count += 1)
+    {
+        uint8_t* kinds = mappings[0] + page - count;
+        uint8_t* roles = mappings[1] + page - count;
+        uint32_t* targets = (uint32_t*)(mappings[2] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t expected[130] = { 0 };
+        uint8_t scalar[130];
+        uint8_t vector[130];
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            kinds[token] = token % 2 == 0 ? PARSE_KIND_AMPAMP : PARSE_KIND_IDENTIFIER;
+            roles[token] = token % 3 == 0 ? PARSE_ROLE_PREFIX : PARSE_ROLE_LOGICAL_AND;
+            targets[token] = token % 5 == 0 ? count : (token * 7) % count;
+            if (token % 6 == 0 && token % 5 != 0)
+            {
+                expected[targets[token]] = 1;
+            }
+        }
+        Parser parser = { 0 };
+        parser.tokens.kinds = kinds;
+        parser.tree.roles = roles;
+        const CheckInput input = { .token_count = count, .label_targets = targets };
+        check_program_addressed(&parser, &input, scalar, true);
+        check_program_addressed(&parser, &input, vector, false);
+        check_test_expect(test, memcmp(scalar, expected, count + 1) == 0 && memcmp(vector, expected, count + 1) == 0,
+                          "label addresses exclude logical && and non-prefix tokens, including every guarded vector tail");
+    }
+    for (uint32_t column = 0; column < 3; column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+}
+
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
 {
     return size == 0 || (a != 0 && b != 0 && memcmp(a, b, size) == 0);
@@ -429,6 +480,7 @@ static void check_test_program_refused(CheckTest* test)
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_addressed(test);
     check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);

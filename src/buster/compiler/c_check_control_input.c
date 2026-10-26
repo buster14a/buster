@@ -236,7 +236,7 @@ static void check_input_controls(CheckInputReader* reader)
                     labels[slot] = token + 1;
                 }
             }
-            else if ((kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || check_input_label_address(parser, token))
+            else if ((kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || (kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX))
             {
                 reader->output->declaration_bodies[token] = body;
             }
@@ -270,17 +270,18 @@ static void check_input_controls(CheckInputReader* reader)
             {
                 continue;
             }
-            const bool indirect = check_input_indirect_goto(parser, token);
-            if (parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0 && indirect)
+            const uint8_t kind = parser->tokens.kinds[token];
+            const bool jump = kind == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0;
+            const bool address = kind == PARSE_KIND_AMPAMP && parser->tree.roles[token] == PARSE_ROLE_PREFIX;
+            if (jump && check_input_indirect_goto(parser, token))
             {
                 // goto *expression: its labels are every one whose address its function takes (check_input_indirect_gotos).
                 reader->indirect_gotos += 1;
             }
-            else if ((parser->tokens.kinds[token] == PARSE_KIND_GOTO && reader->output->asm_ids[token] == 0) || check_input_label_address(parser, token))
+            else if (jump || address)
             {
                 // A goto's label, or the label whose address &&name is: the same function's (clang names a missing one at
                 // its name, and an address of a label outside a function too).
-                const bool address = parser->tokens.kinds[token] != PARSE_KIND_GOTO;
                 const uint32_t body = reader->output->declaration_bodies[token];
                 const uint32_t operand = reader->first_child[token];
                 const uint32_t target = body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
@@ -288,6 +289,7 @@ static void check_input_controls(CheckInputReader* reader)
                 if (target != BUSTER_CHECK_NONE)
                 {
                     reader->output->label_targets[token] = target;
+                    reader->output->label_address_count += address;
                     if (!address && !check_input_region_transfer(reader, token, target))
                     {
                         check_input_report(reader, token, CHECK_INPUT_DECLARATION);
@@ -300,7 +302,7 @@ static void check_input_controls(CheckInputReader* reader)
                     check_input_report(reader, address && operand < count ? operand : token, CHECK_INPUT_UNDECLARED);
                 }
             }
-            else if (parser->tokens.kinds[token] == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)
+            else if (kind == PARSE_KIND_SEMI && reader->output->attributes[token] != 0)
             {
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])
