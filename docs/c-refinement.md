@@ -569,21 +569,27 @@ The windows are 128 KB: in a screening build, `sqlite3.c`'s refine phase took
 1.535-1.539 ms with them, 1.540-1.544 with 64 KB and 1.554-1.556 with 256 KB.
 A window costs its last line, lexed twice; a line longer than a window costs
 more. The lexer then gives no token that starts a line after the window's
-first, and the window doubles. A window whose line goes on through line splices
-alone, as a macro defined over many lines does, is doubled before it is lexed
-(`pp_window_has_line_end`, which looks for a line end that isn't a splice's,
-64 bytes at a time), but the part of such a line that the window before held is
-lexed twice. In this compiler's sources, `x86_64_encoder.c`'s
-`BUSTER_X86_VECTOR_FORMS` is 157 KB on 1,695 lines: its file is lexed over
-692,720 bytes for its 582,021 (823,792 before the check), and the other files
-of 256 KB or more that `main.c` includes, over 0.4% more bytes at most. In one
-build, with `--window-bytes 2000000000` for whole files, a frozen copy of
-`main.c`'s sources took 0.06-0.08 ms more lexing a window at a time than whole
-before the check, and 0.045-0.062 ms more after it, against 0.02-0.04 ms less
-refining: for its twelve files of 256 to 850 KB, whose columns and source the L3
-cache holds whole, windows about break even. On `sqlite3.c` the same build took
-0.14 ms less refining (1.388-1.389 ms against 1.529-1.533), 0.018 ms more for
-the directive tables, and no more lexing.
+first, and the window doubles. Where a window is lexed to comes from its last
+two line ends that aren't a splice's (`pp_window_cut`, 64 bytes at a time from
+its end). Without one, its line goes on through line splices alone, as a macro
+defined over many lines does, and the window is doubled before it is lexed.
+When the part of a line after the last one is longer than 4 KB
+(`BUSTER_PP_WINDOW_TAIL_BYTES`) and than the line before it, the window is the
+start of a long line, which its end would cut and the next window lex again:
+it is cut after that line end instead, and loses the shorter line. Otherwise
+it is lexed to its end, as before. In this compiler's sources,
+`x86_64_encoder.c`'s `BUSTER_X86_VECTOR_FORMS` is 157 KB on 1,695 lines: its
+file was lexed over 692,720 bytes for its 582,021 (823,792 before windows
+without a line end were doubled unlexed), and the other files of 256 KB or more
+that `main.c` includes, over 0.4% more bytes at most. In one build, with
+`--window-bytes 2000000000` for whole files, a frozen copy of `main.c`'s sources
+took 0.06-0.08 ms more lexing a window at a time than whole before that, and
+0.045-0.062 ms more after it, against 0.02-0.04 ms less refining: for its twelve
+files of 256 to 850 KB, whose columns and source the L3 cache holds whole,
+windows about break even. On `sqlite3.c` the same build took 0.14 ms less
+refining (1.388-1.389 ms against 1.529-1.533), 0.018 ms more for the directive
+tables, and no more lexing. The cut before a long line and the directive tables'
+costs are #451's parts 3 and 2 (below).
 
 ### Whole-process cost (#451 part 1, 2026-10-26)
 
@@ -650,6 +656,61 @@ per-file fixtures, refinement on 442 files, both frozen inputs with 64-byte
 windows and whole files (0 of 1 differ in each comparison), and each through
 `test-files` on every tested lane count. The frozen source manifest was
 unchanged after the campaign; the record retains these logs and dependencies.
+
+### The directive tables and long lines (#451 parts 2 and 3, 2026-10-26)
+
+[The record](https://github.com/buster14a/buster-performance/tree/f26096f7b8cb1a2f049bed3627d3c76b6d818871/docs/measurements/window-tables-lines-451-2026-10-26) times `benchmark-preprocessor --only vectorized` on the
+same frozen `sqlite3.c` and `main.c`, a window at a time and whole, on the 9700X,
+five rounds of a process per case, each round under the shared lock on CPU 2.
+Screening builds of main `e7f386c2` time the directive tables' parts with TSC
+counters, per pass of the files of two windows or more (each process's median of
+21 passes, then the median of five processes):
+
+| `sqlite3.c`'s directive tables | A window at a time | Whole |
+| --- | ---: | ---: |
+| The scans for directives and line starts | 16.4 µs, per window | 90.0 µs, a pass to count and one to place |
+| The directives' places out of the scan's words | 45.5 µs | |
+| `pp_finish_directives`: kinds and line ends | 127.7 µs | 106.8 µs |
+| `pp_finish_directives`: pairing and notes | 27.7 µs | 27.9 µs |
+| All but the line pages | 217 µs | 225 µs |
+| The line pages (#439) | 57.8 µs | |
+
+The 0.016 ms that windows added at #408 is gone at `e7f386c2`: but for the
+line pages, the tables a window at a time take less than whole. The phase still
+takes 0.350 against 0.297 ms: the line pages, which count each window's line
+ends while it is in the caches for the main loop's line queries, where a whole
+file's are counted from a cursor. A window at a time, the tables had two costs
+of their own, both now less:
+
+- The places came out of the scan's words a bit at a time, a branch on each
+  word's bits mispredicted. `pp_directive_places` compresses each word's set
+  bits out of a vector of 0 to 63 (`vpcompressb`) and stores them under a mask
+  of their count, with the bit-at-a-time loop as its twin: 33.2 against 46.4 µs.
+- `pp_finish_directives` read each directive's name and line word after the
+  early windows' columns had left the caches. It prefetches them 16 directives
+  ahead: kinds and line ends 107.3 against 126.6 µs a window at a time, and
+  98.9 against 106.9 µs whole.
+
+With both as switches in one screening build, `sqlite3.c`'s directive phase
+took 0.322 ms a window at a time against 0.353 (0.341 with the places alone,
+0.334 with the prefetch alone), and 0.294 whole against 0.296; `main.c`'s, whose
+windowed files hold few directives, 0.422 ms either way.
+
+Part 3: a window whose end would cut a line of more than 4 KB is cut after the
+line end before it (`pp_window_cut`, above). In a screening build that cut
+whenever the line before was the shorter, `main.c`'s twelve windowed files,
+5,541,811 bytes, were lexed over 5,553,665 bytes against 5,656,758, and lexing
+them a window at a time took 0.028 ms more than whole against 0.060 ms (5.487
+against 5.459 ms, and 5.505 against 5.445). With the 4 KB bound, a window of
+ordinary lines ends where it did, and `sqlite3.c`'s windows lex what they did.
+
+Against main, in builds of their own, five rounds by turns: `sqlite3.c`'s
+directive tables took 0.313 ms a window at a time against 0.343 (0.284 against
+0.287 whole), and `main.c`'s windowed files were lexed in 5.449 ms against 5.513
+(5.437 against 5.464 whole), over 5,553,313 bytes; every other phase moved less
+than its rounds' range. A window at a time against whole, the directive tables
+now take 0.029 ms more on `sqlite3.c` (the line pages' 58 µs, less 30 µs the
+rest takes less than whole), and `main.c`'s lexing 0.012 ms more.
 
 ## Where the time went
 
@@ -855,10 +916,13 @@ them), macros defined over up to 400 lines continued by splices of every form
 before it, and `??/`), line splices in identifiers and between tokens, `\r\n`,
 lines of up to 6 KB, literals left open at a line's end, raw string literals
 with bad delimiters, a byte order mark, and a comment, a raw string literal or a
-backslash at the file's end. The line ends' scan (`pp_window_has_line_end`) is
-compared with a byte-at-a-time one on random strings of backslashes, line ends
-and other bytes, of up to 300 bytes, ending at a `PROT_NONE` page: 28,752
-checks. Each is prepared in one of five language modes
+backslash at the file's end. The windows' cut (`pp_window_cut`) is compared
+with a byte-at-a-time one on random strings of backslashes, line ends and other
+bytes, of up to 300 bytes and some of up to 12 KB, with tails of 0, 3, 40 bytes
+and 4 KB, ending at a `PROT_NONE` page and starting at the end of one: 119,616
+checks; and the directives' places (`pp_directive_places`) with their twin on
+words of every density, each output ending at a `PROT_NONE` page: 976 checks.
+Each is prepared in one of five language modes
 (raw strings and digit separators on and off, C89's lexing, prefixes to split)
 whole by the vectorized kernels and by their scalar twins, which must agree, and
 in windows of 1, 7, 64, 100, 333, 1,024, 4,096 and 8,192 bytes: tokens, values,
@@ -911,19 +975,6 @@ the 360 files it lists for `main.c` with the compiler's options.
   the order of first occurrences, so that they don't depend on the lanes.
 - **Named UCNs:** intern them by their code point, which needs Unicode's name
   table, or diagnose them (#116's open question).
-- **The directive tables a window at a time** take 0.016 ms more of
-  `sqlite3.c` than whole, though each window's kinds are scanned while they are
-  in the caches. It isn't the pass that takes the directives out of the words
-  the scans left: with the lines' words and the directives' in two halves, so
-  that it reads half as many words and moves none, the tables took the same
-  time (0.306-0.307 ms against 0.306-0.314), and appending each directive's
-  place as the scan finds it took 0.01 ms more (0.316-0.318). Not measured
-  apart: `pp_finish_directives`, which reads each directive's tokens after the
-  last window, when the early windows' columns have left the caches.
-- **A window's end inside a long logical line.** The part of a macro defined
-  over many lines that a window holds is lexed again with the next one (110 KB
-  of `x86_64_encoder.c`'s 157 KB macro). Cutting at a line splice would need
-  the lexer to take a window's first token as one that continues a line.
 
 ## Boundary audit #298
 
