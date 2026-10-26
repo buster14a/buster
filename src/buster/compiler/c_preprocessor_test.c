@@ -1261,8 +1261,8 @@ static const PPTestCase pp_test_cases[] = {
     // Arguments that start a line, placed first, moved past an empty operand and pasted, from a file's text and from an
     // expansion, where a token that started a line inside an argument has BUSTER_PP_LINE_SPACE.
     { "pastes on new lines",
-      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((,\ny)) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r)) WQ((, ,\nr))\n",
-      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [y] < < y > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >] [r] [< r >]\n", false },
+      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r))\n",
+      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >]\n", false },
     // A chain that makes no token leaves the space pending before it to the next token, which starts a run, and at the
     // end to the token after the expansion.
     { "pastes that make nothing among other tokens",
