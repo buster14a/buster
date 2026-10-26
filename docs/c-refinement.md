@@ -662,7 +662,7 @@ unchanged after the campaign; the record retains these logs and dependencies.
 
 ### The directive tables and long lines (#451 parts 2 and 3, 2026-10-26)
 
-[The record](https://github.com/buster14a/buster-performance/tree/f37b608d65cfad614c0ea7211d220ea8279f677d/docs/measurements/window-tables-lines-451-2026-10-26) times `benchmark-preprocessor --only vectorized` on the
+[The record](https://github.com/buster14a/buster-performance/tree/3b0a4a57b4854bf0c1ae9044b3f4fc2d8594f45b/docs/measurements/window-tables-lines-451-2026-10-26) times `benchmark-preprocessor --only vectorized` on the
 same frozen `sqlite3.c` and `main.c`, a window at a time and whole, on the 9700X,
 five rounds of a process per case, each round under the shared lock on CPU 2.
 Screening builds of main `e7f386c2` time the directive tables' parts with TSC
