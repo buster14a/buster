@@ -100,19 +100,9 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
                     memset(cache, 0xff, (uint64_t)table->count * sizeof(uint32_t));
                 }
             }
-            bool first = !without_cache && cache[name] == UINT32_MAX;
-            if (without_cache)
-            {
-                // With no scratch, keep exact deduplication by searching earlier eligible operands. This slow path
-                // needs no storage; an exact hit still fails as before because its tables require the cache.
-                first = true;
-                for (uint32_t earlier = 0; first && earlier < token; earlier += 1)
-                {
-                    first = parser->tokens.kinds[earlier] != PARSE_KIND_IDENTIFIER || parser->tree.roles[earlier] != PARSE_ROLE_OPERAND ||
-                            (output->deferred_tokens != 0 && reader->deferred == 0 && output->deferred_tokens[earlier]) ||
-                            parser->tokens.names[earlier] != name;
-                }
-            }
+            // Without scratch, look up every operand, including repeated names. A hit fails immediately because its
+            // tables need the cache; an all-miss unit succeeds without a quadratic search of earlier operands.
+            const bool first = without_cache || cache[name] == UINT32_MAX;
             if (first)
             {
                 const InternSpan span = table->spans[name];

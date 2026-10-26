@@ -362,8 +362,78 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
     check_test_expect(test, signatures[0] != 0 && signatures[0] == signatures[1], "scalar/vector parser paths retain identical intrinsic metadata and operand intervals");
 }
 
+static void check_test_intrinsic_no_scratch_large(CheckTest* test)
+{
+    enum { COUNT = 100000 };
+    InternTable identifiers = { 0 };
+    uint8_t* kinds = malloc(COUNT + 1);
+    uint8_t* roles = malloc(COUNT + 1);
+    uint8_t* deferred = calloc(COUNT + 1, 1);
+    uint32_t* names = malloc((COUNT + 1) * sizeof(uint32_t));
+    Arena arena = arena_reserve(4096);
+    Arena scratch = arena_reserve(4096);
+    bool ready = kinds != 0 && roles != 0 && deferred != 0 && names != 0 && arena.base != 0 && scratch.base != 0 && intern_initialize(&identifiers);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char spelling[32];
+        const int length = snprintf(spelling, sizeof(spelling), "ordinary_name_%u", i);
+        names[i] = intern_find_or_add(&identifiers, (const uint8_t*)spelling, (uint32_t)length);
+        kinds[i] = PARSE_KIND_IDENTIFIER;
+        roles[i] = PARSE_ROLE_OPERAND;
+        ready = names[i] != 0;
+    }
+    const char intrinsic[] = "__builtin_ia32_pause";
+    if (ready)
+    {
+        names[COUNT] = intern_find_or_add(&identifiers, (const uint8_t*)intrinsic, sizeof(intrinsic) - 1);
+        kinds[COUNT] = PARSE_KIND_IDENTIFIER;
+        roles[COUNT] = PARSE_ROLE_OPERAND;
+        ready = names[COUNT] != 0;
+    }
+    check_test_expect(test, ready, "large zero-scratch intrinsic fixture initializes");
+    if (ready)
+    {
+        Preprocessor pp = { .table = &identifiers };
+        Parser parser = { .tokens = { .kinds = kinds, .names = names, .count = COUNT + 1 }, .tree = { .roles = roles } };
+        scratch.capacity = 0;
+        deferred[COUNT] = 1;
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            parser.options.scalar = variant == 0;
+            CheckInput output = { .deferred_tokens = deferred };
+            CheckInputReader reader = { .parser = &parser, .pp = &pp, .output = &output, .arena = &arena, .scratch = &scratch };
+            struct timespec start = { 0 }, end = { 0 };
+            const bool clock_started = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start) == 0;
+            const bool valid = check_input_intrinsic_initialize(&reader);
+            const bool clock_finished = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end) == 0;
+            const int64_t elapsed = ((int64_t)end.tv_sec - (int64_t)start.tv_sec) * INT64_C(1000000000) + end.tv_nsec - start.tv_nsec;
+            check_test_expect(test, valid && !output.resource && reader.intrinsic_names == 0 && output.intrinsic_ids == 0 &&
+                              arena.length == 0 && scratch.length == 0 && clock_started && clock_finished && elapsed < INT64_C(2000000000),
+                              "100000 distinct misses finish within two CPU seconds without scratch or published storage");
+            deferred[COUNT] = 0;
+            const bool hit = check_input_intrinsic_initialize(&reader);
+            check_test_expect(test, !hit && output.resource && reader.intrinsic_names == 0 && output.intrinsic_ids == 0 &&
+                              arena.length == 0 && scratch.length == 0,
+                              "a final intrinsic after 100000 misses fails and rolls back without scratch");
+            deferred[COUNT] = 1;
+        }
+    }
+    if (ready)
+    {
+        scratch.capacity = 4096;
+    }
+    arena_release(&scratch);
+    arena_release(&arena);
+    intern_release(&identifiers);
+    free(names);
+    free(deferred);
+    free(roles);
+    free(kinds);
+}
+
 static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
 {
+    check_test_intrinsic_no_scratch_large(test);
     const CheckIntrinsicInputFixture fixtures[] =
     {
         {
