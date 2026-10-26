@@ -42,7 +42,8 @@ jobs:
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
   # pull requests that change what they measure. The same for the first-party performance readers' qualification
-  # (`performance`): tools/performance, docs/performance, the evidence's pin or the qualification's steps.
+  # (`performance`): tools/performance, docs/performance, web/perf, the evidence's pin or the qualification's steps.
+  # A step gated on one of these outputs also runs on the pull request that changes it.
   # And which plain benchmarks, with their checks against the scalar twins, a pull request runs (`measure`): those whose
   # sources it changes, and those whose steps it changes (the branch-sizing qualification too: its steps or its
   # sources). A benchmark built as a translation unit of its own (build.sh's *_benchmark.c) measures what that unit
@@ -102,10 +103,12 @@ jobs:
               [ir_lowering]='ir|ir_validate|ir_lower|ir_lower_emit|ir_lower_benchmark'
               [ir_optimize]='ir|ir_validate|ir_optimize[a-z_]*'
               [checker]='c_check[a-z_]*'
-              # #336's binding handoff: the reader's retained answers (c_check_binding.c), the stack and batch
-              # resolvers and the parser's replay that it was chosen over. Its repeated processes took 170 s of every
-              # pull request that changed any of the checker's sources, which the plain run measures in every mode.
-              [checker_bindings]='c_check_binding[a-z_]*|c_bindings[a-z_]*|c_parser_binding_trace|c_parser_bindings[a-z_]*'
+              # #336's binding handoff: the reader's retained answers (c_check_binding.c), the events' producers in the
+              # reader (check_input_bind and check_input_resolve in c_check_input.c, the enumerators' and the constant
+              # readers': docs/c-check-bindings.md's table), the stack and batch resolvers and the parser's replay that
+              # it was chosen over. Its repeated processes took 170 s of every pull request that changed any of the
+              # checker's sources, which the plain run measures in every mode.
+              [checker_bindings]='c_check_binding[a-z_]*|c_check_input|c_check_enum_input|c_check_constant|c_bindings[a-z_]*|c_parser_binding_trace|c_parser_bindings[a-z_]*'
               [check_debug]='c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0'
               [files]='c_files[a-z_]*'
           )
@@ -201,7 +204,9 @@ jobs:
           else
               # The merge's changes against its base, both names of a file renamed.
               git diff --no-renames --name-only HEAD^1 HEAD > files
-              if grep -Ev '^docs/|\.md$' files > /dev/null; then
+              # docs/performance is an input of the performance readers' qualification (its manifest schema), which
+              # runs in `test`: it counts as code.
+              if grep -Ev '^docs/|\.md$' files > /dev/null || grep -E '^docs/performance/' files > /dev/null; then
                   code=true
               else
                   code=false
@@ -221,7 +226,9 @@ jobs:
               else
                   branch_sizing=false
               fi
-              if grep -E '^(tools|docs)/performance/' files > /dev/null; then
+              # The qualification's inputs: the readers and tools, the schema, and the pages the publisher reads at the
+              # pull request's commit (tools/performance/publish.c).
+              if grep -E '^(tools/performance|docs/performance|web/perf)/' files > /dev/null; then
                   performance=true
               else
                   performance=false
@@ -234,7 +241,9 @@ jobs:
                       measure[$module]=false
                   fi
               done
-              # The steps of this workflow that the merge changes or adds, and the commands they run.
+              # The steps of this workflow that the merge changes or adds, and the commands they run. A changed step
+              # gated on an output (`needs.changes.outputs.NAME != 'false'`) runs, so that its own pull request runs
+              # what it changed.
               workflow=.github/workflows/9700x.yml
               if git cat-file -e "HEAD^1:$workflow" 2> /dev/null; then
                   git show "HEAD^1:$workflow" | split_steps steps/base
@@ -249,9 +258,21 @@ jobs:
                       grep -ohE '\./build/compiler (benchmark|measure)-[a-z0-9-]+' "$step" | sed 's/.* //' >> commands || true
                       case "${step##*/}" in
                           Check-out-pinned-branch-sizing-measurement-harnesses|Benchmark-branch-sizing) branch_sizing=true ;;
-                          Check-out-reviewed-first-party-performance-fixtures-and-acceptance-harnesses) performance=true ;;
-                          Qualify-first-party-performance-readers-and-frozen-import-on-the-9700X) performance=true ;;
                       esac
+                      gates=$(grep -ohE "needs\.changes\.outputs\.[a-z_]+ != 'false'" "$step" | sed -E 's/^needs\.changes\.outputs\.([a-z_]+).*/\1/' || true)
+                      for gate in $gates; do
+                          case "$gate" in
+                              baselines) baselines=true ;;
+                              foreign) foreign=true ;;
+                              branch_sizing) branch_sizing=true ;;
+                              performance) performance=true ;;
+                              *)
+                                  if [ -n "${measure[$gate]+set}" ]; then
+                                      measure[$gate]=true
+                                  fi
+                                  ;;
+                          esac
+                      done
                   fi
               done
               if grep -Fx build.sh files > /dev/null; then
@@ -343,7 +364,7 @@ jobs:
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers
-        # (tools/performance, docs/performance), this pin or these steps: about 11 s of building and checking that
+        # (tools/performance, docs/performance, web/perf), this pin or these steps: about 11 s of building and checking that
         # every other pull request's job spent on code it doesn't change.
         if: needs.changes.outputs.performance != 'false'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
