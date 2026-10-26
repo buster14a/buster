@@ -87,7 +87,7 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
                         check_program_select_mode(&selected, &program, &data, C_LOWERING_REACHABLE, false, &path.output_arena, &path.scratch);
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     bool emitted = chosen && check_program_emit(&code, &selected.program, &parser, pp.table, selected.data.capacity, false, &source->lowered, &bytes,
-                                                &path.scratch, NULL, NULL, false);
+                                                &path.scratch, NULL, NULL, false, false);
     if (emitted && refuse)
     {
         emitted = false;
