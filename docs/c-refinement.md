@@ -643,6 +643,12 @@ includes #439's page-line counting, so its increase is not an isolated
 measurement of #451 part 2. Finding that cost and avoiding long-line relexing
 remain parts 2 and 3, which this comparison does not resolve.
 
+All nine acceptance commands passed on the 9700X: the preprocessor and
+per-file fixtures, refinement on 442 files, both frozen inputs with 64-byte
+windows and whole files (0 of 1 differ in each comparison), and each through
+`test-files` on every tested lane count. The frozen source manifest was
+unchanged after the campaign; the record retains these logs and dependencies.
+
 ## Where the time went
 
 The starting point (`main` at 0077380, 2026-10-21): `benchmark-preprocessor`'s
