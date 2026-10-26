@@ -3195,7 +3195,7 @@ builds an object in its scratch arena and writes it with one `pwrite`.
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
   named symbol at offset 0. Each section is followed by its `.rela.<section>`
   if its atoms have fixups;
-- with `ObjectOptions.debug`, the DWARF of the unit's functions (#395):
+- with `ObjectOptions.debug`'s entry for the unit, the DWARF of its functions (#395):
   debug.c's `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_addr` and
   `.debug_rnglists`, unallocated, `.debug_info` followed by its relocations
   (each unit's fields that point into the other four, `R_X86_64_32` against

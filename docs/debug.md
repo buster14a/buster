@@ -120,8 +120,11 @@ incorporated.
 
 ## Relocatable objects
 
-`ObjectOptions.debug` takes an `ObjectDebug` descriptor, the object writer's
-counterpart of `ExecutableDebug` (#395): the five sections' slices, holding
+`ObjectOptions.debug` takes an `ObjectDebug` descriptor per unit of the
+objects (`debug_count` of them, the units' count; each object, in
+`object_build` and in `object_write_units`'s batch alike, takes its unit's,
+and an entry without sections or functions gives it no DWARF), the object
+writer's counterpart of `ExecutableDebug` (#395): the five sections' slices, holding
 units written one after another at their bases, the functions in their
 address-table order, their line addresses, the units' function counts, and
 each unit's four fields that point into its other sections.
@@ -150,7 +153,10 @@ slices missing or past DWARF32, function counts that don't add up,
 `.debug_addr` headers or unit lengths that don't match, fields out of order,
 outside their unit or past their sections, line addresses that aren't
 `DW_LNE_set_address` operands in order, and functions that aren't ordinary
-ones the unit defines in `TEXT` atoms.
+ones the unit defines in `TEXT` atoms; and entries that aren't the units'.
+`test-object-writer` writes every unit's object of a program of 25 units, each
+with its own entry (every fourth empty), by `object_write_units` on 1, 2, 3
+and 8 lanes into `object_build`'s bytes.
 
 ## The C driver's `-g` (#395)
 

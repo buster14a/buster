@@ -471,7 +471,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         if (valid)
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL };
+            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL, .debug_count = debug ? 1 : 0 };
             const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.

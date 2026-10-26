@@ -479,8 +479,9 @@ designs and the compilers already built this way.
   relocatable object per unit of the representation (`object_prepare` once per
   link, then `object_build` per object, `object_write_file`, and
   `object_write_units` for a group of lanes), with the DWARF of a unit's
-  functions where `ObjectOptions.debug` gives it (#395: debug.c's sections and
-  the relocations a linker resolves, `ObjectDebug`). `object_writer_test.c`
+  functions where `ObjectOptions.debug`'s entry for the unit gives it (#395:
+  an `ObjectDebug` per unit, debug.c's sections and the relocations a linker
+  resolves). `object_writer_test.c`
   holds its tests and `object_debug_test.c` those of its DWARF, which need
   debug.c's units (`main.c` includes both; `./build/compiler
   test-object-writer` runs them), and `object_writer_benchmark.c` provides
@@ -2126,7 +2127,12 @@ segment off its alignment when told where: seed 1's `static-defaults` with
   function's slot and line address an `R_X86_64_64` against its section's
   symbol at its offset; the descriptor's bytes as they were; and 26 changed
   descriptors, and an IFUNC's, which `object_build` refuses
-  (`OBJECT_ERROR_DEBUG`) with nothing on the arena;
+  (`OBJECT_ERROR_DEBUG`) with nothing on the arena, as it refuses another
+  unit's descriptor as a unit's entry and entries one fewer than the units;
+  then every unit's object of the lanes' program below, each with its own
+  entry (every fourth empty: no DWARF, the same bytes as without), by
+  `object_write_units` on 1, 2, 3 and 8 lanes into `object_build`'s bytes,
+  and with entries one fewer, which it refuses for every unit, writing none;
 - many sections: one unit of 33,000 functions in sections of their own, 66,041
   sections: `e_shnum` and `e_shstrndx` in section 0, and symbols' indices
   through `SHN_XINDEX` and `.symtab_shndx`;

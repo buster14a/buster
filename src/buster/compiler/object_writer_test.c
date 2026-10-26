@@ -25,7 +25,8 @@
 //     R_X86_64_GOTPCRELX, and each reference to a local IFUNC against the IFUNC. Then links with an absolute symbol,
 //     which object_prepare refuses.
 //   - Debug: units' objects with the DWARF of their functions (ObjectOptions.debug), compared as above and with what
-//     object_debug_test.c works out again from the descriptor, and the descriptors object_build refuses.
+//     object_debug_test.c works out again from the descriptor, the descriptors object_build refuses, and every unit's
+//     object with its own entry, written by object_write_units on 1, 2, 3 and 8 lanes.
 //   - Many sections: one unit of BUSTER_OBJECT_TEST_MANY_FUNCTIONS functions in sections of their own, past
 //     SHN_LORESERVE: e_shnum and e_shstrndx in section 0, SHN_XINDEX and .symtab_shndx, compared as above.
 //   - Lanes: every unit's object (a trailing one without atoms among them) written by object_write_units in groups of 1,
@@ -1774,6 +1775,7 @@ static String8 object_test_source_name(char* buffer, uint64_t size, uint32_t uni
 static bool object_test_debug_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, const ObjectDebug* debug);
 static bool object_test_debug(uint64_t seed, Arena* arena);
 static bool object_test_debug_cross_check(uint64_t seed, const char* directory, bool keep, Arena* arena);
+static bool object_test_debug_lanes(uint64_t seed, const char* directory, bool keep, Arena* arena);
 
 // Builds unit `unit`'s object in memory, reads it back and compares it with the representation, and with its DWARF's
 // descriptor if it has one. It builds it again over bytes set to BUSTER_OBJECT_TEST_POISON, which must come out the
@@ -1811,10 +1813,18 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
             printf("  unit %u: %s\n", unit, error);
         }
         object_test_expect(tally, result, "object_view_open", unit);
-        // The DWARF's five sections, .debug_info's relocations, and .debug_line's and .debug_addr's with functions.
-        const uint64_t debug_headers = options.debug == 0 ? 0 : 6 + (options.debug->function_count != 0 ? 2 : 0);
+        // The DWARF's five sections, .debug_info's relocations, and .debug_line's and .debug_addr's with functions: the
+        // unit's entry's, which has them unless it has no sections and no functions.
+        const ObjectDebug* debug = options.debug != 0 ? &options.debug[unit] : 0;
+        bool absent = debug == 0 || (debug->function_count == 0 && debug->unit_count == 0);
+        for (uint32_t s = 0; debug != 0 && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+        {
+            absent = absent && debug->sections[s].length == 0;
+        }
+        debug = absent ? 0 : debug;
+        const uint64_t debug_headers = debug == 0 ? 0 : 6 + (debug->function_count != 0 ? 2 : 0);
         result = result && object_test_compare(tally, &view, link, unit, options.function_sections, debug_headers, counts, arena);
-        result = result && (options.debug == 0 || object_test_debug_compare(tally, &view, link, options.debug));
+        result = result && (debug == 0 || object_test_debug_compare(tally, &view, link, debug));
         const char* file_name = result ? object_view_string(view.symbol_names, view.symbol_names_size, view.symbols[1].st_name) : 0;
         object_test_expect(tally, !result || (file_name != 0 && strcmp(file_name, source) == 0), "STT_FILE's name", unit);
         object_test_expect(tally, !result || (object.section_count == view.section_count && object.symbol_count == view.symbol_count && object.size == view.length),
@@ -3176,6 +3186,7 @@ static int run_object_writer_tests(int argc, char** argv)
         passed = object_test_debug(seed, &arena) && passed;
         passed = object_test_many_sections(seed, &arena) && passed;
         passed = object_test_lanes(seed, id_order, directory, keep, &arena) && passed;
+        passed = object_test_debug_lanes(seed, directory, keep, &arena) && passed;
         passed = object_test_files(directory, &arena) && passed;
         if (cross_check)
         {
