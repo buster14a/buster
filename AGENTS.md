@@ -1130,12 +1130,13 @@ there at a time, so everything takes one lock:
   before it decides, and fails the job (so that `test` runs everything) when
   its tables and the workflow disagree: an output a step reads that it doesn't
   write, a `MEASURE` name that isn't a benchmark or a benchmark no step runs, a
-  step that doesn't run its `MEASURE` name's `./build/compiler benchmark-NAME`
-  (or `measure-NAME`) as a command line of its own, after only its indentation,
-  a `run:` and a `taskset -c CPUS` (the selector finds a step's benchmarks by
-  those lines, not by a comment, a string or a here-document's body that
-  spells one; mutants with `benchmark-types` commented out or in a
-  here-document must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
+  step that doesn't start its `MEASURE` name's `./build/compiler
+  benchmark-NAME` (or `measure-NAME`) on a line of its `run:` script, after
+  only the line's indentation, a `run:` and a `taskset -c CPUS` (the selector
+  finds a step's benchmarks by those lines alone, not in other keys' values,
+  folded blocks, quotes, comments, joined lines or here-documents' bodies,
+  though it doesn't read the shell's control flow; mutants of `benchmark-types`'
+  step that hide its command in each must fail), a gated step that doesn't run when changed alone, a pattern alternative or a
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
   `zen5`'s digit, closures through includes, `build.sh`, pushes). Run it
