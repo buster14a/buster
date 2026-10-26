@@ -83,15 +83,18 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
            (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
 }
 
-// Adds `spelling`, the name the source gives a symbol, to the link's names and to the names a made one must not be: its
-// NameId, or 0 when the link has no room.
-static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length)
+// Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
+// it could be one: its NameId, or 0 when the link has no room. Every made name has a '.', which no identifier has, so
+// only an asm label with one can be a made name, and only it goes in the table (#442: most units' given names are
+// identifiers, whose probes the table then doesn't pay for).
+static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length, bool label)
 {
     const uint64_t hash = link_hash(spelling, length);
     uint32_t slot = 0;
-    const bool taken = check_program_emit_taken(link, names, spelling, length, hash, &slot);
+    const bool dotted = label && memchr(spelling, '.', length) != 0;
+    const bool taken = dotted && check_program_emit_taken(link, names, spelling, length, hash, &slot);
     const NameId result = link_add_name_hashed(link, spelling, length, hash);
-    if (!taken && result != 0)
+    if (dotted && !taken && result != 0)
     {
         names->taken[slot] = result;
     }
@@ -439,9 +442,9 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         if (declaration != BUSTER_CHECK_NONE && !made)
         {
             const uint32_t identifier = parser->tokens.names[declaration];
-            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length, true) :
                                              check_program_emit_given_name(&result->link, &names, intern_bytes(identifiers, identifier),
-                                                                           intern_length(identifiers, identifier));
+                                                                           intern_length(identifiers, identifier), false);
             valid = given[s] != 0;
         }
     }
