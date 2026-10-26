@@ -15,13 +15,15 @@
 // file; B and C also make the reader's index and walk the fragments (c_check_fragments.c), with the interleave's vector
 // path or its scalar twin (--interleave). The type table and the arenas are set up outside the time, and reused warm
 // from run to run, but for the parser's own columns, which parse_translation_unit maps afresh each time as it does in
-// the compiler. A first pass checks that every path gives every file the reference's (A's) graph, token nodes, reports
-// and typed stream, and records each path's memory; files the checker doesn't accept are left out and counted. Then
-// a warm-up pass and --passes interleaved ones (21) run every file through each path, the paths' order rotating with
-// the pass, each run timed alone: cycles, instructions and the --counters set's three events (perf, read around each
-// run, its own cost subtracted), nanoseconds, and the phases in TSC ticks (the parse, the reader's index, the rest of
-// check_input, its expressions' walk, and the graph's checking). It reports each path's medians over the passes per
-// parser token, with the fastest and slowest pass, and its memory. Run it pinned to one CPU, on the 9700X under its lock.
+// the compiler. The files go in batches (--batch, 128): a batch is preprocessed outside the time, then a first pass
+// checks that every path gives every file the reference's (A's) graph, token nodes, reports and typed stream, and
+// records each path's memory (files the checker doesn't accept are left out and counted), then a warm-up pass and
+// --passes interleaved ones (21) run every file through each path, the paths' order rotating with the pass, each run
+// timed alone: cycles, instructions and the --counters set's three events (perf, read around each run, its own cost
+// subtracted), nanoseconds, and the phases in TSC ticks (the parse, the reader's index, the rest of check_input, its
+// expressions' walk, the graph's checking, and with --to-ir the rest to Tier 0's typed streams). A pass's totals are
+// its sums over the batches. It reports each path's medians over the passes per parser token, with the fastest and
+// slowest pass, and its memory. Run it pinned to one CPU, on the 9700X under its lock.
 //
 // Layout: the counters; the paths' runs and their comparison; run_fragment_benchmark.
 
@@ -36,6 +38,7 @@
 #define BUSTER_FRAGMENTS_BENCHMARK_MAX_PASSES 101u
 #define BUSTER_FRAGMENTS_BENCHMARK_COUNTERS 5u
 #define BUSTER_FRAGMENTS_BENCHMARK_FILES (1u << 16)
+#define BUSTER_FRAGMENTS_BENCHMARK_BATCH 128u
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The counters
@@ -518,6 +521,7 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
     uint32_t name_count = 0;
     int option_count = 0;
     uint32_t passes = BUSTER_FRAGMENTS_BENCHMARK_PASSES;
+    uint32_t batch = BUSTER_FRAGMENTS_BENCHMARK_BATCH;
     CheckFragmentsBenchmarkOptions options = { .payload = 16, .vector = true };
     CheckFragmentsBenchmarkSet set = CHECK_FRAGMENTS_BENCHMARK_PIPELINE;
     bool selected[CHECK_FRAGMENTS_PATHS] = { false, false, false, false };
@@ -548,6 +552,12 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
             k += 1;
             passes = (uint32_t)strtoul(value, 0, 10);
             valid = passes != 0 && passes <= BUSTER_FRAGMENTS_BENCHMARK_MAX_PASSES;
+        }
+        else if (strcmp(argument, "--batch") == 0 && value != 0)
+        {
+            k += 1;
+            batch = (uint32_t)strtoul(value, 0, 10);
+            valid = batch != 0 && batch <= BUSTER_FRAGMENTS_BENCHMARK_FILES;
         }
         else if (strcmp(argument, "--payload") == 0 && value != 0)
         {
@@ -631,69 +641,17 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
         options_arguments[option_count] = "placeholder.c";
         valid = pp_parse_options(option_count + 1, options_arguments, &pp_options, &option_arena, &input, &output, &markers);
     }
-    // Every file preprocessed once, outside the time. The preprocessors and parsers need their types' alignment, which
-    // an arena gives and calloc doesn't.
+    // The files go a batch at a time (--batch, 128 by default): each preprocessed once, outside the time, then compared
+    // and timed through every pass, then released, since every preprocessor reserves arenas whose address space all of a
+    // corpus's at once would exhaust. A pass's totals are its sums over the batches. The preprocessors and parsers need
+    // their types' alignment, which an arena gives and calloc doesn't.
     Arena state_arena = arena_reserve(UINT64_C(1) << 36);
-    CheckFragmentsBenchmarkFile* files = valid ? BUSTER_ARENA_PUSH_ARRAY(&state_arena, CheckFragmentsBenchmarkFile, name_count) : 0;
-    valid = valid && files != 0;
-    if (valid)
-    {
-        memset(files, 0, (uint64_t)name_count * sizeof(CheckFragmentsBenchmarkFile));
-    }
-    for (uint32_t f = 0; valid && f < name_count; f += 1)
-    {
-        files[f].path = names[f];
-        valid = intern_initialize(&files[f].table) && pp_initialize(&files[f].pp, &pp_options, &files[f].table) && pp_run(&files[f].pp, names[f]);
-        files[f].expanded = valid ? files[f].pp.output.count : 0;
-        if (!valid)
-        {
-            fprintf(stderr, "benchmark-parser --expressions: cannot preprocess %s\n", names[f]);
-        }
-    }
+    CheckFragmentsBenchmarkFile* files = valid ? BUSTER_ARENA_PUSH_ARRAY(&state_arena, CheckFragmentsBenchmarkFile, batch) : 0;
     CheckFragmentsBenchmarkSlot* slots = valid ? BUSTER_ARENA_PUSH_ARRAY(&state_arena, CheckFragmentsBenchmarkSlot, 2) : 0;
-    valid = valid && slots != 0 && check_fragments_benchmark_slot_open(&slots[0], pp_options.language) && check_fragments_benchmark_slot_open(&slots[1], pp_options.language);
+    valid = valid && files != 0 && slots != 0 && check_fragments_benchmark_slot_open(&slots[0], pp_options.language) &&
+            check_fragments_benchmark_slot_open(&slots[1], pp_options.language);
     CheckFragmentsCounters counters = { 0 };
     check_fragments_counters_open(&counters, set);
-    // The validation pass: each selected path against the reference (A) on every file, with each path's memory.
-    CheckFragmentsBenchmarkMemory memory[CHECK_FRAGMENTS_PATHS] = { 0 };
-    uint32_t timed_files = 0;
-    uint64_t tokens = 0;
-    uint64_t expanded = 0;
-    uint32_t rejected = 0;
-    for (uint32_t f = 0; valid && f < name_count; f += 1)
-    {
-        CheckFragmentsBenchmarkFile* file = &files[f];
-        CheckFragmentsBenchmarkSample sample;
-        const bool accepted = check_fragments_benchmark_run(&slots[0], file, CHECK_FRAGMENTS_POSTORDER, &options, &counters, &sample);
-        file->timed = accepted;
-        rejected += !accepted;
-        if (accepted)
-        {
-            check_fragments_benchmark_memory(&memory[CHECK_FRAGMENTS_POSTORDER], &slots[0], CHECK_FRAGMENTS_POSTORDER);
-        }
-        for (uint32_t path = 1; accepted && valid && path < CHECK_FRAGMENTS_PATHS; path += 1)
-        {
-            if (selected[path])
-            {
-                const bool ran = check_fragments_benchmark_run(&slots[1], file, path, &options, &counters, &sample);
-                const bool same = ran && check_fragments_benchmark_same(&slots[0], &slots[1], options.ir);
-                check_fragments_benchmark_memory(&memory[path], &slots[1], path);
-                if (!same)
-                {
-                    fprintf(stderr, "benchmark-parser --expressions: %s: the %s path %s\n", file->path, check_fragments_benchmark_paths[path],
-                            ran ? "gives other results than postorder" : "failed");
-                }
-                valid = same;
-            }
-        }
-        if (accepted)
-        {
-            timed_files += 1;
-            tokens += file->tokens;
-            expanded += file->expanded;
-        }
-    }
-    valid = valid && timed_files != 0;
     // The cost of reading the counters around an empty run, to subtract.
     uint64_t overhead[BUSTER_FRAGMENTS_BENCHMARK_COUNTERS] = { 0 };
     if (valid)
@@ -715,32 +673,95 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
             overhead[c] = check_fragments_benchmark_order(empty[c], BUSTER_FRAGMENTS_BENCHMARK_MAX_PASSES, BUSTER_FRAGMENTS_BENCHMARK_MAX_PASSES / 2);
         }
     }
-    // A warm-up pass, then the timed ones: each path over every file, the paths in an order that rotates by pass.
+    CheckFragmentsBenchmarkMemory memory[CHECK_FRAGMENTS_PATHS] = { 0 };
     static uint64_t totals[CHECK_FRAGMENTS_PATHS][BUSTER_FRAGMENTS_BENCHMARK_MEASURES][BUSTER_FRAGMENTS_BENCHMARK_MAX_PASSES];
     memset(totals, 0, sizeof(totals));
-    for (uint32_t pass = 0; valid && pass <= passes; pass += 1)
+    uint32_t timed_files = 0;
+    uint64_t tokens = 0;
+    uint64_t expanded = 0;
+    uint32_t rejected = 0;
+    for (uint32_t first = 0; valid && first < name_count; first += batch)
     {
-        for (uint32_t step = 0; valid && step < CHECK_FRAGMENTS_PATHS; step += 1)
+        const uint32_t count = name_count - first < batch ? name_count - first : batch;
+        memset(files, 0, (uint64_t)count * sizeof(CheckFragmentsBenchmarkFile));
+        uint32_t prepared = 0;
+        for (uint32_t f = 0; valid && f < count; f += 1)
         {
-            const uint32_t path = (pass + step) % CHECK_FRAGMENTS_PATHS;
-            for (uint32_t f = 0; valid && selected[path] && f < name_count; f += 1)
+            files[f].path = names[first + f];
+            valid = intern_initialize(&files[f].table) && pp_initialize(&files[f].pp, &pp_options, &files[f].table);
+            prepared += valid;
+            valid = valid && pp_run(&files[f].pp, files[f].path);
+            files[f].expanded = valid ? files[f].pp.output.count : 0;
+            if (!valid)
             {
-                if (files[f].timed)
+                fprintf(stderr, "benchmark-parser --expressions: cannot preprocess %s\n", files[f].path);
+            }
+        }
+        // The comparison: each selected path against the reference (A) on every file, with each path's memory.
+        for (uint32_t f = 0; valid && f < count; f += 1)
+        {
+            CheckFragmentsBenchmarkFile* file = &files[f];
+            CheckFragmentsBenchmarkSample sample;
+            const bool accepted = check_fragments_benchmark_run(&slots[0], file, CHECK_FRAGMENTS_POSTORDER, &options, &counters, &sample);
+            file->timed = accepted;
+            rejected += !accepted;
+            if (accepted)
+            {
+                check_fragments_benchmark_memory(&memory[CHECK_FRAGMENTS_POSTORDER], &slots[0], CHECK_FRAGMENTS_POSTORDER);
+            }
+            for (uint32_t path = 1; accepted && valid && path < CHECK_FRAGMENTS_PATHS; path += 1)
+            {
+                if (selected[path])
                 {
-                    CheckFragmentsBenchmarkSample sample;
-                    valid = check_fragments_benchmark_run(&slots[0], &files[f], path, &options, &counters, &sample);
-                    for (uint32_t c = 0; c < BUSTER_FRAGMENTS_BENCHMARK_COUNTERS; c += 1)
+                    const bool ran = check_fragments_benchmark_run(&slots[1], file, path, &options, &counters, &sample);
+                    const bool same = ran && check_fragments_benchmark_same(&slots[0], &slots[1], options.ir);
+                    check_fragments_benchmark_memory(&memory[path], &slots[1], path);
+                    if (!same)
                     {
-                        sample.counts[c] -= sample.counts[c] >= overhead[c] ? overhead[c] : sample.counts[c];
+                        fprintf(stderr, "benchmark-parser --expressions: %s: the %s path %s\n", file->path, check_fragments_benchmark_paths[path],
+                                ran ? "gives other results than postorder" : "failed");
                     }
-                    for (uint32_t m = 0; pass != 0 && m < BUSTER_FRAGMENTS_BENCHMARK_MEASURES; m += 1)
+                    valid = same;
+                }
+            }
+            if (accepted)
+            {
+                timed_files += 1;
+                tokens += file->tokens;
+                expanded += file->expanded;
+            }
+        }
+        // A warm-up pass, then the timed ones: each path over every file, the paths in an order that rotates by pass.
+        for (uint32_t pass = 0; valid && pass <= passes; pass += 1)
+        {
+            for (uint32_t step = 0; valid && step < CHECK_FRAGMENTS_PATHS; step += 1)
+            {
+                const uint32_t path = (pass + step) % CHECK_FRAGMENTS_PATHS;
+                for (uint32_t f = 0; valid && selected[path] && f < count; f += 1)
+                {
+                    if (files[f].timed)
                     {
-                        totals[path][m][pass - 1] += check_fragments_benchmark_measure(&sample, m);
+                        CheckFragmentsBenchmarkSample sample;
+                        valid = check_fragments_benchmark_run(&slots[0], &files[f], path, &options, &counters, &sample);
+                        for (uint32_t c = 0; c < BUSTER_FRAGMENTS_BENCHMARK_COUNTERS; c += 1)
+                        {
+                            sample.counts[c] -= sample.counts[c] >= overhead[c] ? overhead[c] : sample.counts[c];
+                        }
+                        for (uint32_t m = 0; pass != 0 && m < BUSTER_FRAGMENTS_BENCHMARK_MEASURES; m += 1)
+                        {
+                            totals[path][m][pass - 1] += check_fragments_benchmark_measure(&sample, m);
+                        }
                     }
                 }
             }
         }
+        for (uint32_t f = 0; f < prepared; f += 1)
+        {
+            pp_release(&files[f].pp);
+            intern_release(&files[f].table);
+        }
     }
+    valid = valid && timed_files != 0;
     if (valid)
     {
         printf("benchmark-parser --expressions: files=%u timed=%u rejected=%u tokens=%" PRIu64 " expanded_tokens=%" PRIu64 " passes=%u payload=%u interleave=%s to_ir=%u counters=%s%s\n",
@@ -801,8 +822,8 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: benchmark-parser --expressions postorder|prefix|fragments|sorted[,...]|all [--passes N] [--payload 16|32|48] [--interleave vector|scalar]\n"
-                        "                        [--to-ir] [--counters pipeline|branches|memory|stalls] [--files-from LIST] [-E's options] file...\n"
+        fprintf(stderr, "usage: benchmark-parser --expressions postorder|prefix|fragments|sorted[,...]|all [--passes N] [--batch N] [--payload 16|32|48]\n"
+                        "                        [--interleave vector|scalar] [--to-ir] [--counters pipeline|branches|memory|stalls] [--files-from LIST] [-E's options] file...\n"
                         "(or a file didn't preprocess, no file was accepted, or a path's results differed)\n");
     }
     check_fragments_counters_close(&counters);
@@ -810,11 +831,6 @@ static int run_fragment_benchmark(int argument_count, char** arguments)
     {
         check_fragments_benchmark_slot_close(&slots[0]);
         check_fragments_benchmark_slot_close(&slots[1]);
-    }
-    for (uint32_t f = 0; files != 0 && f < name_count; f += 1)
-    {
-        pp_release(&files[f].pp);
-        intern_release(&files[f].table);
     }
     arena_release(&state_arena);
     for (uint32_t f = 0; f < name_count; f += 1)
