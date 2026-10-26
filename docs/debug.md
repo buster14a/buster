@@ -118,6 +118,57 @@ sections 3.1, 3.3, 6.2, 7.5, 7.27 and 7.28. This is original implementation and
 fixture code; no external implementation or generated external bytes are
 incorporated.
 
+## Relocatable objects
+
+`ObjectOptions.debug` takes an `ObjectDebug` descriptor per unit of the
+objects (`debug_count` of them, the units' count; each object, in
+`object_build` and in `object_write_units`'s batch alike, takes its unit's,
+and an entry without sections or functions gives it no DWARF), the object
+writer's counterpart of `ExecutableDebug` (#395): the five sections' slices, holding
+units written one after another at their bases, the functions in their
+address-table order, their line addresses, the units' function counts, and
+each unit's four fields that point into its other sections.
+`DebugOutput.fields` says where `debug_write` put those, by the section each
+points into: the header's abbreviation offset, and the DIE's line program,
+address base and range lists. The object holds the five sections,
+unallocated, after its sections of atoms, with the relocations a linker
+resolves where it puts the object's contributions and functions:
+
+- each field is an `R_X86_64_32` against its section's symbol, with the
+  offset it held as the addend, so that a unit points at its own
+  contributions whatever the objects before it contribute;
+- each function's `.debug_addr` slot and `DW_LNE_set_address` operand is an
+  `R_X86_64_64` against the symbol of its definition's section, with its
+  offset there as the addend. That is the definition's own address, as GNU as
+  relocates a label at a function's start: a relocation against the
+  function's own symbol would follow a strong definition of its name in
+  another object.
+
+`.debug_rnglists` needs none, since its ranges are address-table indices and
+sizes. The fields and slots hold zero in the object, as GNU as writes a RELA
+relocation's field. The caller's bytes stay unchanged, so the same unit can
+be attached to an executable too. `object_build` refuses a descriptor that
+isn't the unit's DWARF as `debug_write` writes it, with `OBJECT_ERROR_DEBUG`:
+slices missing or past DWARF32, function counts that don't add up, unit
+lengths that don't match, headers that aren't debug.c's (`.debug_info`'s
+DWARF 5, `DW_UT_compile` and 8-byte addresses; the line programs', the range
+lists' and `.debug_addr`'s DWARF 5, 8-byte addresses and no segment selector,
+and the range lists' no offset entries), a field anywhere but where debug.c
+writes it (the header's abbreviation offset, and the compile unit DIE's three
+section offsets one after another past its abbreviation code, its three
+strings and its language), a field's value anywhere but at its unit's own
+contribution to the section it points into (each unit's contributions follow
+the earlier units' in every section, and its abbreviation table is read to its
+zero code to find where the next starts), line addresses that aren't
+`DW_LNE_set_address` operands in order, and functions that aren't ordinary
+ones the unit defines in `TEXT` atoms; and entries that aren't the units'. It
+checks that layout, not the DIEs past the compile unit DIE's section offsets,
+the abbreviations' contents, the line programs' opcodes or the range lists'
+entries.
+`test-object-writer` writes every unit's object of a program of 25 units, each
+with its own entry (every fourth empty), by `object_write_units` on 1, 2, 3
+and 8 lanes into `object_build`'s bytes.
+
 ## The C driver's `-g` (#395)
 
 `./build/compiler -g -o program file.c` links an executable with a unit of
@@ -178,17 +229,42 @@ emission reserves the raw rows and writes each function's out of line
 main's executable; with `-g` it took 7.2% more
 ([the record](https://github.com/buster14a/buster-performance/tree/fec2430fdab625676f82a1226607b3ca885b1288/docs/measurements/c-driver-dwarf-395-2026-10-25)).
 
+What `-g` adds to the emission is mostly its copy of the lowering (#456). On
+`benchmark-check-debug --only emit`'s program (2,000 functions, 101,493 typed
+entries, 60,031 raw rows), the emission with the raw rows took 4.76 and 4.41%
+longer than without on the 9700X, in two series of five processes (each the
+median of the processes' changes, every process timing both; the first series'
+times had medians of 6.318 and 6.055 ms), and retired 6.24 million more of its
+132.2 million user instructions. The copy that keeps the
+tokens is 5.61 million of them, about 28 for each of the 197,000 tasks the
+lowering pops, which settles the entries and tasks since the pop before and
+picks the next token; the raw rows take 0.54 million, Tier 0's entries' first
+records 0.10 million, and their room nothing measurable. The 1.1 to 1.2% that
+#426 measured with `-g` in a unit of its own compared two lowerings that both
+kept tokens: there the benchmark ran in that unit, whose lowering saved the
+token with every push and set it at every pop, rows or none. Of the cheaper forms tried, reading the settle's
+columns and bounds once (clang read them again after each store through the
+writer) saved 0.33 million instructions, but on the 9700X it left the emission
+with the rows as long and moved the plain loop's code, which then took 0.8%
+longer; doing the work before the pop, or out of line, retired more. The cost
+stays `-g`'s
+([the record](https://github.com/buster14a/buster-performance/tree/6e5eec7b1354d03073684fe52a82ebc1dcd10f2d/docs/measurements/debug-row-emission-456-2026-10-26)).
+
 A function is named by its identifier, at its declaration's line, in the
 file of its declaration (a header's for a function a header defines, a
 `#line`'s name after one); the unit's first file is the translation unit's.
-`-c -g` writes an object without DWARF: the object writer has no debug
-sections or relocations for them yet. `test-check-debug [--cross-check]`
-checks each pass's twins (at `PROT_NONE` pages), the lines against
-`pp_presumed` on fixtures and generated programs, the fixtures' functions'
-rows, and with `--cross-check` the executable through `llvm-dwarfdump
---verify` and gdb: a line's breakpoint, a function's on its first
-statement, a step over an untaken branch and a backtrace's lines, the
-header's function in the header.
+`-c -g` writes the same unit into the object, relocated against the
+functions' sections ("Relocatable objects" above). `test-check-debug
+[--cross-check]` checks each pass's twins (at `PROT_NONE` pages), the lines
+against `pp_presumed` on fixtures and generated programs, the fixtures'
+functions' rows, and with `--cross-check` the executable through
+`llvm-dwarfdump --verify` and gdb: a line's breakpoint, a function's on its
+first statement, a step over an untaken branch and a backtrace's lines, the
+header's function in the header. The fixture's `-c -g` object must be the
+same bytes by both paths, its DWARF the executable's but at its relocations'
+fields, and `llvm-dwarfdump --verify` must pass it. Linked by `cc` through
+GNU ld and through lld, and by `link-foreign` from GCC's driver's line, it
+must make programs that run and read alike in `llvm-dwarfdump` and gdb.
 
 ## Row emission and measurement
 
@@ -261,6 +337,24 @@ command failure, missing samples or missing consumer tools fail the check.
 This validates the new debug bytes and native writer attachment with real
 consumers; GNU as remains the fixture's unwind-information producer.
 
+The cross-check also writes the fixture's code, imported from GNU as's
+object, as the object writer's object with the units relocated: one unit,
+and the two in one descriptor. GNU ld's and lld's links of it must hold the
+five debug sections of GNU ld's link of the fixture, byte for byte, and the
+same gdb and perf checks run on them.
+
+`test-object-writer` attaches a unit of each unit's functions, in a shuffled
+order, to the objects of test-link's sets and of the link made by hand, as
+one unit and as two, with and without function sections. It works each
+object's DWARF out again from the descriptor: the sections after the
+sections of atoms, their bytes with the fields and address slots zeroed, and
+every relocation. It also checks the 50 changed descriptors `object_build`
+must refuse, and an IFUNC's. With `--cross-check`, GNU ld, lld and mold link
+the objects of two sets into programs that run. `llvm-dwarfdump --verify`
+must pass each program's DWARF, which must be the objects' contributions
+relocated: each field holding its section's contribution's offset plus what
+it held, and each address its function's in the program's `.symtab`.
+
 The [required 9700X run for PR #329](https://github.com/buster14a/buster/actions/runs/39937746848)
 passed on October 23, 2026. It tested merge result
 `b053b9a7a429a5f26f8b9f3c940b491e942f161e`, combining submitted head
@@ -281,9 +375,11 @@ standalone-head consumer evidence, separate from the hosted merge result.
 ## Remaining integration
 
 [#395](https://github.com/buster14a/buster/issues/395) attaches several units
-through `executable_write` (above) and keeps other compilers' DWARF through
-`link-foreign` (the driver's contract, "Debug information"); `Link` still has no
-debug-section atom classes, since those sections are built whole beside it.
+through `executable_write` (above), writes them into relocatable objects
+(`ObjectOptions.debug`, the C driver's `-c -g`) and keeps other compilers' DWARF
+through `link-foreign` (the driver's contract, "Debug information"); `Link`
+still has no debug-section atom classes, since those sections are built whole
+beside it.
 This module does not modify the assembler-owned CFI/section adapter in #233.
 
 The merged [Tier 0 PR #303](https://github.com/buster14a/buster/pull/303),

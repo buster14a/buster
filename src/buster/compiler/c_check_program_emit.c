@@ -358,10 +358,33 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
         result->records += helpers->items[h].code.count;
         result->deferred += helpers->items[h].code.deferred;
     }
-    // An executable's link has room for the runtime's records too.
+    // An executable's link has room for the runtime's records too: the crt objects', and the archives' members' that the
+    // names the unit refers to without defining them may load (bind_capacity_needed), its symbols' and the runtime
+    // functions' the lowering calls.
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
-    const LinkCapacity runtime = binding != NULL && valid ? bind_capacity(binding->runtime, &name_bytes, &atom_bytes) : (LinkCapacity){ 0 };
+    String8* externals = binding != NULL && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + result->lowered.runtime_symbol_count + 1) : 0;
+    uint32_t external_count = 0;
+    valid = valid && (binding == NULL || externals != 0);
+    for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        if (declaration != BUSTER_CHECK_NONE && !program->input->compound_objects[declaration] && !defined[object] && program->input->linkage[declaration] == 2)
+        {
+            const uint32_t identifier = parser->tokens.names[declaration];
+            externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
+                                                                              (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
+                                                                                         .length = intern_length(identifiers, identifier) };
+        }
+    }
+    for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
+    {
+        const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
+        externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
+    }
+    const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
+                                                            (LinkCapacity){ 0 };
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;

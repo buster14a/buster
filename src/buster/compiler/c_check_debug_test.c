@@ -29,6 +29,10 @@
 //   function's breakpoint on its first statement, steps over an untaken branch, steps from a computed goto to its
 //   target's statement, and gives a backtrace's frames their functions, files and lines, the header's function in the
 //   header.
+// - Objects, with --cross-check (#395's -c -g): the fixture's object by each path into the same bytes, whose five DWARF
+//   sections are the -g executable's but at their relocations' fields (zero in the object), and which llvm-dwarfdump
+//   --verify finds no error in; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's
+//   line, into programs that run, whose DWARF llvm-dwarfdump and gdb read as they read the -g executable's.
 
 typedef struct CheckDebugTestTally CheckDebugTestTally;
 struct CheckDebugTestTally
@@ -915,6 +919,44 @@ static String8 check_debug_test_gdb(const char* program, const char* report, con
     return foreign_test_read(arena, report);
 }
 
+// What llvm-dwarfdump and gdb read of an executable of the fixture's, `program` (see the file's comment): the driver's
+// with -g, or a link of its object with -c -g.
+static void check_debug_test_read(CheckDebugTestTally* tally, const char* program, Arena* arena)
+{
+    char report[PATH_MAX + 16];
+    snprintf(report, sizeof(report), "%s.verify", program);
+    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", (char*)program, 0 };
+    object_test_run(verify, report, "/dev/null");
+    const String8 verified = foreign_test_read(arena, report);
+    check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error", report);
+    // A line's breakpoint, a step over the untaken branch, and a function's breakpoint with its backtrace.
+    snprintf(report, sizeof(report), "%s.gdb-lines", program);
+    static const char* const lines[] = { "break dbg_rows.c:45", "run", "next", "info line *$pc" };
+    const String8 stepped = check_debug_test_gdb(program, report, lines, BUSTER_ARRAY_LENGTH(lines), arena);
+    const char* stop = stepped.pointer != 0 ? strstr(stepped.pointer, "Breakpoint 1, main") : 0;
+    check_debug_test_expect(tally, stop != 0 && strstr(stop, "dbg_rows.c:45") != 0 && strstr(stop, "\n49\t") != 0,
+                            "gdb stops at a line's breakpoint on its line and steps over the untaken branch to the next statement", report);
+    snprintf(report, sizeof(report), "%s.gdb-functions", program);
+    static const char* const functions[] = { "break scale", "break header_add", "run", "bt", "continue", "bt" };
+    const String8 traced = check_debug_test_gdb(program, report, functions, BUSTER_ARRAY_LENGTH(functions), arena);
+    const char* scale = traced.pointer != 0 ? strstr(traced.pointer, "Breakpoint 1, scale") : 0;
+    const char* header = scale != 0 ? strstr(scale, "Breakpoint 2, header_add") : 0;
+    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, "main () at") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
+                            "gdb stops at a function's breakpoint on its first statement, and its backtrace gives the caller's line", report);
+    check_debug_test_expect(tally, header != 0 && strstr(header, "dbg_rows.h:3") != 0 && strstr(header, "dbg_rows.c:43") != 0,
+                            "the header's function stops in the header, called from its callee's line (the call's first)", report);
+    // The computed goto: stopped at it, called from main's last line, then a step to the label's statement it goes to.
+    snprintf(report, sizeof(report), "%s.gdb-goto", program);
+    static const char* const jumps[] = { "break dbg_goto.c:5", "run", "bt", "next", "info line *$pc" };
+    const String8 jumped = check_debug_test_gdb(program, report, jumps, BUSTER_ARRAY_LENGTH(jumps), arena);
+    const char* dispatch = jumped.pointer != 0 ? strstr(jumped.pointer, "Breakpoint 1, dispatch") : 0;
+    // gdb names the file with the compilation's directory before it, the #line's name being relative.
+    const char* target = dispatch != 0 ? strstr(dispatch, "\nLine 9 of \"") : 0;
+    check_debug_test_expect(tally, dispatch != 0 && strstr(dispatch, "dbg_goto.c:5") != 0 && strstr(dispatch, "dbg_rows.c:52") != 0 && target != 0 &&
+                                       strstr(target, "/dbg_goto.c\" starts at address") != 0,
+                            "gdb stops at a computed goto and steps to the statement of the label it goes to", report);
+}
+
 // The driver with -g, by each path, and what llvm-dwarfdump and gdb read of its executable (see the file's comment).
 static void check_debug_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
@@ -938,38 +980,154 @@ static void check_debug_test_driver(CheckDebugTestTally* tally, const char* dire
     }
     check_debug_test_expect(tally, files[0].pointer != 0 && files[1].pointer != 0 && files[0].length == files[1].length && memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
                             "the vector path's executable is --scalar's, byte for byte", outputs[0]);
+    check_debug_test_read(tally, outputs[0], arena);
+}
+
+// A relocatable object's section named `name`, and with `relocations` its .rela section; or zeros.
+static Elf64_Shdr check_debug_test_section(String8 file, const char* name, bool relocations)
+{
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)file.pointer;
+    Elf64_Shdr result = { 0 };
+    const bool valid = file.length >= sizeof(Elf64_Ehdr) && header->e_type == ET_REL && header->e_shoff <= file.length &&
+                       header->e_shnum <= (file.length - header->e_shoff) / sizeof(Elf64_Shdr) && header->e_shstrndx < header->e_shnum;
+    const Elf64_Shdr* sections = valid ? (const Elf64_Shdr*)(file.pointer + header->e_shoff) : 0;
+    const Elf64_Shdr* names = valid ? &sections[header->e_shstrndx] : 0;
+    for (uint32_t i = 1; valid && names->sh_offset < file.length && i < header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* section = &sections[i];
+        const uint32_t named = relocations ? (section->sh_type == SHT_RELA && section->sh_info < header->e_shnum ? sections[section->sh_info].sh_name : UINT32_MAX)
+                                           : (section->sh_type != SHT_RELA ? section->sh_name : UINT32_MAX);
+        const char* text = named < names->sh_size && names->sh_offset + names->sh_size <= file.length ? file.pointer + names->sh_offset + named : 0;
+        const bool inside = section->sh_type == SHT_NOBITS || (section->sh_offset <= file.length && section->sh_size <= file.length - section->sh_offset);
+        result = text != 0 && inside && memchr(text, 0, names->sh_size - named) != 0 && strcmp(text, name) == 0 ? *section : result;
+    }
+    return result;
+}
+
+// Whether the object's five DWARF sections are the executable's but at their relocations' fields, which hold zero in
+// the object: -c -g's unit is -g's.
+static bool check_debug_test_same_unit(String8 object, String8 executable)
+{
+    static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
+    const ExecutableTestImage image = executable_test_image_of(executable, ET_DYN);
+    bool result = image.valid;
+    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(names); s += 1)
+    {
+        const Elf64_Shdr ours = check_debug_test_section(object, names[s], false);
+        const Elf64_Shdr relocations = check_debug_test_section(object, names[s], true);
+        const Elf64_Shdr* theirs = executable_test_section(&image, names[s]);
+        result = ours.sh_size != 0 && theirs != 0 && theirs->sh_size == ours.sh_size && theirs->sh_offset <= executable.length &&
+                 theirs->sh_size <= executable.length - theirs->sh_offset;
+        uint8_t* relocated = result ? calloc(ours.sh_size, 1) : 0;
+        result = result && relocated != 0;
+        for (uint64_t r = 0; result && r < relocations.sh_size / sizeof(Elf64_Rela); r += 1)
+        {
+            Elf64_Rela relocation;
+            memcpy(&relocation, object.pointer + relocations.sh_offset + r * sizeof(relocation), sizeof(relocation));
+            const uint32_t type = (uint32_t)ELF64_R_TYPE(relocation.r_info);
+            const uint64_t width = type == R_X86_64_64 ? 8 : type == R_X86_64_32 ? 4 : 0;
+            result = width != 0 && relocation.r_offset <= ours.sh_size - width;
+            if (result)
+            {
+                memset(relocated + relocation.r_offset, 1, width);
+            }
+        }
+        for (uint64_t at = 0; result && at < ours.sh_size; at += 1)
+        {
+            const uint8_t byte = (uint8_t)object.pointer[ours.sh_offset + at];
+            result = relocated[at] != 0 ? byte == 0 : byte == (uint8_t)executable.pointer[theirs->sh_offset + at];
+        }
+        free(relocated);
+    }
+    return result;
+}
+
+// The driver with -c -g (#395), by each path, and what llvm-dwarfdump and gdb read of its object linked by cc, through
+// GNU ld and lld, and by link-foreign, from GCC's driver's line: the unit -g's executable has (check_debug_test_driver
+// made it, dbg_rows), relocated, in programs that run and read alike.
+static void check_debug_test_objects(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char include[PATH_MAX + 2];
+    char objects[2][PATH_MAX];
+    char executable[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_rows.c", directory);
+    snprintf(include, sizeof(include), "-I%s", directory);
+    snprintf(executable, sizeof(executable), "%s/dbg_rows", directory);
+    String8 files[2] = { 0 };
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        char errors[PATH_MAX + 8];
+        snprintf(objects[path], sizeof(objects[path]), "%s/dbg_rows%s.o", directory, path == 0 ? "" : ".scalar");
+        snprintf(errors, sizeof(errors), "%s.err", objects[path]);
+        char* arguments[] = { (char*)"/proc/self/exe", (char*)"-c", (char*)"-g", include, (char*)"-o", objects[path], source, path == 1 ? (char*)"--scalar" : 0, 0 };
+        const bool written = object_test_run(arguments, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, written, "the driver writes the fixture's object with -c -g", errors);
+        files[path] = written ? foreign_test_read(arena, objects[path]) : (String8){ 0 };
+    }
+    check_debug_test_expect(tally, files[0].pointer != 0 && files[1].pointer != 0 && files[0].length == files[1].length && memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
+                            "the vector path's object is --scalar's, byte for byte", objects[0]);
+    const String8 linked_g = foreign_test_read(arena, executable);
+    check_debug_test_expect(tally, files[0].pointer != 0 && linked_g.pointer != 0 && check_debug_test_same_unit(files[0], linked_g),
+                            "the object's DWARF is -g's executable's, but for its relocations' fields", objects[0]);
     char report[PATH_MAX + 16];
-    snprintf(report, sizeof(report), "%s.verify", outputs[0]);
-    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", outputs[0], 0 };
+    snprintf(report, sizeof(report), "%s.verify", objects[0]);
+    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", objects[0], 0 };
     object_test_run(verify, report, "/dev/null");
     const String8 verified = foreign_test_read(arena, report);
-    check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error", report);
-    // A line's breakpoint, a step over the untaken branch, and a function's breakpoint with its backtrace.
-    snprintf(report, sizeof(report), "%s.gdb-lines", outputs[0]);
-    static const char* const lines[] = { "break dbg_rows.c:45", "run", "next", "info line *$pc" };
-    const String8 stepped = check_debug_test_gdb(outputs[0], report, lines, BUSTER_ARRAY_LENGTH(lines), arena);
-    const char* stop = stepped.pointer != 0 ? strstr(stepped.pointer, "Breakpoint 1, main") : 0;
-    check_debug_test_expect(tally, stop != 0 && strstr(stop, "dbg_rows.c:45") != 0 && strstr(stop, "\n49\t") != 0,
-                            "gdb stops at a line's breakpoint on its line and steps over the untaken branch to the next statement", report);
-    snprintf(report, sizeof(report), "%s.gdb-functions", outputs[0]);
-    static const char* const functions[] = { "break scale", "break header_add", "run", "bt", "continue", "bt" };
-    const String8 traced = check_debug_test_gdb(outputs[0], report, functions, BUSTER_ARRAY_LENGTH(functions), arena);
-    const char* scale = traced.pointer != 0 ? strstr(traced.pointer, "Breakpoint 1, scale") : 0;
-    const char* header = scale != 0 ? strstr(scale, "Breakpoint 2, header_add") : 0;
-    check_debug_test_expect(tally, scale != 0 && header != 0 && strstr(scale, "dbg_rows.c:6") != 0 && strstr(scale, "main () at") != 0 && strstr(scale, "dbg_rows.c:42") != 0,
-                            "gdb stops at a function's breakpoint on its first statement, and its backtrace gives the caller's line", report);
-    check_debug_test_expect(tally, header != 0 && strstr(header, "dbg_rows.h:3") != 0 && strstr(header, "dbg_rows.c:43") != 0,
-                            "the header's function stops in the header, called from its callee's line (the call's first)", report);
-    // The computed goto: stopped at it, called from main's last line, then a step to the label's statement it goes to.
-    snprintf(report, sizeof(report), "%s.gdb-goto", outputs[0]);
-    static const char* const jumps[] = { "break dbg_goto.c:5", "run", "bt", "next", "info line *$pc" };
-    const String8 jumped = check_debug_test_gdb(outputs[0], report, jumps, BUSTER_ARRAY_LENGTH(jumps), arena);
-    const char* dispatch = jumped.pointer != 0 ? strstr(jumped.pointer, "Breakpoint 1, dispatch") : 0;
-    // gdb names the file with the compilation's directory before it, the #line's name being relative.
-    const char* target = dispatch != 0 ? strstr(dispatch, "\nLine 9 of \"") : 0;
-    check_debug_test_expect(tally, dispatch != 0 && strstr(dispatch, "dbg_goto.c:5") != 0 && strstr(dispatch, "dbg_rows.c:52") != 0 && target != 0 &&
-                                       strstr(target, "/dbg_goto.c\" starts at address") != 0,
-                            "gdb stops at a computed goto and steps to the statement of the label it goes to", report);
+    check_debug_test_expect(tally, verified.pointer != 0 && strstr(verified.pointer, "No errors.") != 0, "llvm-dwarfdump --verify finds no error in the object", report);
+    // cc through GNU ld and lld, then link-foreign.
+    static const char* const linkers[] = { "-fuse-ld=bfd", "-fuse-ld=lld" };
+    for (uint32_t l = 0; files[0].pointer != 0 && l < BUSTER_ARRAY_LENGTH(linkers) + 1; l += 1)
+    {
+        char program[PATH_MAX + 16];
+        char errors[PATH_MAX + 24];
+        snprintf(program, sizeof(program), "%s/dbg_rows.%s", directory, l == 0 ? "bfd" : l == 1 ? "lld" : "foreign");
+        snprintf(errors, sizeof(errors), "%s.err", program);
+        bool linked = false;
+        if (l < BUSTER_ARRAY_LENGTH(linkers))
+        {
+            char* arguments[] = { (char*)"cc", (char*)linkers[l], (char*)"-o", program, objects[0], 0 };
+            linked = object_test_run(arguments, "/dev/null", errors) == 0;
+        }
+        else
+        {
+            ForeignTestSystem system;
+            foreign_test_system(&system);
+            ForeignTestLine* line = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestLine, 1);
+            char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, BUSTER_FOREIGN_TEST_MAX_ARGUMENTS + 8);
+            if (system.found && line != 0 && arguments != 0)
+            {
+                *line = (ForeignTestLine){ 0 };
+                foreign_test_pie_begin(line, &system);
+                foreign_test_add(line, objects[0], true, true);
+                foreign_test_pie_end(line, &system);
+                static const char* const head[] = { "/proc/self/exe", "link-foreign", "-pie", "--dynamic-linker", "/lib64/ld-linux-x86-64.so.2", "-o" };
+                uint32_t count = 0;
+                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(head); i += 1)
+                {
+                    arguments[count] = (char*)head[i];
+                    count += 1;
+                }
+                arguments[count] = program;
+                count += 1;
+                for (uint32_t i = 0; i < line->our_count; i += 1)
+                {
+                    arguments[count] = line->ours[i];
+                    count += 1;
+                }
+                arguments[count] = 0;
+                linked = object_test_run(arguments, "/dev/null", errors) == 0;
+            }
+        }
+        check_debug_test_expect(tally, linked, l == 0 ? "cc links the object through GNU ld" : l == 1 ? "cc links the object through lld" : "link-foreign links the object", errors);
+        char* run[] = { program, 0 };
+        check_debug_test_expect(tally, linked && object_test_run(run, "/dev/null", "/dev/null") == 0, "the linked fixture runs and returns 0", program);
+        if (linked)
+        {
+            check_debug_test_read(tally, program, arena);
+        }
+    }
 }
 
 // The driver (/proc/self/exe) on a link with -g whose options fail before pp_parse_options runs, a -l without its name
@@ -1041,6 +1199,7 @@ static int run_check_debug_tests(int argc, char** argv)
         if (cross_check)
         {
             check_debug_test_driver(&tally, directory, &arena);
+            check_debug_test_objects(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
         }
         if (!keep && tally.failures == 0)
