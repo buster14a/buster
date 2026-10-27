@@ -679,6 +679,9 @@ What the lowering covers past scalars (#145's programs):
   Zero-size copies still evaluate their operands without touching memory.
   Volatile copies retain the existing inline pieces, including self-assignment's
   accesses; a library routine may skip copying when its pointers are equal.
+  The producer follows the copied value through comma, conditional, selected
+  and statement expressions, whose lvalue conversions can erase a source's
+  volatile qualifier. Its bounded private worklist borrows unused task storage.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,

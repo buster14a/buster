@@ -4,7 +4,7 @@
 // #597: tiny C aggregate assignments must have bounded typed streams and machine code as the object grows.
 // Include after c_check_program_test.c's source/execution helpers. Clang is an external semantic oracle.
 
-static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool volatile_copy)
+static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool volatile_copy, const char* source_override)
 {
     char source[512];
     snprintf(source, sizeof(source),
@@ -13,6 +13,10 @@ static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool v
              "%sunsigned char* kept(%sstruct S*d,const %sstruct S*s){return (*d=*s).bytes;}"
              "void same(%sstruct S*d){*d=*d;}", size, volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "",
              volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "");
+    if (source_override != NULL)
+    {
+        snprintf(source, sizeof(source), "%s", source_override);
+    }
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -57,7 +61,7 @@ static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool v
         }
         counts[path][1] = code.records;
         counts[path][2] = code.code_bytes;
-        check_test_expect(test, ready && code.records <= (volatile_copy ? 256u : 160u) && code.code_bytes <= (volatile_copy ? 1536u : 768u),
+        check_test_expect(test, ready && code.records <= (volatile_copy ? 512u : 160u) && code.code_bytes <= (volatile_copy ? 2048u : 768u),
                           "discarded, consumed and self copies have bounded machine records and code bytes");
         check_test_expect(test, ready && code.lowered.runtime_symbol_count == (uint32_t)(size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy),
                           "small copies stay inline and large copies share one runtime symbol");
@@ -78,9 +82,19 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
     static const uint32_t sizes[] = { 1, 15, 16, 255, 256, 257, 1024, 4096, 16384, 65536, 262144 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
     {
-        check_test_program_copy_shape(test, sizes[i], false);
+        check_test_program_copy_shape(test, sizes[i], false, NULL);
     }
-    check_test_program_copy_shape(test, 513, true);
+    check_test_program_copy_shape(test, 513, true, NULL);
+    check_test_program_copy_shape(test, 513, true,
+        "struct S{unsigned char bytes[513];};"
+        "void copy(struct S*d,const volatile struct S*s){*d=_Generic(0,int:(0,*s));}"
+        "unsigned char* kept(struct S*d,const volatile struct S*s,int n){return (*d=(n?*s:*s)).bytes;}"
+        "void same(struct S*d){*d=({*(const volatile struct S*)d;});}");
+    check_test_program_copy_shape(test, 16384, false,
+        "struct S{unsigned char bytes[16384];};extern volatile int observed;"
+        "void copy(struct S*d,const struct S*s){*d=(observed,*s);}"
+        "unsigned char* kept(struct S*d,const struct S*s,int n){return (*d=(n?*s:*s)).bytes;}"
+        "void same(struct S*d){*d=({observed;*d;});}");
     static const uint32_t execution_sizes[] = { 255, 256, 257, 4097, 16384, 262145 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(execution_sizes); i += 1)
     {

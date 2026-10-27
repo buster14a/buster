@@ -1257,6 +1257,80 @@ static bool check_lower_copy_volatile(const CheckValue* source, TypeId destinati
            (source->flags & BUSTER_CHECK_VOLATILE_PART) != 0;
 }
 
+// Aggregate comma, conditional and statement values forward an address after lvalue conversion erased its qualifier.
+// Follow only those value edges, not earlier side effects or an assignment whose volatile accesses already ran. The
+// unused tail of this writer's task array is a bounded private worklist; no pending task or source-token state changes.
+static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t pending = 0;
+    uint32_t budget = stream->count;
+    uint32_t at = node;
+    bool volatile_copy = false;
+    while (!volatile_copy && at < stream->count && budget != 0 && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        budget -= 1;
+        volatile_copy = check_lower_copy_volatile(&stream->values[at], 0);
+        uint32_t next = BUSTER_CHECK_NONE;
+        if (!volatile_copy)
+        {
+            const CheckOp op = graph->ops[at];
+            if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE)
+            {
+                next = graph->operand0[at];
+            }
+            else if (op == CHECK_OP_COMMA)
+            {
+                next = graph->operand1[at];
+            }
+            else if (op == CHECK_OP_CONDITIONAL)
+            {
+                bool truth = false;
+                if (check_program_runtime_truth(program, at, graph->operand0[at], &truth))
+                {
+                    next = truth ? graph->operand1[at] : graph->operand2[at];
+                }
+                else if (pending < writer->capacity - writer->depth)
+                {
+                    writer->tasks[writer->depth + pending++].node = graph->operand2[at];
+                    next = graph->operand1[at];
+                }
+                else
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+                }
+            }
+        }
+        at = next;
+        if (at == BUSTER_CHECK_NONE && pending != 0)
+        {
+            at = writer->tasks[writer->depth + --pending].node;
+        }
+    }
+    if (!volatile_copy && at < stream->count && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    return volatile_copy;
+}
+
+static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t node, TypeId destination)
+{
+    const CheckValue* source = &writer->program->stream->values[node];
+    bool volatile_copy = check_lower_copy_volatile(source, destination);
+    if (!volatile_copy && (source->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
+    {
+        const CheckOp op = writer->program->input->graph.ops[node];
+        if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
+        {
+            volatile_copy = check_lower_copy_forward_volatile(writer, node);
+        }
+    }
+    return volatile_copy;
+}
+
 // `size` bytes copied from the source's address on top of the stack to the destination's under it, which stays when
 // `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger nonvolatile ones call memmove through the ordinary
 // runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
@@ -3829,7 +3903,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
         const TypeId destination = op == CHECK_OP_ASSIGN ? stream->values[a].type :
                                    declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
-        const bool volatile_copy = check_lower_copy_volatile(&stream->values[op == CHECK_OP_INITIALIZE ? a : b], destination) ||
+        const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
                                    (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_VOLATILE_PART) != 0);
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !task.discard, .volatile_copy = volatile_copy });
         check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value->type);
@@ -4157,7 +4231,9 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
         if (aggregate)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type),
-                                                     .volatile_copy = check_lower_copy_volatile(&write->value, write->type) });
+                                                     .volatile_copy = write->node < writer->program->stream->count ?
+                                                                      check_lower_copy_node_volatile(writer, write->node, write->type) :
+                                                                      check_lower_copy_volatile(&write->value, write->type) });
         }
         else
         {
@@ -4513,7 +4589,7 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
         if (node != BUSTER_CHECK_NONE)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false,
-                                                     .volatile_copy = check_lower_copy_volatile(&writer->program->stream->values[node], writer->result) });
+                                                     .volatile_copy = check_lower_copy_node_volatile(writer, node, writer->result) });
             check_lower_expression(writer, node, false, 0);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         }
