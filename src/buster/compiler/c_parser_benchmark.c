@@ -919,7 +919,6 @@ int run_parser_benchmark(int argc, char** argv)
             pp_release(&pp);
             intern_release(&table);
             arena_release(&file->parser.scratch);
-            arena_release(&file->parser.vector_arena);
         }
         bench.file_count = path_count;
         // The shared arrays, for the largest file and every file's names.

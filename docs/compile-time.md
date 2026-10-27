@@ -157,7 +157,10 @@ Each upper bound is the time the item would save if its cost went to zero.
    - Cost: 29.9 ms of system time, 15.9% of the compile's cycles, all of it the
      kernel clearing pages.
    - Upper bound: about 30 ms, with the cache misses of sparse columns besides.
-   - Follow-up: [#528](https://github.com/buster14a/buster/issues/528).
+   - Follow-up: [#528](https://github.com/buster14a/buster/issues/528), which
+     took 115 MB of it and 17% of the kernel's cycles, and #570 46 MB more
+     ("Memory first touched", below); [#572](https://github.com/buster14a/buster/issues/572)
+     has the rest.
 3. **The checker's graph and program passes**, 35.7 ms (18.9%):
    `check-expressions` 20.0 ms and `check-program` 15.7 ms, with no system
    time.
@@ -184,6 +187,114 @@ Each upper bound is the time the item would save if its cost went to zero.
 The rest are small: preprocessing (9.8 ms) and parsing (9.6 ms) have their own
 issues (#117, #126, #451); Tier 0 takes 5.0 ms; the object's build and write
 take 0.6 ms.
+
+## Memory first touched (#528)
+
+Three allocations touched far more memory than they used.
+- [#528](https://github.com/buster14a/buster/issues/528)'s two changes took
+  115 MB off the compile's peak RSS, and 17% of its kernel cycles.
+- #570, the lowering's work for [#531](https://github.com/buster14a/buster/issues/531),
+  takes 46 MB more with the third. #528's branch had made that change first,
+  and left it to #570.
+
+The objects are the same bytes.
+
+### Before and after
+
+These are the 9700X's medians, pinned to CPU 2 under the host's lock:
+- **Before:** #520's head `ea673e4b`, main `ad408cf2` with the stage clock.
+  Its peak RSS was 674 MB rather than the 728 MB above, measured at `1677a3b`
+  before main's later changes.
+- **#528:** the type table's and the parse's changes on it (round 3 of the
+  record).
+- **Measures:** `measure-compile` in both orders, each compiler the other's
+  reference (21 rotated rounds each), and `perf stat -r 11` of each, twice.
+  [The measurement record](https://github.com/buster14a/buster-performance/tree/c5ffd6cd6f90abca60273f8bc72321c2bc5ad478/docs/measurements/memory-528-2026-10-27)
+  holds the logs, the scripts and the trees' identities.
+
+| | before | #528 | change |
+| --- | ---: | ---: | ---: |
+| wall time | 190.1 ms (189.5 to 193.3) | 186.3 ms (184.8 to 187.9) | −3.9 ms (−2.0%) |
+| peak RSS | 674,216 KB | 558,936 KB | −115,280 KB (−17.1%) |
+| minor faults | 1,531 | 2,092 | +561 |
+| task-clock (perf) | 189.7 ms | 186.1 ms | −1.9% |
+| cycles, kernel | 155.2 M | 129.5 M | −16.6% |
+| cycles, user | 896.9 M | 902.2 M | +0.6% |
+| instructions, user | 2,227.3 M | 2,227.1 M | 0.0% |
+
+- **Reverse order:** base against #528 measured 190.3 ms against 186.0 ms.
+- **Second `perf stat` pair:** 190.1 ms against 186.2 ms, kernel cycles −17.1%.
+- **With lane 0's writer too** (round 2): 184.0 ms against 190.1 ms, and a
+  peak RSS of 512,576 KB.
+- **Profile.** `clear_page_erms` fell from 14.8% of the samples to 12.2%.
+- **User cycles.** They rose with glibc, mostly its `memset`: from 3.9% of the
+  samples to 5.1%. The reader's columns now take pages that the parse left out
+  of the caches, and zeroing them reads each line before writing it, where the
+  kernel had just cleared fresh pages.
+
+The stages that changed, from each compile's `--time-stages` medians:
+
+| stage | ms before | ms after | peak KB added before | peak KB added after |
+| --- | ---: | ---: | ---: | ---: |
+| parse | 9.55 | 9.44 | 105,704 | 97,556 |
+| type-table | 1.67 | 0.04 | 38,916 | 128 |
+| check-input | 80.26 | 78.22 | 324,612 | 261,408 |
+| check-program | 15.79 | 15.84 | 14,336 | 10,240 |
+
+### The allocations
+
+- **The type table** (#528). Its columns each have room for four types a token,
+  far apart, and a unit fills a little at each one's start: `sqlite3.c`'s
+  716,380 tokens make 3,434 types. In huge pages, each column's first touch
+  cleared 2 MB. The C driver's table is now in base pages
+  (`arena_reserve_small`).
+- **The parser's temporaries** (#528). The vector path's arrays but the tree's
+  (63 MB of `sqlite3.c`'s) and the postorder's passes (14 MB) were in arenas of
+  the parser's own, held to the end of the compile. The checker's reader then
+  touched 169 MB of fresh scratch of its own.
+  - A parse's temporaries now go in `ParseOptions.scratch`, each step's popped
+    after it ([the parser guide](c-parser.md)).
+  - The C driver passes its checker's scratch, whose reader takes the same
+    pages again.
+- **Lane 0's writer** (#570). A lane's writer has some thirty columns with room
+  for any of the program's bodies: 11.3 million entries, where the largest body
+  takes 18,935. Lane 0's were in the caller's scratch past what the checker
+  touched, and each column's start cleared a 2 MB page: 46 MB of the `lower`
+  stage on one lane, as the pinned compile runs.
+  - The other lanes' have been in base pages since #151
+    ([the lanes guide](function-lanes.md)).
+  - In #528's branch, all of lane 0's scratch in base pages instead made Tier
+    0's arrays fault page by page, 0.6 ms slower; the writer's columns alone
+    don't.
+
+### What's left
+
+At about 512 MB, with the three, by arena (smaps at the compile's first large
+release, on the laptop):
+- **The checker's scratch, 184 MB.** Its high-water is mostly the reader's:
+  some 55 token columns, many of them sparse but cleared whole, and the binding
+  table. The parse's temporaries fit under it.
+- **The driver's arena, 142 MB.** It holds:
+  - the reader's token columns that the later stages read, 61 MB, many filled
+    with `NONE` where few tokens have an entry;
+  - the expression graph, with a 96-byte `CheckValue` leaf for each of its
+    343,946 nodes (33 MB);
+  - the binding environment that #113's deferred reader takes, which a
+    source-order compile doesn't read.
+- **The checker's output arena, 72 MB.** Most of it is the expressions'
+  stream, with a 96-byte value per node; the declarations' and the program's
+  outputs are the rest.
+- **The front end:** the preprocessor's 47 MB, and the parser's 13 columns,
+  each in an arena of its own: about 31 MB by their sizes.
+
+These were measured on #520's head with the three changes, before main took
+#568 (the reader, #529) and #517. `abi_initialize` cleared ABI rows for every type the table could hold, about
+37 MB of the checker's scratch, inside what the reader touched: user time
+rather than new pages, which #517 sizes by the types.
+[#572](https://github.com/buster14a/buster/issues/572) follows up on the rest:
+sizing the reader's columns by their records, as #528 proposed, and the graph's
+and the stream's values. It shares the reader with
+[#529](https://github.com/buster14a/buster/issues/529).
 
 ## Linking is not in the 194.8 ms
 

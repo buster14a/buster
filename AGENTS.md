@@ -4375,6 +4375,14 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
+- a borrowed scratch (`ParseOptions.scratch`, #528), without files: units in
+  turn on one parser for each path, whose arena holds the caller's data below
+  its length and dirty pages above it (each parse's temporaries, and a pattern
+  before each parse): the fixtures' sources, valid code of which the vector
+  path sends some declarations to the scalar parser, an error, an unclosed
+  brace and 64 random streams. Each must parse as on a fresh parser, tokens,
+  tree, postorder, diagnostics and statistics alike, and leave the arena's
+  length and the caller's data as they were;
 - the driver, without files: seventeen cases' exit statuses and exact messages
   (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
