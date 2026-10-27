@@ -63,6 +63,180 @@ static void check_test_program_addressed(CheckTest* test)
     }
 }
 
+#define BUSTER_CHECK_TEST_SCAN_COLUMNS 16u
+#define BUSTER_CHECK_TEST_SCAN_TOKENS 129u
+
+// #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
+// they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
+// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations,
+// needs and symbols; and at 64 and 128 tokens, the cases' marks, against a test of each token.
+static void check_test_program_scans(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[BUSTER_CHECK_TEST_SCAN_COLUMNS] = { 0 };
+    bool ready = page >= BUSTER_CHECK_TEST_SCAN_TOKENS * sizeof(uint32_t);
+    for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
+    {
+        mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[column] != MAP_FAILED && ready;
+        if (mappings[column] != MAP_FAILED)
+        {
+            ready = mprotect(mappings[column] + page, page, PROT_NONE) == 0 && ready;
+        }
+    }
+    CheckTestTypes types = { 0 };
+    ready = check_test_types_open(&types) && ready;
+    check_test_expect(test, ready, "check_program's scanned columns have protected tails");
+    const TypeId runtime = ready ? type_variable_array(&types.table, BUSTER_TYPE_INT, 1) : 0;
+    for (uint32_t count = 0; ready && count <= BUSTER_CHECK_TEST_SCAN_TOKENS; count += 1)
+    {
+        uint32_t* body_declarations = (uint32_t*)(mappings[0] + page - (uint64_t)count * sizeof(uint32_t));
+        uint32_t* initializer_nodes = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* deferred = mappings[2] + page - count;
+        uint32_t* declarations = (uint32_t*)(mappings[3] + page - (uint64_t)count * sizeof(uint32_t));
+        uint32_t* declaration_bodies = (uint32_t*)(mappings[4] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* declaration_kinds = mappings[5] + page - count;
+        uint8_t* static_objects = mappings[6] + page - count;
+        uint32_t* objects = (uint32_t*)(mappings[7] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* defined = mappings[8] + page - count;
+        uint8_t* tentative = mappings[9] + page - count;
+        CheckOp* ops = (CheckOp*)(mappings[10] + page - (uint64_t)count * sizeof(CheckOp));
+        uint32_t* reached = (uint32_t*)(mappings[11] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* roles = mappings[12] + page - count;
+        uint8_t* kinds = mappings[13] + page - count;
+        TypeId* declared_types = (TypeId*)(mappings[14] + page - (uint64_t)count * sizeof(TypeId));
+        uint32_t* parents = (uint32_t*)(mappings[15] + page - (uint64_t)count * sizeof(uint32_t));
+        const uint32_t node_count = count;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t draw = check_test_random(test);
+            body_declarations[token] = draw % 7 == 0 ? draw % (count + 1) : BUSTER_CHECK_NONE;
+            initializer_nodes[token] = draw % 5 == 0 ? (draw >> 8) % node_count : draw % 5 == 1 ? node_count + draw % 3 : BUSTER_CHECK_NONE;
+            deferred[token] = (uint8_t)(draw % 11 == 0);
+            declarations[token] = draw % 3 != 0 ? token : (draw >> 4) % count;
+            declaration_bodies[token] = draw % 13 != 0 ? (draw >> 6) % count : count + draw % 2;
+            declaration_kinds[token] = (uint8_t)(draw % 9 != 0 ? C_BINDING_OBJECT : C_BINDING_OBJECT + 1);
+            static_objects[token] = (uint8_t)((draw >> 9) % 3 == 0);
+            objects[token] = (draw >> 3) % (count + 2);
+            defined[token] = (uint8_t)((draw >> 11) & 1);
+            tentative[token] = (uint8_t)((draw >> 12) & 1);
+            ops[token] = (CheckOp)((draw >> 13) % 4 == 0 ? CHECK_OP_BUILTIN_UNARY + (draw >> 15) % (CHECK_OP_COUNT - CHECK_OP_BUILTIN_UNARY) : (draw >> 15) % CHECK_OP_COUNT);
+            reached[token] = (draw >> 20) % 3 == 0 ? 0 : 1 + (draw >> 22) % 4;
+            roles[token] = (uint8_t)((draw >> 23) % 5 == 0 ? PARSE_ROLE_CLOSE_CASE : (draw >> 23) % 5 == 1 ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_LEAF_RIGHT);
+            kinds[token] = (uint8_t)((draw >> 26) % 4 == 0 ? PARSE_KIND_SWITCH : PARSE_KIND_IDENTIFIER);
+            declared_types[token] = (draw >> 28) % 2 == 0 ? runtime : BUSTER_TYPE_INT;
+            parents[token] = (draw >> 29) % 4 == 0 ? BUSTER_CHECK_NONE : (draw >> 10) % count;
+        }
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            const CheckInput input = {
+                .token_count = count,
+                .deferred_tokens = variant == 0 ? deferred : NULL,
+                .declarations = declarations,
+                .declared_types = declared_types,
+                .declaration_kinds = declaration_kinds,
+                .objects = objects,
+                .static_objects = static_objects,
+                .defined = defined,
+                .tentative = tentative,
+                .initializer_nodes = initializer_nodes,
+                .body_declarations = body_declarations,
+                .declaration_bodies = declaration_bodies,
+            };
+            uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t bodies[2];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                memset(initializers[path], 0xff, sizeof(initializers[path]));
+                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], path == 0);
+            }
+            check_test_expect(test, bodies[0] == bodies[1] && memcmp(openings[0], openings[1], bodies[0] * sizeof(uint32_t)) == 0 &&
+                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0,
+                              "check_program's openings and initializers agree with their scalar twin at every guarded tail");
+            Parser parser = { 0 };
+            parser.tree.roles = roles;
+            parser.tree.parents = parents;
+            parser.tokens.kinds = kinds;
+            parser.tokens.count = count;
+            uint32_t allocation_first[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            CheckProgram programs[2] = { 0 };
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                programs[path] = (CheckProgram){ .input = &input, .types = &types.table, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+                memset(allocation_first[path], 0xff, sizeof(allocation_first[path]));
+                memset(allocation_next[path], 0xa5, sizeof(allocation_next[path]));
+                memset(vla_blocks[path], 0, sizeof(vla_blocks[path]));
+                memset(vla_saves[path], 0, sizeof(vla_saves[path]));
+                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path], path == 0);
+            }
+            check_test_expect(test, programs[0].status == programs[1].status && programs[0].token == programs[1].token &&
+                                   memcmp(allocation_first[0], allocation_first[1], sizeof(allocation_first[0])) == 0 &&
+                                   memcmp(allocation_next[0], allocation_next[1], sizeof(allocation_next[0])) == 0 &&
+                                   memcmp(vla_blocks[0], vla_blocks[1], sizeof(vla_blocks[0])) == 0 && memcmp(vla_saves[0], vla_saves[1], sizeof(vla_saves[0])) == 0,
+                              "check_program's variable-length array declarations agree with their scalar twin at every guarded tail");
+            const CheckGraph graph = { .ops = ops, .count = node_count };
+            uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t builtin_counts[2];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                builtin_counts[path] = check_program_builtins(&graph, reached, NULL, path == 0);
+                const uint32_t listed = check_program_builtins(&graph, reached, builtins[path], path == 0);
+                check_test_expect(test, listed == builtin_counts[path], "check_program's builtins count what they list");
+            }
+            check_test_expect(test, builtin_counts[0] == builtin_counts[1] && memcmp(builtins[0], builtins[1], builtin_counts[0] * sizeof(uint32_t)) == 0,
+                              "check_program's reached builtins agree with their scalar twin at every guarded tail");
+            uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            SymbolId object_symbols[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t symbol_objects[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t symbols[2];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path], .object_symbols = object_symbols[path] };
+                memset(needed[path], 0, sizeof(needed[path]));
+                memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
+                memset(object_symbols[path], 0, sizeof(object_symbols[path]));
+                needed[path][count / 2] = (uint8_t)(count % 2);
+                check_program_static_objects(&programs[path], needed[path], path == 0);
+                symbols[path] = check_program_symbols(&programs[path], needed[path], NULL, path == 0);
+                const uint32_t numbered = check_program_symbols(&programs[path], needed[path], symbol_objects[path], path == 0);
+                check_test_expect(test, numbered == symbols[path], "check_program's symbols count what they number");
+            }
+            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
+                                   memcmp(object_symbols[0], object_symbols[1], sizeof(object_symbols[0])) == 0 && symbols[0] == symbols[1] &&
+                                   memcmp(symbol_objects[0], symbol_objects[1], symbols[0] * sizeof(uint32_t)) == 0,
+                              "check_program's static objects and symbols agree with their scalar twin at every guarded tail");
+            for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
+            {
+                uint64_t cases = 0;
+                const uint64_t marked = check_program_case_marks(&parser, &input, block, &cases);
+                uint64_t expected_marked = 0;
+                uint64_t expected_cases = 0;
+                for (uint32_t lane = 0; lane < 64; lane += 1)
+                {
+                    const uint32_t token = block + lane;
+                    const bool kept = input.deferred_tokens == NULL || input.deferred_tokens[token] == 0;
+                    expected_marked |= (uint64_t)(kept && (roles[token] == PARSE_ROLE_CLOSE_CASE || kinds[token] == PARSE_KIND_SWITCH)) << lane;
+                    expected_cases |= (uint64_t)(kept && roles[token] == PARSE_ROLE_CLOSE_CASE) << lane;
+                }
+                check_test_expect(test, marked == expected_marked && cases == expected_cases, "check_program's case marks agree with each token's test at a guarded tail");
+            }
+        }
+    }
+    check_test_types_close(&types);
+    for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+}
+
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
 {
     return size == 0 || (a != 0 && b != 0 && memcmp(a, b, size) == 0);
@@ -777,6 +951,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
+    check_test_program_scans(test);
     check_test_program_refused(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
