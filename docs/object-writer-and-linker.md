@@ -2928,14 +2928,11 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   import of its names gets its `DT_NEEDED` entry and its versions'
   `.gnu.version_r` entries.
 - **Split-stack code in a dynamic PIE.** `morestack.o` binds now, and makes
-  `generic-morestack.o` join, whose thread-locals it reaches by
-  general-dynamic accesses. The writer relaxes those in a static executable
-  and gives them GOT pairs in a shared library, but doesn't take them in a
-  dynamic PIE yet: the C driver refuses such a link at the writer, naming the
-  member's fixup (`libgcc.a(generic-morestack.o)'s fixup to
-  '__morestack_initial_sp'`). Split-stack libraries link and run;
-  `test-bind` links the PIE's bound objects with lld and GNU ld, which relax
-  the accesses to local-exec.
+  `generic-morestack.o` join, whose thread-locals it reaches by general- and
+  local-dynamic accesses, which the writer relaxes in a dynamic PIE since
+  #515 (below, "General- and local-dynamic TLS in a dynamic PIE"), as it does
+  in a static executable; a shared library keeps them, with GOT pairs.
+  Split-stack PIEs and libraries link and run.
 
 **The cost**, on a 4-core Xeon VM (not the 9700X), against main (7e3782a),
 the two builds' runs alternating: the dynamic runtime's snapshot grew from
@@ -2967,9 +2964,93 @@ it against a copy of the runtime without `libgcc_s.so.1`
 code walks its stack, each with `DT_NEEDED` `libgcc_s.so.1` before
 `libc.so.6` and its version need, compared with lld's links, and runs them;
 and `test-checker-driver` links a program that calls `_Unwind_Backtrace` by
-both paths into the same bytes, which name `libgcc_s.so.1` and run, and
-refuses a call of `__splitstack_getcontext` at the writer, naming
-`generic-morestack.o`'s fixup.
+both paths into the same bytes, which name `libgcc_s.so.1` and run, and one
+that calls `__splitstack_getcontext` too (#515).
+
+#### General- and local-dynamic TLS in a dynamic PIE
+
+Split-stack code joins `libgcc.a`'s `generic-morestack.o` (above), which
+reaches its thread-locals (`__morestack_initial_sp` and others) by
+general- and local-dynamic accesses, `TLSGD` and `TLSLD` fixups whose
+sequences call the loader's `__tls_get_addr`. A static executable relaxes
+them to local-exec and a shared library gives them GOT pairs (above); a
+dynamic PIE refused them until #515 (`EXECUTABLE_ERROR_FIXUP`), so the
+direct path couldn't link a split-stack PIE. It relaxes them now, as GNU ld
+and lld do in an executable (lld's `handleTlsRelocation` with its
+`execOptimize`, which skips the call's relocation):
+
+- **To local-exec** for the image's own thread-locals: the general-dynamic
+  sequence becomes `mov %fs:0, %rax; lea x@tpoff(%rax), %rax`, the
+  local-dynamic one `mov %fs:0, %rax` after three or four `0x66` prefixes,
+  and its `DTPOFF32` fields offsets from the thread pointer: the static
+  executable's relaxation (`executable_relax_tls`), unchanged.
+- **To initial-exec** for an imported thread-local (a symbol of the
+  executable's dynamic bitset, `ExecutablePatch.imports`), whose offset from
+  the thread pointer only the loader knows: `mov %fs:0, %rax; add
+  x@gottpoff(%rip), %rax` (`64 48 8b 04 25 00 00 00 00 48 03 05`), its field
+  the import's GOT slot, which a `TPOFF64` relocation against the symbol
+  fills, as an initial-exec access's slot already had. The count marks the
+  slot where it tells a fixup to a dynamic symbol from the rest
+  (`executable_check_direct`, and `executable_is_refused` for the exact
+  report), on both paths, so a `TLSGD` to an import is no longer refused.
+  A local-dynamic access to an import stays refused: its module is the
+  image's, and the representation can't hold one (`link_check` refuses a
+  `TLSLD` or `DTPOFF32` to a shared library's symbol, `LINK_ERROR_BINDING`,
+  as lld refuses it).
+- **`__tls_get_addr`** is `ExecutableDynamic.tls_get_addr`, which
+  `dynamic_inputs` names (`dynamic_global`), 0 when the link doesn't refer to
+  it. Each call of it must be an access's, which consumes it, as in a static
+  executable: the count compares every fixup's target with it, 16 at a time,
+  beside the accesses' count by a compare of 64 kinds, and a link whose counts
+  differ (a call of `__tls_get_addr` of the program's own) is refused
+  (`EXECUTABLE_ERROR_UNSUPPORTED`). Its calls get no stub or slot: the count
+  clears its bits in the lane's rows of both bitsets, as the static runtime's
+  clears its slot's. It stays an import of the loader's in `.dynsym`, and the
+  loader stays needed, as lld leaves them (binding made the reference strong).
+  A shared library keeps its calls (`dynamic_shared_inputs` names none).
+- **Producers that don't name it**: `link-foreign`'s dynamic PIEs, whose
+  conversion doesn't yet give the writer its `__tls_get_addr`
+  (`foreign_link.c`'s `ExecutableDynamic`), relax nothing and refuse their
+  accesses as before (`ExecutableShared.relaxes_tls` is false for them): a
+  general-dynamic access to an import gets no slot and is refused by the
+  relocations' check (`EXECUTABLE_ERROR_RELOCATION`), before the patch
+  (#521's review).
+
+The relaxation rewrites the atoms' bytes, so a link with such accesses can't
+be written twice from the same bytes: the tests write it each time from the
+bytes binding left (`dynamic_test_lanes` and `dynamic_test_variants`), as
+`test-static` writes its links.
+
+`test-dynamic` writes test-bind's split-stack PIE (`bind_test_split_source`
+with `BUSTER_SPLIT_MAIN`, in `dynamic_test_libgcc_s`), whose
+`generic-morestack.o` has general- and local-dynamic accesses, and an
+assembly fixture with each sequence through the PLT and the GOT, to its own
+thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
+status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
+bytes, and without RELR; every access's bytes in the file must be the
+relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
+are compared with lld's links with `--cross-check`, and both run.
+`dynamic_test_tls_refusals` writes what a PIE refuses, by every lane count
+and the exact twins, without an output: the fixture without `__tls_get_addr`
+named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`) and a
+call of `__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`,
+naming it); a local-dynamic access to `errno` binds, and `link_check` refuses
+it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
+call of `__splitstack_getcontext` by both paths into the same bytes, which
+name `libgcc_s.so.1` and run.
+
+**The cost.** A dynamic PIE that doesn't refer to `__tls_get_addr` (every
+program the direct path compiled before split-stack code: Tier 0 reaches
+thread-locals by local-exec and initial-exec) does no new work: its count
+neither compares targets with `__tls_get_addr` nor counts accesses. One that
+does pays what a static executable pays: a compare of 16 targets per 16
+fixups and of 64 kinds per 64, and a scalar relaxation per access in the
+patch's path for the other kinds (the static executable's 0.89 us for 47
+accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
+accesses" below). The 9700X's measurement of `benchmark-executable --only
+dynamic` before and after is still to be made: the session that wrote this
+had no access to the host, and its VM's Xeon lacks AVX-512 VBMI and GFNI,
+which the compiler needs to run.
 
 #### The unwind tables
 
