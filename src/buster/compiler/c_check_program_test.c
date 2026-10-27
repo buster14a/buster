@@ -171,6 +171,10 @@ static const char check_test_program_harness[] =
     // (clang -O0 returns in place), and a misaligned one shows in the first byte.
     "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
     "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
+    // Structs aligned to 32 by value (MEMORY, on a stack aligned to 32 at the call), which clang's callee takes in place:
+    // an outgoing area off its alignment shows in their addresses.
+    "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int k,struct external_aligned x,struct external_aligned y){"
+    "return (int)(x.a+x.b+y.a*3+y.b)+k+(int)((((unsigned long)&x)|((unsigned long)&y))&31)*1000;}\n"
     // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
     // own called through a pointer.
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
@@ -929,6 +933,73 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "switch((i+n)&3){case 0:continue;case 1:{int h[(n&7)+1];h[0]=i;s+=h[0];break;}default:break;}s+=g[0];}"
         "return (int)(s%1000003);}",
         "vla-continue-through-switch", clang);
+    // Objects aligned past 16 bytes, in realigned frames (Tier0Frame.alignment_log2): arrays, structs, a long double and
+    // scalars (values aligned past 8 bytes are objects too), their addresses' low bits, which must be 0, in the result.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(64) int a;long b;}S64;int tested(int n){_Alignas(32) int x=n;_Alignas(4096) char page[100];S64 s;"
+        "_Alignas(16) double d=n*0.5;_Alignas(32) long double e=n+0.25L;page[0]=(char)n;page[99]=(char)(n+1);s.a=n*3;s.b=n*5;"
+        "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
+        "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
+        "objects-aligned-past-16", clang);
+    // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
+    // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
+    // arguments whose outgoing area the allocations keep aligned.
+    check_test_program_source(test,
+        "long sum8(long a,long b,long c,long d,long e,long f,long g,long h){return a+b+c+d+e+f+g+h;}"
+        "typedef struct{_Alignas(32) char c;}T;int tested(int n){_Alignas(128) long fixed[4]={n,n+1,n+2,n+3};long total=0;"
+        "for(int round=0;round<3;round++){int count=(n&7)+round+1;_Alignas(64) int v[count];T w[count+1];"
+        "for(int i=0;i<count;i++)v[i]=i*n;for(int i=0;i<=count;i++)w[i].c=(char)i;long sum=0;"
+        "for(int i=0;i<count;i++)sum+=v[i];for(int i=0;i<=count;i++)sum+=w[i].c;"
+        "unsigned long mask=((unsigned long)v&63)|((unsigned long)w&31)|((unsigned long)fixed&127);"
+        "total+=sum8(sum,fixed[0],fixed[1],fixed[2],fixed[3],round,(long)sizeof(w),(long)mask*1000);}return (int)(total%1000003);}",
+        "vlas-aligned-past-16", clang);
+    // A variable-length array aligned to 64 allocated below a guard array, while calls with two stack arguments put the
+    // outgoing area 16 bytes past the realigned frame's alignment: its storage, rounded up from the allocation's
+    // address, must leave the guard's bytes as they were (the allocation's room, its alignment less 16 bytes more).
+    check_test_program_source(test,
+        "long sum8(long a,long b,long c,long d,long e,long f,long g,long h){return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){long total=0;for(int k=1;k<=4;k++){char guard[16*k];for(int i=0;i<16*k;i++)guard[i]=(char)(i+n);"
+        "_Alignas(64) char v[64*k];for(int i=0;i<64*k;i++)v[i]=(char)0x5a;long bad=0;"
+        "for(int i=0;i<16*k;i++)bad+=guard[i]!=(char)(i+n);"
+        "total+=sum8(bad*100000,v[0],v[64*k-1],k,n,0,0,(long)((unsigned long)v&63)*1000);}return (int)(total%1000003);}",
+        "vlas-aligned-past-16-room", clang);
+    // Structs aligned to 32 and 64 passed by value (on a stack aligned to them at the call, which realigns the caller's
+    // frame) and returned (through a hidden pointer), the parameters' addresses aligned.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(32) long a;int b;}A32;typedef struct{_Alignas(64) char c;double d;}A64;"
+        "A32 make(int n){A32 r={n*2,n+1};return r;}"
+        "long take(A32 x,int k,A64 y,A32 z){return x.a+x.b+k+y.c+(long)y.d+z.a*3+z.b+"
+        "(long)(((unsigned long)&x&31)|((unsigned long)&y&63)|((unsigned long)&z&31))*1000;}"
+        "A64 pass(A64 y,int k){y.c+=(char)k;y.d*=2;return y;}"
+        "int tested(int n){A32 p=make(n);A64 q={(char)n,n*0.25};A32 r=make(n+5);A64 t=pass(q,n);return (int)take(p,n,t,r)+(int)t.d;}",
+        "aggregates-aligned-past-16-by-value", clang);
+    // A variadic definition whose named argument is aligned to 32 (on its caller's stack, aligned to 32 at the call): its
+    // incoming area so aligned, and the unnamed arguments after it, each read at its own alignment.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(32) long a;int b;}A32;typedef struct{_Alignas(64) char c;long d;}A64;"
+        "long sum(int count,A32 first,...){__builtin_va_list ap;__builtin_va_start(ap,first);long s=first.a+first.b+(long)((unsigned long)&first&31)*1000;"
+        "for(int i=0;i<count;i++){A64 x=__builtin_va_arg(ap,A64);s+=x.c+x.d*(i+1);}long last=__builtin_va_arg(ap,long);__builtin_va_end(ap);return s+last;}"
+        "int tested(int n){A32 f={n,n+1};A64 x={(char)n,n*3L};A64 y={(char)(n+1),n*5L};return (int)(sum(2,f,x,y,(long)n*7)%1000003);}",
+        "variadic-named-argument-aligned-past-16", clang);
+    // Calls whose outgoing areas are aligned to 32 (of clang's callee in the harness, which takes its arguments in place),
+    // from functions with no object aligned past 16, whose frames the calls alone realign: two of frames 16 bytes apart,
+    // so that a frame left unrealigned would put one of their areas off 32. (After a variable-length array, clang's code
+    // rounds the allocation to 16 alone and its call's area may be off 32, where Tier 0's keeps the frame's alignment: a
+    // test of its own, tier0_deep_test.c's base, checks that.)
+    check_test_program_source(test,
+        "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int,struct external_aligned,struct external_aligned);"
+        "struct external_aligned gx,gy;int inner(int n){return external_aligned_by_value(n,gx,gy);}"
+        "int padded(int n){volatile long pad[2]={n,n};return external_aligned_by_value(n+(int)(pad[1]-pad[0]),gx,gy);}"
+        "int tested(int n){gx.a=n;gx.b=n+1;gy.a=n*2;gy.b=n-1;return inner(n)+padded(n+1)*3;}",
+        "calls-aligned-past-16", clang);
+    // Parameters of types aligned past 8 bytes: objects of their alignment, from a register's part or an 8-byte stack slot
+    // (an aligned typedef passes as its base, so a slot is aligned to 8 alone), called at two stack depths 16 bytes apart.
+    check_test_program_source(test,
+        "typedef int aligned_int __attribute__((aligned(32)));typedef double aligned_double __attribute__((aligned(16)));"
+        "long check(aligned_int a,aligned_double b,int c,aligned_int d,long e,long f,long g,aligned_int h){a+=1;h*=2;"
+        "return a+(long)b+c+d+e+f+g+h+(long)(((unsigned long)&a&31)|((unsigned long)&b&15)|((unsigned long)&d&31)|((unsigned long)&h&31))*1000;}"
+        "int tested(int n){int r=(int)check(n,n*2.5,3,n+1,5,6,7,n*9);{char pad[16+(n&1)*16];pad[0]=0;r+=(int)check(n+pad[0],1.5,n,2,3,4,5,n);}return r;}",
+        "parameters-aligned-past-8", clang);
     check_test_program_source(test,
         "char a[24]=\"abcdefghijklmnop\";char b[24];int tested(int n){unsigned k=(unsigned)n%12;"
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
@@ -1516,7 +1587,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, true, 0, 1);
+
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);
     check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",
