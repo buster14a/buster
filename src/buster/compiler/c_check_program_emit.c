@@ -1175,7 +1175,9 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     {
         const CheckProgramHelper* helper = helpers->items + h;
         char spelling[64];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
+        // An asm statement's helper is named after its statement (c_check_program_asm.c), a builtin's after its builtin.
+        const int length = helper->assembly != 0 ? snprintf(spelling, sizeof(spelling), ".Lbuster_asm_%u", helper->assembly - 1) :
+                                                   snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                             BUSTER_LINK_SOURCE_NONE) == helper->symbol;
