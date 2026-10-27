@@ -278,6 +278,28 @@ fields, and `llvm-dwarfdump --verify` must pass it. Linked by `cc` through
 GNU ld and through lld, and by `link-foreign` from GCC's driver's line, it
 must make programs that run and read alike in `llvm-dwarfdump` and gdb.
 
+## Prepared C debug emission (#606)
+
+The [October 27 qualification record](https://github.com/buster14a/buster-performance/tree/ba3d5f0de24d1fd36032d5c0903c750f9ba746b4/docs/measurements/debug-plan-606-2026-10-27)
+compares compiler code `7a110797` with main `92c025e7` on the approved 9700X.
+The ordinary C path now prepares once and emits once, with a 160-byte stack
+plan and no additional heap storage. Its validation and sizing each traverse
+the retained rows once rather than twice; writing still traverses them once.
+An instrumented one-executable comparison counts every traversal and separates
+validation, sizing and writing from source-line mapping and object output.
+The complete debug-building boundary falls from 6.445 to 6.315 ms for SQLite,
+2.577 to 2.539 ms for long functions, and 4.828 to 4.587 ms for many small ones.
+
+All 144 measured fresh compiles and 24 warm-ups succeed; their complete object
+pairs are byte-identical, with and without `-g`, including DWARF relocations.
+Peak RSS is essentially unchanged. Complete `-g -c` time is 157.284 → 157.972 ms
+for SQLite, 98.417 → 95.934 ms for long functions, and 149.927 → 148.518 ms for
+small functions. The corresponding no-debug controls move similarly: this
+single-placement comparison does **not** establish a general complete-compile
+speedup. The record retains paired ranges, all controls and diagnostic limits.
+The target's debug/debugger, C integration, encoder and source call-graph checks
+pass; focused ASan/UBSan, guarded-capacity and deliberate-fault checks pass too.
+
 ## Row emission and measurement
 
 The vector path forms four address and line deltas together. Leading-zero
