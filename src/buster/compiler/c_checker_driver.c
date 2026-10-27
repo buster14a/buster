@@ -1214,6 +1214,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
                             .scalar = scalar,
+                            .target_features = options.target.features,
                         };
                         if (result == 0 && !check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch))
                         {

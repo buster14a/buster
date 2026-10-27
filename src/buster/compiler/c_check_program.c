@@ -99,6 +99,10 @@ struct CheckProgramOptions
     // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
     // same model's. Tier 0 lowers both arms, which -c's program keeps.
     bool folded_ifs;
+    // The generated code's instruction set past x86-64's (x86_target.c's X86Target.features, the preprocessor's from
+    // -march and the -m flags): which vector types the lowering takes, and how wide a vector register the convention
+    // passes them in. Zero is x86-64 baseline.
+    uint64_t target_features;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -148,9 +152,10 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramStatus status;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands and folded_ifs.
+    // CheckProgramOptions.unselected_operands, folded_ifs and target_features.
     bool unselected_operands;
     bool folded_ifs;
+    uint64_t target_features;
 };
 
 typedef enum CheckControlTaskKind
@@ -1471,7 +1476,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+                               .folded_ifs = options.folded_ifs, .target_features = options.target_features, .token = BUSTER_CHECK_NONE,
+                               .diagnostic_position = BUSTER_CHECK_NONE };
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;

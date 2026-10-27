@@ -7,6 +7,7 @@
 // Source constant proofs remain intact; FP_ENVIRONMENT requires runtime evaluation. Math leaves transport raw
 // IEEE bits, and errno-enabled leaves receive the target libc accessor's real int pointer. Runtime dependencies
 // append symbols after the source/helper map and do not invent source declarations or change binding identities.
+#include "buster/compiler/x86_target.c"
 
 // The runtime's functions that the lowering calls of its own accord: the C library's errno accessor, and libgcc's, which
 // clang -O0 calls where Tier 0 has no entry: the 128-bit integers' division and remainder, and their conversions to and
@@ -245,9 +246,18 @@ struct CheckLowerWriter
     uint64_t* x87_constants;
     uint32_t x87_constant_count;
     uint32_t x87_constant_capacity;
-    bool x87;
-    // Whether the function has 128-bit integer values (Tier0Function.int128's): an entry of class I128 or U128.
-    bool int128;
+    // The classes of the function's entries, a bit each, with F80's for a long double result: whether it has long double
+    // values (Tier0Function.x87, which then takes the constants' table), 128-bit integers' (Tier0Function.int128) and
+    // vectors (Tier0Function.vectors).
+    uint32_t class_bits;
+    // The function's machine operations (Tier0Function.operations), each X86 entry's row by its index: the vector
+    // operators' (check_vector_lower_row), each distinct row once, and the room for them.
+    Tier0Operation* operations;
+    uint32_t operation_count;
+    uint32_t operation_capacity;
+    // The classes check_lower_emit takes, those below this: BUSTER_TYPED_CLASSES, or BUSTER_TYPED_CLASS_VECTOR where the
+    // target has no AVX-512F and AVX-512VL, whose EVEX forms Tier 0's vector entries are (check_lower_vector_target).
+    uint32_t class_limit;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -288,6 +298,45 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
     check_lower_fail(writer, CHECK_PROGRAM_UNSUPPORTED);
 }
 
+// A vector type's bytes, where Tier 0 takes its values (BUSTER_TYPED_CLASS_VECTOR): GNU C's and Clang's extended vectors
+// of 16, 32 or 64 bytes, as the intrinsics' __m128 to __m512i, of elements other than bool (whose extended vectors pack
+// a bit per element); 0 for any other type.
+static uint32_t check_lower_vector_bytes(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_unqualified(type_strip_aligned(types, type));
+    const uint8_t kind = type_kind(types, base);
+    const uint64_t size = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? type_size(types, base) : 0;
+    const bool boolean = size != 0 && type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_BOOL;
+    return (size == 16 || size == 32 || size == 64) && !boolean ? (uint32_t)size : 0;
+}
+
+// The value of a LOAD, STORE or SET of a class's value of a type: a vector's bytes, which Tier 0 takes the width of a
+// VECTOR entry that touches memory from (check_lower_vector_bytes); 0 for every other class.
+static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, TypeId type)
+{
+    return class == BUSTER_TYPED_CLASS_VECTOR ? check_lower_vector_bytes(types, type) : 0;
+}
+
+// Whether the target takes Tier 0's vector values: their entries are EVEX forms through zmm16 (AVX-512F), of 16 and 32
+// bytes too (AVX-512VL).
+static bool check_lower_vector_target(uint64_t features)
+{
+    const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    return (features & required) == required;
+}
+
+// The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
+// takes it from the target's features (X86AVXABILevel): AVX-512F's 64 bytes, AVX's 32, or else 16.
+static uint32_t check_lower_vector_register_bytes(uint64_t features)
+{
+    return (features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 64 : (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+}
+
+// The most distinct machine operations a function may have (CheckLowerWriter.operations).
+#define BUSTER_CHECK_LOWER_OPERATIONS 4096u
+
+#include "c_check_program_vectors.c"
+
 static uint8_t check_lower_class(const TypeTable* types, TypeId type)
 {
     const TypeId base = type_unqualified(type_strip_aligned(types, type));
@@ -326,16 +375,23 @@ static uint8_t check_lower_class(const TypeTable* types, TypeId type)
             result += 1;
         }
     }
+    else if (check_lower_vector_bytes(types, base) != 0)
+    {
+        // Tier 0 keeps a vector's values in memory too (check_lower_memory_class), in their depths' 64-byte slots; each
+        // entry that makes or moves one has its bytes (check_lower_vector_bytes), as the class has no width.
+        result = BUSTER_TYPED_CLASS_VECTOR;
+    }
     return result;
 }
 
-// Whether a class is a memory class, whose values Tier 0 keeps in their 16-byte slots: long double's F80 and the 128-bit
-// integers' I128 and U128. A local or a parameter of one is a frame object, which LOCAL, STORE_LOCAL and SET_LOCAL of the
-// class read and write (tier0_memory_object), and so is a temporary of one; a global of one is read and written through
-// its address, as Tier 0 has no GLOBAL, STORE_GLOBAL or SET_GLOBAL of them.
+// Whether a class is a memory class, whose values Tier 0 keeps in their slots: long double's F80 and the 128-bit
+// integers' I128 and U128 in 16-byte ones, and vectors (VECTOR) in 64-byte ones. A local or a parameter of one is a frame
+// object, which LOCAL, STORE_LOCAL and SET_LOCAL of the class read and write (tier0_memory_object), and so is a temporary
+// of one; a global of one is read and written through its address, as Tier 0 has no GLOBAL, STORE_GLOBAL or SET_GLOBAL of
+// them.
 static bool check_lower_memory_class(uint8_t class)
 {
-    return class == BUSTER_TYPED_CLASS_F80 || class == BUSTER_TYPED_CLASS_I128 || class == BUSTER_TYPED_CLASS_U128;
+    return class == BUSTER_TYPED_CLASS_F80 || class == BUSTER_TYPED_CLASS_I128 || class == BUSTER_TYPED_CLASS_U128 || class == BUSTER_TYPED_CLASS_VECTOR;
 }
 
 // Whether a class is a 128-bit integer's, which the convention passes and returns as two INTEGER eightbytes: Tier 0
@@ -421,7 +477,8 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
     }
     else if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        feature = "vector types";
+        feature = type_unqualified(type_strip_aligned(types, type_element(types, base))) == BUSTER_TYPE_BOOL ? "vectors of bool" :
+                  "vector types of other than 16, 32 or 64 bytes";
     }
     else if (kind == BUSTER_TYPE_KIND_ATOMIC)
     {
@@ -522,6 +579,11 @@ static void check_lower_track(CheckLowerWriter* writer, uint8_t kind, uint8_t cl
     {
         pop = 1;
         push = kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL;
+    }
+    else if (kind == BUSTER_TYPED_X86)
+    {
+        pop = value < writer->operation_count ? writer->operations[value].operand_count : 0;
+        push = class != BUSTER_TYPED_CLASS_VOID;
     }
     else if (kind == BUSTER_TYPED_CALL)
     {
@@ -639,9 +701,9 @@ static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
 
 static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
-    if (class >= BUSTER_TYPED_CLASSES)
+    if (class >= writer->class_limit)
     {
-        check_lower_unsupported(writer, "values of this type");
+        check_lower_unsupported(writer, class == BUSTER_TYPED_CLASS_VECTOR ? "vector types without AVX-512F and AVX-512VL" : "values of this type");
     }
     else if (writer->count >= writer->capacity || writer->count >= BUSTER_TIER0_MAX_ENTRIES)
     {
@@ -670,8 +732,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
                 writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
                 writer->classes[writer->count] = top;
                 writer->values[writer->count++] = 0;
-                writer->x87 |= top == BUSTER_TYPED_CLASS_F80;
-                writer->int128 |= check_lower_wide_class(top);
+                writer->class_bits |= UINT32_C(1) << top;
             }
         }
         if (writer->output->status == CHECK_PROGRAM_OK)
@@ -680,8 +741,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
             {
                 check_lower_track(writer, kind, class, value);
             }
-            writer->x87 |= class == BUSTER_TYPED_CLASS_F80;
-            writer->int128 |= check_lower_wide_class(class);
+            writer->class_bits |= UINT32_C(1) << class;
             writer->kinds[writer->count] = kind;
             writer->classes[writer->count] = class;
             writer->values[writer->count] = value;
@@ -805,7 +865,12 @@ static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint
 static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
 {
     uint32_t local = writer->local_count;
-    if (check_lower_memory_class(class))
+    if (class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        // A vector's object has its bytes (check_lower_temporary_of), which a class doesn't give.
+        check_lower_unsupported(writer, "vector values here");
+    }
+    else if (check_lower_memory_class(class))
     {
         local = check_lower_object(writer, 16, 4);
     }
@@ -831,6 +896,66 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
         writer->value_classes[local] = class;
     }
     return local;
+}
+
+// A temporary of a type's values: check_lower_temporary's of its value class, but a vector's, a frame object of its bytes,
+// which LOCAL, STORE_LOCAL and SET_LOCAL of VECTOR take its width from (check_lower_vector_bytes).
+static uint32_t check_lower_temporary_of(CheckLowerWriter* writer, TypeId type)
+{
+    const TypeTable* types = writer->program->types;
+    const uint32_t bytes = check_lower_vector_bytes(types, type);
+    uint32_t local = BUSTER_CHECK_NONE;
+    if (bytes != 0)
+    {
+        local = check_lower_object(writer, bytes, 4);
+        if (writer->output->status == CHECK_PROGRAM_OK)
+        {
+            writer->value_classes[local] = BUSTER_TYPED_CLASS_VECTOR;
+        }
+    }
+    else
+    {
+        local = check_lower_temporary(writer, check_lower_value_class(types, type));
+    }
+    return local;
+}
+
+// A row's index among the function's machine operations (CheckLowerWriter.operations): an equal row's, or a new one's.
+// The rows are few (an operator's at a type), and check_vector_lower_row clears each one's padding.
+static uint32_t check_lower_operation_index(CheckLowerWriter* writer, const Tier0Operation* row)
+{
+    uint32_t index = 0;
+    while (index < writer->operation_count && memcmp(&writer->operations[index], row, sizeof(*row)) != 0)
+    {
+        index += 1;
+    }
+    if (index == writer->operation_count && index < writer->operation_capacity)
+    {
+        writer->operations[index] = *row;
+        writer->operation_count += 1;
+    }
+    else if (index == writer->operation_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    return index;
+}
+
+// An X86 entry of an operator's row at a vector type (check_vector_lower_row), or its refusal: its operands are the
+// stack's when it runs.
+static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
+{
+    Tier0Operation row;
+    const char* reason = check_vector_lower_row(writer->program->types, writer->program->target_features, op, vector, scalar_class, &row);
+    if (reason != NULL)
+    {
+        check_lower_unsupported(writer, reason);
+    }
+    else
+    {
+        const uint32_t index = check_lower_operation_index(writer, &row);
+        check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
+    }
 }
 
 // A frame object (an array, a struct or a union, or a value that must live in memory): a local of class VOID, reached
@@ -1389,6 +1514,35 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
 
 static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
 
+// A conversion from or to a vector (#136), of the value on top of the stack: a cast between vectors of the same bytes is
+// nothing, as their bits are the same; to void, a DISCARD; a scalar's splat converts it to the element's type first, then
+// sets every element to it (a row's, check_vector_lower_row). A cast between a vector and an integer of its bytes isn't
+// lowered.
+static __attribute__((noinline)) void check_lower_vector_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    const TypeTable* types = writer->program->types;
+    const uint32_t source = check_lower_vector_bytes(types, from);
+    const uint32_t target = check_lower_vector_bytes(types, to);
+    if (source != 0 && target == source)
+    {
+    }
+    else if (source != 0 && type_unqualified(type_strip_aligned(types, to)) == BUSTER_TYPE_VOID)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_VECTOR, 0);
+    }
+    else if (source == 0 && target != 0 && check_lower_class(types, from) < BUSTER_TYPED_CLASS_F80 &&
+             (check_action_is_integer(types, from) || check_lower_class(types, from) == BUSTER_TYPED_CLASS_F32 || check_lower_class(types, from) == BUSTER_TYPED_CLASS_F64))
+    {
+        const TypeId element = type_unqualified(type_strip_aligned(types, type_element(types, type_unqualified(type_strip_aligned(types, to)))));
+        check_lower_vector_row(writer, BUSTER_CHECK_VECTOR_SPLAT, to, check_lower_class(types, element));
+        check_lower_convert(writer, from, element);
+    }
+    else
+    {
+        check_lower_unsupported(writer, "casts between vectors and integers or vectors of other sizes");
+    }
+}
+
 // A conversion of the value on top of the stack from `from` to `to`, neither of them complex (but to void): a complex
 // one's are check_lower_complex_conversion's, which converts its parts here. Always inlined into both copies of the
 // tasks' loop (check_lower_drain_body), through check_lower_conversion.
@@ -1399,9 +1553,17 @@ static inline __attribute__((always_inline)) void check_lower_scalar_conversion(
     const uint8_t target = check_lower_value_class(types, to);
     // An aggregate converts only to its own (compatible) type or to void: GNU's cast to a union isn't lowered.
     const bool mixed = check_lower_aggregate(types, from) != check_lower_aggregate(types, to) && target != BUSTER_TYPED_CLASS_VOID;
-    if (source >= BUSTER_TYPED_CLASSES || target >= BUSTER_TYPED_CLASSES || mixed)
+    if (source >= BUSTER_TYPED_CLASS_VECTOR || target >= BUSTER_TYPED_CLASS_VECTOR || mixed)
     {
-        check_lower_unsupported(writer, mixed ? "casts to union types" : check_lower_type_feature(types, source >= BUSTER_TYPED_CLASSES ? from : to));
+        // VECTOR is the last class: a vector's conversions are out of line (check_lower_vector_conversion).
+        if (!mixed && source < BUSTER_TYPED_CLASSES && target < BUSTER_TYPED_CLASSES)
+        {
+            check_lower_vector_conversion(writer, from, to);
+        }
+        else
+        {
+            check_lower_unsupported(writer, mixed ? "casts to union types" : check_lower_type_feature(types, source >= BUSTER_TYPED_CLASSES ? from : to));
+        }
     }
     else if (target == BUSTER_TYPED_CLASS_VOID)
     {
@@ -1866,11 +2028,11 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         const CheckConversion* conversion = stream->argument_conversions + first + a;
         passed = (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 ? "transparent unions" : check_lower_passed(writer, conversion->type);
     }
-    // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so does a
-    // 128-bit integer's, which LOCAL then reads.
+    // A struct or union result lands in a frame object of the call's own, whose address is the call's value, and so do a
+    // 128-bit integer's and a vector's, which LOCAL then reads.
     const TypeId result = stream->values[node].type;
     const bool aggregate_result = check_lower_aggregate(types, result);
-    const bool wide_result = check_lower_wide(types, result);
+    const bool wide_result = check_lower_wide(types, result) || check_lower_vector_bytes(types, result) != 0;
     const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(types, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
     // A callee that is a function's own symbol is called directly; any other (a pointer's value, a function designator
     // through one) is evaluated before the arguments and called through: Tier 0's indirect call, callee 0.
@@ -1896,7 +2058,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         const uint32_t call = writer->call_count++;
         const uint8_t result_class = check_lower_class(types, result);
         const uint32_t object = aggregate_result ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
-                                wide_result      ? check_lower_temporary(writer, result_class) :
+                                wide_result      ? check_lower_temporary_of(writer, result) :
                                                    BUSTER_CHECK_NONE;
         writer->call_targets[call] = direct ? writer->program->object_symbols[value.object] : 0;
         writer->call_first[call] = writer->argument_count;
@@ -1911,12 +2073,14 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         abi->variadic[abi->count++] = variadic;
         for (uint32_t a = 0; a < count; a += 1)
         {
-            // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made.
+            // A 128-bit integer argument is a 16-byte object's address, the value set into it after it is made, and a
+            // vector's an object of its bytes.
             const TypeId argument = stream->argument_conversions[first + a].type;
             const bool aggregate = check_lower_aggregate(types, argument);
-            const bool wide = check_lower_wide(types, argument);
+            const uint32_t vector = check_lower_vector_bytes(types, argument);
+            const bool wide = check_lower_wide(types, argument) || vector != 0;
             abi->arguments[abi->argument_count++] = argument;
-            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, argument) : wide ? 16 : 0;
+            writer->argument_sizes[writer->argument_count] = aggregate ? (uint32_t)type_size(types, argument) : vector != 0 ? vector : wide ? 16 : 0;
             writer->aggregates |= aggregate || wide;
             writer->argument_classes[writer->argument_count++] = wide ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(types, argument);
         }
@@ -1932,10 +2096,10 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const TypeId argument = stream->argument_conversions[first + a].type;
-            if (check_lower_wide(types, argument))
+            if (check_lower_wide(types, argument) || check_lower_vector_bytes(types, argument) != 0)
             {
                 const uint8_t class = check_lower_class(types, argument);
-                const uint32_t local = check_lower_temporary(writer, class);
+                const uint32_t local = check_lower_temporary_of(writer, argument);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
             }
@@ -2250,6 +2414,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const TypeId right_type = stream->conversions[node].operands[1].type;
     const uint8_t stored_class = check_lower_class(program->types, stored);
     const uint8_t calculated_class = check_lower_class(program->types, calculated);
+    if (stored_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        check_lower_unsupported(writer, "compound assignments of vectors");
+    }
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
     const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN;
@@ -2682,8 +2850,7 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
-            writer->x87 |= writer->classes[i] == BUSTER_TYPED_CLASS_F80;
-            writer->int128 |= check_lower_wide_class(writer->classes[i]);
+            writer->class_bits |= UINT32_C(1) << writer->classes[i];
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -3086,7 +3253,9 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
         const uint32_t end = writer->local_count;
         const TypeId type = program->stream->values[task.node].type;
         const uint8_t class = task.address ? BUSTER_TYPED_CLASS_U64 : check_lower_value_class(program->types, type);
-        const uint32_t result = class != BUSTER_TYPED_CLASS_VOID ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+        const uint32_t result = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_CHECK_NONE :
+                                task.address                     ? check_lower_temporary(writer, class) :
+                                                                   check_lower_temporary_of(writer, type);
         if (result != BUSTER_CHECK_NONE)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, result);
@@ -3105,6 +3274,46 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONTROL, .node = region->first + i });
         }
+    }
+}
+
+// A vector operator (#136): its operands, converted to the operator's vector type (a scalar's splat, which
+// check_lower_vector_conversion makes), and an X86 entry of its row. A compare's row is its operands' type's, whose
+// result is its mask's -1 or 0 elements; a shift's count, when it is a scalar, is splat at the shifted vector's type.
+static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const CheckOp op = graph->ops[node];
+    const uint32_t a = graph->operand0[node];
+    const uint32_t b = graph->operand1[node];
+    if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT)
+    {
+        const TypeId vector = stream->values[a].type;
+        const CheckVectorElement element = check_vector_lower_element(types, vector);
+        if (op == CHECK_OP_NEGATIVE && element.floating)
+        {
+            // The sign bit, the row's integer operand, after the vector.
+            check_lower_vector_row(writer, op, vector, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, element.bytes == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64,
+                                     element.bytes == 4 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000));
+        }
+        else
+        {
+            check_lower_vector_row(writer, op, vector, 0);
+        }
+        check_lower_operand(writer, node, 0, false, 0);
+    }
+    else
+    {
+        const TypeId vector = stream->conversions[node].operands[0].type;
+        const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
+        const bool scalar_count = shift && check_lower_vector_bytes(types, stream->values[b].type) == 0;
+        check_lower_vector_row(writer, op, vector, 0);
+        check_lower_operand(writer, node, 1, false, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        check_lower_operand(writer, node, 0, false, vector);
     }
 }
 
@@ -3174,7 +3383,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             // A global of a memory class, through its address (a local's object takes LOCAL below).
             check_lower_address(writer, object, value.offset);
-            check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value.type));
         }
         else if (value.category == CHECK_LVALUE && object != 0 && object < program->object_count)
         {
@@ -3341,7 +3550,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         if (!task.address && !address_value)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value.type));
         }
         check_lower_operand(writer, node, 0, false, type_a);
     }
@@ -3373,7 +3582,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             }
             else if (!task.address && !address_value)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value.type));
             }
             if (offset / 8 != 0)
             {
@@ -3382,6 +3591,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             }
             check_lower_operand(writer, node, 0, op == CHECK_OP_MEMBER, type_a);
         }
+    }
+    else if (class == BUSTER_TYPED_CLASS_VECTOR && op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_BIT_XOR && op != CHECK_OP_NOT)
+    {
+        check_lower_vector_operation(writer, node);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {
@@ -3540,13 +3753,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (op == CHECK_OP_ASSIGN)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value.type));
             check_lower_operand(writer, node, 1, false, value.type);
             check_lower_operand(writer, node, 0, true, 0);
         }
         else if (local != BUSTER_CHECK_NONE || symbol != 0)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value.type));
             check_lower_operand(writer, node, 0, false, value.type);
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_ADDRESS, .node = object });
         }
@@ -3562,6 +3775,29 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)
     {
         check_lower_update(writer, node);
+    }
+    else if (op == CHECK_OP_SUBSCRIPT && (value.flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0)
+    {
+        // A vector's element, at its index's place in the vector's bytes: the vector's own place when it is an lvalue, or
+        // a temporary's that the value is stored into.
+        const TypeId vector = stream->values[a].type;
+        if (!task.address && !address_value)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, type_size(types, value.type));
+        check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);
+        if (stream->values[a].category == CHECK_LVALUE)
+        {
+            check_lower_operand(writer, node, 0, true, 0);
+        }
+        else
+        {
+            const uint32_t local = check_lower_temporary_of(writer, vector);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+            check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+            check_lower_operand(writer, node, 0, false, vector);
+        }
     }
     else if (op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
     {
@@ -3592,7 +3828,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             {
                 if (op == CHECK_OP_SUBSCRIPT && !task.address && !address_value)
                 {
-                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, value.type));
                 }
                 check_lower_scale(writer, pointer_type, size);
                 if (op == CHECK_OP_SUBTRACT)
@@ -3838,7 +4074,7 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
         }
         else
         {
-            check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_SET, class, check_lower_access_value(types, class, write->type));
         }
         check_lower_part_value(writer, write);
         if (write->bit_offset != 0)
@@ -4123,7 +4359,8 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     {
         if (control.kind == CHECK_CONTROL_RETURN && writer->result_object != BUSTER_CHECK_NONE)
         {
-            // A 128-bit integer's: set into the result object, whose address Tier 0 returns (Tier0Function.result_size).
+            // A 128-bit integer's or a vector's: set into the result object, whose address Tier 0 returns
+            // (Tier0Function.result_size).
             check_lower_instruction(writer, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, writer->result_object);
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(program->types, writer->result), writer->result_object);
@@ -4348,7 +4585,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     BUSTER_CHECK_LOWER_ABI(variadic, uint8_t, abi_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
     CheckLowerWriter writer = { .program = program, .output = lowered, .abi = &abi, .capacity = capacity, .local_capacity = local_capacity, .scalar = scalar,
-                                .sources = sources, .x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0 };
+                                .sources = sources, .x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0,
+                                .class_limit = check_lower_vector_target(program->target_features) ? BUSTER_TYPED_CLASSES : BUSTER_TYPED_CLASS_VECTOR };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer.field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer.field != 0
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
@@ -4384,6 +4622,9 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * x87_capacity64);
+    // The rows' room: reserved, and touched only by functions with vectors.
+    writer.operation_capacity = BUSTER_CHECK_LOWER_OPERATIONS;
+    BUSTER_CHECK_LOWER_COLUMN(operations, Tier0Operation, BUSTER_CHECK_LOWER_OPERATIONS);
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
     // The labels' symbols: of the selected program's objects, those whose token is a label's.
@@ -4397,7 +4638,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes every signature together after.
     AbiTable table;
-    valid = valid && abi_initialize(&table, scratch, types, 16);
+    valid = valid && abi_initialize(&table, scratch, types, check_lower_vector_register_bytes(program->target_features));
     if (valid)
     {
         if (scalar)
@@ -4491,8 +4732,8 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         writer.save_anchor = BUSTER_CHECK_NONE;
         writer.overflow_anchor = BUSTER_CHECK_NONE;
         writer.varargs_count = 0;
-        writer.x87 = check_lower_x87(types, result);
-        writer.int128 = false;
+        writer.class_bits = check_lower_x87(types, result) ? UINT32_C(1) << BUSTER_TYPED_CLASS_F80 : 0;
+        writer.operation_count = 0;
         writer.result_object = BUSTER_CHECK_NONE;
         writer.x87_constant_count = 1;
         writer.x87_constants[0] = 0;
@@ -4524,11 +4765,11 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
         {
             function->result_size = (uint32_t)type_size(types, result);
         }
-        else if (check_lower_wide(types, result))
+        else if (check_lower_wide(types, result) || check_lower_vector_bytes(types, result) != 0)
         {
-            // A 128-bit integer returns from its object's 16 bytes, in rax and rdx, as a struct of two eightbytes does: the
-            // object comes after the parameters (below).
-            function->result_size = 16;
+            // A 128-bit integer returns from its object's 16 bytes, in rax and rdx, as a struct of two eightbytes does, and a
+            // vector from its object's, in xmm0, ymm0 or zmm0: the object comes after the parameters (below).
+            function->result_size = check_lower_wide(types, result) ? 16 : check_lower_vector_bytes(types, result);
         }
         uint32_t declared = 0;
         for (uint32_t parameter = input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
@@ -4594,9 +4835,9 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
             writer.gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
             writer.fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
         }
-        if (check_lower_wide(types, result))
+        if (check_lower_wide(types, result) || check_lower_vector_bytes(types, result) != 0)
         {
-            writer.result_object = check_lower_temporary(&writer, check_lower_class(types, result));
+            writer.result_object = check_lower_temporary_of(&writer, result);
         }
         for (uint32_t declaration = local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = local_next[declaration])
         {
@@ -4777,13 +5018,16 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
             BUSTER_CHECK_LOWER_COPY(argument_sizes, argument_sizes, uint32_t, writer.argument_count);
             BUSTER_CHECK_LOWER_COPY(call_result_objects, call_result_objects, uint32_t, writer.call_count);
         }
-        if (writer.x87)
+        if ((writer.class_bits & (UINT32_C(1) << BUSTER_TYPED_CLASS_F80)) != 0)
         {
             BUSTER_CHECK_LOWER_COPY(x87_constants, x87_constants, uint64_t, 2 * (uint64_t)writer.x87_constant_count);
             function->x87_constant_count = writer.x87_constant_count;
             function->x87 = true;
         }
-        function->int128 = writer.int128;
+        function->int128 = (writer.class_bits & (UINT32_C(1) << BUSTER_TYPED_CLASS_I128 | UINT32_C(1) << BUSTER_TYPED_CLASS_U128)) != 0;
+        function->vectors = (writer.class_bits & (UINT32_C(1) << BUSTER_TYPED_CLASS_VECTOR)) != 0;
+        BUSTER_CHECK_LOWER_COPY(operations, operations, Tier0Operation, writer.operation_count);
+        function->operation_count = writer.operation_count;
         BUSTER_CHECK_LOWER_COPY(label_entries, label_entries, uint32_t, writer.label_entry_count);
         function->label_count = writer.label_entry_count;
 #undef BUSTER_CHECK_LOWER_COPY
