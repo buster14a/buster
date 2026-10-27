@@ -994,7 +994,8 @@ emission's of `benchmark-check-lanes --lanes 1`'s 11 passes, twice each):
 What is left is the tasks' loop's dispatch on tasks and operators, and the
 first touches the prefetch doesn't hide; `tier0_validate`'s check of every
 lowered function, a scalar walk of the stack with a mispredicted `switch` per
-entry, 16% of the stage; and the preparation's passes over every token (#517).
+entry, 16% of the stage (#569); and the preparation's passes over every token
+(#517).
 
 ## Correctness tests
 
