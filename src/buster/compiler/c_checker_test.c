@@ -3545,6 +3545,51 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             true,
             false
         },
+        // An inferred array's elements of struct type from subscripts, members and indirections, and compound literals in
+        // a block-scope static's initializer, as this compiler's own main.c has them.
+        {
+            "struct-valued elements of an inferred array",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(const S8* x, struct W w, struct W** q)\n{\n    const S8 a[] = { x[1], x[2] };\n    _Static_assert(sizeof a == 2 * sizeof(S8), \"two\");\n    S8 b[] = { x[0], { \"c\", 1 }, x[1] };\n    _Static_assert(sizeof b == 3 * sizeof(S8), \"three\");\n    S8 c[] = { *x, (*x), w.s, w.t[1], q[0]->s, (*q)->t[0] };\n    _Static_assert(sizeof c == 6 * sizeof(S8), \"six\");\n    unsigned long d[] = { x[1].length, w.t[0].length, q[1]->s.length };\n    _Static_assert(sizeof d == 3 * sizeof(unsigned long), \"three scalars\");\n    return (int)(a[1].length + b[2].length + c[5].length + d[2]);\n}\n",
+            false,
+            false
+        },
+        // #495's review: a subscript's pointer as either operand, and chains of steps around 16, the walk's old limit.
+        {
+            "reversed subscripts in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct W { S s; S t[2]; };\nint f(S* p, int i, struct W* w, S** q)\n{\n    S a[] = { 0[p], 1[p] };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"two\");\n    S b[] = { p[0], i[p], 1[w->t], 0[q][1], 1[0[q]], (i[q])[i] };\n    _Static_assert(sizeof b == 6 * sizeof(S), \"six\");\n    int c[] = { 0[p].a, i[p].b, (1[w->t]).a };\n    _Static_assert(sizeof c == 3 * sizeof(int), \"three scalars\");\n    return a[1].b + b[5].a + c[2];\n}\n",
+            false,
+            false
+        },
+        {
+            "chains of 15, 16 and 17 steps in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct C { S s[2]; struct C* next; };\nint f(S*************** p, S**************** q, S***************** r, struct C* x)\n{\n    S a[] = { ***************p, ***************p };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"15\");\n    S b[] = { ****************q, ****************q };\n    _Static_assert(sizeof b == 2 * sizeof(S), \"16\");\n    S c[] = { *****************r, *****************r };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"17\");\n    S d[] = { x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[1],\n              x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[0], x->s[1] };\n    _Static_assert(sizeof d == 3 * sizeof(S), \"16 and 17 members and subscripts\");\n    return a[1].a + b[1].a + c[1].a + d[2].b;\n}\n",
+            false,
+            false
+        },
+        {
+            "compound literals in static initializers",
+            "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
+            false,
+            false
+        },
+        {
+            "a compound literal of a parameter in a static's initializer refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(int n)\n{\n    static const S8 g[] = { (S8){ \"a\", n } };\n    return (int)sizeof g;\n}\n",
+            true,
+            false
+        },
+        {
+            "an automatic compound literal's address in a static's initializer refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(void)\n{\n    static const S8* g = &(S8){ \"a\", 1 };\n    return g != 0;\n}\n",
+            true,
+            false
+        },
+        {
+            "a struct where an inferred array's member goes refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(const S8* x)\n{\n    S8 a[] = { x->pointer, x[1] };\n    return (int)sizeof a;\n}\n",
+            true,
+            false
+        },
         {
             "incompatible loop hints across pragmas refused",
             "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n#pragma clang loop unroll_count(4)\n while (n--) s += 1; return s; }\n",
