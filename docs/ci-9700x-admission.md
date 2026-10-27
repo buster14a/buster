@@ -305,9 +305,13 @@ Only background workflows that actually reached their hosted admission job can
 receive a lease. A run still pending behind its ref's existing concurrency group
 cannot deadlock the active gate by taking its lease. The original per-PR stale
 commit cancellation, per-ref groups, job timeouts, host pinning, benchmark gates
-and host-wide shared lock remain. At cutover, legacy queued PR hardware work is
-cancelled/replaced; legacy running work and unrelated maintenance drain before
-new admission. Other repositories' use of the host still goes through the lock.
+and host-wide shared lock remain. At cutover, clean legacy work and unrelated
+maintenance drain before new admission. A run listed as queued can already have
+a running job, and Actions has no atomic cancel-if-queued operation. Clean legacy
+PR runs therefore are not cancelled just to replace their queue entry; the active
+host source gate refuses old queued PR jobs before checkout or taking the lock.
+Confirmed conflicts, closure and obsolete heads still receive scoped cancellation.
+Other repositories' use of the host still goes through the lock.
 
 ## Durable state and failure recovery
 

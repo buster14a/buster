@@ -398,6 +398,20 @@ static void ci_test_controller(void)
     ci_reconcile(false);
     ci_expect(ci_fixture.dispatches == 0, "API: unreviewed public fork cannot reach the physical host");
 
+    const char* legacy_status[] = {"queued", "queued", "in_progress"};
+    for (size_t i = 0; i < sizeof(legacy_status) / sizeof(legacy_status[0]); ++i)
+    {
+        ci_fixture_init();
+        ci_fixture.legacy = true;
+        ci_fixture.legacy_running = i != 0;
+        ci_copy(ci_fixture.native.status, sizeof(ci_fixture.native.status), legacy_status[i]);
+        ci_reconcile(false);
+        ci_expect(ci_fixture.cancellations == 0 && ci_fixture.dispatches == 0, "API: clean legacy work drains without cancellation or overlap, including queued run metadata with a running job");
+        ci_copy(ci_fixture.native.status, sizeof(ci_fixture.native.status), "completed");
+        ci_reconcile(false);
+        ci_expect(ci_fixture.cancellations == 0 && ci_fixture.dispatches == 1, "API: terminal legacy work permits exactly one current-pair admission");
+    }
+
     ci_fixture_init();
     ci_fixture.current.mergeable = 0;
     ci_fixture.legacy = true;

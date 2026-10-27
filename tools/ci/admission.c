@@ -1877,14 +1877,14 @@ static bool ci_legacy_and_conflicts(CiState* state, CiIdentity* identities, size
             }
             bool obsolete = current == NULL || strcmp(run->head, current->head) != 0;
             bool conflict = current != NULL && current->mergeable == 0;
-            if (!inspect && (obsolete || conflict || run->hardware))
+            if (!inspect && (obsolete || conflict))
             {
                 CiIdentity final = ci_get_pr(run->pr, false);
                 bool same = current != NULL && ci_same_pair(current, &final);
                 bool confirmed = (!final.open || strcmp(run->head, final.head) != 0) || (same && final.mergeable == 0);
-                // At cutover, queued legacy PR jobs are replaced by the admission path. Running legacy jobs drain.
-                bool queued_legacy = same && run->hardware && strcmp(run->status, "queued") == 0;
-                if (confirmed || queued_legacy)
+                // Queue metadata can lag an already-running job, and Actions cannot cancel only if still queued.
+                // Clean legacy work drains; the source gate rejects old queued PR jobs before checkout or the lock.
+                if (confirmed)
                 {
                     CiRun exact = ci_get_run(run->id);
                     if (exact.pr == run->pr && strcmp(exact.event, "pull_request") == 0 && strcmp(exact.head, run->head) == 0)
@@ -1897,7 +1897,7 @@ static bool ci_legacy_and_conflicts(CiState* state, CiIdentity* identities, size
         if (run->hardware && run->id != state->lease.run)
         {
             // Repair/startup: don't dispatch alongside legacy, unrelated maintenance or a bypassed workflow gate.
-            // The runner group's exact-default-workflow restriction prevents untrusted PR YAML bypassing admission.
+            // The exact-default-workflow source gate prevents untrusted PR YAML bypassing admission.
             occupied = true;
         }
     }
