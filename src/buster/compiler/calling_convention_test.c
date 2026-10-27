@@ -3546,7 +3546,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         }
         type = world->gcc && type_size(table, type) == 0 ? BUSTER_TYPE_CHAR : type;
         const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
-        const uint8_t alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0;
+        const uint8_t alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, 5)) : 0;
         // GCC's worlds take the same draws, so that other seeds' worlds stay as they were, but not every alignment.
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
@@ -3567,7 +3567,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     const TypeRecordAttributes attributes = {
         .packed = type_test_below(random, 8) == 0 && !world->gcc,
         .pack_log2 = type_test_below(random, 10) == 0 && !world->gcc ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
-        .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 6)) : 0,
+        .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0,
     };
     const TypeId record = type_tag(table, is_union ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
     TypeId result = 0;
@@ -3817,9 +3817,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         }
         else if (pick < 12)
         {
-            // (Aligned to 16 at most in a compiled world, which this compiler's frame objects are.)
+            // (To 64, in a compiled world too: this compiler realigns a frame for objects aligned past 16.)
             const TypeId base = abi_test_world_pick(world, &random, true);
-            const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, world->compiled ? 5 : 7);
+            const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, 7);
             const bool lowered = alignment_log2 <= type_alignment_log2(table, type_strip_aligned(table, base));
             const bool gcc_divergent = lowered || abi_test_spells_vector(table, base);
             abi_test_world_add(world, world->gcc && gcc_divergent ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
@@ -4168,9 +4168,14 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
            kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && !half;
 }
 
+// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2; tier0_test.c, which main.c includes
+// after tier0.c and this file, checks it).
+#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
+
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a complex
-// float, double or long double, a struct or a union aligned to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, a long double, a 128-bit integer, a complex float, double or long
+// double, a struct or a union, at any alignment the world makes (a value aligned past 8 bytes is an object of its own, and
+// past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
@@ -4182,7 +4187,7 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                                                               code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
                       complex || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
+    return (scalar || wide) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -5145,11 +5150,13 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->variadic = variadic;
         uint32_t offset = 0;
         // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
-        // value on the integer one, as a 128-bit integer's), and copies its aggregates through each stack's first free
-        // register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or a
-        // function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under them
-        // when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an argument
-        // past 13 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
+        // value on the integer one, as a 128-bit integer's; 14 integer ones in a frame realigned for an object or an
+        // argument aligned past 16 bytes, whose rbp is the table's last), and copies its aggregates through each stack's
+        // first free register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or
+        // a function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under
+        // them when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an
+        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit
+        // both).
         uint32_t depths[2] = { 0, 0 };
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -5162,7 +5169,7 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             type = cross->gcc && variadic && a < named && abi_test_gcc_variadic_differs(cross->abi, type) ? BUSTER_TYPE_LONG : type;
             const TypeId stripped = type_strip_aligned(table, type);
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
-            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 2);
+            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3);
             type = cross->compiled && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : type;
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;
