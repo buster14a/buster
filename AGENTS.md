@@ -4519,7 +4519,9 @@ body's), whatever the lane count. The lowering numbers the runtime's
 functions (libgcc's) and the label symbols part by part, and
 `check_lower_finish` puts them in source order. Lane 0 is the calling thread
 with the caller's arenas but for its writer's columns, which take the first
-lane's scratch in base pages (`CheckEmitRun.columns`, #531); each other lane
+lane's scratch in base pages (`CheckEmitRun.columns`, #531), reserved for
+exactly their room (`check_lower_writer_bytes`), or the caller's scratch where
+that address space can't be reserved; each other lane
 has its own (`CheckProgramLanes.arenas`), which the caller keeps until it is
 done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
@@ -4539,7 +4541,12 @@ causes, each emission one lane's: a lane short of room
 so many bytes in one of its arenas, from none up, doubling, until the part
 fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
 code's after it), and lanes that start no thread, in a child that
-`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+`RLIMIT_NPROC` limits (not as root); then in a child whose address space
+`RLIMIT_AS` limits, after an emission whose lane 0's columns must take exactly
+their reservation, emissions with less room than that reservation maps (lane
+0's columns in the caller's scratch) and with it and 1 GB more (in their
+reservation; the 8 lanes' other arenas not reserved), each one lane's; then
+the lane rule, and the driver's
 objects and executables by `--lanes` and by default, each one lane's, the
 executables exiting alike, and with lanes that don't start, and the failing
 programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
