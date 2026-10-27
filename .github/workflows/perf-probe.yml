@@ -1,0 +1,66 @@
+name: Perf probe (temporary, hosted runners)
+
+# A temporary probe on GitHub's hosted runners, never the 9700X: it runs only on pushes to this branch, which has no
+# pull request. It builds the compiler where the runner's CPU has the AVX-512 subsets the lexer needs, and times its
+# stages (.github/perf-probe/probe.sh).
+on:
+  push:
+    branches: [claude/beautiful-einstein-9rz8gx]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out triggering commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Whether the CPU has the lexer's AVX-512 subsets
+        id: cpu
+        run: |
+          lscpu | sed -n '1,25p'
+          flags="$(grep -m1 '^flags' /proc/cpuinfo)"
+          capable=true
+          for flag in avx512f avx512bw avx512vl avx512vbmi avx512_vbmi2 avx512_vpopcntdq gfni bmi2; do
+              grep -qw "$flag" <<< "$flags" || { echo "missing $flag"; capable=false; }
+          done
+          echo "capable=$capable" >> "$GITHUB_OUTPUT"
+          echo "capable=$capable"
+
+      - name: Install clang 23, tcc, perf and time
+        if: steps.cpu.outputs.capable == 'true'
+        run: |
+          set -euo pipefail
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh 23 > /dev/null
+          sudo apt-get install -y -q tcc time > /dev/null
+          sudo apt-get install -y -q "linux-tools-$(uname -r)" > /dev/null 2>&1 || sudo apt-get install -y -q linux-tools-azure linux-tools-generic > /dev/null 2>&1 || true
+          perf="$(ls /usr/lib/linux-tools/*/perf /usr/lib/linux-tools-*/perf 2> /dev/null | head -n 1 || true)"
+          echo "PERF=${perf:-perf}" >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          mkdir -p "$HOME/bin"
+          ln -sf "$(command -v clang-23)" "$HOME/bin/clang"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Build the compiler
+        if: steps.cpu.outputs.capable == 'true'
+        run: |
+          set -euo pipefail
+          clang --version | head -n 1
+          BUSTER_DEBUG_INFO=0 ./build.sh
+
+      - name: Probe
+        if: steps.cpu.outputs.capable == 'true'
+        run: bash .github/perf-probe/probe.sh
