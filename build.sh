@@ -31,13 +31,12 @@ case "${BUSTER_DEBUG_INFO-1}" in
     0) debug=() ;;
     *) echo "build.sh: BUSTER_DEBUG_INFO must be 0 or 1" >&2; exit 1 ;;
 esac
-sources+=(src/buster/compiler/main_unit_fragments.c)
 # The order the compiles start in, each source's file name once, the longest first by their times on the 9700X (#270):
 # the build runs at most one compile per core (cores, below), so a long one that started late would make it wait for
 # it. A new source goes where its time puts it.
 order=(main_unit_checker.c main_unit_backend.c main_unit_frontend.c main_unit_executable.c main_unit_dynamic.c
     main_unit_link.c c_parser_benchmark.c main.c main_unit_x86.c main_unit_types.c main_unit_check_builtins.c
-    c_files_benchmark.c c_preprocessor_benchmark.c main_unit_fragments.c link_benchmark.c executable_benchmark.c
+    c_files_benchmark.c c_preprocessor_benchmark.c link_benchmark.c executable_benchmark.c
     main_unit_assembler.c foreign_benchmark.c tier0_benchmark.c snapshot_benchmark.c x86_64_encoder_benchmark.c
     bind_benchmark.c c_refine_benchmark.c c_checker_benchmark.c import_benchmark.c tier1_select_benchmark.c
     c_lexer_benchmark.c branch_sizing_benchmark.c object_writer_benchmark.c x86_64_disassembler_benchmark.c

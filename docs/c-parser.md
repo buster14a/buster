@@ -9,9 +9,9 @@ didn't have, which lets the vector path take only code the scalar parser would
 accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
-The test-only [expression-fragment experiment](c-parser-fragments.md) records
-the alternative representation's contracts and the semantic-consumer work
-required before the complete comparison in #107 can select a representation.
+Salter's [operator fragments](c-parser-fragments.md), the alternative output
+that #104–#107 measured end to end against the postorder, read beside the
+checker's tree walk, lost: the parser keeps the postorder.
 
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
@@ -662,7 +662,8 @@ mapping. Pragmas remain events, not removable noise for future checking.
 
 Observed costs include PP-to-parser copying/remapping and full-tree postorder
 construction. [#335](https://github.com/buster14a/buster/issues/335) compares the first with an optional producer-aware path;
-#104–#107/#315 own the fragment alternatives to the second. Neither may change
+#104–#107 measured the fragment alternative to the second, which lost to it ([the
+decision](c-parser-fragments.md)). Neither may change
 checker semantics, source identity or move uncounted reconstruction downstream.
 Parser-derived bindings proposed in [#320](https://github.com/buster14a/buster/pull/320) and environment/extension branches
 #319/#324 are **not** main-branch outputs at this pin; #336 tracks shared checker
@@ -716,7 +717,7 @@ Allocation capacity does not authorize a consumer to read past that padding.
 | `pp_print` / `-E`, token oracles and preprocessing benchmarks | Complete resolved PP output; no parser-column allocations. Printer spacing and source markers still use the original flags/locations. |
 | `pp_diagnose_output`, macro history and parser diagnostics | Original PP token identity, source locations, flags and expansion runs; repeated occurrences are not deduplicated. Parser indices translate through `ParseTokens.sources`. |
 | [Assembly preprocessing](../src/buster/compiler/assembler_driver.c) | Assembly-mode PP output and `pp_print`; no C parser metadata or deferred C keyword resolution. |
-| Parser tests/benchmarks and fragment adapters | The same logical counts, padding, source identities and completion rules as real parser callers. A timed conversion row does not include preprocessing, storage preparation or downstream parsing. |
+| Parser tests and benchmarks | The same logical counts, padding, source identities and completion rules as real parser callers. A timed conversion row does not include preprocessing, storage preparation or downstream parsing. |
 
 The evaluated alternative was explicitly requested with
 `PPOptions.parser_keywords` (`--parser-keywords`) by parsing consumers only.
