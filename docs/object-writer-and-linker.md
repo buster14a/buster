@@ -4478,6 +4478,42 @@ it. It writes every kind the direct path writes: static executables (with
   ([40088135270](https://github.com/buster14a/buster/actions/runs/40088135270),
   [40090244483](https://github.com/buster14a/buster/actions/runs/40090244483)).
 
+**Foreign DWARF strings (#607).** Keep the current concatenation. A locked
+9700X experiment at `92c025e7` reused the existing exact-string producer with
+per-contribution offset maps, translating `S+A` before applying 32/64-bit
+debug relocations. In 1,000 shared-header units plus startup, the two string
+sections shrink from 6,111,198 to 88,103 bytes (98.6%), and the complete file
+from 7,824,192 to 1,801,096 bytes. The added producer and relocation work costs
+more than the smaller write saves:
+
+| 1,000-unit input | Compression | Base link, ms | Pooling prototype, ms | Peak RSS base / prototype, KiB |
+| --- | --- | ---: | ---: | ---: |
+| Shared header | none | 9.498 | 10.962 | 41,996 / 46,100 |
+| Shared header | zlib | 19.822 | 21.415 | 34,000 / 38,104 |
+| Mostly unique names | none | 9.503 | 14.112 | 41,988 / 50,156 |
+| Mostly unique names | zlib | 20.061 | 24.861 | 33,996 / 44,276 |
+
+The existing vector producer alone takes 1.466 ms on the shared-header input,
+against a writer saving of 1.117 ms; the mostly-unique producer costs 2.633 ms
+for a 0.081 ms writer saving. These optimistic samples omit remapping, so
+vector remapping alone has no demonstrated budget to recover the eager
+producer's cost. Fusing hashing with the original copy is a different,
+unmeasured producer design. A separate SQLite SQL consumer saves 655 string
+bytes while its uncompressed link grows from 1.856 to 2.253 ms.
+
+These are medians of eleven warm-cache whole-process runs of matched
+standalone linker drivers, pinned to CPU 2, with a warm-up after each binary
+switch. They are observations of this eager prototype, which retains the
+original concatenation buffers; they do not rule out a different admission
+rule or a streaming design. Exact/vector/eight-lane output equality, decoded
+DWARF strings/statistics, GDB values/types/lines/backtraces and independent
+interior/negative-addend relocation fixtures validate the admitted inputs.
+The [record](https://github.com/buster14a/buster-performance/tree/55e2b56472ba967e17be314136d2e6b1c663c6a5/docs/measurements/foreign-debug-strings-607-2026-10-27)
+retains the experimental patch, complete small/large/control/DWARF64/SQLite
+matrix, lld reference, source/tool identities and reproduction harnesses.
+The production compiler gains no merging option or implementation from this
+negative experiment.
+
 **The corpus.** `test-foreign-corpus` links each program from one command line
 by `link-foreign`, lld and mold, as each kind (a dynamic PIE, a static
 executable, a static PIE, and a shared library of the program's library part
