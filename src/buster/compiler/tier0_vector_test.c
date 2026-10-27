@@ -118,7 +118,7 @@ static const Tier0TestVectorKind tier0_test_vector_kinds[BUSTER_TIER0_TEST_VECTO
     BUSTER_TIER0_TEST_VECTOR_KIND("vpaddd zmm", V64, V64, NONE, NONE, 2, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpsubb ymm (VEX)", V32, V32, NONE, NONE, 2, V32, 2, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpxorq xmm", V16, V16, NONE, NONE, 2, V16, 0, true),
-    BUSTER_TIER0_TEST_VECTOR_KIND("kmovw, vpaddd zmm{k}", V64, U16, V64, V64, 4, V64, 0, true),
+    BUSTER_TIER0_TEST_VECTOR_KIND("kmovw, vpaddd zmm{k}", V64, U32, V64, V64, 4, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpcmpeqb k, kmovq r64", V64, V64, NONE, NONE, 2, U64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpbroadcastd zmm, r32", I32, NONE, NONE, NONE, 1, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vmovd r32, xmm", V16, NONE, NONE, NONE, 1, I32, 0, true),
@@ -132,7 +132,7 @@ static const Tier0TestVectorKind tier0_test_vector_kinds[BUSTER_TIER0_TEST_VECTO
     BUSTER_TIER0_TEST_VECTOR_KIND("vmovd xmm, r32, vpsrld zmm", V64, U32, NONE, NONE, 2, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("no records (the low half)", V64, NONE, NONE, NONE, 1, V32, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vaddps zmm", V64, V64, NONE, NONE, 2, V64, 0, false),
-    BUSTER_TIER0_TEST_VECTOR_KIND("kmovw, vmovdqu32 [r]{k}", OUTPUT, U16, V64, NONE, 3, NONE, 0, false),
+    BUSTER_TIER0_TEST_VECTOR_KIND("kmovw, vmovdqu32 [r]{k}", OUTPUT, U32, V64, NONE, 3, NONE, 0, false),
     BUSTER_TIER0_TEST_VECTOR_KIND("kxnorw, vpgatherdd zmm{k}", BASE, INDICES, NONE, NONE, 2, V64, 0, true),
     BUSTER_TIER0_TEST_VECTOR_KIND("vpsubq xmm", V16, V16, NONE, NONE, 2, V16, 0, true),
 };
@@ -743,10 +743,12 @@ static void tier0_test_vector_statement(Tier0TestVectorProgram* program, uint32_
     const uint32_t shape = tier0_generate_below(state, 10);
     if (shape == 0)
     {
-        // kmovw, vmovdqu32 [r]{k}: an output slot's address, a mask, a vector.
+        // kmovw, vmovdqu32 [r]{k}: an output slot's address, a mask (a U16's, extended to the row's U32, since kmovw's
+        // field is a 32-bit register's), a vector.
         tier0_test_vector_address(program, 3, 64 * (uint64_t)(2 * s));
         tier0_test_vector_push(program, &tasks, tier0_test_vector_entry(BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_TEST_VECTOR_MASK_STORE));
         tier0_test_vector_push(program, &tasks, tier0_test_vector_expression(BUSTER_TIER0_TEST_VECTOR_V64, budget));
+        tier0_test_vector_push(program, &tasks, tier0_test_vector_entry(BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0));
         tier0_test_vector_push(program, &tasks, tier0_test_vector_expression(BUSTER_TIER0_TEST_VECTOR_U16, 2));
         tier0_test_vector_run_tasks(program, &tasks, state);
     }
@@ -1883,6 +1885,17 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
 // The rules
 
 // A row that breaks one of tier0_operation_valid's rules, from kind `k`'s: `b` picks the break.
+// MASK_LOAD's row with an index too, operand 2 of class `index` (scaled by 1).
+static Tier0Operation tier0_test_vector_indexed_row(uint32_t index)
+{
+    Tier0Operation row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD);
+    row.records[1].mode = BUSTER_X86_MEMORY_BASE_INDEX(0);
+    row.records[1].index = BUSTER_TIER0_ROLE_INTEGER(2);
+    row.operand_count = 3;
+    row.operand_classes[2] = (uint8_t)index;
+    return row;
+}
+
 static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
 {
     Tier0Operation row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
@@ -1926,16 +1939,31 @@ static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
         row.result_class = BUSTER_TYPED_CLASS_VECTOR;
         row.result_bytes = 64;
         break;
-    default:
+    case 15:
         // INTEGER(j) past the operands.
         row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_SPLAT_D);
         row.records[0].rm = BUSTER_TIER0_ROLE_INTEGER(1);
+        break;
+    // Integer operands narrower than their fields, whose registers' bits past their classes' are unspecified: an
+    // address's base, an index, a 64-bit field and a 32-bit one.
+    case 16:
+        row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD);
+        row.operand_classes[0] = BUSTER_TYPED_CLASS_I32;
+        break;
+    case 17: row = tier0_test_vector_indexed_row(BUSTER_TYPED_CLASS_U32); break;
+    case 18:
+        row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD);
+        row.operand_classes[1] = BUSTER_TYPED_CLASS_U32;
+        break;
+    default:
+        row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_ADD);
+        row.operand_classes[1] = BUSTER_TYPED_CLASS_U16;
         break;
     }
     return row;
 }
 
-#define BUSTER_TIER0_TEST_VECTOR_ROW_BREAKS 16
+#define BUSTER_TIER0_TEST_VECTOR_ROW_BREAKS 20
 
 // Each row break refused, and every row of this file's taken; then the stream's rules for vectors, each break refused at
 // its entry (or at 0 for a function's columns), and its valid neighbour taken.
@@ -1949,6 +1977,20 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
     {
         const Tier0Operation row = tier0_test_vector_broken_row(b);
         tier0_test_expect(tally, !tier0_operation_valid(&row), "vectors", "row break %u taken", b);
+    }
+    // The narrow operands' neighbours: an address of I64, an index of U64 and of I64, and a 64-bit operand in a 32-bit
+    // field (its low half).
+    Tier0Operation neighbours[4] = {
+        tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_LOAD),
+        tier0_test_vector_indexed_row(BUSTER_TYPED_CLASS_U64),
+        tier0_test_vector_indexed_row(BUSTER_TYPED_CLASS_I64),
+        tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_MASK_ADD),
+    };
+    neighbours[0].operand_classes[0] = BUSTER_TYPED_CLASS_I64;
+    neighbours[3].operand_classes[1] = BUSTER_TYPED_CLASS_U64;
+    for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(neighbours); n += 1)
+    {
+        tier0_test_expect(tally, tier0_operation_valid(&neighbours[n]), "vectors", "the narrow operands' neighbour %u refused", n);
     }
     // The streams: a function of the programs' locals, and its entries.
     static const struct
@@ -1976,6 +2018,8 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         { "a call's vector argument as a value", 0 },
         { "an invalid row among the operations", 0 },
         { "a row's operation at the stack's depth", UINT32_MAX },
+        { "CONVERT of a vector", 1 },
+        { "EQ of two vectors", 2 },
     };
     static const uint8_t local_classes[6] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
                                               BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VECTOR };
@@ -2057,6 +2101,18 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
             {
                 tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, v, 0);
             }
+            break;
+        case 20:
+            // A conversion of a vector to U64, and a compare of two, which only X86 entries make.
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONST, v, 2);
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+            break;
+        case 21:
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONST, v, 2);
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONST, v, 2);
+            tier0_test_vector_put(&written, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
             break;
         case 19:
         {

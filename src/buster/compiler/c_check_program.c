@@ -129,6 +129,9 @@ struct CheckProgram
     const CheckInitializers* initializers;
     const CheckAsms* asms;
     CheckControl* controls;
+    // The SWITCH controls followed by four CASE controls or more, which a jump table may dispatch
+    // (check_lower_switch_tables): `switch_count` of them, by their index in `controls`, in its order.
+    uint32_t* switches;
     CheckProgramBody* bodies;
     CheckProgramCase* cases;
     CheckProgramRegion* regions;
@@ -140,6 +143,7 @@ struct CheckProgram
     uint32_t* symbol_objects;
     uint32_t* object_declarations;
     uint32_t control_count;
+    uint32_t switch_count;
     uint32_t body_count;
     uint32_t case_count;
     uint32_t region_count;
@@ -213,6 +217,10 @@ struct CheckControlWriter
     CheckControl* entries;
     CheckControlTask* tasks;
     uint32_t* labels;
+    // CheckProgram.switches, and its room: a switch recorded there has four of the program's cases or more.
+    uint32_t* switches;
+    uint32_t switch_count;
+    uint32_t switch_capacity;
     uint32_t count;
     uint32_t depth;
     uint32_t label_count;
@@ -785,14 +793,22 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             check_control_mark(writer, end);
             check_control_statement(writer, body, end, task.repeat);
             check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, fallback);
+            uint32_t cases = 0;
             for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])
             {
                 if (!writer->program->cases[c].fallback)
                 {
                     check_control_entry(writer, CHECK_CONTROL_CASE, writer->program->cases[c].token, BUSTER_CHECK_NONE, c);
+                    cases += 1;
                 }
             }
             check_control_entry(writer, CHECK_CONTROL_SWITCH, token, condition, BUSTER_CHECK_NONE);
+            // A jump table takes four clusters of cases or more, so only a switch of four cases or more may have one: the
+            // program lists those. The drain writes this SWITCH entry next, the last task pushed, at writer->count.
+            if (cases >= 4 && writer->switch_count < writer->switch_capacity)
+            {
+                writer->switches[writer->switch_count++] = writer->count;
+            }
         }
         else
         {
@@ -1693,6 +1709,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
     }
     program->bodies = valid && body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramBody, body_count) : 0;
+    const uint32_t switch_capacity = program->case_count / 4;
+    program->switches = valid && switch_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, switch_capacity) : 0;
     program->regions = valid && input->region_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramRegion, input->region_count) : 0;
     program->region_count = input->region_count;
     program->object_symbols = valid ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, (uint64_t)count + 1) : 0;
@@ -1718,8 +1736,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     }
     program->asm_target_count = valid ? (uint32_t)asm_targets : 0;
     program->asm_targets = valid && asm_targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, asm_targets) : 0;
-    valid = valid && (body_count == 0 || program->bodies != 0) && (input->region_count == 0 || program->regions != 0) &&
-            program->object_symbols != 0 && program->object_declarations != 0 && (asm_targets == 0 || program->asm_targets != 0);
+    valid = valid && (body_count == 0 || program->bodies != 0) && (switch_capacity == 0 || program->switches != 0) &&
+            (input->region_count == 0 || program->regions != 0) && program->object_symbols != 0 && program->object_declarations != 0 &&
+            (asm_targets == 0 || program->asm_targets != 0);
     if (!valid && program->status == CHECK_PROGRAM_OK)
     {
         program->status = CHECK_PROGRAM_RESOURCE;
@@ -1755,6 +1774,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         .entries = entries,
         .tasks = tasks,
         .labels = labels,
+        .switches = program->switches,
+        .switch_capacity = switch_capacity,
         .capacity = capacity,
     };
     uint32_t reference_count = 0;
@@ -1842,6 +1863,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     if (valid)
     {
         program->control_count = writer.count;
+        program->switch_count = writer.switch_count;
         program->reference_count = reference_count;
         if (writer.count != 0)
         {
@@ -1907,6 +1929,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 
 #include "c_check_program_select.c"
 #include "c_check_program_helpers.c"
+#include "c_check_program_asm.c"
 #include "c_check_program_lower.c"
 #include "c_check_debug.c"
 #include "c_check_program_emit.c"

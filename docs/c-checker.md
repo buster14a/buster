@@ -628,8 +628,19 @@ it doesn't.
 What the lowering covers past scalars (#145's programs):
 
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
-  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  Past 16 bytes' alignment, Tier 0 realigns the function's frame
+  ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
+  (its type's, an aligned typedef's, or its declaration's `_Alignas`) passes 8
+  bytes is a frame object of its size and alignment, as a long double's is,
+  which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of its class read and write
+  (Tier 0's `tier0_value_object`), so that the rest of the lowering reads and
+  writes it as it would a value's local. A parameter's arrives from its
+  register as a struct of it would, or from its 8-byte stack slot, which
+  Tier 0's prologue copies into the object (an aligned typedef passes as its
+  base, so the slot is aligned to 8 alone).
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
   them; a statement's assignment leaves no address to discard, and neither
@@ -654,8 +665,9 @@ What the lowering covers past scalars (#145's programs):
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
-  of a `long double`, in st0) returns its bytes' address too. Those aligned past
-  16 bytes or larger than 64 KB are refused.
+  of a `long double`, in st0) returns its bytes' address too. Those larger than
+  64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
+  stack aligned to it at the call, which realigns the caller's frame.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -665,7 +677,9 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area.
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  arguments aligned past 16 bytes align the incoming area to them, which
+  Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
   parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
@@ -792,10 +806,13 @@ What the lowering covers past scalars (#145's programs):
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
   element's size, and the same extents give `sizeof` and the strides of
-  pointer arithmetic over a pointer to a variable-length array. An array
-  declared in a `for` statement's clause or directly in a statement
-  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
-  are refused by name. The source reader doesn't yet take a bound whose
+  pointer arithmetic over a pointer to a variable-length array. One aligned past
+  16 bytes (its element's alignment, or its declaration's `_Alignas`) takes its
+  alignment less 16 bytes more, and its address rounds up to its alignment,
+  `(address + alignment - 1) & -alignment`, where clang's code rounds rsp down:
+  `ALLOCA`'s address is a multiple of 16. An array declared in a `for`
+  statement's clause or directly in a statement expression's block, and one
+  initialized (C23's `= {}`), are refused by name. The source reader doesn't yet take a bound whose
   statement expression holds more than expression statements (a declaration,
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the
@@ -849,6 +866,55 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **Switches (#136's item 7).** A switch's value goes in a temporary, and each
+  case compares it, as clang -O0's code does for a sparse switch, unless clang
+  would build a jump table: then the switch dispatches through one
+  (`check_lower_switch_table`), decided before any body is lowered
+  (`check_lower_switch_tables`) for each switch of four cases or more, which
+  the checked program lists as it writes their controls
+  (`CheckProgram.switches`), and found by its control when its body is
+  lowered (`check_lower_table_of`). LLVM's rule at -O0
+  (`SwitchLowering::findJumpTables`) takes a switch's whole range or nothing:
+  four clusters or more (runs of consecutive values that go to one place;
+  `case 1: case 2:` with nothing between them is one, as it is LLVM's one
+  block) whose cases hold at least a tenth of the range's values (its
+  jump-table density). The class must be one of 32 or 64 bits, and the range
+  at most 65,536 values (`BUSTER_CHECK_LOWER_MAX_TABLE`; LLVM's limit is
+  UINT_MAX). The dispatch, at the switch's first case: a value whose
+  difference from the lowest case's, unsigned, is past the last entry goes to
+  the default or the switch's end, and any other to the table's address plus
+  the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
+  label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
+  record as it does `&&label`'s) with the entry's offset as its addend, as
+  clang's `.long .LBB - .LJTI` entries are. The tables and their labels are
+  numbered in source order when they are decided, so that whatever lane lowers
+  a body (#151), they come out as one lane's. Their symbols are the lowering's
+  own, after the runtime functions', which `check_lower_finish` numbers once
+  they are all known: while the bodies compile, a table's address is a
+  provisional symbol after the runtime functions' (`provisional_tables`, which
+  the access column has), whose references the emission's merge replaces after
+  the runtime functions', in the functions that have tables: a table's final
+  symbol falls among the runtime functions' provisional numbers, while theirs
+  are below the tables' provisional ones, so that each reference is rewritten
+  once. An empty GNU range
+  (`case 5 ... 3`) counts for nothing, as clang's Sema drops it. In `-c`'s
+  object the tables' and the labels' symbols are temporaries
+  (`ObjectOptions.temporary_symbols`), as an
+  assembler takes clang's `.LJTI` and `.LBB` labels: left out of its symbol
+  table, where a label inside a function would split the function for a
+  symbolizer, with the relocations against their sections' symbols. Deciding
+  takes a merge sort of the switch's cases, scalar: a pass over a few cases
+  per listed switch. On `sqlite3.c`, whose 53 tables hold 2,776 entries, the
+  tables added about 431,000 instructions (0.019%) to `-c` before the function
+  lanes, and their temporaries 298,000, with no cycles beyond the runs' spread
+  (one executable with the tables on and off, on the 9700X), and its shell runs
+  13.8% faster
+  ([the record](https://github.com/buster14a/buster-performance/blob/6328c2664043f54076850f6c03c5a580ab5bfeb2/docs/measurements/switch-tables-136-2026-10-26/README.md)).
+  With the lanes, on one lane, the tables and their temporaries add about
+  900,000 instructions (0.04%; one executable with the tables on and off, on a
+  Zen 4 laptop's build).
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 

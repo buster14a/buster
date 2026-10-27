@@ -75,9 +75,10 @@ _Static_assert(BUSTER_TIER0_GENERATE_SCOPE_OBJECTS >= BUSTER_TIER0_GENERATE_OBJE
 // table and classifies: byte arrays of 1 to 17 bytes, whose parts load in every way (exactly, overlapping, through a
 // temporary) and the largest of which goes on the stack; floats and doubles (in XMM registers), mixed with integers
 // both ways round, unions, a member aligned to 16 (one part of 16 bytes), the empty struct, and records past 16 bytes
-// (MEMORY: on the stack, returned through a hidden pointer). Each is a shape: a member per letter, of a class (b u8,
+// (MEMORY: on the stack, returned through a hidden pointer), among them records aligned to 32 (MEMORY too, on a stack
+// aligned to 32 at the call, which realigns the caller's frame). Each is a shape: a member per letter, of a class (b u8,
 // c i8, s i16, S u16, i i32, I u32, l i64, L u64, f f32, d f64), a union after "u:", its first member _Alignas(16)
-// after "a:". A record's C name is "struct rN" or "union rN".
+// after "a:" and _Alignas(32) after "A:". A record's C name is "struct rN" or "union rN".
 #define BUSTER_TIER0_GENERATE_RECORDS 64
 #define BUSTER_TIER0_GENERATE_RECORD_MEMBERS 17
 #define BUSTER_TIER0_GENERATE_NO_RECORD 0xff
@@ -141,6 +142,8 @@ static const char* const tier0_record_shapes[] = {
     "LLLLLLLLLLLLLLLLL",
     "ddddddddd",
     "iiiiiiiiiiiiiiiii",
+    "A:d",
+    "A:il",
 };
 
 // A record of the catalog: its members' classes and offsets, its size and alignment, and from the calling convention
@@ -154,7 +157,8 @@ struct Tier0Record
     uint32_t size;
     uint32_t alignment;
     bool is_union;
-    bool aligned;
+    // Its first member's _Alignas, in bytes (0 for none).
+    uint32_t aligned;
     TypeId type;
     AbiReturn result;
 };
@@ -204,6 +208,9 @@ struct Tier0ProgramOptions
     // BUSTER_TIER0_GENERATE_DEEP_ROOM values at once. A program without them is the same as before they existed, seed
     // for seed.
     bool deep;
+    // With `objects`, objects aligned past 16 bytes (tier0_generate_alignment: 32, 64 or 4096), whose functions' frames
+    // are realigned. A program without them is the same as before they existed, seed for seed.
+    bool over_aligned;
 };
 
 typedef struct Tier0GeneratedFunction Tier0GeneratedFunction;
@@ -501,8 +508,9 @@ struct Tier0Expression
 };
 
 // An object of a function: a local array (`elements` of class classes[0], a power of two) or a struct (`members`, at
-// their offsets), and its alignment in bytes (`aligned` when it is _Alignas(16) in C: an array's declaration's, or a
-// struct's member's). Objects of one `layout` (a twin and the object it copies) can be copied into one another. A
+// their offsets), and its alignment in bytes (`aligned` the _Alignas in C, 0 for none: an array's declaration's, or a
+// struct's member's; 16, or with Tier0ProgramOptions.over_aligned 32, 64 or 4096 too). Objects of one `layout` (a twin
+// and the object it copies) can be copied into one another. A
 // record's object is of the catalog's `record` (BUSTER_TIER0_GENERATE_NO_RECORD for the function's own), whose layout
 // is its record's, and a union's members aren't read apart (only their bits, by the checksum).
 // A variable-length array (`vla`) is an array whose `local` is a U64 that holds its address (ALLOCA's), not a frame
@@ -514,7 +522,7 @@ struct Tier0Object
     uint32_t elements;
     uint32_t members;
     uint8_t classes[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
-    bool aligned[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
+    uint16_t aligned[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
     uint32_t offsets[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
     uint32_t alignment;
     uint32_t size;
@@ -1305,11 +1313,26 @@ static void tier0_scope_add(Tier0Scope* scope, uint32_t local, uint32_t class)
     }
 }
 
+// An _Alignas for an object's declaration or member: 16, or with `over_aligned` (Tier0ProgramOptions') half the time
+// past it, 32, 64 or 4096, from a draw that a program without the option doesn't make.
+static uint16_t tier0_generate_alignment(uint64_t* random, bool over_aligned)
+{
+    static const uint16_t past[3] = { 32, 64, 4096 };
+    uint16_t alignment = 16;
+    if (over_aligned)
+    {
+        const uint32_t pick = tier0_generate_below(random, 6);
+        alignment = pick < 3 ? past[pick] : 16;
+    }
+    return alignment;
+}
+
 // A new object of the current function (which has fewer than BUSTER_TIER0_GENERATE_MAX_OBJECTS): a local array of 2 to
 // 16 elements of a class, or a struct of 2 to 5 members laid out as C lays them out, each now and then aligned to 16
-// (an array's declaration, a struct's member), or a twin of the object before. Its local is of class VOID,
-// address-taken, with its size and alignment. Returns false when the columns are full.
-static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, bool floating)
+// (an array's declaration, a struct's member; with `over_aligned`, now and then past 16: tier0_generate_alignment), or
+// a twin of the object before. Its local is of class VOID, address-taken, with its size and alignment. Returns false
+// when the columns are full.
+static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* state, uint64_t* random, bool floating, bool over_aligned)
 {
     Tier0Object object;
     memset(&object, 0, sizeof(object));
@@ -1327,8 +1350,8 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
         object.elements = 2u << tier0_generate_below(random, 4);
         object.members = 0;
         object.classes[0] = (uint8_t)tier0_generate_class(random, floating);
-        object.aligned[0] = tier0_generate_chance(random, 30);
-        object.alignment = object.aligned[0] ? 16 : tier0_class_bytes(object.classes[0]);
+        object.aligned[0] = tier0_generate_chance(random, 30) ? tier0_generate_alignment(random, over_aligned) : 0;
+        object.alignment = object.aligned[0] != 0 ? object.aligned[0] : tier0_class_bytes(object.classes[0]);
         object.size = object.elements * tier0_class_bytes(object.classes[0]);
         object.layout = state->scope.object_count;
     }
@@ -1340,8 +1363,8 @@ static bool tier0_generate_object(Tier0Program* program, Tier0FunctionState* sta
         for (uint32_t m = 0; m < object.members; m += 1)
         {
             object.classes[m] = (uint8_t)tier0_generate_class(random, floating);
-            object.aligned[m] = tier0_generate_chance(random, 15);
-            const uint32_t alignment = object.aligned[m] ? 16 : tier0_class_bytes(object.classes[m]);
+            object.aligned[m] = tier0_generate_chance(random, 15) ? tier0_generate_alignment(random, over_aligned) : 0;
+            const uint32_t alignment = object.aligned[m] != 0 ? object.aligned[m] : tier0_class_bytes(object.classes[m]);
             offset = (offset + alignment - 1) & ~(alignment - 1);
             object.offsets[m] = offset;
             offset += tier0_class_bytes(object.classes[m]);
@@ -1386,7 +1409,7 @@ static uint32_t tier0_generate_record_object(Tier0Program* program, Tier0Functio
             object->members = layout->members;
             memcpy(object->classes, layout->classes, sizeof(object->classes));
             memcpy(object->offsets, layout->offsets, sizeof(object->offsets));
-            object->aligned[0] = layout->aligned;
+            object->aligned[0] = (uint16_t)layout->aligned;
             object->alignment = layout->alignment;
             object->size = layout->size;
             object->layout = BUSTER_TIER0_GENERATE_SCOPE_OBJECTS + record;
@@ -1443,7 +1466,9 @@ static bool tier0_generate_copy(Tier0Program* program, const Tier0Scope* scope, 
         const uint32_t pair = pairs[tier0_generate_below(random, pair_count)];
         const Tier0Object* destination = &scope->objects[pair >> 8];
         const Tier0Object* source = &scope->objects[pair & 0xff];
-        const uint32_t size = tier0_generate_chance(random, 60) ? destination->size : 1 + tier0_generate_below(random, destination->size);
+        // All of the bytes, or a prefix, of BUSTER_TIER0_MAX_COPY_BYTES at most (an object aligned to 4096 is larger).
+        const uint32_t whole = destination->size < BUSTER_TIER0_MAX_COPY_BYTES ? destination->size : BUSTER_TIER0_MAX_COPY_BYTES;
+        const uint32_t size = tier0_generate_chance(random, 60) ? whole : 1 + tier0_generate_below(random, whole);
         tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, destination->local);
         tier0_emit(program, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, source->local);
         tier0_emit(program, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
@@ -1462,14 +1487,25 @@ static void tier0_declare_object(Tier0Program* program, const Tier0Object* objec
     }
     else if (object->elements != 0)
     {
-        tier0_text(program, "    %s%s v%u[%u];\n", object->aligned[0] ? "_Alignas(16) " : "", tier0_c_type(object->classes[0]), object->local, object->elements);
+        if (object->aligned[0] != 0)
+        {
+            tier0_text(program, "    _Alignas(%u) %s v%u[%u];\n", object->aligned[0], tier0_c_type(object->classes[0]), object->local, object->elements);
+        }
+        else
+        {
+            tier0_text(program, "    %s v%u[%u];\n", tier0_c_type(object->classes[0]), object->local, object->elements);
+        }
     }
     else
     {
         tier0_text(program, "    struct {");
         for (uint32_t m = 0; m < object->members; m += 1)
         {
-            tier0_text(program, " %s%s m%u;", object->aligned[m] ? "_Alignas(16) " : "", tier0_c_type(object->classes[m]), m);
+            if (object->aligned[m] != 0)
+            {
+                tier0_text(program, " _Alignas(%u)", object->aligned[m]);
+            }
+            tier0_text(program, " %s m%u;", tier0_c_type(object->classes[m]), m);
         }
         tier0_text(program, " } v%u;\n", object->local);
     }
@@ -2507,7 +2543,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     const uint32_t objects = options->objects ? tier0_generate_below(random, BUSTER_TIER0_GENERATE_MAX_OBJECTS + 1) : 0;
     for (uint32_t o = 0; o < objects; o += 1)
     {
-        tier0_generate_object(program, &state, random, options->floating);
+        tier0_generate_object(program, &state, random, options->floating, options->over_aligned);
     }
     // The records' objects, for what the function passes and returns: one of its result's, and of a few of the
     // records its earlier functions take (or any); the entry's, of each record its callees take, as far as they go.
@@ -2953,7 +2989,11 @@ static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t
             tier0_text(program, "%s r%u {", record->is_union ? "union" : "struct", r);
             for (uint32_t m = 0; m < record->members; m += 1)
             {
-                tier0_text(program, " %s%s m%u;", record->aligned && m == 0 ? "_Alignas(16) " : "", tier0_c_type(record->classes[m]), m);
+                if (record->aligned != 0 && m == 0)
+                {
+                    tier0_text(program, " _Alignas(%u)", record->aligned);
+                }
+                tier0_text(program, " %s m%u;", tier0_c_type(record->classes[m]), m);
             }
             tier0_text(program, " };\n");
         }
@@ -3074,8 +3114,8 @@ static bool tier0_records_build(Tier0Tables* tables)
         const char* shape = tier0_record_shapes[r];
         Tier0Record* record = &records->records[r];
         record->is_union = shape[0] == 'u' && shape[1] == ':';
-        record->aligned = shape[0] == 'a' && shape[1] == ':';
-        const char* letters = record->is_union || record->aligned ? shape + 2 : shape;
+        record->aligned = shape[1] != ':' ? 0 : shape[0] == 'a' ? 16 : shape[0] == 'A' ? 32 : 0;
+        const char* letters = record->is_union || record->aligned != 0 ? shape + 2 : shape;
         TypeMember members[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
         uint32_t offset = 0;
         uint32_t end = 0;
@@ -3085,7 +3125,7 @@ static bool tier0_records_build(Tier0Tables* tables)
             const uint32_t m = record->members;
             const uint32_t class = tier0_record_class(letters[m]);
             const uint32_t bytes = tier0_class_bytes(class);
-            const uint32_t alignment = record->aligned && m == 0 ? 16 : bytes;
+            const uint32_t alignment = record->aligned != 0 && m == 0 ? record->aligned : bytes;
             offset = record->is_union ? 0 : (offset + alignment - 1) & ~(alignment - 1);
             record->classes[m] = (uint8_t)class;
             record->offsets[m] = offset;
@@ -3096,7 +3136,7 @@ static bool tier0_records_build(Tier0Tables* tables)
                 .name = m + 1,
                 .type = tier0_program_class_type(class),
                 .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
-                .alignment_log2 = (uint8_t)(record->aligned && m == 0 ? 5 : 0),
+                .alignment_log2 = (uint8_t)(record->aligned != 0 && m == 0 ? __builtin_ctz(record->aligned) + 1 : 0),
                 .packed = false,
             };
             record->members += 1;

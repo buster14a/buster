@@ -223,9 +223,10 @@ none of its subset's programs makes a name twice in clang's objects.
   and `--symbols-minimum N` fails the run when fewer than N files' objects were
   compared. The 9700X job compares eight of the frozen musl `src` directories
   (`math`, `string`, `stdlib`, `fenv`, `legacy`, `process`, `signal` and
-  `multibyte`: 348 files the backend lowers, and every explained difference of
-  musl's) with `--symbols-minimum 348`; `sqlite3.c`, which the
-  backend refuses, compares none.
+  `multibyte`: 354 files the backend lowers, 351 before it lowered inline
+  assembly (#147), and every explained difference of musl's) with
+  `--symbols-minimum 354`; `sqlite3.c`, which the backend refuses, compares
+  none.
 
 On corpora, clang -O0 decides three things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the

@@ -747,6 +747,99 @@ static void asm_test_lex_guard(AsmTest* test)
     }
 }
 
+// asm_assemble_code by both paths (#147: C's inline assembly), which must give the same records, branch columns and
+// references, and each failure alike, with both arenas as they were after it and scratch as it was after a success.
+// `expected` is the record count, -1 for a failure.
+static AsmCode asm_test_code_pair(AsmTest* test, const char* source, int64_t expected, const char* name)
+{
+    const String8 text = { .pointer = (char*)source, .length = strlen(source) };
+    test->scalar.length = 0;
+    test->vector.length = 0;
+    // The scalar path's result in the scalar arena, its scratch the vector one; then the other way round, above it.
+    const AsmCode scalar = asm_assemble_code(text, test->index, (AsmOptions){ 0 }, &test->scalar, &test->vector);
+    const bool scalar_restored = test->vector.length == 0 && (scalar.error == 0 || test->scalar.length == 0);
+    const uint64_t kept = test->scalar.length;
+    const AsmCode vector = asm_assemble_code(text, test->index, (AsmOptions){ .vectorized = true }, &test->vector, &test->scalar);
+    const bool vector_restored = test->scalar.length == kept && (vector.error == 0 || test->vector.length == 0);
+    bool same = (scalar.error == 0) == (vector.error == 0) && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
+                scalar.reference_count == vector.reference_count && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
+    same = same && (scalar.count == 0 || memcmp(scalar.records, vector.records, scalar.count * sizeof(X86Instruction)) == 0);
+    same = same && (scalar.branch_count == 0 || (memcmp(scalar.branches, vector.branches, scalar.branch_count * sizeof(uint32_t)) == 0 &&
+                                                 memcmp(scalar.targets, vector.targets, scalar.branch_count * sizeof(uint32_t)) == 0));
+    for (uint32_t i = 0; same && i < scalar.reference_count; i += 1)
+    {
+        const AsmCodeReference* a = scalar.references + i;
+        const AsmCodeReference* b = vector.references + i;
+        same = a->record == b->record && a->field == b->field && a->kind == b->kind && a->addend == b->addend && a->name.length == b->name.length &&
+               memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
+    }
+    asm_test_check(test, same && scalar_restored && vector_restored, name, "inline code differs between the paths or leaves an arena moved");
+    asm_test_check(test, expected < 0 ? vector.error != 0 : vector.error == 0 && vector.count == (uint64_t)expected, name, vector.error);
+    return vector;
+}
+
+static void asm_test_code(AsmTest* test)
+{
+    // Every feature, as the C lowering's index has them: a template's instructions are its author's to choose.
+    const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
+    x86_match_initialize(test->index, &everything);
+    test->architecture = X86_ARCH_OTHER;
+    // A numeric label backward in a loop: the branch's rel8 form at displacement 0, its target the label's next record.
+    const AsmCode loop = asm_test_code_pair(test, "1:\n\taddl $2, %eax\n\tdecl %ecx\n\tjnz 1b", 3, "inline code: a loop");
+    asm_test_check(test, loop.branch_count == 1 && loop.branches[0] == 2 && loop.targets[0] == 0 && x86_form_description(loop.records[2].form)->relative_bytes == 1 &&
+                         loop.records[2].displacement == 0 && loop.reference_count == 0, "inline code: a loop's branch column", 0);
+    // Labels forward, the last one the end (the record count).
+    const AsmCode forward = asm_test_code_pair(test, "testl %esi, %esi\n\tjle .Lneg\n\tmovl $5, %eax\n\tjmp .Lend\n.Lneg:\n\tmovl $7, %eax\n.Lend:", 5,
+                                               "inline code: labels forward");
+    asm_test_check(test, forward.branch_count == 2 && forward.branches[0] == 1 && forward.targets[0] == 4 && forward.branches[1] == 3 && forward.targets[1] == 5,
+                   "inline code: forward branches' columns", 0);
+    asm_test_code_pair(test, ".intel_syntax noprefix\nmov eax, 1\n.att_syntax prefix\naddl $2, %eax\n", 2, "inline code: the syntax directives");
+    asm_test_code_pair(test, "", 0, "inline code: an empty source");
+    asm_test_code_pair(test, "  # a comment, %eax\n\n", 0, "inline code: a comment alone");
+    // The newly admitted processor-state instructions, each a record.
+    asm_test_code_pair(test, "cpuid\nxgetbv\nxchgq %rbx,%rsi\nfnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\npcmpeqd %xmm1,%xmm2\n"
+                             "bswapl %eax\nbswapq %r9", 12,
+                       "inline code: processor-state instructions");
+    // Symbols the source doesn't define: references by name, a call's preemptible, the records marked.
+    const AsmCode symbols = asm_test_code_pair(test, "call external\n\tmovq data+8(%rip), %rax\n\tmovl $sym+4, %eax", 3, "inline code: references");
+    const bool marked = symbols.count == 3 && (symbols.records[0].form & BUSTER_X86_FORM_FIXUP) != 0 && (symbols.records[1].form & BUSTER_X86_FORM_FIXUP) != 0 &&
+                        (symbols.records[2].form & BUSTER_X86_FORM_FIXUP) != 0;
+    const bool referred = symbols.reference_count == 3 && symbols.references[0].record == 0 && symbols.references[0].kind == BUSTER_LINK_FIXUP_CALL &&
+                          symbols.references[0].field == X86_FIXUP_DISPLACEMENT && symbols.references[0].name.length == 8 &&
+                          memcmp(symbols.references[0].name.pointer, "external", 8) == 0 && symbols.references[1].kind == BUSTER_LINK_FIXUP_PC32 &&
+                          symbols.references[1].addend == 8 && symbols.references[2].field == X86_FIXUP_IMMEDIATE && symbols.references[2].kind == BUSTER_LINK_FIXUP_ABS32 &&
+                          symbols.references[2].addend == 4;
+    asm_test_check(test, marked && referred, "inline code: references' names, kinds, fields and addends", 0);
+    // What it refuses: directives but the syntax's, its own labels but as a jmp's or jcc's target without an addend,
+    // undefined local labels, and what the matcher doesn't take.
+    static const char* const refused[] = {
+        ".byte 0x90",
+        ".globl x\nx: nop",
+        ".section .data\n.long 1",
+        ".p2align 4\nnop",
+        "loop 1f\n1:",
+        "call 1f\n1:",
+        "jmp 1f+2\n1: nop",
+        "leaq 1f(%rip), %rax\n1:",
+        "jmp 9f",
+        "jmp .Lmissing",
+        "bogus %eax",
+        ".cfi_startproc\nnop\n.cfi_endproc",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+    {
+        asm_test_code_pair(test, refused[i], -1, refused[i]);
+    }
+    // A failure without room: nothing kept in either arena.
+    Arena tiny = arena_reserve(4096);
+    tiny.length = 16;
+    tiny.capacity = 64;
+    const AsmCode exhausted = asm_assemble_code(BUSTER_S8("nop\nnop\nnop\n"), test->index, (AsmOptions){ .vectorized = true }, &test->vector, &tiny);
+    asm_test_check(test, exhausted.error != 0 && exhausted.count == 0 && tiny.length == 16, "inline code: an exhausted scratch arena keeps nothing", 0);
+    tiny.capacity = 4096;
+    arena_release(&tiny);
+}
+
 static void asm_test_valid_batches(AsmTest* test, uint64_t* random)
 {
     static const char* const registers[] = {"rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
@@ -1193,6 +1286,7 @@ static int run_assembler_tests(int count, char** arguments)
         asm_test_registers(&test);
         asm_test_register_diagnostics(&test);
         asm_test_numbers(&test);
+        asm_test_code(&test);
         asm_test_valid_batches(&test, &random);
         static const char alphabet[] = "abcdefghijklmnopqrstuvwxyz0123456789.,:;[](){}%$@+-*/<>=&|~!^\\\"# \n\t";
         for (uint32_t i = 0; i < fuzz; i += 1)
@@ -1222,6 +1316,10 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".intel_syntax noprefix\nf: jmp done\n.zero 120\njmp f\n.zero 20\n.p2align 5,0,31\ndone: ret\n.data\n.long external+7\n.quad f-8\n", directory, 0);
                 asm_test_oracle(&test, ".text\nf: movq %rdi,%rax\naddq $200,%rax\nmovl 4(%rdi,%rcx,4),%edx\nshlq %cl,%rax\nshrdq %cl,%rbx,%rax\nret\n.size f,.-f\n", directory, 0);
                 asm_test_oracle(&test, ".data\nexpr:\n.byte ~0,~1,~0+256\n.long -1|0,~0&0xffffffff\n.quad ~0xffffffffffffffff\n", directory, 0);
+                // The processor-state instructions C's inline assembly reaches (#147).
+                asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"
+                                       "fnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\n"
+                                       "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n", directory, X86_ARCH_V3);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);
