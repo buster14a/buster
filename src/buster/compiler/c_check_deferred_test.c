@@ -507,8 +507,11 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 // rule's bodies of the tokens it was made with, on the lanes it was made for.
                 const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body,
                                                                 lane_counts[l], every);
+                // The parts a group of the bodies' lanes cuts, made before the lanes started (parts_by_cost).
+                const uint64_t group = most == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * most;
+                const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
                 const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
-                                                          outcome.deferred_copies <= most);
+                                                          outcome.deferred_copies <= most && outcome.deferred_parts == parts);
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
                                                        outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
@@ -522,7 +525,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                     fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
-                            copied ? "" : " (not the rule's lanes, or its reader copied by too many of them or by none)",
+                            copied ? "" : " (not the rule's lanes or their parts, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
                 }
             }
@@ -547,6 +550,30 @@ static int run_checker_deferred_tests(int count, char** arguments)
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : outcome.deferred != expected ? (expected ? "not merged" : "merged") :
                         "not the rule's lanes, or its reader copied by too many of them or by none");
+            }
+        }
+        // A side of the rule of more than one body, on every lane its bodies can take of 8 with the first lane starting once
+        // every other has taken from the counter, as when the others arrive first: the first lane must still read the
+        // largest body, the first, which the others' takes must leave to it.
+        if (valid && size != 0 && size->bodies > 1)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_late_first = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_late_first = false;
+            const uint64_t most = size->bodies < 8 ? size->bodies : 8;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
+                                outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on %" PRIu64 " lanes with the first lane starting last: %s\n", name, most,
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
+                        outcome.deferred_active != most ? "not every lane" : "the largest body not the first lane's");
             }
         }
         // A unit that merges, with its first lane taking every part: no other lane copies the reader. (The rule's sides,

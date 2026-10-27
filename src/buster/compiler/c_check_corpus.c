@@ -628,9 +628,10 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // test-checker-deferred: without check_corpus_deferred_every_lane, the reader's own rule of how many lanes; with
 // check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
-// check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); and with
-// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests may also
-// supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
+// check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
+// check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
+// and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
+// may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
 // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
 // what it wrote, or with check_corpus_deferred_poison every byte it pushed poisoned (check_deferred_poison), and the
 // path's reading, on fresh arenas of its own, takes the state's memory over from it: check_corpus_deferred_kept says
@@ -641,6 +642,7 @@ static bool check_corpus_deferred_every_lane = true;
 static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
+static bool check_corpus_deferred_late_first;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
 static uint32_t check_corpus_deferred_reread;
@@ -726,6 +728,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                         .every_lane = check_corpus_deferred_every_lane,
                         .fail_after_replay = check_corpus_deferred_fail_merge,
                         .hold_lanes = check_corpus_deferred_hold_lanes,
+                        .late_first = check_corpus_deferred_late_first,
                         .timing = check_corpus_deferred_timing,
                         .cpus = check_corpus_deferred_cpus,
                     };
@@ -2118,9 +2121,10 @@ struct CheckCorpusOutcome
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
     // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens, the
-    // largest one's and the largest of the others', the lane that read the largest, the lanes they ran on and those that
-    // copied its reader, and whether it gave the vector path's result exactly; and with check_corpus_deferred_timing, the
-    // lanes' span, lane_run's dispatch and the other lanes' wake-up (CheckDeferred's), in nanoseconds.
+    // largest one's and the largest of the others', the lane that read the largest, the parts it cut the bodies into,
+    // the lanes they ran on and those that copied its reader, and whether it gave the vector path's result exactly; and
+    // with check_corpus_deferred_timing, the lanes' span, lane_run's dispatch and the other lanes' wake-up
+    // (CheckDeferred's), in nanoseconds.
     bool deferred;
     bool deferred_equal;
     uint64_t deferred_bodies;
@@ -2128,6 +2132,7 @@ struct CheckCorpusOutcome
     uint32_t deferred_largest_body;
     uint32_t deferred_second_body;
     uint32_t deferred_largest_lane;
+    uint64_t deferred_parts;
     uint32_t deferred_active;
     uint64_t deferred_copies;
     uint64_t deferred_lanes_ns;
@@ -2190,6 +2195,7 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_largest_body = outcome->deferred ? paths[2].deferred->largest_body : 0;
     outcome->deferred_second_body = outcome->deferred ? paths[2].deferred->second_body : 0;
     outcome->deferred_largest_lane = outcome->deferred ? paths[2].deferred->largest_lane : 0;
+    outcome->deferred_parts = outcome->deferred ? paths[2].deferred->parts : 0;
     outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;

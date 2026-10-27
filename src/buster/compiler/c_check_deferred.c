@@ -234,12 +234,17 @@ struct CheckDeferred
     // Every lane the bodies can take, however few tokens they have, as the tests and test-checker-corpus read them.
     bool every_lane;
     // For the tests (test-checker-deferred): the merge fails right after its replay into the caller's table, as one
-    // that runs out of room there does, and the unit goes to source order; and with `hold_lanes`, every lane but the
-    // first waits to take a part until the first has taken them all, so that the others must copy nothing.
+    // that runs out of room there does, and the unit goes to source order; with `hold_lanes`, every lane but the first
+    // waits to take a part until the first has taken them all, so that the others must copy nothing; and with
+    // `late_first` (not with hold_lanes), the first lane starts its part only once every other lane has taken from the
+    // counter, as when the others arrive first, so that it must still read the costliest part.
     bool fail_after_replay;
     bool hold_lanes;
-    // The first lane's word that it has taken every part, which hold_lanes' other lanes wait for.
+    bool late_first;
+    // The first lane's word that it has taken every part, which hold_lanes' other lanes wait for; and the other lanes
+    // that have taken from the counter, which late_first's first lane waits for.
     uint32_t held;
+    uint32_t others_took;
     // The lanes the bodies ran on, as the first records it: `lanes`, or fewer when the bodies' tokens pay for fewer or the
     // bodies are fewer.
     uint32_t active;
@@ -823,10 +828,20 @@ static void check_deferred_lane(void* argument)
         // A test's wait, which yields: the tests may run more lanes than CPUs.
         sched_yield();
     }
+    while (deferred->late_first && index == 0 && __atomic_load_n(&deferred->others_took, __ATOMIC_ACQUIRE) + 1 < lane_count())
+    {
+        // A test's wait for the other lanes' first takes, before the first lane's own.
+        sched_yield();
+    }
     // The costliest part, order[0], is the first lane's own, which it starts at once: the others are woken for the
     // bodies, and a woken lane reads a body at about half the first lane's speed. The counter gives out the others,
     // costliest first, to every lane as it comes.
-    for (uint64_t taken = index == 0 ? 0 : 1 + lane_take(parts - 1); taken < parts; taken = 1 + lane_take(parts - 1))
+    uint64_t taken = index == 0 ? 0 : 1 + lane_take(parts - 1);
+    if (deferred->late_first && index != 0)
+    {
+        __atomic_fetch_add(&deferred->others_took, 1, __ATOMIC_RELEASE);
+    }
+    for (; taken < parts; taken = 1 + lane_take(parts - 1))
     {
         check_deferred_part(deferred, lane, index, order[taken]);
     }
@@ -1478,6 +1493,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const uint32_t* cpus = deferred->cpus;
     const bool fail_after_replay = deferred->fail_after_replay;
     const bool hold_lanes = deferred->hold_lanes;
+    const bool late_first = deferred->late_first;
     const bool every_lane = deferred->every_lane;
     const CheckDeferredMemory memory = deferred->memory;
     *deferred = (CheckDeferred){
@@ -1489,6 +1505,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .every_lane = every_lane,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
+        .late_first = late_first,
     };
     const uint32_t count = parser->tokens.count;
     const uint64_t arena_mark = arena->length;
