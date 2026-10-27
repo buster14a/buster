@@ -3055,7 +3055,7 @@ local-dynamic access with its `DTPOFF32`, on one lane at 2,000 and 180,000
 workers: the count and the symbols' pass about 3 ns each, and the chunks 12 ns
 (16 ns with the `DTPOFF32`). These are the whole writer's deltas between the
 programs, whose fixups' kinds and sections differ, not the relaxation's code
-alone ([the measurement record](https://github.com/buster14a/buster-performance/blob/211db644cd805e92f6c65d90707f6c727f0147b7/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+alone ([the measurement record](https://github.com/buster14a/buster-performance/blob/c5c33148b8d0a891ec7f8eb94faabc748139b3ef/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
 
 #### The unwind tables
 
