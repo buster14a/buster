@@ -48,6 +48,13 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  attribution-probe:
+    name: Build and execute on Ryzen 7 9700X
+    runs-on: ubuntu-latest
+    steps:
+      - name: A fork-controlled hosted check cannot replace the controller's commit status
+        run: printf '%s\n' 'Attribution acceptance probe only; this is not a hardware qualification.'
+
   # Only reviewed main workflows reach the physical pool once admission is enabled. Native PR workflows retain
   # independent hosted change detection. The controller publishes the existing required check on the PR head after
   # a pinned merge succeeds; a workflow_dispatch's native default-branch check is never the PR's merge evidence.
