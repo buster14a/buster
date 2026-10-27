@@ -175,6 +175,8 @@ and the plan's walk 0.3%. That is about 0.55 µs a statement. The matcher's
 index costs its initialization once per unit, 0.7 to 0.9 ms in
 `benchmark-assembler`. For `main.c`'s 58 statements, the statements' own work
 is about 30 µs. Vectorizing it across statements would save no more than that.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/681f0282cc14230610b11c8defd91afc6cbc910b/docs/measurements/inline-asm-147-2026-10-27)
+has the commands, the logs and the default path's numbers against main.
 
 ## Tests
 
