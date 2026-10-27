@@ -337,6 +337,27 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false,
         },
         {
+            // The enum job captures the call, then yields to read S and its nested enum. Resuming the job must
+            // use the earlier prototype even though the nested enumerator has since hidden that spelling.
+            "suspended enum query retains an intrinsic captured before a shadow",
+            "int f(void){ {enum { A=_Generic(__builtin_rotateleft8(1,1),unsigned char:7,default:0)"
+            "+sizeof(struct S {enum {__builtin_rotateleft8=5} x;}) };\n"
+            "_Static_assert(A==7+sizeof(struct S),\"captured before suspended tag\");\n"
+            "_Static_assert(__builtin_rotateleft8==5,\"tag introduced the shadow\");}\n"
+            "_Static_assert(_Generic(__builtin_rotateleft8(1,1),unsigned char:1,default:0),\"restored intrinsic\");return 0;}\n",
+            false,
+        },
+        {
+            "cached typeof queries preserve call identities across a closed shadowing scope",
+            "int f(void){__typeof__(__builtin_rotateleft8(1,1)) before;\n"
+            "{double (*__builtin_rotateleft8)(int,int);__typeof__(__builtin_rotateleft8(1,1)) inside;\n"
+            "_Static_assert(_Generic(inside,double:1,default:0),\"ordinary shadow\");}\n"
+            "__typeof__(__builtin_rotateleft8(1,1)) after;\n"
+            "_Static_assert(_Generic(before,unsigned char:1,default:0),\"earlier intrinsic\");\n"
+            "_Static_assert(_Generic(after,unsigned char:1,default:0),\"restored intrinsic\");return 0;}\n",
+            false,
+        },
+        {
             "generic intrinsic control rejects an extra argument",
             "int f(void){return _Generic(__builtin_ia32_rdpid(1),unsigned:1,default:0);}\n",
             true,
