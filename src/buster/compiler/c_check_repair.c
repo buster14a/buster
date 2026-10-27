@@ -440,6 +440,9 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
                  // headers. Appending closing braces cannot create such an enclosing statement around this use.
                  (report->message == CHECK_INPUT_DECLARATION && ((role == PARSE_ROLE_RETURN && (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE)) || asm_name)) ||
                  (report->message == CHECK_INPUT_RETURN && kind == PARSE_KIND_RETURN);
+        // The asm's complete original operands fix a naked parameter reference. A synthetic body closer
+        // cannot supply the non-asm body constraint, which remains outside this whitelist.
+        result |= report->message == CHECK_INPUT_NAKED_PARAMETER && role == PARSE_ROLE_CLOSE_ASM;
         if (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_GOTO)
         {
             uint32_t ancestor = token;

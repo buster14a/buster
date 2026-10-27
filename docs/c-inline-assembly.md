@@ -41,7 +41,48 @@ A template can't reach the function's frame, which Tier 0 lays out otherwise tha
 clang anyway. Moving a helper's records into its caller's code would be a
 follow-up, if a measurement shows the call matters.
 
-## Naked functions
+## Naked-function checking
+
+The semantic reader rejects naked functions' non-asm statements and references
+to their parameters in asm operands (#554), including under `-fsyntax-only`.
+`c_check_naked_input.c` uses the existing statement tree and resolved parameter
+identities. It permits empty bodies, null statements and uninitialized variables
+with asm register labels, including declarators whose inline type defines
+members or enumerators. Only the statement's own declarators are inspected.
+Ordinary functions after a naked definition retain
+their ordinary rules. Later declarations inherit a naked prototype's attribute;
+an attribute declared after a definition does not change that earlier body's
+checking.
+
+Parameter references in unevaluated or discarded expression operands still
+diagnose. A statement expression's compound body and a type-only `typeof` query
+are outside that expression walk, as in Clang. Type-form `sizeof` and `alignof`
+visit their retained inline VLA bounds, including dimensions below a constant
+array dimension; constant bounds and pointer/typeof type spellings do not
+become parameter uses. A bounded scratch worklist preserves the rightmost-first
+expression order for nested type queries. Operand errors become available
+at the asm's closing parenthesis, body-statement errors at the body's closing
+brace. A rejected input keeps its diagnostic spelling separately, so errors
+within a statement precede the body constraint while the displayed location is
+the offending statement or parameter use.
+
+The new function bit shares the existing flag column. Only units declaring
+naked functions run the body scan, advancing once through the source-ordered
+asm list rather than rescanning it per body; only a rejected input allocates the small
+diagnostic record. Attribute inheritance copies the small attribute accumulator
+before appending the inherited record. No token column or syntax replay is added.
+The checker and its scalar twin consume the same resolved metadata. Lowering's
+unsupported-feature checks remain the backstop for accepted bodies.
+
+`test-checker-asm` compares the original fixtures with Clang, including exact
+messages and columns for these two errors. `test-checker-deferred` also compares
+valid, rejected and inherited naked bodies across its binding modes and lanes.
+The behavior references are Clang/LLVM `llvmorg-23.1.1`'s
+[`SemaDecl.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaDecl.cpp)
+and [`SemaStmtAsm.cpp`](https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaStmtAsm.cpp),
+checked with original probes against installed Clang 23.1.4. No LLVM
+implementation or test fixture is copied.
+## Naked-function lowering
 
 A function is naked when any of its declarations up to its definition has the
 attribute, as clang takes it. That includes an unannotated prototype before a
