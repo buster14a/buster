@@ -471,6 +471,15 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
     return result;
 }
 
+// The ordering position is exclusive, so it may equal original_end after a complete original statement. A synthetic
+// closer would put completion past that bound. Never infer placement/conflicts from a synthetically closed record.
+static bool check_repair_loop_report(const CheckRepair* repair, const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
+    return repair->status == CHECK_REPAIR_READY && loop != 0 && report->pragma == loop->pragma && report->token == loop->position &&
+           loop->statement < repair->original_end && loop->position <= repair->original_end && repair->record_begin == repair->original_end;
+}
+
 static bool check_repair_graph_report(const CheckRepair* repair, const CheckGraph* graph, const CheckReport* report)
 {
     bool result = false;

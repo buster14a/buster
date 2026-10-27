@@ -61,8 +61,19 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
         case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
+        case CHECK_INPUT_LOOP_HINT: result = "invalid '#pragma clang loop' directive"; break;
+        case CHECK_INPUT_LOOP_PLACEMENT: result = "expected a for, while, or do-while loop to follow '#pragma clang loop'"; break;
+        case CHECK_INPUT_LOOP_MISSING: result = "missing argument; expected an integer value"; break;
+        case CHECK_INPUT_LOOP_EXPRESSION: result = "expected expression"; break;
+        case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
     }
     return result;
+}
+
+static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
+    return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)
@@ -196,7 +207,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
-            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i)))
+            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
             {
                 first[token] = i;
             }
@@ -251,7 +262,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t index = (uint32_t)first[token];
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_message(input->reports[index].message);
+                                                                                     check_driver_input_report_message(input, input->reports + index);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (source != BUSTER_CHECK_NONE)
                 {
