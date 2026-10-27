@@ -233,6 +233,28 @@ both directions, high-bit bytes, and operations through 1 MiB. The checker
 tests also compile and execute source fixtures with retained size proofs and
 argument side effects against Clang.
 
+The [#599 qualification](https://github.com/buster14a/buster-performance/tree/afaf2b45b826e4a20b3bb5970ccb071e2ec5adeb/docs/measurements/memory-builtins-599-2026-10-27)
+compares main `92c025e7` with implementation `f499888c` on the locked 9700X,
+Clang 23.1.1, CPU 2. Dynamic disjoint/equal cases have these medians:
+
+| Operation | 4 KiB before / after, ns | 1 MiB speedup |
+| --- | ---: | ---: |
+| memcpy | 1016.4 / 70.1 | 17.1x |
+| memmove | 1016.6 / 148.5 | 7.4x |
+| memset | 760.4 / 115.4 | 8.0x |
+| memcmp, equal | 1494.8 / 203.7 | 8.0x |
+| strlen | 773.2 / 193.8 | 4.1x |
+
+The eight-byte dynamic copy is 1.62 ns versus 3.06 ns before; known 32-byte
+copies are 1.44 versus 8.23 ns. Empty dynamic copy/compare add about 0.18 ns
+of fixed overhead. The 41-wrapper object grows from 4486 to 6467 bytes of
+text. Compiling the wrappers adds 0.85% instructions; whole SQLite compilation
+is effectively unchanged (146.953 / 146.971 ms, overlapping ranges), with
+about 3 MiB more peak RSS. The record retains libc/Clang references, all
+alignments, overlap and mismatch shapes, code size, compiler cost, identities,
+guarded tests and measurement limits. These are emitted-wrapper measurements;
+they establish neither application-wide gains nor libc parity.
+
 ## Constant and object-bound queries
 
 `c_check_builtin_query.c` separates source constant proof from the runtime
