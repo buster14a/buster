@@ -1511,7 +1511,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
-static bool pp_history_ensure(Preprocessor* pp);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preprocessor* pp);
 
 #include "c_preprocessor_history.c"
 
@@ -17087,8 +17087,9 @@ static void pp_history_report(Preprocessor* pp, bool result)
 // The unit's expansion history, recorded now if PPOptions.defer_history put it off. A reader of the history
 // (pp_history_at, the history's records) given a unit whose history may be deferred calls this first, as
 // pp_diagnose_output and parse_print_diagnostics do. Returns whether there is a history: a unit with
-// PPOptions.no_history, run otherwise than by pp_run or pp_run_source, or whose replay fails has none.
-static bool pp_history_ensure(Preprocessor* pp)
+// PPOptions.no_history, run otherwise than by pp_run or pp_run_source, or whose replay fails has none. An entry point:
+// the replay is the whole preprocessor, which the units that read a history (the checker's) call in its home.
+BUSTER_PREPROCESSOR_ENTRY bool pp_history_ensure(Preprocessor* pp)
 {
     if (pp->history_deferred)
     {
