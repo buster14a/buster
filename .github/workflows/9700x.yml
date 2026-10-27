@@ -258,6 +258,17 @@ jobs:
         # the longest first. Each heading's report gives its CPU time beside its time, which over it shows the CPUs the
         # command kept busy. Each command has 180 s from its start.
         run: |
+          # Temporary (#542's measurement, removed before review): every external tool the tests run, logged with its
+          # CPU time by test (tools/ci/oracle_measure.c).
+          measure="$RUNNER_TEMP/oracle-measure"
+          rm -rf "$measure"
+          mkdir -p "$measure/bin"
+          cc -std=c17 -O2 -Wall -Wextra -Werror -o "$measure/wrap" tools/ci/oracle_measure.c
+          for tool in clang clang++ gcc g++ cc c++ as ld ld.bfd ld.lld mold wild gdb perf readelf objdump size nm \
+              llvm-dwarfdump llvm-readobj llvm-objdump llvm-mc gzip; do
+              ln -s "$measure/wrap" "$measure/bin/$tool"
+          done
+          export PATH="$measure/bin:$PATH" BUSTER_MEASURE_LOG="$measure/log"
           taskset -c 0-7 ./build/compiler parallel --github --timeout 180 <<'TESTS'
           == Test the foreign inputs [8 CPUs]
           # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
@@ -622,6 +633,22 @@ jobs:
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
+
+      - name: Summarize the tests' external processes
+        # Temporary (#542's measurement, removed before review).
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/oracle-measure/log"
+          test -f "$log"
+          echo "processes $(wc -l < "$log"), CPU $(awk -F'\t' '{ s += $3 } END { printf "%.1f", s / 1e6 }' "$log") s"
+          echo "== by test and tool: CPU s, processes, wall s, repeated arguments' CPU s"
+          awk -F'\t' '{ key = substr($1, 1, 110) "\t" $2; n[key] += 1; c[key] += $3; w[key] += $4;
+                         seen = key "\t" $6; if (seen in once) r[key] += $3; once[seen] = 1 }
+                       END { for (k in n) printf "%8.2f %6d %8.2f %8.2f  %s\n", c[k] / 1e6, n[k], w[k] / 1e6, r[k] / 1e6, k }' "$log" | sort -rn | awk 'NR <= 80'
+          echo "== by tool"
+          awk -F'\t' '{ n[$2] += 1; c[$2] += $3 } END { for (k in n) printf "%8.2f %6d  %s\n", c[k] / 1e6, n[k], k }' "$log" | sort -rn
+          echo "== by test"
+          awk -F'\t' '{ k = substr($1, 1, 110); n[k] += 1; c[k] += $3 } END { for (k in n) printf "%8.2f %6d  %s\n", c[k] / 1e6, n[k], k }' "$log" | sort -rn | awk 'NR <= 60'
 
       - name: Benchmark the C lexer on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
