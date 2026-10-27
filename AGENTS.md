@@ -339,7 +339,7 @@ designs and the compilers already built this way.
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as twelve translation units: `main.c` itself, the driver's unit, and each
+  it as eleven translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -347,8 +347,7 @@ designs and the compilers already built this way.
   command's branch names its unit. The modules that several units' commands
   run compile in one unit alone, their home, which the others call (#270): the
   lexer in the driver's unit, the preprocessor and the parser in the front
-  end's (but for the fragments' unit, which compiles a parser of its own with
-  the fragment sink), and the linker's modules (`import.c`, `runtime.c`,
+  end's, and the linker's modules (`import.c`, `runtime.c`,
   `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
   unit. Their entry points that other units call take the module's macro
   (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
@@ -1039,7 +1038,10 @@ designs and the compilers already built this way.
   places with clang's messages. It also holds the driver. `docs/c-parser.md`
   explains the design and its 9700X measurements. `c_parser_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
-  `c_parser_benchmark.c` provides `benchmark-parser`.
+  `c_parser_benchmark.c` provides `benchmark-parser`. Salter's operator
+  fragments, the alternative to the postorder that #104–#107 measured end to
+  end beside the checker's tree walk, lost and were removed: [the
+  decision](docs/c-parser-fragments.md).
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock), `time-runs` (whole
   processes, and builds compared over their code's placements and fresh
@@ -4298,18 +4300,6 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 `docs/c-parser.md` has the numbers for `sqlite3.c`, the libc corpus and `main.c`.
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
-
-## Fragment experiment tests
-
-The test-only expression-fragment experiment is described in
-[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
-`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
-AVX-512 byte routing, including exhaustive short masks and exact protected-page
-boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
-experimental sink, compiled separately in `main_unit_fragments.c`; production
-parser units have no fragment sink. These checks do not establish semantic or
-SSA IR identity. The complete #107 comparison still requires the shared
-semantic consumer and its actual output.
 
 ## Scoped binding kernels
 

@@ -494,8 +494,6 @@ jobs:
           ./build/compiler test-differential-harness
           == Test the independent preprocessor fuzz harness in C23
           ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -617,8 +615,6 @@ jobs:
           ./build/compiler test-tier1-allocation
           == Test dataflow bitsets
           ./build/compiler test-dataflow
-          == Test fragment byte interleave and protected-page tails
-          ./build/compiler test-fragment-interleave
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
