@@ -22,12 +22,13 @@
 // - Squeezes: a lane short of room (CheckProgramLanes.squeeze_body), in a generated program of its own seed and in each
 //   failing program, by each path, with -g's rows and unwind tables and without, on 8 lanes: the bodies with the fewest
 //   and the most tokens, each squeezed in turn in the output, scratch and bytes arenas of the lane that takes its part,
-//   from no room to spare up, doubling, until the part fits. Each emission is one lane's object or failure, run again on
-//   one lane while the part doesn't fit, and the generated program's sweeps reach each of a resource's reasons: the
-//   lowering's, Tier 0's and the code's after it.
+//   from no room to spare up, doubling, until the part fits. One lane's emission makes the generated program's object
+//   and each failing program's failure; each emission on lanes is one lane's, run again on one lane while the part
+//   doesn't fit, and the generated program's sweeps reach each of a resource's reasons: the lowering's, Tier 0's and
+//   the code's after it.
 // - Lanes that don't start: in a child limited to the processes it has (RLIMIT_NPROC, which doesn't limit root), so that
 //   lane_run starts no thread, the squeezes' program and each failing program on 8 lanes, as above: one lane's object or
-//   failure, run again on one lane.
+//   failure, run again on one lane. The child's alarm ends it if its lanes hang, which fails the check.
 // - The driver (with --executable, this executable by default): four of the generated programs' objects (-c) and
 //   executables (one of 3 functions, two of random sizes and the first of 600) by --lanes 1, 3 and 8 and by default, by
 //   each path: the same bytes, and the executables exit with the same status; in a child limited as above, the first
@@ -565,10 +566,11 @@ struct CheckLanesTestSqueezes
 
 // `unit` on 8 lanes with a lane short of room (see the file's comment): its bodies with the fewest and the most tokens,
 // whose parts the lanes are likely to take last and first, each squeezed in turn in the output, scratch and bytes arenas
-// of the lane that takes its part, from no room to spare up, doubling, until the part fits. Each emission must be one
-// lane's, run again on one lane for a resource's reason while the part doesn't fit.
+// of the lane that takes its part, from no room to spare up, doubling, until the part fits. One lane's emission must make
+// its object where the program `succeeds`, and fail where it doesn't; each emission on lanes must be one lane's, run
+// again on one lane for a resource's reason while the part doesn't fit.
 static void check_lanes_test_squeeze(CheckLanesTestTally* tally, CheckLanesTestSqueezes* squeezes, CheckLanesTestUnit* unit, const Parser* parser,
-                                     Preprocessor* pp, const InternTable* identifiers, bool scalar, bool rows, const char* what)
+                                     Preprocessor* pp, const InternTable* identifiers, bool scalar, bool rows, bool succeeds, const char* what)
 {
     static const uint32_t arenas[] = { BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH, BUSTER_CHECK_EMIT_SQUEEZE_BYTES };
     static const char* const names[] = { "output", "scratch", "bytes" };
@@ -586,6 +588,10 @@ static void check_lanes_test_squeeze(CheckLanesTestTally* tally, CheckLanesTestS
     }
     char detail[384];
     CheckLanesTestEmission one = check_lanes_test_emit(unit, parser, pp, identifiers, NULL, scalar, rows, rows);
+    snprintf(detail, sizeof(detail), "%s, %s path%s: status %u, reason %s", what, scalar ? "scalar" : "vector", rows ? ", -g and unwind tables" : "", (uint32_t)one.status,
+             one.reason != NULL ? one.reason : "none");
+    check_lanes_test_expect(tally, succeeds ? one.emitted && one.built : !one.emitted,
+                            succeeds ? "the squeezes' program makes its object on one lane" : "a squeezed failing program fails on one lane", detail);
     for (uint32_t s = 0; program->body_count > 1 && s < BUSTER_ARRAY_LENGTH(bodies); s += 1)
     {
         for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)
@@ -656,7 +662,7 @@ static void check_lanes_test_squeezes(CheckLanesTestTally* tally, const char* di
             check_lanes_test_expect(tally, unit.ready, "compile a squeezed program to its selected program", path);
             for (uint32_t shape = 0; unit.ready && shape < 2; shape += 1)
             {
-                check_lanes_test_squeeze(tally, s == 0 ? &generated : &failing, &unit, &parser, &pp, &identifiers, scalar != 0, shape == 1,
+                check_lanes_test_squeeze(tally, s == 0 ? &generated : &failing, &unit, &parser, &pp, &identifiers, scalar != 0, shape == 1, s == 0,
                                          s == 0 ? "the squeezes' program" : check_lanes_test_failures[s - 1].name);
             }
             check_lanes_test_close(&unit);
@@ -682,7 +688,8 @@ static void check_lanes_test_squeezes(CheckLanesTestTally* tally, const char* di
 
 // Lanes that don't start (see the file's comment): in a child limited to the processes it has (RLIMIT_NPROC, which
 // doesn't limit root), so that lane_run starts no thread, the squeezes' program and each failing program on 8 lanes, by
-// each path, with -g's rows and unwind tables and without: one lane's object or failure, run again on one lane.
+// each path, with -g's rows and unwind tables and without: one lane's object or failure, run again on one lane. The
+// child's alarm ends it if lanes wait for workers that never started, and the parent says how it ended.
 static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* directory)
 {
     if (geteuid() == 0)
@@ -703,6 +710,7 @@ static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* d
                 .rlim_cur = 0,
                 .rlim_max = 0,
             };
+            alarm(BUSTER_OBJECT_TEST_RUN_SECONDS);
             CheckLanesTestTally own = { .random = 1 };
             check_lanes_test_expect(&own, setrlimit(RLIMIT_NPROC, &limit) == 0, "limit the child to the processes it has", 0);
             uint32_t compared = 0;
@@ -734,6 +742,8 @@ static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* d
                         snprintf(detail, sizeof(detail), "%s, %s path%s: status %u/%u, %llu/%llu bytes, %u lanes, again %u", path, scalar != 0 ? "scalar" : "vector",
                                  shape == 1 ? ", -g and unwind tables" : "", (uint32_t)one.status, (uint32_t)many.status, (unsigned long long)one.size,
                                  (unsigned long long)many.size, many.active, (uint32_t)many.again);
+                        check_lanes_test_expect(&own, s == 0 ? one.emitted && one.built : !one.emitted,
+                                                s == 0 ? "the squeezes' program makes its object on one lane" : "a failing program fails on one lane", detail);
                         check_lanes_test_expect(&own, check_lanes_test_same(&one, &many), "an emission whose lanes don't start makes one lane's", detail);
                         check_lanes_test_expect(&own, many.active == 1 || many.again == CHECK_PROGRAM_AGAIN_START, "lanes that don't start run the bodies again on one lane",
                                                 detail);
@@ -754,7 +764,21 @@ static void check_lanes_test_unstarted(CheckLanesTestTally* tally, const char* d
         }
         int status = 0;
         const bool waited = child > 0 && waitpid(child, &status, 0) == child;
-        check_lanes_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "emissions whose lanes don't start make one lane's, in a limited child", 0);
+        char ended[96];
+        if (!waited)
+        {
+            snprintf(ended, sizeof(ended), "the child couldn't be started or waited for");
+        }
+        else if (WIFEXITED(status))
+        {
+            snprintf(ended, sizeof(ended), "the child exited with status %d", WEXITSTATUS(status));
+        }
+        else
+        {
+            snprintf(ended, sizeof(ended), "the child was killed by signal %d%s", WTERMSIG(status), WTERMSIG(status) == SIGALRM ? ", its alarm: it hung" : "");
+        }
+        check_lanes_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "emissions whose lanes don't start make one lane's, in a limited child",
+                                ended);
     }
 }
 

@@ -136,10 +136,12 @@ as long as it. #113's deferred reader sizes its lanes the same way
   program of its own seed and in the failing programs, by each path, with `-g`
   and without, the bodies with the fewest and the most tokens are squeezed in
   each arena from no room up, doubling, until the part fits: each emission one
-  lane's object or failure, the sweeps reaching each reason a lane short of
-  room has, on lane 0 and on the others;
+  lane's object or failure (the generated program's an object, the failing
+  programs' a failure), the sweeps reaching each reason a lane short of room
+  has, on lane 0 and on the others;
 - lanes that start no thread, in a child limited to the processes it has
-  (`RLIMIT_NPROC`, which doesn't limit root): one lane's object or failure;
+  (`RLIMIT_NPROC`, which doesn't limit root), under an alarm that ends it if
+  its lanes hang: one lane's object or failure;
 - the driver's objects and executables by `--lanes 1`, `2`, `3`, `8` and by
   default, by each path: the same bytes, and executables that exit alike; with
   lanes that start no thread, by `--lanes 8`, `--lanes 1`'s objects and
