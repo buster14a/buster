@@ -169,6 +169,32 @@ immutable, errors restore the entry arena length and preserve the result, and
 success discards all temporary arrays. Sorting requires temporary capacity, so
 capacity exhaustion can precede duplicate-destination diagnosis.
 
+### Resolver measurements (#608)
+
+On the approved locked Ryzen 7 9700X, Clang 23.1.1 with the normal optimized
+flags, three independent processes pinned to CPU 2 measured the complete
+resolver call and arena reset at source `e2dcb4b63c2611946be26a424a4618f6b584cfb8`.
+The 1024-move adversarial chain took 116.487–117.449 ms with the original scan
+and 13.309–13.314 microseconds with dispatch. Median retired instructions fell
+from 3,842,936,080 to 420,805. Across 32–1024 moves, doubling N increased the
+original chain's instruction work by 7.39–7.96 times, and dispatch's by
+2.13–2.15 times. Reversed chains, independent moves, cycles and fan-out were
+also measured at every requested size and retain the indexed path's bounded
+work. These are resolver measurements, separate from whole-compiler throughput.
+
+At 1024 moves the indexed call peaks at 44 KiB of arena storage versus 21 KiB
+for the scan; both retain 16 KiB. The small cutoff preserves the current
+caller's original algorithm and smaller arena budget. Its tuning remains an
+opportunity: forced indexing takes 43.811–44.878 ns on the six-move synthetic
+chain, while dispatch takes 106.910–117.510 ns; the original scan wins on the
+one- and two-move chains. The actual caller's shuffle distribution remains
+unmeasured, so these data establish neither an optimal cutoff nor a corpus
+speedup. The native/Clang pipeline, allocation, liveness, selection, call-graph
+and resolver ASan/UBSan qualification all passed on the locked host.
+
+The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
+record the shapes, complete process ranges, memory costs and validation scope.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
