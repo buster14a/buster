@@ -3158,7 +3158,17 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
         while (classified < ready_count)
         {
             const uint32_t end = ready_count;
-            if (scalar || end - classified == 1)
+            bool scalar_record = false;
+            if (end - classified == 1)
+            {
+                const uint32_t index = ready[classified] >> BUSTER_TYPE_INDEX_SHIFT;
+                const uint8_t kind = table->types.kind[index];
+                // A chain's one-member record needs no fold setup. A lone array or many-member record still benefits
+                // from folding all sixteen offsets together, so it keeps the vector path.
+                scalar_record = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
+                                table->tags.member_count[table->types.index[index]] <= 1;
+            }
+            if (scalar || scalar_record)
             {
                 abi_classify_scalar(abi, table, ready + classified, end - classified);
             }

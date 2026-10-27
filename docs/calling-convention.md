@@ -516,8 +516,10 @@ base, an array for its element, an `_Atomic` for its value, and every record
 for its members. A flexible array member waits for its element, since the
 incomplete array itself is never classified. Waiting for wide records' members
 also covers the transitive storage reads of `abi_wide_alignment` for arrays
-of no elements. The vector classifier takes each frontier as a batch; a
-singleton takes the scalar classifier directly.
+of no elements. The vector classifier takes each frontier as a batch. A
+singleton record with at most one member takes the scalar classifier directly;
+arrays and records with more members retain the vector fold across their
+sixteen offsets.
 
 The scheduler links a pending type to just its next unfinished dependency.
 Once a frontier is classified, its waiters resume their member scans and
