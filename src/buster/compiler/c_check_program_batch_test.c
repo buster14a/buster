@@ -12,7 +12,14 @@ static void check_test_program_batch(CheckTest* test)
     CheckTestTypes types = { 0 };
     bool ready = check_test_types_open(&types);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    const uint32_t sizes[] = { sizeof(CheckOp), sizeof(uint32_t), sizeof(uint32_t), sizeof(uint32_t), sizeof(CheckValue), sizeof(CheckNodeConversions) };
+    const uint32_t sizes[] = {
+        sizeof(CheckOp),
+        sizeof(uint32_t),
+        sizeof(uint32_t),
+        sizeof(uint32_t),
+        sizeof(CheckValue),
+        sizeof(CheckNodeConversions),
+    };
     uint8_t* mappings[BUSTER_ARRAY_LENGTH(sizes)] = { 0 };
     uint64_t lengths[BUSTER_ARRAY_LENGTH(sizes)] = { 0 };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sizes); c += 1)
@@ -33,15 +40,39 @@ static void check_test_program_batch(CheckTest* test)
         check_lower_classify_types_scalar(&types.table, types.table.types.count, type_classes, type_facts);
     }
     check_test_expect(test, ready, "expression templates have guarded graph, value and conversion columns");
-    uint32_t locals[2] = { BUSTER_CHECK_NONE, 0 };
-    SymbolId symbols[2] = { 0, 1 };
+    uint32_t locals[2] = {
+        BUSTER_CHECK_NONE,
+        0,
+    };
+    SymbolId symbols[2] = {
+        0,
+        1,
+    };
     uint8_t object_flags[1] = { 0 };
-    const CheckOp binary[] = { CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE, CHECK_OP_REMAINDER,
-                              CHECK_OP_SHIFT_LEFT, CHECK_OP_SHIFT_RIGHT, CHECK_OP_LESS, CHECK_OP_LESS_EQUAL, CHECK_OP_GREATER,
-                              CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR };
+    const CheckOp binary[] = {
+        CHECK_OP_ADD,
+        CHECK_OP_SUBTRACT,
+        CHECK_OP_MULTIPLY,
+        CHECK_OP_DIVIDE,
+        CHECK_OP_REMAINDER,
+        CHECK_OP_SHIFT_LEFT,
+        CHECK_OP_SHIFT_RIGHT,
+        CHECK_OP_LESS,
+        CHECK_OP_LESS_EQUAL,
+        CHECK_OP_GREATER,
+        CHECK_OP_GREATER_EQUAL,
+        CHECK_OP_EQUAL,
+        CHECK_OP_NOT_EQUAL,
+        CHECK_OP_BIT_AND,
+        CHECK_OP_BIT_OR,
+        CHECK_OP_BIT_XOR,
+    };
     for (uint32_t count = 1; ready && count <= BUSTER_CHECK_BATCH_TEST_NODES; count += 1)
     {
-        CheckInput input = { .compound_objects = object_flags, .static_objects = object_flags };
+        CheckInput input = {
+            .compound_objects = object_flags,
+            .static_objects = object_flags,
+        };
         CheckGraph* graph = &input.graph;
         graph->count = count;
         graph->ops = (CheckOp*)(mappings[0] + lengths[0] - (uint64_t)count * sizes[0]);
@@ -53,7 +84,13 @@ static void check_test_program_batch(CheckTest* test)
             .conversions = (CheckNodeConversions*)(mappings[5] + lengths[5] - (uint64_t)count * sizes[5]),
             .count = count,
         };
-        CheckProgram program = { .input = &input, .stream = &stream, .types = &types.table, .object_count = 2, .object_symbols = symbols };
+        CheckProgram program = {
+            .input = &input,
+            .stream = &stream,
+            .types = &types.table,
+            .object_count = 2,
+            .object_symbols = symbols,
+        };
         // Plain postorder, promoted edges, folded subtrees (gaps), and repeated/reordered operands. Each mode
         // still compares the actual scalar task output; fallback must not hide a stricter eligibility rule.
         for (uint32_t mode = 0; mode < 5; mode += 1)
@@ -158,26 +195,61 @@ static void check_test_program_batch(CheckTest* test)
     // inaccessible: reading it would be both an out-of-bounds access here and a race in a concurrent lowering.
     if (ready)
     {
-        CheckOp ops[2] = { CHECK_OP_VALUE, CHECK_OP_VALUE };
-        uint32_t operands[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
-        uint32_t source_tokens[2] = { 0, 1 };
-        uint32_t declarations[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
-        uint32_t bodies[2] = { 10, 20 };
+        CheckOp ops[2] = {
+            CHECK_OP_VALUE,
+            CHECK_OP_VALUE,
+        };
+        uint32_t operands[2] = {
+            BUSTER_CHECK_NONE,
+            BUSTER_CHECK_NONE,
+        };
+        uint32_t source_tokens[2] = {
+            0,
+            1,
+        };
+        uint32_t declarations[3] = {
+            BUSTER_CHECK_NONE,
+            BUSTER_CHECK_NONE,
+            BUSTER_CHECK_NONE,
+        };
+        uint32_t bodies[2] = {
+            10,
+            20,
+        };
         uint8_t flags[2] = { 0 };
+        uint8_t static_flags[2] = { 0 };
         SymbolId object_symbols[3] = { 0 };
         CheckValue source_values[2] = {
-            { .type = BUSTER_TYPE_INT, .category = CHECK_LVALUE, .object = 1 },
-            { .type = BUSTER_TYPE_INT, .category = CHECK_LVALUE, .object = 2 },
+            {
+                .type = BUSTER_TYPE_INT,
+                .category = CHECK_LVALUE,
+                .object = 1,
+            },
+            {
+                .type = BUSTER_TYPE_INT,
+                .category = CHECK_LVALUE,
+                .object = 2,
+            },
         };
         CheckNodeConversions conversions[2] = { 0 };
         CheckInput input = {
-            .graph = { .ops = ops, .tokens = source_tokens, .operand0 = operands, .operand1 = operands, .count = 2 },
+            .graph = {
+                .ops = ops,
+                .tokens = source_tokens,
+                .operand0 = operands,
+                .operand1 = operands,
+                .count = 2,
+            },
             .token_count = 2,
             .compound_objects = flags,
-            .static_objects = flags,
+            .static_objects = static_flags,
             .declaration_bodies = bodies,
         };
-        CheckStream stream = { .values = source_values, .conversions = conversions, .count = 2 };
+        CheckStream stream = {
+            .values = source_values,
+            .conversions = conversions,
+            .count = 2,
+        };
         CheckProgram program = {
             .input = &input,
             .stream = &stream,
@@ -211,6 +283,14 @@ static void check_test_program_batch(CheckTest* test)
         const bool lowered = check_lower_batch_expression(&writer, 0);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
+        flags[0] = 1;
+        source_values[0].category = CHECK_RVALUE;
+        source_values[0].constant_kind = CHECK_CONSTANT_INTEGER;
+        source_values[0].integer = 7;
+        writer.count = 0;
+        writer.batch.first = BUSTER_CHECK_NONE;
+        check_test_expect(test, !check_lower_batch_expression(&writer, 0) && writer.count == 0,
+                          "an automatic compound literal always defers its initializer, before testing constant proofs");
     }
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sizes); c += 1)
     {

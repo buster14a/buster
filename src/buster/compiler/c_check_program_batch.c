@@ -77,11 +77,14 @@ static bool check_lower_batch_node(const CheckLowerWriter* writer, uint32_t node
     const CheckValue* value = program->stream->values + node;
     const CheckOp op = graph->ops[node];
     const uint8_t facts = check_lower_facts(writer, value->type);
+    const uint32_t object = value->object;
+    const bool compound = op == CHECK_OP_VALUE && object != 0 && object < program->object_count &&
+                          program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
     *class = check_lower_class(writer, value->type);
     *kind = 0;
     *bits = 0;
     *arity = 0;
-    bool valid = op != CHECK_OP_STATEMENT_VALUE && value->overload_head == 0 && *class >= BUSTER_TYPED_CLASS_I8 && *class <= BUSTER_TYPED_CLASS_F64 &&
+    bool valid = !compound && op != CHECK_OP_STATEMENT_VALUE && value->overload_head == 0 && *class >= BUSTER_TYPED_CLASS_I8 && *class <= BUSTER_TYPED_CLASS_F64 &&
                  (facts & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS)) == 0;
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
@@ -115,9 +118,7 @@ static bool check_lower_batch_node(const CheckLowerWriter* writer, uint32_t node
     }
     else if (valid && recipe == BUSTER_CHECK_LOWER_BATCH_VALUE)
     {
-        const uint32_t object = value->object;
-        valid = value->category == CHECK_LVALUE && object != 0 && object < program->object_count &&
-                (!program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
+        valid = value->category == CHECK_LVALUE && object != 0 && object < program->object_count;
         if (valid)
         {
             // A window may straddle bodies. Another lane owns that body's local_map entries, so speculative
