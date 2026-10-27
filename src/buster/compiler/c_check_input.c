@@ -369,6 +369,10 @@ struct CheckInputReader
     uint32_t* next_child;
     uint32_t* first_value;
     uint32_t* last_value;
+    // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
+    // children's rather than walking their chains, which an initializer's separators, each a child of the next, made
+    // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
+    uint32_t* value_counts;
     uint32_t* value_next;
     uint32_t* scope_marks;
     uint32_t* scope_ends;
@@ -3523,9 +3527,13 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
+    const bool scalar = parser->options.scalar;
     for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
     {
         const uint32_t token = parser->postorder[order];
+        // Every token's first value is written when the walk reaches it, NONE for one without values, before its parent
+        // reads it: a column written before it is read.
+        reader->first_value[token] = BUSTER_CHECK_NONE;
         if (check_input_expression_end(reader, token) > reader->expression_limit ||
             (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0))
         {
@@ -3555,9 +3563,16 @@ static void check_input_expressions(CheckInputReader* reader)
                     first = begin;
                 }
                 last = reader->last_value[child];
-                for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
+                if (scalar)
                 {
-                    count += 1;
+                    for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
+                    {
+                        count += 1;
+                    }
+                }
+                else
+                {
+                    count += reader->value_counts[child];
                 }
             }
         }
@@ -4196,6 +4211,7 @@ static void check_input_expressions(CheckInputReader* reader)
             {
                 reader->first_value[token] = node;
                 reader->last_value[token] = node;
+                reader->value_counts[token] = 1;
             }
         }
         else if (list)
@@ -4203,6 +4219,7 @@ static void check_input_expressions(CheckInputReader* reader)
             reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
             reader->first_value[token] = first;
             reader->last_value[token] = last;
+            reader->value_counts[token] = count;
         }
     }
 }
@@ -4503,6 +4520,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(next_child, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(first_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
+    BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_marks, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
