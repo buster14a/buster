@@ -282,9 +282,10 @@ release, on the laptop):
 - **The front end:** the preprocessor's 47 MB, and the parser's 13 columns,
   each in an arena of its own: about 31 MB by their sizes.
 
-`abi_initialize` also clears ABI rows for every type the table could hold,
-about 37 MB of the checker's scratch, inside what the reader touched: user
-time rather than new pages. #517 sizes them by the types.
+These were measured on #520's head with the three changes, before main took
+#568 (the reader, #529) and #517. `abi_initialize` cleared ABI rows for every type the table could hold, about
+37 MB of the checker's scratch, inside what the reader touched: user time
+rather than new pages, which #517 sizes by the types.
 [#572](https://github.com/buster14a/buster/issues/572) follows up on the rest:
 sizing the reader's columns by their records, as #528 proposed, and the graph's
 and the stream's values. It shares the reader with
