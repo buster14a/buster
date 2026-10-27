@@ -463,9 +463,11 @@ static void cbuiltin_lower_overflow(CBuiltinLowerRecipe* recipe, const CBuiltinL
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
 }
 
+// A 128-bit operand's or destination's descriptor: BUSTER_CBUILTIN_LOWER_WIDE, signed or not, with no other bit beside it
+// (a malformed one is refused as any other unsupported descriptor).
 static bool cbuiltin_lower_wide(uint32_t type)
 {
-    return (type & BUSTER_CBUILTIN_LOWER_WIDE) != 0;
+    return (type & ~BUSTER_CBUILTIN_SIGNED) == BUSTER_CBUILTIN_LOWER_WIDE;
 }
 
 // `slot` = `a` + `b` (or `a` - `b`, `kind` SUB), of U64 slots apart from `slot`, and `carry` = 1 when the sum wrapped (the
