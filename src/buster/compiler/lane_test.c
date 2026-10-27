@@ -454,7 +454,9 @@ static bool lane_test_arenas(void)
         const uint64_t alignment = 1ull << ((random >> 20) % 13);
         const uint8_t* counted = arena_push(&measure, size, alignment);
         const uint8_t* held = arena_push(&reserved, size, alignment);
-        alike = counted != 0 && held != 0 && measure.length == reserved.length && counted - measure.base == held - reserved.base;
+        // As integers: a measuring arena's addresses are in no object, so subtracting them as pointers is undefined.
+        alike = counted != 0 && held != 0 && measure.length == reserved.length &&
+                (uintptr_t)counted - (uintptr_t)measure.base == (uintptr_t)held - (uintptr_t)reserved.base;
     }
     lane_test_expect(&tally, alike, "a measuring arena's pushes take other room than a reserved arena's");
     lane_test_expect(&tally, (uintptr_t)measure.base >= BUSTER_ARENA_MAX_CAPACITY && arena_push(&measure, BUSTER_ARENA_MAX_CAPACITY, 1) == 0,

@@ -97,7 +97,8 @@ static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
-// push returns faults: only code that pushes and writes nothing in what it pushes may run on it.
+// push returns faults: only code that pushes and writes nothing in what it pushes may run on it. Its addresses are in no
+// object, so compare or subtract them only as integers.
 static __attribute__((unused)) Arena arena_measure(void);
 // Unmaps the arena, and leaves it without capacity.
 static __attribute__((unused)) void arena_release(Arena* arena);
