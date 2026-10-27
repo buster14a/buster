@@ -249,14 +249,21 @@ jobs:
         # those 8 CPUs (#522): one each, or the [N CPUs] its heading says it keeps busy for much of its run, so that
         # commands with lanes or processes of their own never multiply the budget together. All 8 go to the call-graph
         # check's eight compiler captures, the calling convention's ten runs, and the tests whose lanes wait for each
-        # other in loops, which lose time slices on CPUs they share (test-lanes took 2.3 to 2.9 s beside other tests
-        # rather than 0.2 s alone); they come first, with nothing running before them to wait for, and the 4s next. A
-        # test's processes come to its CPUs: its parts (test_process_cpus) and the --jobs it gets from
-        # BUSTER_PARALLEL_CPUS. Brief phases on more (most lane tests' 8-lane checks) don't count. The rest follow in
-        # the order of their times run alone, the longest first. Each heading's report gives its CPU time beside its
-        # time, which over it shows the CPUs the command kept busy. Each command has 180 s from its start.
+        # other in loops, which lose time slices on CPUs they share: beside other tests, test-lanes took 2.3 to 2.9 s
+        # rather than 0.2 s alone, test-foreign 28.3 s on 2 CPUs rather than 6.5 s, and test-link 0.8 s rather than
+        # 0.02 s. They come first, with nothing running before them to wait for, and the 4s next. A test's processes
+        # come to its CPUs: its parts (test_process_cpus), the --jobs it gets from BUSTER_PARALLEL_CPUS, and gdb's and
+        # perf's beside test-unwind's own. Brief phases on more don't count, as the 8-lane checks of the longer
+        # test-files runs, whose CPU time stays near their time. The rest follow in the order of their times run alone,
+        # the longest first. Each heading's report gives its CPU time beside its time, which over it shows the CPUs the
+        # command kept busy. Each command has 180 s from its start.
         run: |
           taskset -c 0-7 ./build/compiler parallel --github --timeout 180 <<'TESTS'
+          == Test the foreign inputs [8 CPUs]
+          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
+          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
+          # winners, the COMDAT groups and -y's lines with the resolution's.
+          ./build/compiler test-foreign --cross-check
           == Check the no-recursion rule on the call graph [8 CPUs]
           # Writes the translation units' LLVM IR to a temporary directory and fails on any cycle not in the allowlist.
           ./build/compiler test-call-graph
@@ -276,20 +283,33 @@ jobs:
           # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
           # dynamic symbols and relocations.
           ./build/compiler test-dynamic --cross-check
+          == Test the foreign linker against lld and mold [8 CPUs]
+          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
+          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
+          # agree but for each reference linker's documented choices.
+          ./build/compiler test-foreign-corpus
           == Test the per-file jobs [8 CPUs]
           # The cache filled on 1, 2, 3 and 8 lanes must give the same tables, records and translation units' streams,
           # -E text and diagnostics, and each unit the spellings it gives alone; and again with the shared table's ids
           # in another order (#153's --id-order, 153 by default), the same records, -E text, diagnostics and
           # locations, each id spelled the same. Its forms with paths (the translation units, src flat) do the same.
           ./build/compiler test-files
+          == Test the per-file jobs on the frozen C library corpus, flat [8 CPUs]
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files --flat /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc
           == Test the runtime snapshot [8 CPUs]
           ./build/compiler test-snapshot
+          == Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
+          unset CPATH C_INCLUDE_PATH
+          ./build/compiler test-files /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
           == Test the direct path's executables [8 CPUs]
           ./build/compiler test-executable
           == Test the lanes [8 CPUs]
           ./build/compiler test-lanes
           == Test the per-file jobs on the repository's sources, flat [8 CPUs]
           ./build/compiler test-files --flat src
+          == Test the link representation [8 CPUs]
+          ./build/compiler test-link
           == Test the preprocessor's cases against clang [4 CPUs]
           # --clang also preprocesses each case with clang -E and compares the tokens. A worker per CPU of the
           # heading's shares the fuzz batch's 3,000 cases (--jobs, which the cases don't depend on), about 9 s of threads
@@ -343,11 +363,6 @@ jobs:
           # cross-check rules with a stand-in compiler, in a directory of its own: about 7 s, most of it waiting out
           # the timeouts, so it runs apart from the programs, on one CPU rather than their four.
           ./build/compiler test-c-testsuite --self-test
-          == Test the foreign inputs [2 CPUs]
-          # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
-          # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the
-          # winners, the COMDAT groups and -y's lines with the resolution's.
-          ./build/compiler test-foreign --cross-check
           == Check semantic mutants of the frozen SQLite and musl sources against Clang
           # #133: each mutant is one edit of a unit's -E text (a type changed, a declaration removed, operands swapped),
           # checked as a file is: acceptance and the first error's line against clang -fsyntax-only, and both paths
@@ -449,11 +464,6 @@ jobs:
           ./build/compiler test-checker-driver --executable ./build/compiler
           == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
           ./build/compiler test-checker-driver --executable ./build/compiler --lazy-system-headers
-          == Test the foreign linker against lld and mold
-          # Original C and C++ programs, each compiled by gcc and by clang, linked from one command line by
-          # link-foreign, lld and mold: their runs, symbols and sizes, dynamic sections, versions and relocations must
-          # agree but for each reference linker's documented choices.
-          ./build/compiler test-foreign-corpus
           == Test DWARF source lines and late address finalization
           # The original fixture's debug sections are consumed by readelf, gdb and perf; GNU as supplies its CFI.
           ./build/compiler test-debug --cross-check
@@ -500,9 +510,6 @@ jobs:
           ./build/compiler test-checker-corpus --clang /usr/bin/clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
           == Test the independent preprocessor fuzz harness in C17
           ./build/compiler test-preprocessor-fuzz --std c17
-          == Test the per-file jobs on the frozen C library corpus, flat
-          unset CPATH C_INCLUDE_PATH
-          ./build/compiler test-files --flat /var/lib/buster-9700x/corpora/preprocessor-391e729af658/libc
           == Compare a frozen preprocessor corpus subset with Clang
           # The runner hooks hold the shared host lock for this whole job. This copy is readable by the runner, unlike
           # the original bundle under /home/david. Verify the manifests and every input/header byte first.
@@ -548,7 +555,7 @@ jobs:
           ./build/compiler test-ssa
           == Test generated-code ISA policy
           ./build/compiler test-x86-target
-          == Test native fixed-frame CFI and generated GDB/perf consumers
+          == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
           ./build/compiler test-unwind --cross-check
           == Test C-source binding identities and scope semantics
           ./build/compiler test-parser-bindings --clang
@@ -561,9 +568,6 @@ jobs:
           ./build/compiler test-import --cross-check
           == Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
           ./build/compiler test-streaming --cross-check
-          == Test the per-file jobs on the frozen sqlite3.c
-          unset CPATH C_INCLUDE_PATH
-          ./build/compiler test-files /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c
           == Test GNU syntax metadata against clang
           ./build/compiler test-gnu --clang
           == Test experimental Tier 1 scheduling and model coverage
@@ -610,8 +614,6 @@ jobs:
           ./build/compiler test-dataflow
           == Test fragment byte interleave and protected-page tails
           ./build/compiler test-fragment-interleave
-          == Test the link representation
-          ./build/compiler test-link
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS

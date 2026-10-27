@@ -1527,15 +1527,18 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
 
 - all 8 for the call-graph check's eight compiler captures, the calling
   convention's ten runs, and the tests whose lanes wait for each other in
-  loops, which lose their time slices on CPUs they share (test-lanes and the
-  executable writers' 8-lane groups: on the 9700X, test-lanes took 2.3 to 2.9 s
-  beside other tests rather than 0.2 s alone, and 32 s on a 4-CPU cloud VM
-  whose CPU has no mwaitx). They come first, where nothing runs before them to
-  wait for;
-- 4 or 2 for those whose processes or lanes keep that many busy for much of
-  their run: the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`),
-  the `--jobs` the step passes from it (test-preprocessor's fuzz workers,
-  test-c-testsuite's), and test-foreign's resolutions on 2 and 3 lanes. The 4s
+  loops, which lose their time slices on CPUs they share: test-lanes, the
+  executable writers' 8-lane groups, test-foreign's resolutions,
+  `link-foreign --lanes=8` in test-foreign-corpus, test-link's checks and the
+  short test-files runs. On the 9700X, beside other tests, test-lanes took 2.3
+  to 2.9 s rather than 0.2 s alone (and 32 s on a 4-CPU cloud VM whose CPU has
+  no mwaitx), test-foreign 28.3 s on 2 CPUs rather than 6.5 s, and test-link
+  0.8 s rather than 0.02 s (#526's first run). They come first, where nothing
+  runs before them to wait for;
+- 4 or 2 for those whose processes keep that many busy for much of their run:
+  the parts that follow `BUSTER_PARALLEL_CPUS` (`test_process_cpus`), the
+  `--jobs` the step passes from it (test-preprocessor's fuzz workers,
+  test-c-testsuite's), and gdb's and perf's beside test-unwind's own. The 4s
   come next, while the pool is empty;
 - the rest follow in the order of their times run alone, the longest first.
   c-testsuite's self-test, about 7 s of waiting out its timeouts, is a command
@@ -1543,13 +1546,15 @@ command holds one CPU, or the `[N CPUs]` its heading declares:
 
 A heading declares the CPUs its command keeps busy for much of its run, which
 its CPU time over its time shows (the report gives both). Brief phases on more
-don't count, as the 8-lane checks of tests such as test-files and test-checker,
-but lanes that wait for each other in loops do. A command whose report shows it
-keeping more busy than its heading says needs a larger count or less work. Run
-together, the step is bound by the machine's CPU rather than by its longest
-test (#465: its tests took 622 s of CPU, their times in the job 404 s, in a
-step of 52.5 s when 8 ran at once on 15 CPUs), so what shortens it is less
-work: the clang processes the tests start as oracles are most of it.
+don't count, as the 8-lane checks of the longer test-files runs and of
+test-checker, whose CPU time stays near their time, but lanes that wait for each
+other in loops do. A command whose report shows it keeping more busy than its
+heading says needs a larger count or less work. Run together, the step is bound
+by the machine's CPU rather than by its longest test (#465: its tests took 622 s
+of CPU, their times in the job 404 s, in a step of 52.5 s when 8 ran at once on
+15 CPUs; #526's first run: 73.9 s, against 213.5 s one at a time, with 441.5 s
+of CPU), so what shortens it is less work: the clang processes the tests start
+as oracles are most of it.
 The runner sets `BUSTER_PARALLEL_CPUS` to each command's CPUs, and a test that
 runs processes of its own (`test_process_cpus`: test-preprocessor's parts,
 `parse_test_clang`'s clang processes) runs at most that many at once (all the
