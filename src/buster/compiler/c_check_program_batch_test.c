@@ -4,7 +4,7 @@
 // Entry-for-entry comparison with the original task loop, independently of the semantic scheduler. Every
 // input column ends at a protected page, including all partial operator batches and the 64-node window edges.
 
-#define BUSTER_CHECK_BATCH_TEST_NODES 129u
+#define BUSTER_CHECK_BATCH_TEST_NODES 321u
 #define BUSTER_CHECK_BATCH_TEST_ENTRIES (BUSTER_CHECK_BATCH_TEST_NODES * 4)
 
 static void check_test_program_batch(CheckTest* test)
@@ -34,10 +34,15 @@ static void check_test_program_batch(CheckTest* test)
     }
     uint8_t type_classes[256];
     uint8_t type_facts[256];
+    uint32_t type_templates[256];
     ready = ready && types.table.types.count < BUSTER_ARRAY_LENGTH(type_classes);
     if (ready)
     {
         check_lower_classify_types_scalar(&types.table, types.table.types.count, type_classes, type_facts);
+        for (uint32_t i = 0; i < types.table.types.count; i += 1)
+        {
+            type_templates[i] = type_classes[i] | (uint32_t)type_facts[i] << 8;
+        }
     }
     check_test_expect(test, ready, "expression templates have guarded graph, value and conversion columns");
     uint32_t locals[2] = {
@@ -138,17 +143,17 @@ static void check_test_program_batch(CheckTest* test)
                     }
                 }
             }
-            uint8_t kinds[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            uint8_t classes[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            uint64_t values[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            CheckLowerTask tasks[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            uint32_t task_sources[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            uint32_t tokens[2][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            uint8_t kinds[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            uint8_t classes[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            uint64_t values[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            CheckLowerTask tasks[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            uint32_t task_sources[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            uint32_t tokens[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             for (uint32_t limit = 0; limit < 3; limit += 1)
             {
-                CheckProgramLowered status[2] = { 0 };
-                CheckLowerWriter writers[2];
-                for (uint32_t path = 0; path < 2; path += 1)
+                CheckProgramLowered status[3] = { 0 };
+                CheckLowerWriter writers[3];
+                for (uint32_t path = 0; path < 3; path += 1)
                 {
                     writers[path] = (CheckLowerWriter){
                         .program = &program,
@@ -164,9 +169,10 @@ static void check_test_program_batch(CheckTest* test)
                         .scalar = path == 0,
                         .type_classes = type_classes,
                         .type_facts = type_facts,
+                        .type_templates = path == 2 ? NULL : type_templates,
                         .type_count = types.table.types.count,
-                        .batch.first = BUSTER_CHECK_NONE,
                     };
+                    check_lower_batch_reset(writers + path);
                     check_lower_expression(writers + path, count - 1, false, 0);
                     check_lower_drain(writers + path);
                 }
@@ -178,6 +184,11 @@ static void check_test_program_batch(CheckTest* test)
                 snprintf(description, sizeof(description), "expression templates: %u guarded nodes, mode %u, capacity %u; entries, status and diagnostic token agree", count,
                          mode, writers[0].capacity);
                 check_test_expect(test, same, description);
+                const bool fallback = writers[0].count == writers[2].count && status[0].status == status[2].status && status[0].token == status[2].token &&
+                                      writers[0].token == writers[2].token && memcmp(kinds[0], kinds[2], writers[0].count) == 0 &&
+                                      memcmp(classes[0], classes[2], writers[0].count) == 0 &&
+                                      memcmp(values[0], values[2], (uint64_t)writers[0].count * sizeof(uint64_t)) == 0 && writers[2].classified_nodes == 0;
+                check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact task loop and failures");
                 if (limit == 0)
                 {
                     check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes != 0,
@@ -277,9 +288,10 @@ static void check_test_program_batch(CheckTest* test)
             .capacity = 2,
             .type_classes = type_classes,
             .type_facts = type_facts,
+            .type_templates = type_templates,
             .type_count = types.table.types.count,
-            .batch.first = BUSTER_CHECK_NONE,
         };
+        check_lower_batch_reset(&writer);
         const bool lowered = check_lower_batch_expression(&writer, 0);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
@@ -288,7 +300,7 @@ static void check_test_program_batch(CheckTest* test)
         source_values[0].constant_kind = CHECK_CONSTANT_INTEGER;
         source_values[0].integer = 7;
         writer.count = 0;
-        writer.batch.first = BUSTER_CHECK_NONE;
+        check_lower_batch_reset(&writer);
         check_test_expect(test, !check_lower_batch_expression(&writer, 0) && writer.count == 0,
                           "an automatic compound literal always defers its initializer, before testing constant proofs");
     }

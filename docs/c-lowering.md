@@ -169,9 +169,10 @@ module), so that tools and the comparisons below read them alike.
 ## Straight-line expression templates (#624)
 
 `c_check_program_batch.c` handles ordinary checked expressions before the task
-loop expands them. Each lane's writer keeps one 64-node window. Byte permutes
-classify 16 operators at a time; a bounded postorder scan combines their checked
-types and operand conversions into two-slot entry templates. A node's first
+loop expands them. Each lane's writer keeps four 64-node windows. Byte permutes
+and bounded gathers classify 16 checked records at a time: operators, type
+classes and facts, constant proofs and categories. A bounded postorder scan joins
+their subtrees and operand conversions into two-slot entry templates. A node's first
 slot is its operation, constant or local/global read; its second is its consuming
 edge's conversion. Empty wrappers have no first slot.
 
@@ -188,22 +189,27 @@ the same operands as the scalar loop; gaps, shared or reordered operands and
 window boundaries defer to it. Calls, builtins, bit-fields, pointer arithmetic,
 short-circuit and conditional expressions, memory classes and bool normalization
 retain their existing rules. Their ordinary operands can still take templates.
+Floating constants and automatic compound literals also retain the task loop.
 Functions that track their evaluation stack, and source-row emission for `-g`,
 keep the task loop, whose stack and source-token effects need more than these
 templates describe. `--scalar` selects that original loop for every expression.
 
 Window preparation may inspect a neighboring body's immutable checked facts,
 but never its mutable local map: another lane can own that map. Each body
-invalidates its window after assigning its own locals. Coverage is accumulated
+invalidates its windows after assigning its own locals. Coverage is accumulated
 in each part and merged in source order, without shared counters.
 
 With `--time-stages`, `-c` and the executable driver also print
 `lowering-nodes`: evaluated expression occurrences, those handled by templates,
-and their percentage. The denominator includes repeated graph uses and excludes
-unevaluated operands and unselected definitions. `test-checker` compares every
+and their percentage, plus the count of records classified (including cache
+misses). The denominator counts expression expansion visits, including repeated
+graph uses, and excludes unevaluated operands and unselected definitions. The
+optional packed per-type lookup table costs four bytes per type; without room
+for it the task loop remains available. `test-checker` compares every
 typed column with the task loop, including guarded partial batches, window
 edges, promoted operands, folded subtrees, shared/reordered uses, task and entry
-capacity failures and a guarded neighboring body's local map. Its source
+capacity failures, cache eviction, missing optional workspace and a guarded
+neighboring body's local map. Its source
 fixtures also compare native results and effects with Clang.
 
 ## Against clang -O0's objects

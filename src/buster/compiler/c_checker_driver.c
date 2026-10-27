@@ -520,8 +520,8 @@ static void check_driver_lower_report(const CheckProgramCode* code, const CheckC
     {
         const uint64_t nodes = code->lowered.expression_nodes;
         const uint64_t batch = code->lowered.batch_nodes;
-        fprintf(stderr, "lowering-nodes\tevaluated=%" PRIu64 "\tbatched=%" PRIu64 "\tshare=%.2f%%\n", nodes, batch,
-                nodes != 0 ? 100.0 * (double)batch / (double)nodes : 0.0);
+        fprintf(stderr, "lowering-nodes\tevaluated=%" PRIu64 "\tbatched=%" PRIu64 "\tshare=%.2f%%\tclassified=%" PRIu64 "\n", nodes, batch,
+                nodes != 0 ? 100.0 * (double)batch / (double)nodes : 0.0, code->lowered.classified_nodes);
     }
 }
 
