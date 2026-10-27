@@ -4147,6 +4147,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_overload_address_test.c"
 #include "c_types_function_abi_test.c"
 #include "c_check_constant_test.c"
+#include "c_check_generic_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
@@ -4297,6 +4298,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_overload_addresses(&test, clang);
             check_test_function_abis(&test, clang);
             check_test_constant_sources(&test, clang);
+            check_test_generic_index(&test);
+            check_test_generic_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);

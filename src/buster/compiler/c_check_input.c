@@ -1405,6 +1405,7 @@ static CheckOp check_input_binary(uint8_t kind);
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
 #include "c_check_builtin_evidence.c"
+#include "c_check_generic.c"
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
