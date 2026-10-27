@@ -329,7 +329,11 @@ designs and the compilers already built this way.
   object (`ObjectOptions.debug`). Either output has its functions' unwind
   tables when clang's would (by default, unless `-ffreestanding` or
   `-fno-asynchronous-unwind-tables`: `predefines_unwind_tables`, the
-  [unwind guide](docs/unwind.md)'s "The C driver's unwind tables").
+  [unwind guide](docs/unwind.md)'s "The C driver's unwind tables"). Either
+  output's functions compile on lanes (#151, `check_program_emit_lanes`, the
+  [lanes guide](docs/function-lanes.md)): by default as many as the bodies'
+  tokens pay for, up to one per CPU the process may run on, and with
+  `--lanes N` N of them; the output is one lane's, byte for byte.
   `./build/compiler parse
   [-fsyntax-only] [-E's options] [--scalar] file.c` is the parser's driver
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
@@ -1113,6 +1117,7 @@ clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predef
 ./build/compiler benchmark-backend
 ./build/compiler test-check-debug --cross-check
 ./build/compiler benchmark-check-debug
+./build/compiler test-check-lanes
 ./build/compiler test-ir
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
@@ -4321,6 +4326,42 @@ and the combined parser/adapter/consumer path. Run benchmarks on the locked
 opt-in adapter, the declaration-token columns, corpus provenance and the
 explicit cost of its scalar grammar replay. The syntax-only driver does not
 request these columns.
+
+## Function lanes
+
+`check_program_emit_lanes` (`c_check_program_emit.c`) is #151's emission on
+lanes: each function's lowering (`check_lower_part`, `c_check_program_lower.c`),
+Tier 0 code, branch sizing and encoding run as lane items, in parts of
+consecutive bodies cut by their tokens and taken costliest first; then the
+calling thread adds every function's atom, symbols and fixups to the link in
+source order. A part takes source order's steps in source order's order, and
+the failure reported is source order's (the earliest step's, its first
+body's), whatever the lane count. The lowering numbers the runtime's
+functions (libgcc's) and the label symbols part by part, and
+`check_lower_finish` puts them in source order. Lane 0 is the calling thread
+with the caller's arenas; each other lane has its own
+(`CheckProgramLanes.arenas`), which the caller keeps until it is done with the
+link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
+bodies' tokens beyond twice the largest body's, no more than the bodies or
+the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
+
+`./build/compiler test-check-lanes [--executable PATH] [--seed N]
+[--programs N] [--keep]` emits generated programs of up to 600 functions (of
+libgcc's functions in random first-use orders, computed gotos through static
+tables of labels' addresses, switches, structs by value, long doubles,
+variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, and
+on 8 with a slow lane, by both paths, with `-g`'s rows and unwind tables and
+without: each must be the one lane's object or failure; then the lane rule,
+and the driver's objects and executables by `--lanes` and by default, each one
+lane's, the executables exiting alike. `./build/compiler benchmark-check-lanes
+[--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
+times a file's emission on each lane count (every lane forced) and by the
+rule, with the lowering's preparation, the lanes' run and the merge apart,
+every run one lane's code. Run it under the 9700X's lock without `taskset`,
+with `--cpus 2,0,1,3,4,5,6,7` (lane 0 on CPU 2). The 9700X job runs the test,
+and the benchmark on the frozen SQLite source where the emission changes.
+[docs/function-lanes.md](docs/function-lanes.md) has the design and the
+measurements.
 
 ## Selective lowering
 
