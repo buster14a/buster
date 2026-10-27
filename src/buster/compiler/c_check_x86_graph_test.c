@@ -137,7 +137,7 @@ static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, Type
                 arena_pop_to(&output, mark);
             }
             const uint32_t immediate = graph.argument_nodes[graph.argument_offsets[nodes[3]] + 1];
-            graph.leaves[immediate].integer = 256;
+            check_graph_leaf_of(&graph, immediate)->integer = 256;
             CheckStream range;
             const bool ranged = check_graph_run(table, &graph, &output, &scratch, &options, &range);
             check_test_expect(test, ranged && range.diagnostics[nodes[3]] == CHECK_DIAG_NONE && range.x86[3].range_event_count == 1 &&
@@ -153,7 +153,7 @@ static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, Type
                               "a numeric payload cannot impersonate original source ICE proof");
             arena_pop_to(&output, mark);
             calls[3].ice_arguments = 2;
-            graph.leaves[immediate].integer = 255;
+            check_graph_leaf_of(&graph, immediate)->integer = 255;
             const uint32_t saved = calls[0].node;
             calls[0].node = nodes[1];
             CheckStream invalid;
@@ -164,7 +164,7 @@ static __attribute__((noinline)) void check_test_x86_graph(CheckTest* test, Type
             calls[0].node = saved;
         }
         CheckGraph small = graph;
-        small.count = nodes[0] + 1;
+        check_test_graph_cut(&small, nodes[0] + 1);
         small.argument_count = 0;
         small.x86_count = 1;
         check_test_special_graph_bounds(test, table, &small);

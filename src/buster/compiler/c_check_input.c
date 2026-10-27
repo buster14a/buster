@@ -3617,7 +3617,7 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
             const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, graph->tokens[argument], BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (proven != BUSTER_CHECK_NONE)
             {
-                graph->leaves[proven] = value;
+                *check_graph_leaf_of(graph, proven) = value;
                 argument = proven;
             }
         }
@@ -3705,7 +3705,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 region->result = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (region->result != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[region->result] = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
+                    *check_graph_leaf_of(graph, region->result) = (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE };
                 }
             }
             if (region->result != BUSTER_CHECK_NONE)
@@ -3723,7 +3723,7 @@ static void check_input_expressions(CheckInputReader* reader)
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                graph->leaves[node] = reader->cached_constants[reader->constant_present[token] - 1];
+                *check_graph_leaf_of(graph, node) = reader->cached_constants[reader->constant_present[token] - 1];
             }
         }
         else if (reader->selected_tokens[token] < parser->tokens.count)
@@ -3745,7 +3745,7 @@ static void check_input_expressions(CheckInputReader* reader)
             node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
             if (node != BUSTER_CHECK_NONE)
             {
-                graph->leaves[node] = (CheckValue)
+                *check_graph_leaf_of(graph, node) = (CheckValue)
                 {
                     .type = BUSTER_TYPE_ULONG,
                     .category = CHECK_RVALUE,
@@ -3784,7 +3784,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     const TypeId type = reader->declared_types[token];
                     const uint32_t declaration = reader->output->declarations[token];
                     const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = type,
                         .category = enumeration ? CHECK_RVALUE : type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE,
@@ -3810,7 +3810,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = check_literal_value(literal);
+                    *check_graph_leaf_of(graph, node) = check_literal_value(literal);
                 }
             }
         }
@@ -3830,7 +3830,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = string->type,
                         .category = CHECK_LVALUE,
@@ -3865,7 +3865,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     node = supported ? check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
                     if (node != BUSTER_CHECK_NONE)
                     {
-                        graph->leaves[node] = (CheckValue)
+                        *check_graph_leaf_of(graph, node) = (CheckValue)
                         {
                             .type = pointer,
                             .category = CHECK_RVALUE,
@@ -4043,7 +4043,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                 if (node != BUSTER_CHECK_NONE)
                 {
-                    graph->leaves[node] = (CheckValue)
+                    *check_graph_leaf_of(graph, node) = (CheckValue)
                     {
                         .type = reader->declared_types[declaration],
                         .category = CHECK_LVALUE,
@@ -4300,7 +4300,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 const CheckOp actual = (CheckOp)graph->ops[node];
                 const uint32_t child = graph->operand0[node];
                 const uint32_t child_token = child != BUSTER_CHECK_NONE ? graph->tokens[child] : parser->tokens.count;
-                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? graph->leaves[node].overload_head :
+                reader->output->overload_heads[token] = actual == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
                     (actual == CHECK_OP_ADDRESS || actual == CHECK_OP_SELECT) && child_token < parser->tokens.count ? reader->output->overload_heads[child_token] : 0;
             }
             if (reader->constant_contexts[token] && graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_EXPECT)
@@ -4315,7 +4315,7 @@ static void check_input_expressions(CheckInputReader* reader)
                     const uint32_t proven = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
                     if (proven != BUSTER_CHECK_NONE)
                     {
-                        graph->leaves[proven] = constant;
+                        *check_graph_leaf_of(graph, proven) = constant;
                         node = proven;
                     }
                 }

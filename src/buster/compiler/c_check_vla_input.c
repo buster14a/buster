@@ -398,7 +398,7 @@ static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, 
         const uint32_t constant = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (constant != BUSTER_CHECK_NONE)
         {
-            graph->leaves[constant] = (CheckValue)
+            *check_graph_leaf_of(graph, constant) = (CheckValue)
             {
                 .type = BUSTER_TYPE_ULONG,
                 .category = CHECK_RVALUE,
