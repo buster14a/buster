@@ -29,8 +29,10 @@ records with `x86_validate`, as the c-testsuite harness asks
 ([the c-testsuite guide](c-testsuite.md)), with `-c` too. Without it, the
 emission checks only each function's branch columns, which branch sizing reads
 and writes by (`branch_sizing_validate_branches`): Tier 0's records are valid by
-construction, and `x86_validate` of them all took 15 times the encoder's time
-([#532](https://github.com/buster14a/buster/issues/532)).
+construction, and `x86_validate` of them all made branch sizing take 14 times
+the encoder's time on `sqlite3.c`, against 1.33 times without it
+([#532](https://github.com/buster14a/buster/issues/532),
+[the branch sizing guide's contract](branch-sizing.md#contract)).
 
 `-lNAME` (or `-l NAME`) links a shared library besides the C runtime's (the
 value of an option that takes the next argument stays that option's, as

@@ -52,17 +52,22 @@ record count, then each branch, with the same first error, taking records
 by construction, but whose branch columns the two paths still read and write by:
 an index or a target past the function would have them read and write outside
 the records and the offsets. The C driver's emission runs it on Tier 0's code
-and runs `x86_validate` only under `--verify` (#532): with `x86_validate` of
-every record, the driver's branch sizing took 5.6 ms of `-c sqlite3.c`, 15
-times what `x86_encode` of the same records took, nearly all of it
-`x86_validate`'s. Its vector path takes 16 branches at a time: masks of the indices
-that aren't below the count or above the branch before (the vector before's
-last lane, by `valignd`), of the targets past the count and of the forms that
-aren't a branch's, then the first lane with an error, whose error is the first
-of the scalar order (the index's, the target's, the form's). It gathers the
-forms only for the records below the count, and looks each up in a bitmap of
-the 17 forms over the 512 form numbers from `JMP_REL8`'s: `vpermd` takes the
-dword and `vprorvd` rotates the form's bit to bit 0. Its twin,
+and runs `x86_validate` only under `--verify` (#532). On the 9700X, `-c` of the
+frozen `sqlite3.c` writes the same object with either check. #520's stage clock
+puts the driver's branch sizing at 5.620 ms with `x86_validate` of every record,
+14.4 times `x86_encode`'s 0.389 ms of the same records. With the columns alone
+it takes 0.517 ms, 1.33 times the encoder's time. The whole compile is 5.9 ms
+(3.1%) faster against main, and 5.0 ms faster on one executable with a switch
+between the checks, in 133 M fewer user instructions ([the
+record](https://github.com/buster14a/buster-performance/tree/518da9bd10a7e23b2d84bdd783f6feb0a6bceab7/docs/measurements/branch-columns-532-2026-10-27)).
+Its vector path takes 16 branches at a time: masks of the indices that aren't
+below the count or above the branch before (the vector before's last lane, by
+`valignd`), of the targets past the count and of the forms that aren't a
+branch's, then the first lane with an error, whose error is the first of the
+scalar order (the index's, the target's, the form's). It gathers the forms only
+for the records below the count, and looks each up in a bitmap of the 17 forms
+over the 512 form numbers from `JMP_REL8`'s: `vpermd` takes the dword and
+`vprorvd` rotates the form's bit to bit 0. Its twin,
 `branch_sizing_validate_branches_scalar`, a branch at a time over the list of
 forms, is `branch_sizing_validate`'s first part.
 
