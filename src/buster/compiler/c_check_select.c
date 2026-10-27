@@ -55,6 +55,7 @@ static bool check_input_selection_prepare(CheckInputReader* reader, uint32_t key
                 const bool fallback = parser->tokens.kinds[association] == PARSE_KIND_DEFAULT;
                 valid = !fallback || association + 1 == colon;
                 reader->selection_type_ends[association] = fallback ? 0 : colon;
+                check_input_visit(reader, association, BUSTER_CHECK_RESOLVE_QUERY);
                 for (uint32_t token = association; token < colon; token += 1)
                 {
                     reader->ignored[token] = true;

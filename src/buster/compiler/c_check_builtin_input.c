@@ -25,6 +25,7 @@ static bool check_input_builtin_type_prepare(CheckInputReader* reader, uint32_t 
         const uint32_t type_end = first_type ? separator : closing;
         reader->builtins[closing] = builtin;
         reader->builtin_type_ends[type_first] = closing;
+        check_input_visit(reader, type_first, BUSTER_CHECK_RESOLVE_QUERY);
         reader->ignored[keyword] = true;
         memset(reader->ignored + type_first, 1, type_end - type_first);
     }
@@ -118,6 +119,7 @@ static bool check_input_vararg_prepare(CheckInputReader* reader, uint32_t keywor
         if (builtin == CBUILTIN_VA_ARG && second < closing)
         {
             reader->vararg_types[second] = index + 1;
+            check_input_visit(reader, second, BUSTER_CHECK_RESOLVE_QUERY);
             memset(reader->ignored + second, 1, closing - second);
         }
     }

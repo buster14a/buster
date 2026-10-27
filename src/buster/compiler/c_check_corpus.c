@@ -1581,7 +1581,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     const CheckInput* left = &a->input;
     const CheckInput* right = &b->input;
-    equal = equal && left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
+    // The scalar path's walks act at no token the vector path's would skip (#529).
+    equal = equal && left->visit_misses == 0 && right->visit_misses == 0 &&
+            left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
@@ -1958,6 +1960,10 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     {
         snprintf(text, capacity, "types: tags, members, parameters or last_error (tags %u against %u, completions %u against %u, last_error %u against %u)",
                  s->tags.count, t->tags.count, s->tags.completions, t->tags.completions, s->last_error, t->last_error);
+    }
+    else if (x->visit_misses != 0 || y->visit_misses != 0)
+    {
+        snprintf(text, capacity, "the walks act at %u and %u tokens the vector path's would skip", x->visit_misses, y->visit_misses);
     }
     else if (x->binding_event_count != y->binding_event_count || x->string_count != y->string_count || x->vla_count != y->vla_count || x->asm_count != y->asm_count ||
              x->region_count != y->region_count || x->report_count != y->report_count || x->diagnostic_graph != y->diagnostic_graph ||
