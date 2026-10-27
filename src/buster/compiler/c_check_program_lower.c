@@ -2254,19 +2254,44 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 writer->argument_sizes[writer->argument_count] = 0;
                 writer->argument_classes[writer->argument_count++] = check_lower_class(writer, type);
             }
+            // A floating value crosses an atomic helper's integer registers as its bits, through a frame temporary, as the
+            // math helpers' do: the helpers move bits, so a numeric conversion would change the value.
+            const uint8_t result_class = check_lower_class(writer, stream->values[node].type);
             if (helper->terminates)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
+            }
+            else if (helper->result_type == BUSTER_TYPE_ULONG && (result_class == BUSTER_TYPED_CLASS_F32 || result_class == BUSTER_TYPED_CLASS_F64))
+            {
+                const uint32_t result = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, result_class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, result);
             }
             else
             {
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
             check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, helper->result_type), call);
-            for (uint32_t a = count; a-- > 0;)
+            for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
                 const TypeId checked = stream->argument_conversions[first + a].type;
-                check_lower_convert(writer, checked, helper->parameter_types[a]);
+                const uint8_t class = check_lower_class(writer, checked);
+                if (helper->parameter_types[a] == BUSTER_TYPE_ULONG && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64))
+                {
+                    const uint32_t local = check_lower_addressed_temporary(writer, class);
+                    if (class == BUSTER_TYPED_CLASS_F32)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    }
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else
+                {
+                    check_lower_convert(writer, checked, helper->parameter_types[a]);
+                }
                 check_lower_operand(writer, node, a + 3, false, checked);
             }
         }

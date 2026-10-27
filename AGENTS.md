@@ -270,7 +270,11 @@ designs and the compilers already built this way.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
-  acceptance remain separate requirements.
+  acceptance remain separate requirements. The atomic builtins lower through
+  per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
+  clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
+  #126); `test-checker` runs them against clang's code and checks that a
+  misaligned one is refused exactly where clang calls libatomic.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -382,7 +386,21 @@ designs and the compilers already built this way.
   any other until it was split into the types, checker and checker builtins
   units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
-  one function that its optimizer takes superlinear time over.
+  one function that its optimizer takes superlinear time over. The checker's
+  own sources (not its tests or the builtins' actions) are included between
+  `#pragma clang section text = ".text.buster_checker"` and its reset, a
+  section that starts on a page, so that code compiled before them doesn't
+  move the driver's hot loops in the instruction caches (#502,
+  `docs/profiling.md`'s "Placement"): a new one goes there too.
+- `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
+  stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
+  encoding, the object's build and write, the release; on several lanes their run is one stage, `lanes`), with its
+  system time, page faults and peak resident set added, and the process's resource use; off by default, its laps test
+  a null pointer. `measure-compile [--runs N]
+  [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
+  against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
+  `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
+  guide](docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
@@ -1195,9 +1213,7 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Keep each qualification short. With admission enabled, the hosted controller
-  chooses priority before a job enters the physical queue ("9700X admission"
-  below); the shared host lock still protects every measurement.
+- Every pull request's job queues behind every other's, so keep the job short.
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
@@ -1246,76 +1262,6 @@ there at a time, so everything takes one lock:
   benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
-
-## 9700X admission
-
-`tools/ci/admission.c` and `.github/workflows/9700x-control.yml` implement the
-default-branch eligibility/priority controller for #546-#548.
-[The admission guide](docs/ci-9700x-admission.md) describes the version-1
-interface, required-check attribution, recovery and the live rollout gates.
-Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
-ordinary qualification and restricted runner-group access have been verified.
-Verify this repository's exact default-workflow entrypoint and the existing
-single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
-with legacy, use the documented root-owned Buster-only job-start source guard;
-do not narrow legacy's group-wide access, broaden access or change other jobs.
-
-When enabled, confirmed conflicting PRs are blocked and their own outstanding
-qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
-to be a conflict. Behind-but-clean PRs remain eligible. The controller preserves
-the `buster-fast-9700x-` per-PR/ref concurrency groups and the shared host lock.
-It admits one job, rather than flooding the self-hosted queue. P0 critical,
-P1 high/current approval, P2 ordinary, P3 background and explicit P4 low are FIFO
-within class, with the guide's reserved aging slots and two-hour main/daily
-deadline. The default backlog threshold is three waiting eligible PRs.
-
-Maintainers with verified repository write/maintain/admin permission can post
-one standalone command in a PR conversation:
-
-```text
-/ci priority critical|high|normal|low
-/ci hold
-/ci resume
-/ci retry
-/ci status
-```
-
-The priority words above are alternatives. Append `run RUN_ID` for a current
-request-specific control, or use the controller's `workflow_dispatch` form on
-`main` with a PR/run ID. `normal`/`clear` removes an override; automatic approval
-priority can apply again. PR overrides/holds persist across commits until
-reset/resume or closure. Run overrides are bound to that request ID/SHA and expire
-on supersession/completion. Hold/promote never preempts admitted work. Retry
-qualifies only the current revision and is a no-op while its run is active.
-
-Automatic P1 requires a trusted current-head `APPROVED` review, or a comment
-consisting of `LGTM`, `APPROVED`, `SHIP IT`, `READY TO MERGE` or `/ci approve`.
-Quotes, code blocks, incidental/negated text and untrusted actors do not approve.
-Comment approval binds only a head already observed by the controller; edit or
-repost after observation, or use a commit-associated review, when ambiguous.
-Edits/deletions, dismissed reviews and new heads remove derived approval. Manual
-priority persists independently. Public fork revisions need a trusted current
-approval before any physical execution; a persistent priority alone is not one.
-
-The required context keeps its name, `Build and execute on Ryzen 7 9700X`, and
-GitHub Actions integration. In active mode the controller publishes both its
-Check Run and same-name commit status on the PR head after the exact current
-head/base/merge qualification; the native default-branch dispatch is not the PR
-result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
-status green. Documentation-only clean PRs retain success without hardware work.
-The check and controller summary expose priority, position, blocked reason,
-command result, admitted SHA/run, state and expiry. Raw real-run scheduling
-measurements belong in `buster-performance`, not here.
-
-Run `cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o /tmp/admission`
-and `/tmp/admission --self-test` after changing this policy, and rerun the existing
-`changes --self-test` after any workflow gate/benchmark edit. The policy/fixtures
-are original C; the privileged workflow never runs PR code or consumes a PR cache
-or artifact as authority. Guard binaries are compiled on hosted capacity and
-checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
-block new admission; never clear a live lease merely because it expired.
-`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
-backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 
@@ -3219,8 +3165,10 @@ it with `--cross-check`.
 ## Direct executable benchmark
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
-[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]`
-(about 4 s) reports medians of:
+[--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]
+[--tls control|general|local|imported] [--exact] [--after-scalar MS]` (about
+6 s)
+reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
   the checked path, 64-bit targets, and gathers with scalar stores or
@@ -3241,14 +3189,24 @@ it with `--cross-check`.
 - the same sizes as programs that call libc, bound against the system's
   runtime and written as dynamic PIEs the same way, with their dynamic
   symbols, relocations, RELR words and stubs (`--only dynamic` runs these
-  alone);
+  alone); then again with a probe per worker: a control of the
+  general-dynamic probe's bytes, atoms and fixups without TLS (a `PC32` to a
+  data object and a direct call), then TLS accesses that the writer relaxes
+  (#515): a general-dynamic access to a thread-local of the program's
+  (local-exec), a local-dynamic one with its `DTPOFF32`, and a general-dynamic
+  access to `libc.so.6`'s `errno` (initial-exec through its GOT slot), each
+  write from binding's bytes, put back outside the time, and every probe's
+  bytes checked (`--tls control|general|local|imported` runs one mode alone),
+  so that a mode's rows less the control's are what its relaxation costs;
 - bound against its static runtime and written as static executables,
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,
   with their stubs, relocations (RELATIVE among them) and GOT slots
   (`--only static-pie`);
 - bound against the shared-library runtime and written as libraries, including
-  exports, preemptible calls and initial-exec TLS (`--only shared`).
+  exports, preemptible calls and initial-exec TLS (`--only shared`, with
+  `--tls general|local` a general- or local-dynamic probe per worker, which a
+  library keeps and `dlopen` runs).
 
 Executable writes after a case's first reuse the last one's file, whose loads
 and calls through the GOT the writer relaxed already. Shared-library writes
@@ -4718,10 +4676,11 @@ checks each file as the driver does and compares it with
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
-names the checked source makes; a difference must have one of three documented
+names the checked source makes; a difference must have one of four documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects": folded constants, unselected operands, and a constant `if`'s
-dropped arm, from the model `CheckProgramOptions.folded_ifs`), and a file the
+-O0's objects": folded constants, unselected operands, a constant `if`'s
+dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
+`always_inline` function, which clang inlines everywhere), and a file the
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
@@ -5041,7 +5000,27 @@ other integers, under live values where
 past the slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
-both arms of a `?:`.
+both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
+same for VECTOR values and `X86` entries, its rows' model plain C (each
+instruction's elements as its definition has them): the rows' rules
+(`tier0_operation_valid`: each of 20 breaks refused, integer operands narrower
+than their fields among them, every row of the check and the narrow operands'
+neighbours taken) and the stream's, each break refused at its entry (a vector
+converted and two compared among them); each row under no
+live values, under 8 floats and 3 integers, and under as many floats as leave
+its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
+one past it and a scratch register past the integer table, which both paths
+refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+registers and on the stack, called from C and calling C (a vector argument on
+the stack among them), a float parameter's register that a row of no records
+loads its vector operand into, and a 16-byte operand that a ZMM form reads
+whole, its upper bytes zero; and `--count` random programs of vector, integer and
+float statements, masked stores and dropped vectors over the rows (operands and
+results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
+operands, a row of no records), constants, frame objects of each width, DUP,
+STORE's kept value and `?:`, under live values on both stacks, every output
+byte against the check's stack machine. Its coverage must reach every VECTOR
+kind at each width it has, every row and both arms.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
