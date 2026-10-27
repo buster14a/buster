@@ -282,6 +282,37 @@ expression is refused with its bound, as a statement expression that holds a
 declaration is ("Variable-length arrays" below). A definition in a `typeof` is
 still refused, there as anywhere.
 
+Type-name prototypes check duplicate parameter names with a separate digital
+search tree per prototype (`check_constant_parameter_unique`, #604). A root
+and two child indices per existing parameter record consume interned 32-bit
+names directly, low bit first. Each unequal record fixes another bit, bounding
+an insertion by 32 unequal comparisons, independent of the parameter count.
+Zero names are skipped. Nested and sibling prototypes have independent roots;
+the tree is private to one `check_constant_type` scratch lifetime. It adds no
+allocation or identifier-table initialization. Parameter records grow from
+12 to 20 bytes; the scratch reservation grows by eight bytes per token of the
+bounded type slice. Reordering the part record keeps it at 40 bytes.
+
+The check stays after parameter type adjustment and before reading the next
+parameter, preserving the existing failure order and binding activation.
+The source-order insertions and their dependent bit decisions use scalar
+loads; the full scalar/vector source readers exercise the same membership
+rule. The affected path is declaration-time evaluation, for example
+`enum { N=sizeof(int (*)(int p0,int p1)) };`; a body-level `return sizeof(...)`
+uses the ordinary declarator reader and is a separate, already-linear control.
+
+On the locked 9700X against main `92c025e7`, a 4,096-name prototype takes
+11.27–11.41 ms as a whole `-fsyntax-only` process before this change and
+2.01–2.09 ms afterward (5.46–5.61 times faster); following 100 ms of scalar
+work it improves 5.15–5.33 times. Instructions fall 77.94%. SQLite's timing
+stays within the identical copies' variation; a possible few-percent cost on
+many small prototypes is unresolved. The 4,096-unnamed-parameter control
+uses about 2 MiB more peak RSS, while the named control stays near 31 MiB.
+[The pinned qualification and measurements](https://github.com/buster14a/buster-performance/tree/3e6cd7e2a88ae93b11797050f9fb8806be18ecc9/docs/measurements/prototype-parameter-names-604-2026-10-27)
+include all named/unnamed sizes, source/binary identities, memory costs,
+the passing target suites and the excluded setup run. These are measurements
+of this reader change and its recorded controls, not whole-compiler acceptance.
+
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
 the destination function-pointer type. Initializers, casts, assignments,
