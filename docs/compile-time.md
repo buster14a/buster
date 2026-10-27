@@ -242,7 +242,8 @@ its store.
   - **Scans.** Its other unit-wide scans test 16 tokens or nodes (or 64 roles)
     at a time and run the per-token code on the hits, in the same order:
     the bodies and initializers, the cases, the variable-length arrays'
-    declarations, the reached builtins, and the static objects and symbols.
+    declarations, the reached builtins and the static objects, whose symbols
+    #442's kernels number (`check_program_needed_number`).
 
 On `sqlite3.c`'s 319,193 body nodes the graph run went from 55.2 to 40.2 ns a
 node on the 9700X (303 to 223 cycles).

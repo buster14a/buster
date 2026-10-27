@@ -1758,39 +1758,9 @@ static void check_program_static_objects(CheckProgram* program, uint8_t* needed,
     }
 }
 
-// The needed objects' symbols, numbered from 1 in object order, and each symbol's object, into `symbol_objects` when it
-// isn't null; returns their count. AVX-512 tests 64 objects at a time, the rest and the `scalar` path one at a time.
-static uint32_t check_program_symbols(CheckProgram* program, const uint8_t* needed, uint32_t* symbol_objects, bool scalar)
-{
-    const uint32_t count = program->input->token_count;
-    uint32_t symbols = 0;
-    uint32_t object = 1;
-    for (; !scalar && count - object + 1 >= 64; object += 64)
-    {
-        const uint64_t marked = _mm512_test_epi8_mask(_mm512_loadu_si512(needed + object), _mm512_set1_epi8(-1));
-        for (uint64_t bits = symbol_objects != NULL ? marked : 0; bits != 0; bits &= bits - 1)
-        {
-            const uint32_t at = object + (uint32_t)__builtin_ctzll(bits);
-            symbols += 1;
-            program->object_symbols[at] = symbols;
-            symbol_objects[symbols - 1] = at;
-        }
-        symbols += symbol_objects == NULL ? (uint32_t)__builtin_popcountll(marked) : 0;
-    }
-    for (; object <= count; object += 1)
-    {
-        if (needed[object])
-        {
-            symbols += 1;
-            if (symbol_objects != NULL)
-            {
-                program->object_symbols[object] = symbols;
-                symbol_objects[symbols - 1] = object;
-            }
-        }
-    }
-    return symbols;
-}
+// #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
+static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
+static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
 
 static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, const CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
@@ -2124,12 +2094,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
             }
         }
-        program->symbol_count = check_program_symbols(program, needed, NULL, options.scalar);
+        program->symbol_count = check_program_needed_count(needed, program->object_count, options.scalar);
         program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
         valid = program->symbol_count == 0 || program->symbol_objects != 0;
         if (valid && program->symbol_count != 0)
         {
-            check_program_symbols(program, needed, program->symbol_objects, options.scalar);
+            check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, options.scalar);
         }
     }
     if (!valid || program->status != CHECK_PROGRAM_OK)

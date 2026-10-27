@@ -68,8 +68,9 @@ static void check_test_program_addressed(CheckTest* test)
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
-// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations,
-// needs and symbols; and at 64 and 128 tokens, the cases' marks, against a test of each token.
+// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations
+// and needs (whose symbols #442's kernels number: check_test_program_declaring); and at 64 and 128 tokens, the cases'
+// marks, against a test of each token.
 static void check_test_program_scans(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -191,25 +192,16 @@ static void check_test_program_scans(CheckTest* test)
                               "check_program's reached builtins agree with their scalar twin at every guarded tail");
             uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            SymbolId object_symbols[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t symbol_objects[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t symbols[2];
             for (uint32_t path = 0; path < 2; path += 1)
             {
-                programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path], .object_symbols = object_symbols[path] };
+                programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path] };
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
-                memset(object_symbols[path], 0, sizeof(object_symbols[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
                 check_program_static_objects(&programs[path], needed[path], path == 0);
-                symbols[path] = check_program_symbols(&programs[path], needed[path], NULL, path == 0);
-                const uint32_t numbered = check_program_symbols(&programs[path], needed[path], symbol_objects[path], path == 0);
-                check_test_expect(test, numbered == symbols[path], "check_program's symbols count what they number");
             }
-            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
-                                   memcmp(object_symbols[0], object_symbols[1], sizeof(object_symbols[0])) == 0 && symbols[0] == symbols[1] &&
-                                   memcmp(symbol_objects[0], symbol_objects[1], symbols[0] * sizeof(uint32_t)) == 0,
-                              "check_program's static objects and symbols agree with their scalar twin at every guarded tail");
+            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0,
+                              "check_program's static objects agree with their scalar twin at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
             {
                 uint64_t cases = 0;
@@ -235,6 +227,190 @@ static void check_test_program_scans(CheckTest* test)
             munmap(mappings[column], page * 2);
         }
     }
+}
+
+// #530's review: bodies whose controls check_control_children's columns decide, several in one unit: switches of their own
+// (one case in a nested block, a range, a nested switch), nested blocks, labels of one name in two bodies with gotos
+// forward and back, loops' breaks and continues, and a statement expression with a switch, a label and a goto of its own.
+static const char check_test_program_bodies_source[] =
+    "static int classify(int x){int r=0;switch(x&7){case 0:r=1;break;case 1:case 2:r=2;{int y=x;switch(y%3){case 0:r+=10;break;default:r+=20;}}break;"
+    "case 3 ... 5:r=3;goto out;default:{r=4;case 6:r+=5;}}r*=2;out:return r;}"
+    "static int walk(int n){int s=0;int i=0;top:if(i>=n)goto out;{int j=0;while(j<i){if(j==3){j++;continue;}s+=j;j++;}}"
+    "switch(i%4){case 0:s+=100;break;case 2:i++;goto top;default:s-=1;}i++;goto top;out:do{s+=1;if(s>1000)break;}while(s%3!=0);return s;}"
+    "static int region(int n){int t=0;for(int i=0;i<n;i++){t+=({int u=0;switch(i%3){case 0:u=1;break;case 1:u=2;break;default:if(i>7)break;u=3;}"
+    "again:u+=1;if(u<3)goto again;u;});if(t>50)break;}return t;}"
+    "int tested(int n){int a=n<0?-n:n;return classify(a)+walk(a&15)*3+region(a&15)*7+classify(a+1);}";
+
+// The next of `parent`'s children in the unit-wide lists, from `child` (BUSTER_CHECK_NONE for its first), that is in
+// [opening, closing]: the children a body's own lists keep.
+static uint32_t check_test_program_inside_child(const uint32_t* first, const uint32_t* next, uint32_t parent, uint32_t child, uint32_t opening, uint32_t closing)
+{
+    uint32_t at = child == BUSTER_CHECK_NONE ? first[parent] : next[child];
+    while (at != BUSTER_CHECK_NONE && (at < opening || at > closing))
+    {
+        at = next[at];
+    }
+    return at;
+}
+
+// #530's review: check_control_children's columns for each body against the unit-wide construction they replaced, the
+// independent expectation (the scalar and vector paths share the builder, so their comparison can't see its bugs). For
+// every body of `source`, each column starting poisoned: each token's children in order and in reverse, those outside the
+// body left out; the labels and cases numbered from 0 in the body's token order and every other token unlabeled; the cases'
+// targets the labels and the body's run of the program's cases exactly its own; and no loop's stop or repeat yet.
+static void check_test_program_body_columns(CheckTest* test, const char* source, const char* name)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = {
+        .language = { .standard = 2017, .gnu = true },
+        .no_standard_includes = true,
+    };
+    const ParseOptions parse_options = { 0 };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                 pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source)) &&
+                 parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
+    const uint32_t count = ready ? parser.tokens.count : 0;
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* columns = ready ? malloc(slots * 13 * sizeof(uint32_t)) : 0;
+    ready = ready && columns != 0;
+    check_test_expect(test, ready, "the body columns' source parses");
+    uint32_t bodies = 0;
+    uint32_t labels_seen = 0;
+    uint32_t cases_seen = 0;
+    bool equal = ready;
+    if (ready)
+    {
+        const uint32_t* parents = parser.tree.parents;
+        const uint8_t* roles = parser.tree.roles;
+        uint32_t* unit_first = columns;
+        uint32_t* unit_last = unit_first + slots;
+        uint32_t* unit_next = unit_last + slots;
+        uint32_t* unit_previous = unit_next + slots;
+        uint32_t* case_map = unit_previous + slots;
+        memset(columns, 0xff, slots * 5 * sizeof(uint32_t));
+        uint32_t case_count = 0;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t parent = parents[token];
+            if (parent < count)
+            {
+                unit_previous[token] = unit_last[parent];
+                if (unit_last[parent] != BUSTER_CHECK_NONE)
+                {
+                    unit_next[unit_last[parent]] = token;
+                }
+                else
+                {
+                    unit_first[parent] = token;
+                }
+                unit_last[parent] = token;
+            }
+            if (roles[token] == PARSE_ROLE_CLOSE_CASE)
+            {
+                case_map[token] = case_count++;
+            }
+        }
+        CheckProgramCase* cases = calloc((uint64_t)case_count + 1, sizeof(CheckProgramCase));
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .cases = cases, .case_count = case_count, .token = BUSTER_CHECK_NONE };
+        uint32_t* body_columns = case_map + slots;
+        memset(body_columns, 0xa5, slots * 8 * sizeof(uint32_t));
+        CheckControlWriter writer = {
+            .program = &program,
+            .parser = &parser,
+            .first = body_columns,
+            .last = body_columns + slots,
+            .next = body_columns + slots * 2,
+            .previous = body_columns + slots * 3,
+            .case_map = case_map,
+            .source_labels = body_columns + slots * 4,
+            .stops = body_columns + slots * 5,
+            .repeats = body_columns + slots * 6,
+            .labels = body_columns + slots * 7,
+            .capacity = count + 1,
+        };
+        equal = cases != 0;
+        for (uint32_t opening = 0; equal && opening < count; opening += 1)
+        {
+            const uint32_t closing = parents[opening];
+            if (roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing > opening)
+            {
+                writer.label_count = 0;
+                check_control_children(&writer, opening, closing);
+                bodies += 1;
+                uint32_t label = 0;
+                uint32_t case_start = BUSTER_CHECK_NONE;
+                uint32_t case_end = 0;
+                for (uint32_t token = opening; equal && token <= closing; token += 1)
+                {
+                    // In order, then in reverse, each child the unit's lists give that is in the body.
+                    uint32_t ours = writer.first[token];
+                    uint32_t expected = check_test_program_inside_child(unit_first, unit_next, token, BUSTER_CHECK_NONE, opening, closing);
+                    for (uint32_t steps = 0; equal && steps <= count && (ours != BUSTER_CHECK_NONE || expected != BUSTER_CHECK_NONE); steps += 1)
+                    {
+                        equal = ours == expected;
+                        ours = equal ? writer.next[ours] : ours;
+                        expected = equal ? check_test_program_inside_child(unit_first, unit_next, token, expected, opening, closing) : expected;
+                    }
+                    ours = writer.last[token];
+                    expected = check_test_program_inside_child(unit_last, unit_previous, token, BUSTER_CHECK_NONE, opening, closing);
+                    for (uint32_t steps = 0; equal && steps <= count && (ours != BUSTER_CHECK_NONE || expected != BUSTER_CHECK_NONE); steps += 1)
+                    {
+                        equal = ours == expected;
+                        ours = equal ? writer.previous[ours] : ours;
+                        expected = equal ? check_test_program_inside_child(unit_last, unit_previous, token, expected, opening, closing) : expected;
+                    }
+                    const bool labeled = token != opening && token != closing && (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE);
+                    const uint32_t expected_label = labeled ? label : BUSTER_CHECK_NONE;
+                    equal = equal && writer.source_labels[token] == expected_label && writer.stops[token] == BUSTER_CHECK_NONE &&
+                            writer.repeats[token] == BUSTER_CHECK_NONE;
+                    if (labeled && roles[token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        equal = equal && cases[case_map[token]].target == expected_label;
+                        case_start = case_start == BUSTER_CHECK_NONE ? case_map[token] : case_start;
+                        case_end = case_map[token] + 1;
+                        cases_seen += 1;
+                    }
+                    label += labeled;
+                }
+                equal = equal && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
+                        program.status == CHECK_PROGRAM_OK;
+                labels_seen += label;
+            }
+        }
+        free(cases);
+    }
+    printf("  %s: %u bodies' own columns against the unit-wide lists, with %u labels and %u cases\n", name, bodies, labels_seen, cases_seen);
+    char description[256];
+    snprintf(description, sizeof(description), "%s: each of %u bodies' own columns are the unit-wide lists' within it, with its %u labels and %u cases",
+             name, bodies, labels_seen, cases_seen);
+    check_test_expect(test, equal && bodies != 0, description);
+    free(columns);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
+static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
+
+// The bodies fixture's columns, and those of a unit of many small bodies, each with a switch, its own labels of one name,
+// a goto back, and an empty body and a label alone among them; then the bodies fixture compiled and run against clang.
+static void check_test_program_bodies(CheckTest* test, const char* clang)
+{
+    check_test_program_body_columns(test, check_test_program_bodies_source, "bodies-columns");
+    char many[16384];
+    int length = snprintf(many, sizeof(many), "void empty(void){}void lone(void){only:;}");
+    for (uint32_t i = 0; length > 0 && (size_t)length < sizeof(many) && i < 24; i += 1)
+    {
+        length += snprintf(many + length, sizeof(many) - (size_t)length,
+                           "int f%u(int x){int r=0;again:switch(x%%%u){case 0:r+=%u;break;case 1:{case 2:r+=1;}if(r<%u){x++;goto again;}break;default:r--;}"
+                           "for(int i=0;i<3;i++){if(i==1)continue;r+=i;}done:return r;}",
+                           i, i + 3, i, i + 2);
+    }
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(many), "the many bodies' source fits");
+    check_test_program_body_columns(test, many, "many-bodies-columns");
+    check_test_program_source(test, check_test_program_bodies_source, "bodies-controls", clang);
 }
 
 // `bytes` at the end of a mapping whose next page is PROT_NONE, so that an access past them faults: the start, or 0.
@@ -1182,6 +1358,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_control_walks(test);
     check_test_program_addressed(test);
     check_test_program_scans(test);
+    check_test_program_bodies(test, clang);
     check_test_program_declaring(test);
     check_test_program_refused(test);
     check_test_program_type_facts(test);
