@@ -2,10 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
-// every operator at each element type and width, calls passing and returning vectors in registers, elements, literals,
-// splats, casts, conditionals, globals, arrays and members of vector type. Their types are aligned to 16 at most, as
+// every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
+// elements, literals, splats, casts, conditionals, globals, arrays and members of vector type. Their types are aligned to 16 at most, as
 // Tier 0's frame objects are until it realigns a frame. Then what the lowering refuses by name: vectors on x86-64,
-// operators AVX-512 has no instruction for, compound assignments, other sizes and over-aligned locals. Include after
+// operators AVX-512 has no instruction for, other sizes and over-aligned locals. Include after
 // c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
@@ -83,6 +83,14 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "pointer[-1]=sum;FOLD(array);"
             "return (int)h;}",
         },
+        {
+            "vector-compound-assignments",
+            "static v8si global_sum;int tested(int n){unsigned h=2166136261u;v8si a={n,2,3,4,5,6,7,8},b={1,n,1,n,1,n,1,n};"
+            "v8hu w={1,2,3,4,5,6,7,(unsigned short)n};v8df d={0.5,1.5,2.5,3.5,4.5,5.5,6.5,(double)n};v8si x[2];fill(x,sizeof(x),n);"
+            "a+=b;a-=3;a*=b;a<<=2;a>>=b&3;a&=~b;a|=0x100;a^=b;FOLD(a);w*=w;w>>=1;w+=(unsigned short)n;FOLD(w);"
+            "d*=2.0;d/=d+1.0;d-=0.25;FOLD(d);global_sum=a;global_sum+=a;*x+=global_sum;x[1]^=a;FOLD(global_sum);FOLD(x);"
+            "return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
@@ -116,11 +124,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "vector-shift-bytes",
             "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
             "vector shifts of 8-bit elements",
-        },
-        {
-            "vector-compound-assignment",
-            "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a+=b;return a[0];}",
-            "compound assignments of vectors",
         },
         {
             "vector-of-8-bytes",

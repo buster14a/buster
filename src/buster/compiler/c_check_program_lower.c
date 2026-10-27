@@ -2414,11 +2414,15 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     const TypeId right_type = stream->conversions[node].operands[1].type;
     const uint8_t stored_class = check_lower_class(program->types, stored);
     const uint8_t calculated_class = check_lower_class(program->types, calculated);
-    if (stored_class == BUSTER_TYPED_CLASS_VECTOR)
-    {
-        check_lower_unsupported(writer, "compound assignments of vectors");
-    }
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+    // A vector's compound assignment is its operator's row (check_lower_vector_row) between the load and the store, its
+    // right operand a scalar's splat where it isn't a vector, at the stored vector's type, as a shift's count is.
+    const bool vector = stored_class == BUSTER_TYPED_CLASS_VECTOR;
+    const uint32_t vector_op = op <= CHECK_OP_SHIFT_RIGHT_ASSIGN ? CHECK_OP_ADD + (uint32_t)(op - CHECK_OP_ADD_ASSIGN) : CHECK_OP_BIT_AND + (uint32_t)(op - CHECK_OP_BIT_AND_ASSIGN);
+    if (vector && increment)
+    {
+        check_lower_unsupported(writer, "increments of vectors");
+    }
     const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN;
     const bool pointer = type_kind(program->types, type_strip_aligned(program->types, stored)) == BUSTER_TYPE_KIND_POINTER;
@@ -2441,9 +2445,15 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         address_temporary = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         old_temporary = check_lower_temporary(writer, stored_class);
     }
-    check_lower_instruction(writer, store, stored_class, direct ? destination : 0);
+    check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access_value(program->types, stored_class, stored));
     check_lower_convert(writer, calculated, stored);
-    if (pointer)
+    if (vector)
+    {
+        const bool scalar = check_lower_vector_bytes(program->types, stream->values[graph->operand1[node]].type) == 0;
+        check_lower_vector_row(writer, vector_op, calculated, 0);
+        check_lower_operand(writer, node, 1, false, scalar ? calculated : right_type);
+    }
+    else if (pointer)
     {
         check_lower_scale(writer, stored, check_lower_stride(writer, stored));
         if (subtract)
@@ -2500,7 +2510,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     }
     else if (!postfix)
     {
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access_value(program->types, stored_class, stored));
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_operand(writer, node, 0, true, 0);
     }
