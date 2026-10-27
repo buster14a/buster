@@ -682,6 +682,16 @@ What the lowering covers past scalars (#145's programs):
   The producer follows the copied value through comma, conditional, selected
   and statement expressions, whose lvalue conversions can erase a source's
   volatile qualifier. Its bounded private worklist borrows unused task storage.
+  The [9700X comparison](https://github.com/buster14a/buster-performance/blob/3d131b17c8b08bc2688da9c929e26ffea01055d2/docs/measurements/aggregate-copies-597-2026-10-27/README.md)
+  at compiler `03d79f50` records an 8192-byte discarded assignment shrinking
+  from 223 typed entries, 1152 machine records and 6197 text bytes to 6, 11
+  and 43, with hot-buffer runtime 52.659 to 23.647 ns per call. Copies through
+  262144 bytes compile where the baseline exhausts code capacity from 16384;
+  all 18 tested objects through 256 bytes remain byte-identical. Five release
+  test groups pass. There is no demonstrated compile-time gain; 257-byte calls
+  cost more than the old expansion, and the single-placement SQLite control's
+  median increases 0.79% with overlapping ranges. The report preserves these
+  limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
