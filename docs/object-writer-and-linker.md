@@ -2989,15 +2989,22 @@ already-discovered begin-object path, replaces repeated version scans with
 range classification, and omits the unused catalog from the writer's inputs.
 Three alternating rounds on the same 9700X compare e04462c, the immediate
 baseline 8fcf19ce and implementation 3760045a
-([the follow-up record](https://github.com/buster14a/buster-performance/tree/dddb7605d0ea565b9df9d60e69b2fe91e025b060/docs/measurements/libgcc-s-no-import-489-2026-10-27)).
+([the follow-up record](https://github.com/buster14a/buster-performance/tree/5208f575308ce0317e5c325924114f032ab4c28d/docs/measurements/libgcc-s-no-import-489-2026-10-27)).
 The tiny PIE's median total is 21.4, 22.6 and 21.2 us respectively; every
 final round is at or below its paired historical total. Its cached runtime
 load is 11.0--11.4 us, against the historical 11.4--12.0 us, and the writer's
-count phase is back to 1.0 us. The tiny shared library's load is 10.5--10.8 us,
+count phase is back to 1.0 us. A supplementary tiny-PIE `bind_end` sample uses
+6,738 instructions versus the historical 7,233 and immediate baseline's 9,152;
+its separate wall median, 0.34 versus 0.32 us historically, does not establish
+an individual phase speedup. The tiny shared library's load is 10.5--10.8 us,
 against 11.0--11.5 us historically; its summed load and binding/input phases
 are lower too. Shared close/write times vary widely, and the larger-output
 totals do not establish a general linker speedup: all workloads and their
-ranges remain in the record. Traced cached ordinary links check no GCC DSO
+ranges remain in the record. A single-executable control pair also removes
+the fixed tiny-PIE cost (21.8 to 21.2 us); its large shared total is higher,
+so it supports no general speedup claim either. The whole-driver sample is
+2.241 ms and 30,500 KB peak RSS versus the immediate 2.267 ms and 29,584 KB:
+it establishes no whole-driver memory improvement. Traced cached ordinary links check no GCC DSO
 path, dependent unwinder links check all four, and the begin object is checked
 once. Both ordinary and unwinder outputs remain byte-identical to the
 implementation before catalog omission. The snapshot, binding, import,
