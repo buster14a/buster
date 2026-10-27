@@ -944,7 +944,7 @@ static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime*
         if (no_use)
         {
             snapshot_test_expect(tally, !test.bind.deferred_checked, "a no-use link never checks deferred probes", c);
-            snapshot_test_expect(tally, c == 0 || (test.link.symbols.source[reference] == BUSTER_LINK_SOURCE_NONE && test.link.symbols.version[reference] == 0),
+            snapshot_test_expect(tally, c == 0 || (reference != 0 && test.link.symbols.source[reference] == BUSTER_LINK_SOURCE_NONE && test.link.symbols.version[reference] == 0),
                                  "a weak-only unwinder stays unbound", c);
         }
         bind_test_link_end(&test);
@@ -961,7 +961,9 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
         char place[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         char file[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         char path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
-        snapshot_test_path(place, directory->path, missing ? "deferred-absent" : "deferred-found");
+        char name[64];
+        snprintf(name, sizeof(name), "deferred-%u-%u", (unsigned)imported->kind, missing);
+        snapshot_test_path(place, directory->path, name);
         snapshot_test_path(file, place, "optional-library");
         snapshot_test_path(path, place, snapshot_name(imported->kind));
         Scratch scratch = scratch_begin(0);
