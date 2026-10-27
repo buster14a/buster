@@ -4239,6 +4239,7 @@ static int run_checker_tests(int argc, char** argv)
         .random = 133
     };
     const char* clang = "clang";
+    bool program_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -4249,6 +4250,10 @@ static int run_checker_tests(int argc, char** argv)
             const char* value = argv[++i];
             test.random = strtoull(value, &end, 10);
             options = errno == 0 && value != end && *end == 0 && *value != '-';
+        }
+        else if (strcmp(argv[i], "--program-initializers") == 0)
+        {
+            program_initializers = true;
         }
         else if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
@@ -4261,12 +4266,16 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers]");
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
         check_test_expect(&test, initialized, "type-table allocation");
-        if (initialized)
+        if (initialized && program_initializers)
+        {
+            check_test_program_initializers(&test, clang);
+        }
+        else if (initialized)
         {
             check_test_action_fixtures(&test, &types.table);
             check_test_action_constraints(&test, &types.table);
@@ -4334,6 +4343,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_attributes(&test, clang);
             check_test_attribute_sources(&test, clang);
             check_test_programs(&test, clang);
+            check_test_program_initializers(&test, clang);
             check_test_prefixes(&test, clang);
             check_test_repairs(&test, clang);
             check_test_mutations(&test, clang);

@@ -676,6 +676,18 @@ What the lowering covers past scalars (#145's programs):
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
   bytes or value is stored, an aggregate's copied.
+  Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
+  plans use a readonly byte image and one call to the target C library's
+  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  storage is cleared separately. Images with internal holes larger than their
+  payload keep the existing writes, avoiding large readonly zero gaps for sparse
+  initializers. This preserves checked string truncation,
+  embedded NULs, wide characters, designated overrides and local mutability.
+  A mixed runtime plan retains its ordered parts, pooling an individual string
+  part above the same threshold. Small payloads, volatile parts, bit-fields and
+  values needing address relocations retain their existing lowering. Pools are
+  immutable before function lanes start, have deterministic local symbols, and
+  require no generated ISA beyond the ordinary C runtime call ABI.
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
