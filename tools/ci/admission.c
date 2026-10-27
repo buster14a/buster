@@ -21,6 +21,7 @@
 #define BUSTER_CI_WORKFLOW ".github/workflows/9700x.yml"
 #define BUSTER_CI_CONTROL "buster14a/buster/.github/workflows/9700x-control.yml@refs/heads/main"
 #define BUSTER_CI_CANDIDATES (BUSTER_CI_ITEMS * 2)
+#define BUSTER_CI_PR_FIELDS "number state headRefOid baseRefOid headRef { target { oid } } baseRef { target { oid } } mergeable potentialMergeCommit { oid } headRepository { databaseId }"
 
 typedef struct Http Http;
 struct Http
@@ -81,6 +82,8 @@ static Buffer ci_read(FILE* file)
     result.data[result.length] = 0;
     return result;
 }
+
+#include "admission_git.c"
 
 // gh handles authentication/TLS. No shell, PR-controlled executable, jq program or argument interpolation is used.
 static Http ci_transport(const char* method, const char* path, const char* body)
@@ -229,6 +232,7 @@ static Buffer ci_state_json(const CiState* state)
         buffer_add(&out, ",", 1);
         ci_json_string(&out, "audit", pr->audit);
         buffer_printf(&out, ",\"active_seconds\":%" PRIu64, pr->active_seconds);
+        buffer_printf(&out, ",\"head_repo\":%" PRIu64, pr->head_repo);
         buffer_printf(&out, ",\"command_hash\":%" PRIu64, pr->command_hash);
         buffer_printf(&out, ",\"executor_run\":%" PRIu64, pr->executor_run);
         buffer_printf(&out, ",\"signals_at\":%" PRIu64 ",\"cached_approved\":%s,\"signal_approval_at\":%" PRIu64 ",\"cached_code\":%s,", pr->signals_at, pr->cached_approved ? "true" : "false", pr->signal_approval_at, pr->cached_code ? "true" : "false");
@@ -320,6 +324,7 @@ static CiState ci_state_parse(const char* text)
         }
         CiPr* pr = &state.prs[state.pr_count++];
         pr->number = json_number(&json, row, "number");
+        pr->head_repo = json_number(&json, row, "head_repo");
         pr->seen_at = json_number(&json, row, "seen_at");
         pr->queued_at = json_number(&json, row, "queued_at");
         pr->manual = ci_state_priority(&json, row);
@@ -483,6 +488,7 @@ typedef struct CiRun CiRun;
 struct CiRun
 {
     uint64_t id;
+    uint64_t head_repo;
     uint64_t attempt;
     uint64_t pr;
     uint64_t created_at;
@@ -506,6 +512,8 @@ static CiRun ci_run_parse(const Json* json, size_t row)
     run.id = json_number(json, row, "id");
     run.attempt = json_number(json, row, "run_attempt");
     run.workflow = json_number(json, row, "workflow_id");
+    size_t head_repo = json_get(json, row, "head_repository");
+    run.head_repo = json_number(json, head_repo, "id");
     ci_copy(run.head, sizeof(run.head), json_field(json, row, "head_sha"));
     ci_copy(run.event, sizeof(run.event), json_field(json, row, "event"));
     ci_copy(run.branch, sizeof(run.branch), json_field(json, row, "head_branch"));
@@ -528,6 +536,23 @@ static CiRun ci_run_parse(const Json* json, size_t row)
         }
     }
     return run;
+}
+
+static void ci_associate_run(CiRun* run, const CiState* state)
+{
+    if (run->pr == 0 && run->head_repo != 0 && strcmp(run->event, "pull_request") == 0)
+    {
+        uint64_t number = 0;
+        unsigned matches = 0;
+        for (size_t i = 0; i < state->pr_count; ++i)
+        {
+            const CiPr* pr = &state->prs[i];
+            if (pr->head_repo == run->head_repo && strcmp(pr->head, run->head) == 0) { number = pr->number; ++matches; }
+        }
+        // Fork run payloads may omit pull_requests. A unique live repository-ID/SHA match is safe;
+        // multiple PRs with the same head remain ambiguous and cannot be run-control targets.
+        if (matches == 1) run->pr = number;
+    }
 }
 
 static bool ci_run_path(const char* path)
@@ -631,36 +656,73 @@ static void ci_jobs(CiRun* run, bool* executor_success, bool* guard_success)
     json_free(&response.json);
 }
 
-static CiIdentity ci_get_pr(uint64_t number, bool retry_unknown)
+static CiIdentity ci_graph_pr(const Json* json, size_t row)
 {
     CiIdentity result = {0};
-    char path[80];
-    snprintf(path, sizeof(path), "pulls/%" PRIu64, number);
+    result.number = json_number(json, row, "number");
+    result.open = strcmp(json_field(json, row, "state"), "OPEN") == 0;
+    size_t head_ref = json_get(json, row, "headRef");
+    size_t base_ref = json_get(json, row, "baseRef");
+    size_t head = json_get(json, head_ref, "target");
+    size_t base = json_get(json, base_ref, "target");
+    const char* head_sha = json_field(json, head, "oid");
+    const char* base_sha = json_field(json, base, "oid");
+    bool live = ci_sha(head_sha) && ci_sha(base_sha);
+    ci_copy(result.head, sizeof(result.head), live ? head_sha : json_field(json, row, "headRefOid"));
+    ci_copy(result.base, sizeof(result.base), live ? base_sha : json_field(json, row, "baseRefOid"));
+    size_t repository = json_get(json, row, "headRepository");
+    result.head_repo = json_number(json, repository, "databaseId");
+    result.fork = result.head_repo != UINT64_C(1421805693);
+    const char* mergeable = json_field(json, row, "mergeable");
+    result.mergeable = !live ? -1 : strcmp(mergeable, "MERGEABLE") == 0 ? 1 : strcmp(mergeable, "CONFLICTING") == 0 ? 0 : -1;
+    // Only the original API fixtures use the supplied test-merge SHA. Production derives a canonical merge
+    // from the live refs: GitHub may defer updating baseRefOid/potentialMergeCommit for up to twelve hours.
+    if (ci_fixture_http)
+    {
+        size_t merge = json_get(json, row, "potentialMergeCommit");
+        ci_copy(result.merge, sizeof(result.merge), json_field(json, merge, "oid"));
+    }
+    if (result.number == 0 || !ci_sha(result.head) || !ci_sha(result.base)) ci_die("invalid live PR identity");
+    return result;
+}
+
+static void ci_resolve_merge(CiIdentity* identity, const CiLease* proof)
+{
+    if (!ci_fixture_http && identity->open && identity->mergeable >= 0)
+    {
+        if (proof != NULL)
+        {
+            // A read-only worker trusts only an authenticated controller lease for this exact immutable pair.
+            // It rechecks the live refs but performs no Git merge/fetch while holding the physical host lock.
+            if (proof->pr == identity->number && strcmp(proof->head, identity->head) == 0 && strcmp(proof->base, identity->base) == 0)
+            {
+                identity->mergeable = 1;
+                ci_copy(identity->merge, sizeof(identity->merge), proof->merge);
+            }
+        }
+        else identity->mergeable = ci_git_merge(identity->base, identity->head, identity->merge);
+    }
+}
+
+static CiIdentity ci_get_pr_mode(uint64_t number, bool retry_unknown, const CiLease* proof)
+{
+    CiIdentity result = {0};
     unsigned attempts = retry_unknown ? 3 : 1;
     for (unsigned i = 0; i < attempts; ++i)
     {
-        Http response = ci_api("GET", path, NULL);
-        result.number = number;
-        result.open = strcmp(json_field(&response.json, 0, "state"), "open") == 0;
-        size_t head = json_get(&response.json, 0, "head");
-        size_t base = json_get(&response.json, 0, "base");
-        ci_copy(result.head, sizeof(result.head), json_field(&response.json, head, "sha"));
-        ci_copy(result.base, sizeof(result.base), json_field(&response.json, base, "sha"));
-        ci_copy(result.merge, sizeof(result.merge), json_field(&response.json, 0, "merge_commit_sha"));
-        const char* mergeable = json_field(&response.json, 0, "mergeable");
-        result.mergeable = strcmp(mergeable, "true") == 0 ? 1 : strcmp(mergeable, "false") == 0 ? 0 : -1;
-        size_t head_repo = json_get(&response.json, head, "repo");
-        result.fork = json_number(&response.json, head_repo, "id") != UINT64_C(1421805693);
-        if (strcmp(json_field(&response.json, base, "ref"), "main") != 0)
-        {
-            // Stacked PRs are qualified against their actual target, using the same head/base identity contract.
-            // They are still in this repository and cannot affect another pool or workflow.
-        }
-        if (!ci_sha(result.head) || !ci_sha(result.base) || (result.mergeable == 1 && !ci_sha(result.merge)))
-        {
-            ci_die("invalid PR identity from GitHub");
-        }
+        Buffer query = {0}, request = {0};
+        buffer_printf(&query, "query { repository(owner: \"buster14a\", name: \"buster\") { pullRequest(number: %" PRIu64 ") { " BUSTER_CI_PR_FIELDS " } } }", number);
+        buffer_add(&request, "{\"query\":", 9); json_quote(&request, query.data); buffer_add(&request, "}", 1);
+        Http response = ci_http("POST", "graphql", request.data);
+        free(query.data); free(request.data);
+        if (response.status != 200 || json_get(&response.json, 0, "errors") != SIZE_MAX) ci_die("current PR metadata query failed");
+        size_t data = json_get(&response.json, 0, "data");
+        size_t repository = json_get(&response.json, data, "repository");
+        size_t pr = json_get(&response.json, repository, "pullRequest");
+        result = ci_graph_pr(&response.json, pr);
+        if (result.number != number) ci_die("current PR identity changed");
         json_free(&response.json);
+        ci_resolve_merge(&result, proof);
         if (result.mergeable != -1 || !result.open)
         {
             break;
@@ -673,6 +735,11 @@ static CiIdentity ci_get_pr(uint64_t number, bool retry_unknown)
     return result;
 }
 
+static CiIdentity ci_get_pr(uint64_t number, bool retry_unknown)
+{
+    return ci_get_pr_mode(number, retry_unknown, NULL);
+}
+
 static bool ci_document(const char* path)
 {
     size_t length = strlen(path);
@@ -682,6 +749,7 @@ static bool ci_document(const char* path)
 
 static bool ci_pr_code(const CiIdentity* current)
 {
+    if (!ci_fixture_http && current->mergeable == 1) return ci_git_code(current);
     bool code = current->mergeable != 1;
     if (!code)
     {
@@ -843,6 +911,7 @@ static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, 
     {
         CiRun run = {0};
         valid = ci_command_run(command.run, &run);
+        if (valid) ci_associate_run(&run, state);
         if (pr != NULL && (!valid || run.pr != pr->number || strcmp(run.head, pr->head) != 0 || run.id != pr->request_run))
         {
             snprintf(pr->audit, sizeof(pr->audit), "Rejected command by @%s (source %" PRIu64 "): run is not this revision's current request.", actor, source);
@@ -1101,7 +1170,7 @@ static void ci_reviews(CiIdentity* current)
 static size_t ci_list_prs(CiIdentity* identities)
 {
     // One cheap metadata-only GraphQL query, rather than N REST requests on every run event.
-    const char* query = "query { repository(owner: \"buster14a\", name: \"buster\") { pullRequests(states: OPEN, first: 65, orderBy: {field: CREATED_AT, direction: ASC}) { pageInfo { hasNextPage } nodes { number state headRefOid baseRefOid mergeable potentialMergeCommit { oid } headRepository { databaseId } } } } }";
+    const char* query = "query { repository(owner: \"buster14a\", name: \"buster\") { pullRequests(states: OPEN, first: 65, orderBy: {field: CREATED_AT, direction: ASC}) { pageInfo { hasNextPage } nodes { " BUSTER_CI_PR_FIELDS " } } } }";
     Buffer request = {0};
     buffer_add(&request, "{\"query\":", 9);
     json_quote(&request, query);
@@ -1129,29 +1198,16 @@ static size_t ci_list_prs(CiIdentity* identities)
             ci_die("more than %u open PRs; raise the reviewed state bound before admission", BUSTER_CI_ITEMS);
         }
         CiIdentity* identity = &identities[count++];
-        memset(identity, 0, sizeof(*identity));
-        identity->number = json_number(&response.json, row, "number");
-        identity->open = strcmp(json_field(&response.json, row, "state"), "OPEN") == 0;
-        ci_copy(identity->head, sizeof(identity->head), json_field(&response.json, row, "headRefOid"));
-        ci_copy(identity->base, sizeof(identity->base), json_field(&response.json, row, "baseRefOid"));
-        size_t merge = json_get(&response.json, row, "potentialMergeCommit");
-        ci_copy(identity->merge, sizeof(identity->merge), json_field(&response.json, merge, "oid"));
-        size_t head_repo = json_get(&response.json, row, "headRepository");
-        identity->fork = json_number(&response.json, head_repo, "databaseId") != UINT64_C(1421805693);
-        const char* mergeable = json_field(&response.json, row, "mergeable");
-        identity->mergeable = strcmp(mergeable, "MERGEABLE") == 0 ? 1 : strcmp(mergeable, "CONFLICTING") == 0 ? 0 : -1;
-        if (identity->number == 0 || !ci_sha(identity->head) || !ci_sha(identity->base))
-        {
-            ci_die("invalid queried PR identity");
-        }
+        *identity = ci_graph_pr(&response.json, row);
     }
     json_free(&response.json);
     for (size_t i = 0; i < count; ++i)
     {
-        if (identities[i].mergeable < 0 || (identities[i].mergeable == 1 && !ci_sha(identities[i].merge)))
+        if (identities[i].mergeable < 0)
         {
             identities[i] = ci_get_pr(identities[i].number, true);
         }
+        else ci_resolve_merge(&identities[i], NULL);
     }
     return count;
 }
@@ -1270,6 +1326,7 @@ static void ci_dispatch_event(CiState* state, const Json* event, uint64_t now, u
                 CiRun run = {0};
                 if (ci_command_run(run_id, &run))
                 {
+                    ci_associate_run(&run, state);
                     pr = ci_find_pr(state, run.pr);
                 }
             }
@@ -1422,10 +1479,11 @@ static void ci_commit_status(CiPr* pr, const char* state)
 static void ci_refresh_status(CiPr* pr)
 {
     char path[120];
-    snprintf(path, sizeof(path), "commits/%s/status?per_page=100", pr->head);
+    snprintf(path, sizeof(path), "commits/%s/statuses?per_page=100", pr->head);
     Http response = ci_api("GET", path, NULL);
-    size_t statuses = json_get(&response.json, 0, "statuses");
-    if (statuses >= response.json.count || json_number(&response.json, 0, "total_count") > 100)
+    // The combined /status response omits creator. The individual status list retains the issuer identity.
+    size_t statuses = 0;
+    if (response.json.rows[statuses].type != '[')
     {
         ci_die("ambiguous required commit status; no publication");
     }
@@ -1433,9 +1491,12 @@ static void ci_refresh_status(CiPr* pr)
     for (size_t row = statuses + 1; row < response.json.rows[statuses].next; row = response.json.rows[row].next)
     {
         size_t creator = json_get(&response.json, row, "creator");
-        if (strcmp(json_field(&response.json, row, "context"), BUSTER_CI_REQUIRED) == 0 && strcmp(json_field(&response.json, creator, "login"), "github-actions[bot]") == 0)
+        if (strcmp(json_field(&response.json, row, "context"), BUSTER_CI_REQUIRED) == 0)
         {
-            ci_copy(pr->status_state, sizeof(pr->status_state), json_field(&response.json, row, "state"));
+            if (strcmp(json_field(&response.json, creator, "login"), "github-actions[bot]") == 0 && json_number(&response.json, creator, "id") == UINT64_C(41898282))
+            {
+                ci_copy(pr->status_state, sizeof(pr->status_state), json_field(&response.json, row, "state"));
+            }
             break;
         }
     }
@@ -1470,7 +1531,7 @@ static Buffer ci_receipt(const CiPr* pr, const CiIdentity* current)
     Buffer out = {0};
     buffer_printf(&out, "{\"version\":1,\"pr\":%" PRIu64 ",\"head\":\"%s\",\"base\":\"%s\",\"merge\":\"%s\",\"priority\":%d,\"queue_position\":%" PRIu64 ",\"eligible\":%s,\"outcome\":%u,\"request_run\":%" PRIu64 ",\"executor_run\":%" PRIu64 ",\"queued_at\":%" PRIu64 ",\"approval_at\":%" PRIu64 ",\"admitted_at\":%" PRIu64 ",\"completed_at\":%" PRIu64 ",\"hardware_job_seconds\":%" PRIu64 ",\"reason\":", pr->number, current->head, current->base, current->merge, pr->effective_priority, pr->queue_position, pr->eligible ? "true" : "false", pr->outcome, pr->request_run, pr->executor_run, pr->queued_at, pr->approval_at, pr->admitted_at, pr->completed_at, pr->active_seconds);
     json_quote(&out, pr->reason);
-    buffer_add(&out, "}", 1);
+    buffer_printf(&out, ",\"merge_method\":\"git-merge-tree/v1\"}");
     return out;
 }
 
@@ -1768,6 +1829,7 @@ static bool ci_legacy_and_conflicts(CiState* state, CiIdentity* identities, size
     for (size_t i = 0; i < run_count; ++i)
     {
         CiRun* run = &runs[i];
+        ci_associate_run(run, state);
         bool executor_success;
         bool guard_success;
         ci_jobs(run, &executor_success, &guard_success);
@@ -1828,6 +1890,7 @@ static void ci_refresh_requests(CiState* state, uint64_t workflow)
     for (size_t row = runs + 1; row < response.json.rows[runs].next; row = response.json.rows[row].next)
     {
         CiRun run = ci_run_parse(&response.json, row);
+        ci_associate_run(&run, state);
         CiPr* pr = ci_find_pr(state, run.pr);
         if (pr != NULL && strcmp(pr->head, run.head) == 0 && run.id > pr->request_run)
         {
@@ -2239,7 +2302,7 @@ static bool ci_guard_once(bool output)
         if (pr != 0)
         {
             bool inputs_match = strcmp(json_field(&event, inputs, "lease"), lease->nonce) == 0 && strcmp(json_field(&event, inputs, "target_head"), lease->head) == 0 && strcmp(json_field(&event, inputs, "target_base"), lease->base) == 0 && strcmp(json_field(&event, inputs, "target_merge"), lease->merge) == 0;
-            CiIdentity current = ci_get_pr(pr, true);
+            CiIdentity current = ci_get_pr_mode(pr, true, lease);
             admitted = inputs_match && ci_executor_identity(&run, lease, workflow) && ci_lease_current(lease, &current);
         }
         else
@@ -2309,6 +2372,16 @@ static int ci_host_source_guard(void)
     return allowed ? 0 : 1;
 }
 
+static int ci_guard_transfer(const char* path, bool checkout)
+{
+    if (ci_guard(false) != 0) return 1;
+    CiState state = ci_load_state();
+    if (checkout) ci_git_materialize(&state.lease, path);
+    else ci_git_pack(&state.lease, path);
+    free(state.saved_json);
+    return 0;
+}
+
 #include "admission_fixture.c"
 #include "admission_test.c"
 
@@ -2339,9 +2412,13 @@ int main(int argc, char** argv)
     {
         status = ci_host_source_guard();
     }
+    else if (argc == 3 && (strcmp(argv[1], "--merge-pack") == 0 || strcmp(argv[1], "--materialize") == 0))
+    {
+        status = ci_guard_transfer(argv[2], strcmp(argv[1], "--materialize") == 0);
+    }
     else
     {
-        fputs("usage: admission --self-test | --snapshot | --reconcile | --wait | --verify | --host-source-guard\n", stderr);
+        fputs("usage: admission --self-test | --snapshot | --reconcile | --wait | --verify | --host-source-guard | --merge-pack FILE | --materialize FILE\n", stderr);
         status = 2;
     }
     return status;

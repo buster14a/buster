@@ -1294,6 +1294,11 @@ Check Run and same-name commit status on the PR head after the exact current
 head/base/merge qualification; the native default-branch dispatch is not the PR
 result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
 status green. Documentation-only clean PRs retain success without hardware work.
+Live branch-ref targets bind the pair: cached PR base/test-merge snapshots can
+lag. Hosted preflight checks a private bare Git merge without checkout, PR
+execution, inherited hooks/drivers or GitHub writes. The executor reconstructs
+the canonical unpublished merge from its pinned inputs and an authenticated
+small object pack; both parents and the checkout SHA must match the lease.
 The check and controller summary expose priority, position, blocked reason,
 command result, admitted SHA/run, state and expiry. Raw real-run scheduling
 measurements belong in `buster-performance`, not here.

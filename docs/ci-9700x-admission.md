@@ -41,8 +41,8 @@ write token to an executor. A read-only review-signal workflow wakes it; live
 review data and actual repository permissions decide the result.
 
 The dispatched executor uses the reviewed default-branch workflow and only read
-permissions. It checks out the immutable merge SHA selected for the current
-head/base pair. Its admission guard is compiled on hosted capacity, transferred
+permissions. It reconstructs the immutable merge SHA selected for the current
+live head/base pair. Its admission guard is compiled on hosted capacity, transferred
 as an immutable artifact of that same run/attempt, and checked against the
 hosted job's SHA-256 before each execution. A conflicted/stale admission therefore
 does not compile the guard or the compiler on the 9700X. Public fork revisions
@@ -118,7 +118,7 @@ be a conflict. A known changed identity still invalidates the old lease.
 Documentation-only PRs receive the existing successful required result without
 hardware work, after confirming mergeability and the immutable base-to-merge
 diff. `docs/performance/**` remains code for qualification. Both names of a
-rename count. A comparison at GitHub's 300-file limit is conservatively code.
+rename count; the local object diff reads every changed path without REST's file cap.
 Conflicting or indeterminate docs-only PRs do not receive a false green skip.
 
 The event, dispatcher and reporter have separate SHA identities. GitHub reruns
@@ -126,6 +126,40 @@ retain their original event SHA/ref ([rerun semantics](https://docs.github.com/e
 rerunning a stale native PR workflow is therefore not the dispatch architecture.
 Current-head qualifications can also be created for PRs that opened with a
 conflict and never had an original PR run.
+
+### Live refs and the frozen merge
+
+The controller reads `headRef.target.oid` and `baseRef.target.oid` for the current
+branches. PR `baseRefOid`, REST `base.sha` and the generated test merge can be
+older snapshots. GitHub documents [deferred test-merge generation](https://docs.github.com/en/enterprise-server@3.21/admin/release-notes),
+and the live rollout observed this on an unchanged head after `main` advanced.
+Those cached fields are not current-pair authority. UNKNOWN still receives three
+bounded metadata retries and remains pending; neither a stale clean result nor
+a stale conflict decides admission for a changed base.
+
+For known metadata, hosted preflight reads the pinned Git objects over public
+HTTPS into a private bare repository and uses `git merge-tree --write-tree` to
+establish the actual current conflict state. It never checks out PR files, runs
+a PR program, follows a submodule, executes hooks or inherits external merge
+drivers. Git configuration, credentials, prompts, replacement objects, protocols
+and thread counts are constrained. No GitHub ref or PR branch is changed and
+the controller retains read-only contents permission. Clean behind PRs therefore
+qualify the new base without a forced update/rebase or a twelve-hour cache wait.
+
+A deterministic, unpublished automation commit records the resulting tree and
+the exact base/head parents. Its fixed metadata identifies the construction as
+`Buster 9700X frozen qualification merge v1`; it is not a human/DCO source commit.
+The lease's merge SHA is this canonical object, not GitHub's possibly stale test
+merge. Hosted admission independently reconstructs the same object and transfers
+only new merge objects in a small pack alongside its guard, through that exact
+run/attempt's immutable artifact. SHA-256 outputs authenticate both files.
+
+The hosted selector and physical executor check out the pinned base, fetch the
+pinned head and import the authenticated pack. They verify both parents and the
+resulting checkout SHA before reading/building PR source. A changed pair,
+different merge result, missing/corrupt pack or failed guard remains blocking.
+The physical guard rechecks live refs against the authenticated lease; it does
+not calculate mergeability or build the guard while holding the host lock.
 
 ## Priority and commands
 
@@ -280,10 +314,17 @@ Actions. Controller/runner outages cannot create a second lease.
 API/permission errors, unsupported/corrupt state, ambiguous dispatches or bounds
 exhaustion stop new admission. Bounds are 64 open PRs, 128 active candidates,
 64 run overrides, 100 unprocessed dispatch controls and 60,000 state JSON bytes.
+Metadata and frozen-object transfers are each bounded to 16 MiB.
 Do not delete the ledger or clear a lease while an executor could still be alive.
 First cancel/confirm terminal status, then reconcile. No branch-protection bypass,
 force-update or new service is a recovery step. A maintainer can inspect without
 writing using `admission --snapshot`.
+
+Disabling admission intentionally leaves existing controller statuses blocking
+until a valid qualification is restored. A new source-fix head can qualify through
+the ordinary pre-activation path; do not fabricate status success or bypass branch
+protection to recover. Stop controller writes before removing the host marker,
+and cancel/confirm terminal any controlled fork probe before restoring old behavior.
 
 Commit statuses are appended only when the required pending/failure/success state
 changes, avoiding queue-position updates consuming GitHub's per-SHA/context quota.

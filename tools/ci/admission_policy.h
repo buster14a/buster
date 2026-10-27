@@ -203,6 +203,7 @@ typedef struct CiPr CiPr;
 struct CiPr
 {
     uint64_t number;
+    uint64_t head_repo;
     char head[BUSTER_CI_SHA];
     char base[BUSTER_CI_SHA];
     uint64_t seen_at;
@@ -284,6 +285,7 @@ typedef struct CiIdentity CiIdentity;
 struct CiIdentity
 {
     uint64_t number;
+    uint64_t head_repo;
     char head[BUSTER_CI_SHA];
     char base[BUSTER_CI_SHA];
     char merge[BUSTER_CI_SHA];
@@ -308,6 +310,7 @@ static bool ci_lease_current(const CiLease* lease, const CiIdentity* current)
 
 static void ci_observe(CiPr* state, const CiIdentity* current, uint64_t now)
 {
+    state->head_repo = current->head_repo;
     bool head_changed = strcmp(state->head, current->head) != 0;
     bool base_changed = strcmp(state->base, current->base) != 0;
     if (head_changed)

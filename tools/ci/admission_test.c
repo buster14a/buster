@@ -28,6 +28,8 @@ static CiIdentity ci_test_identity(uint64_t number)
     return current;
 }
 
+#include "admission_git_test.c"
+
 static void ci_test_json(void)
 {
     Json json = json_parse("{\"items\":[{\"body\":\"LGTM\\n\\u00e9\\ud83d\\ude00\",\"id\":6438358225}],\"mergeable\":null,\"boolean\":true}");
@@ -264,6 +266,27 @@ static void ci_test_lease_and_state(void)
 static void ci_test_controller(void)
 {
     ci_fixture_init();
+    ci_fixture.snapshot_base = "dddddddddddddddddddddddddddddddddddddddd";
+    CiIdentity live = ci_get_pr(546, false);
+    ci_expect(strcmp(live.base, ci_fixture.current.base) == 0, "API: live base-ref target wins over a deferred PR baseRefOid snapshot");
+    ci_reconcile(false);
+    ci_expect(strcmp(ci_fixture.state.lease.base, ci_fixture.current.base) == 0, "API: admission binds the live branch tip rather than cached PR metadata");
+
+    ci_fixture_init();
+    ci_fixture.current.fork = true;
+    ci_fixture.native.pr = 0;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].request_run == ci_fixture.native.id, "API: a fork run with an empty pull_requests array binds by its unique live repository-ID/SHA pair");
+    ci_apply(&ci_fixture.state, &ci_fixture.state.prs[0], ci_command("/ci priority high run 4000"), ci_now(), "maintainer", 1);
+    ci_expect(ci_fixture.state.override_count == 1 && ci_fixture.state.overrides[0].manual == 1 && ci_fixture.dispatches == 0, "API: fork run controls work without turning a priority override into code approval");
+    CiRun ambiguous = ci_get_run(ci_fixture.native.id);
+    ci_fixture.state.prs[1] = ci_fixture.state.prs[0];
+    ci_fixture.state.prs[1].number = 547;
+    ci_fixture.state.pr_count = 2;
+    ci_associate_run(&ambiguous, &ci_fixture.state);
+    ci_expect(ambiguous.pr == 0, "API: ambiguous same-repository/same-SHA PR run association fails closed");
+
+    ci_fixture_init();
     CiRun run = {0};
     ci_expect(ci_command_run(ci_fixture.native.id, &run) && run.workflow == 42, "API: a ref-qualified PR workflow path remains a valid command target");
     ci_fixture.run_path = BUSTER_CI_WORKFLOW;
@@ -300,6 +323,11 @@ static void ci_test_controller(void)
     ci_reconcile(false);
     ci_expect(ci_fixture.dispatches == 1 && ci_fixture.cancellations == 0, "API: webhook replay cannot dispatch twice or preempt the active executor");
     ci_expect(ci_fixture.status_writes == 1, "API: queue/phase changes do not exhaust the commit-status append limit");
+    ci_fixture.state.prs[0].manual = 0;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.status_writes == 1, "API: status refresh uses the real individual-status array and verified bot identity, without redundant pending appends");
+    ci_fixture.state.prs[0].manual = -1;
+    ci_reconcile(false);
     unsigned writes = ci_fixture.state_writes;
     unsigned reads = ci_fixture.signal_reads;
     unsigned calls = ci_fixture.http_calls;
@@ -617,6 +645,7 @@ static void ci_test_dispatch_controls(void)
 static int ci_self_test(void)
 {
     ci_test_json();
+    ci_test_git();
     ci_test_commands();
     ci_test_policy();
     ci_test_scheduler();
