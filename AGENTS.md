@@ -1739,16 +1739,19 @@ SHA-256 of:
 - its arguments, its working directory, the names of the files it writes and
   the environment variables that change a compiler's result
   (`oracle_environment_names`) with their values, each with its roots made
-  alike (below); and the bytes of its standard input.
+  alike (below); its time limit; and the bytes of its standard input.
 
 A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
 filter that stops each call of its processes that looks at a path (`open`,
-`stat`, `access`, `readlink`, `execve` and their kin) or lists a directory,
-whose listener the cache answers (`oracle_trace_answer`): it reads the path
-from the process (`process_vm_readv`), looks at it first if the run hasn't
-before (`oracle_probe_look`), and lets the call through
-(`SECCOMP_USER_NOTIF_FLAG_CONTINUE`). The entry lists every path the run looked
-at, each as it was when the run first looked, before the run could change it:
+`stat`, `access`, `readlink`, `execve`, `statfs` and their kin), lists a
+directory, or makes, removes, renames or changes one (`mkdir`, `unlink`,
+`rename`, `link`, `chmod` and their kin), whose listener the cache answers
+(`oracle_trace_answer`, which reads each call's paths as `oracle_calls`
+describes): it reads the paths from the process (`process_vm_readv`), looks at
+each first if the run hasn't before (`oracle_probe_look`), and lets the call
+through (`SECCOMP_USER_NOTIF_FLAG_CONTINUE`). The entry lists every path the
+run looked at, each as it was when the run first looked, before the run could
+change it:
 a file by SHA-256 of its bytes if it is in one of the run's roots (below),
 which tests write anew for each run, and otherwise by its identity (what
 `stat` gives of it, as the runtime snapshot's probes: the system's headers,
@@ -1756,8 +1759,11 @@ the repository's sources and the frozen corpora keep theirs from one run to
 the next until they change); a path that isn't there, and why; a symbolic
 link and its target; a directory as one; another kind (a device node, a FIFO)
 by its kind and device number; each with the permissions of what it leads to
-(its mode's bits, owner and group, which `access` and `execve` read); a
-directory's names where the run listed them; and which of them is the same
+(its mode's bits, owner and group, which `access` and `execve` read) and the
+kind and permissions of the directory it is in (an `mkdir` in a directory that
+isn't there yet fails, and once it is succeeds, for a path that isn't there
+either way); a directory's names where the run listed them, or needed them to
+be none (`rmdir`'s, and `rename`'s target's); and which of them is the same
 file (a hard link, which `#pragma once` takes once). So every place an
 `#include`, `__has_include` or `#embed` looked for a header and found none
 counts, in any directory (one that other runs' files go into, or a nested
@@ -1777,8 +1783,14 @@ reads its files' real paths through), they are left out, and so is following
 `exe` or a standard descriptor; a run that follows another one, or a path past
 one (`/proc/self/cwd/x.h`), isn't kept (`oracle_process_link`). A
 process answers its traced runs' calls while it waits for any of them, so that
-runs under way at once all go on; a call the tracing can't follow (io_uring's,
-files opened by handle, another architecture's) makes its run unkept. On this
+runs under way at once all go on. A call the tracing can't follow makes its run
+unkept (`oracle_unfollowed_calls`): one that reaches files it can't name
+(io_uring's, files opened by handle), that changes how its process resolves
+paths (`chroot`, `pivot_root`, the mount calls, `unshare`, `setns`, and
+`openat2` with resolution flags, whose `RESOLVE_IN_ROOT` reads an absolute
+name from its descriptor's directory), that reads or changes what a path's
+state doesn't hold (extended attributes, the mounts' listings), and another
+architecture's. On this
 container, the filter's stops took a `clang -E` of `<stdio.h>` from 34 ms to
 47 ms, which only a run that isn't taken pays.
 
@@ -1850,7 +1862,7 @@ Its users:
 
 Each of these tests prints a line of what its runs did (`oracle_cache_report`).
 
-`./build/compiler test-oracle-cache` (about 4.5 s, 3 s of it the process
+`./build/compiler test-oracle-cache` (about 7 s, 5 s of it the process
 groups' waits) checks it with sh and clang as the tools, in a directory of its
 own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
 `SOURCE_DATE_EPOCH` fixed where it isn't set:
@@ -1865,9 +1877,9 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   own), taken by the same run and by one in the other directory, naming that
   one's directory; each part of a key making a new one (the input's bytes, an
   argument's byte, where the arguments split, a variable's value, one set to
-  nothing against one not set, the purpose, the tool's path and its file's
-  times), and `HOME` not; a tool not on `PATH`; a file the run didn't write,
-  removed when its entry is taken;
+  nothing against one not set, the purpose, the time limit, the tool's path and
+  its file's times), and `HOME` not; a tool not on `PATH`; a file the run
+  didn't write, removed when its entry is taken;
 - dependencies (traced `clang -fsyntax-only`): a compile taken in its
   directory and in the other, run again after a header changes, and taken
   after a file it doesn't look for is added beside it; run again after
@@ -1898,9 +1910,17 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   header in `/dev/shm` in no root, each compiled again; runs that follow
   `/proc/self/cwd` and `/dev/fd/3` to a file, not kept; and one that reads
   `/proc/self/fd/3`'s link and `/dev/stdin` and writes `/dev/null`, kept;
+- changes (traced sh): `mkdir`'s path, which the run made, there the next time;
+  `mkdir` in a directory made since; and `rmdir` of a directory whose file
+  goes; each run again;
+- what the tracing can't follow, with a program the test compiles: `openat2`
+  with `RESOLVE_IN_ROOT`, not kept, and without resolution flags kept and run
+  again when its file changes; `chroot`, `unshare` and `getxattr`, not kept;
+  `statfs`, kept, and run again once its path is there;
 - process groups: what a run leaves running when it ends, and what a run
   killed at its time limit started, killed (the markers they would write later
-  aren't there); the limit on the monotonic clock, with a pidfd and without;
+  aren't there); the limit on the monotonic clock, with a pidfd and without; a
+  run kept without a limit, killed at a limit given later;
 - check mode: an entry made stale fails its run and is written again (the test
   prints that it makes one on purpose), and one whose run read other bytes
   isn't stale;

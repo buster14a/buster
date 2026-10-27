@@ -11,8 +11,8 @@
 //   - runs: a run's status, output, errors and written file, taken by the same run again and by one in the other
 //     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
-//     isn't set, the purpose, the tool's path and its file's times) making a new one, and HOME not; a tool not on
-//     PATH; a file the run didn't write removed when it is taken;
+//     isn't set, the purpose, the time limit, the tool's path and its file's times) making a new one, and HOME not; a
+//     tool not on PATH; a file the run didn't write removed when it is taken;
 //   - dependencies (traced clang -fsyntax-only): taken in the same and the other directory, again after a header
 //     changes, and taken after a file it doesn't look for is added beside it; again after #embed's resource or what
 //     __has_include found changes; __has_include's header created where it looked, in a directory other files go
@@ -32,8 +32,14 @@
 //     them); a source in a root in /dev/shm ($TMPDIR there) and a header in /dev/shm in no root, each compiled again
 //     when they change; runs that follow /proc/self/cwd and /dev/fd/3 to a file, not kept; and one that reads
 //     /proc/self/fd/3's link and /dev/stdin and writes /dev/null, kept;
+//   - changes (traced sh): mkdir's path, which the run made, there the next time; mkdir in a directory made since; and
+//     rmdir of a directory whose file goes; each run again;
+//   - what the tracing can't follow, with a program the test compiles: openat2 with RESOLVE_IN_ROOT, not kept, and
+//     without resolution flags kept and run again when its file changes; chroot, unshare and getxattr, not kept;
+//     statfs kept, and run again once its path is there;
 //   - process groups: what a run leaves running when it ends and when it is killed at its time limit, killed (markers
-//     they would write later aren't); the limit on the monotonic clock, with a pidfd and without one;
+//     they would write later aren't); the limit on the monotonic clock, with a pidfd and without one; a run kept
+//     without a limit, killed at a limit given later;
 //   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
 //     whose run read other bytes isn't stale;
 //   - damaged entries: a changed magic, key, body length, root or dependency count, an unknown flag, one cut short, cut
@@ -400,6 +406,15 @@ static void oracle_test_runs(OracleTest* test)
     const bool empty_first = !oracle_test_takes(&cache, "oracle test: parts", whole, input, empty);
     oracle_test_expect(test, empty_first && !oracle_test_takes(&cache, "oracle test: parts", whole, input, unset), "keys: a variable set to nothing, and not set");
     oracle_test_expect(test, oracle_test_takes(&cache, "oracle test: parts", whole, input, home), "keys: HOME isn't a part");
+    // The same run with a time limit, another key, taken with that limit again.
+    bool limits = true;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        OracleRun limited = { .cache = &cache, .purpose = "oracle test: parts", .arguments = whole, .input = input, .environment = plain, .timeout = 60 };
+        limits &= oracle_run(&limited) && limited.taken == (i == 1);
+        oracle_run_release(&limited);
+    }
+    oracle_test_expect(test, limits, "keys: the time limit");
     oracle_test_write(input, "input bytez\n", 12);
     oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: parts", whole, input, plain), "keys: the input's bytes");
     // The tool: another sh first on PATH, and that file's times changed.
@@ -488,6 +503,36 @@ static void oracle_test_unlink(const char* directory, const char* name)
     char path[BUSTER_ORACLE_PATH_BYTES + 32];
     snprintf(path, sizeof(path), "%s/%s", directory, name);
     unlink(path);
+}
+
+// Removes the files of `base`/`relative` (or `base` itself) and then each directory of `relative`, deepest first (the
+// tests' own trees, whose directories hold files alone).
+static void oracle_test_remove(const char* base, const char* relative)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(path, sizeof(path), relative[0] != 0 ? "%s/%s" : "%s%s", base, relative);
+    DIR* directory = opendir(path);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        {
+            char file[BUSTER_ORACLE_PATH_BYTES + 256];
+            snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
+            unlink(file);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+    for (char* end = path + strlen(path); end >= path + strlen(base); end -= 1)
+    {
+        if (*end == '/' || *end == 0)
+        {
+            *end = 0;
+            rmdir(path);
+        }
+    }
 }
 
 static void oracle_test_dependencies(OracleTest* test)
@@ -1014,6 +1059,145 @@ static void oracle_test_kernel(OracleTest* test)
     oracle_cache_close(&cache);
 }
 
+// What a run reads of the paths it makes and removes, with sh as the tool: whether mkdir's path is there, and its
+// directory, which isn't yet; and rmdir's directory's names, which must be none; each run again when it changes.
+static void oracle_test_changes(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "changes");
+    const char* directory = test->runs[0];
+    char full[BUSTER_ORACLE_PATH_BYTES + 32];
+    char parent[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(full, sizeof(full), "%s/full", directory);
+    snprintf(parent, sizeof(parent), "%s/parent", directory);
+    oracle_test_remove(directory, "made");
+    oracle_test_remove(directory, "parent/child");
+    oracle_test_remove(directory, "full");
+    // mkdir makes its directory, which the same run then finds there: run again.
+    static const char make[] = "if mkdir \"$1/made\" 2>/dev/null; then echo made; else echo there; fi";
+    bool makes = oracle_test_traced(&cache, make, directory, false, "made\n") && oracle_test_traced(&cache, make, directory, false, "there\n");
+    makes &= oracle_test_traced(&cache, make, directory, true, "there\n");
+    oracle_test_expect(test, makes, "changes: mkdir's path, which it made, there, run again");
+    // mkdir in a directory that isn't there, which a path that isn't there either doesn't show, until it is.
+    static const char nest[] = "if mkdir \"$1/parent/child\" 2>/dev/null; then echo made; else echo failed; fi";
+    bool nests = oracle_test_traced(&cache, nest, directory, false, "failed\n") && oracle_test_traced(&cache, nest, directory, true, "failed\n");
+    nests &= mkdir(parent, 0700) == 0 && oracle_test_traced(&cache, nest, directory, false, "made\n");
+    oracle_test_expect(test, nests, "changes: mkdir in a directory made since, run again");
+    // rmdir of a directory with a file in it, which goes once the file does.
+    static const char empty[] = "if rmdir \"$1/full\" 2>/dev/null; then echo removed; else echo kept; fi";
+    bool empties = mkdir(full, 0700) == 0 && oracle_test_write_text(full, "file", "x\n");
+    empties &= oracle_test_traced(&cache, empty, directory, false, "kept\n") && oracle_test_traced(&cache, empty, directory, true, "kept\n");
+    oracle_test_unlink(full, "file");
+    empties &= oracle_test_traced(&cache, empty, directory, false, "removed\n");
+    oracle_test_expect(test, empties, "changes: rmdir of a directory whose file goes, run again");
+    oracle_test_remove(directory, "made");
+    oracle_test_remove(directory, "parent/child");
+    oracle_test_remove(directory, "full");
+    oracle_cache_close(&cache);
+}
+
+// A program of the test's own, for the calls sh doesn't make: `openat2 DIRECTORY NAME RESOLVE` prints what openat2 opens
+// as NAME from DIRECTORY with RESOLVE's flags ("none" if it can't), and `chroot`, `unshare`, `getxattr PATH` and `statfs
+// PATH` make their calls, whatever they return, and print their names.
+static const char oracle_test_helper[] =
+    "#define _GNU_SOURCE\n"
+    "#include <fcntl.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <string.h>\n"
+    "#include <sys/syscall.h>\n"
+    "#include <sys/vfs.h>\n"
+    "#include <sys/xattr.h>\n"
+    "#include <unistd.h>\n"
+    "int main(int argc, char** argv)\n"
+    "{\n"
+    "    if (argc == 5 && strcmp(argv[1], \"openat2\") == 0)\n"
+    "    {\n"
+    "        struct { uint64_t flags; uint64_t mode; uint64_t resolve; } how = { O_RDONLY, 0, strtoull(argv[4], 0, 0) };\n"
+    "        const int directory = open(argv[2], O_PATH | O_DIRECTORY);\n"
+    "        const int file = (int)syscall(SYS_openat2, directory, argv[3], &how, sizeof(how));\n"
+    "        char bytes[256];\n"
+    "        const ssize_t got = file >= 0 ? read(file, bytes, sizeof(bytes)) : -1;\n"
+    "        if (got >= 0) fwrite(bytes, 1, (size_t)got, stdout); else puts(\"none\");\n"
+    "    }\n"
+    "    else if (argc == 2 && strcmp(argv[1], \"chroot\") == 0) { if (chroot(\"/\")) {} puts(\"chroot\"); }\n"
+    "    else if (argc == 2 && strcmp(argv[1], \"unshare\") == 0) { syscall(SYS_unshare, 0); puts(\"unshare\"); }\n"
+    "    else if (argc == 3 && strcmp(argv[1], \"getxattr\") == 0) { char value[16]; getxattr(argv[2], \"user.oracle\", value, sizeof(value)); puts(\"getxattr\"); }\n"
+    "    else if (argc == 3 && strcmp(argv[1], \"statfs\") == 0) { struct statfs figures; statfs(argv[2], &figures); puts(\"statfs\"); }\n"
+    "    return 0;\n"
+    "}\n";
+
+// A traced run of `arguments` through `cache`: whether it ran, took its entry as `taken` says and printed `output`.
+static bool oracle_test_traced_tool(OracleCache* cache, char* const* arguments, bool taken, const char* output)
+{
+    OracleRun run = { .cache = cache, .purpose = "oracle test: traced tool", .arguments = arguments, .dependencies = true };
+    const bool result = oracle_run(&run) && run.taken == taken && run.output != 0 && strcmp(run.output, output) == 0;
+    oracle_run_release(&run);
+    return result;
+}
+
+// What the tracing can't follow, with the test's program as the tool: openat2 with RESOLVE_IN_ROOT, which reads an
+// absolute name from its descriptor's directory, isn't kept, and with no resolution flags is, and run again when its
+// file changes; chroot, unshare and getxattr aren't kept; statfs, as libselinux calls it, is.
+static void oracle_test_unfollowed(OracleTest* test)
+{
+    OracleCache cache;
+    OracleCache off;
+    oracle_test_open(test, &cache, "use", "unfollowed");
+    oracle_test_open(test, &off, "off", "unfollowed-off");
+    char source[BUSTER_ORACLE_PATH_BYTES + 32];
+    char helper[BUSTER_ORACLE_PATH_BYTES + 32];
+    char header[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(source, sizeof(source), "%s/helper.c", test->base);
+    snprintf(helper, sizeof(helper), "%s/helper", test->base);
+    snprintf(header, sizeof(header), "%s/header.h", test->runs[0]);
+    char* compile[] = { "clang", "-O0", "-w", "-o", helper, source, 0 };
+    OracleRun build = { .cache = &off, .arguments = compile };
+    const bool built = oracle_test_write(source, oracle_test_helper, strlen(oracle_test_helper)) && oracle_run(&build) && WIFEXITED(build.status) &&
+                       WEXITSTATUS(build.status) == 0;
+    oracle_run_release(&build);
+    char* plain[] = { helper, "openat2", "/", header, "0", 0 };
+    // RESOLVE_IN_ROOT is 0x10.
+    char* rooted[] = { helper, "openat2", test->runs[0], "/header.h", "16", 0 };
+    char* rooting[] = { helper, "chroot", 0 };
+    char* sharing[] = { helper, "unshare", 0 };
+    char* attributes[] = { helper, "getxattr", header, 0 };
+    char maybe[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(maybe, sizeof(maybe), "%s/maybe-statfs", test->runs[0]);
+    unlink(maybe);
+    char* figures[] = { helper, "statfs", maybe, 0 };
+    const bool opens = built && oracle_test_write_text(test->runs[0], "header.h", "one\n") && oracle_test_traced_tool(&cache, plain, false, "one\n");
+    if (opens)
+    {
+        bool plainly = oracle_test_traced_tool(&cache, plain, true, "one\n");
+        plainly &= oracle_test_write_text(test->runs[0], "header.h", "two\n") && oracle_test_traced_tool(&cache, plain, false, "two\n");
+        oracle_test_expect(test, plainly, "unfollowed: openat2 without resolution flags kept, and run again when its file changes");
+        const uint64_t unkept = cache.counts->unkept;
+        bool resolved = oracle_test_traced_tool(&cache, rooted, false, "two\n");
+        resolved &= oracle_test_write_text(test->runs[0], "header.h", "three\n") && oracle_test_traced_tool(&cache, rooted, false, "three\n");
+        oracle_test_expect(test, resolved && cache.counts->unkept == unkept + 2, "unfollowed: openat2 with RESOLVE_IN_ROOT, not kept");
+    }
+    else
+    {
+        printf("oracle cache: unfollowed: openat2 not checked (%s)\n", built ? "the kernel has no openat2" : "the test's program didn't build");
+    }
+    const uint64_t unkept = cache.counts->unkept;
+    bool refused = built && oracle_test_traced_tool(&cache, rooting, false, "chroot\n") && oracle_test_traced_tool(&cache, sharing, false, "unshare\n");
+    refused &= oracle_test_traced_tool(&cache, attributes, false, "getxattr\n");
+    oracle_test_expect(test, refused && cache.counts->unkept == unkept + 3, "unfollowed: chroot, unshare and getxattr, not kept");
+    // statfs of a path that isn't there, kept and taken, then run again once it is.
+    bool statfs_kept = built && oracle_test_traced_tool(&cache, figures, false, "statfs\n") && oracle_test_traced_tool(&cache, figures, true, "statfs\n");
+    statfs_kept &= oracle_test_write_text(test->runs[0], "maybe-statfs", "") && oracle_test_traced_tool(&cache, figures, false, "statfs\n");
+    unlink(maybe);
+    oracle_test_expect(test, statfs_kept, "unfollowed: statfs, kept as a path's look, and run again when its path is made");
+    unlink(source);
+    unlink(helper);
+    oracle_test_unlink(test->runs[0], "header.h");
+    oracle_cache_close(&cache);
+    oracle_cache_close(&off);
+}
+
 // --- Process groups ---
 
 // A run's process group: what a run that ends leaves running in it is killed, and so is what a run killed at its time
@@ -1048,6 +1232,15 @@ static void oracle_test_groups(OracleTest* test)
         limited &= killed && elapsed >= 1000000000ull && elapsed < 3000000000ull && cache.counts->unkept == unkept + 1;
     }
     oracle_without_pidfd = false;
+    // A run kept without a limit, then the same run with a limit it doesn't pass: killed, not taken.
+    char* sleeper[] = { "sh", "-c", "sleep 1.1; echo done", 0 };
+    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: a limit given later", .arguments = sleeper, .dependencies = true };
+    const bool unlimited = oracle_run(&run) && run.output != 0 && strcmp(run.output, "done\n") == 0;
+    oracle_run_release(&run);
+    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: a limit given later", .arguments = sleeper, .dependencies = true, .timeout = 1 };
+    const bool shortened = !oracle_run(&run) && run.killed && !run.taken;
+    oracle_run_release(&run);
+    oracle_test_expect(test, unlimited && shortened, "process groups: a run kept without a limit, killed at a limit given later");
     // Past both markers' times, from the last run's start.
     const struct timespec pause = { .tv_sec = 0, .tv_nsec = 800000000 };
     nanosleep(&pause, 0);
@@ -1286,36 +1479,6 @@ static void oracle_test_process(OracleTest* test)
                        "the process's cache from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, made private, and turned off");
 }
 
-// Removes the files of `base`/`relative` (or `base` itself) and then each directory of `relative`, deepest first (the
-// tests' own trees, whose directories hold files alone).
-static void oracle_test_remove(const char* base, const char* relative)
-{
-    char path[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(path, sizeof(path), relative[0] != 0 ? "%s/%s" : "%s%s", base, relative);
-    DIR* directory = opendir(path);
-    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
-    {
-        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
-        {
-            char file[BUSTER_ORACLE_PATH_BYTES + 256];
-            snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
-            unlink(file);
-        }
-    }
-    if (directory != 0)
-    {
-        closedir(directory);
-    }
-    for (char* end = path + strlen(path); end >= path + strlen(base); end -= 1)
-    {
-        if (*end == '/' || *end == 0)
-        {
-            *end = 0;
-            rmdir(path);
-        }
-    }
-}
-
 static int run_oracle_cache_tests(int argc, char** argv)
 {
     (void)argv;
@@ -1342,6 +1505,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_permissions(&test);
         oracle_test_path_rules(&test);
         oracle_test_kernel(&test);
+        oracle_test_changes(&test);
+        oracle_test_unfollowed(&test);
         oracle_test_groups(&test);
         oracle_test_check(&test);
         oracle_test_damaged(&test);
@@ -1355,9 +1520,10 @@ static int run_oracle_cache_tests(int argc, char** argv)
         fprintf(stderr, "usage: test-oracle-cache (with sh and clang on PATH, and $TMPDIR or /tmp writable)\n");
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "runs/oracle",   "dependencies/oracle", "identities/oracle", "tracing/oracle", "permissions/oracle",
-                                               "kernel/oracle", "groups/oracle",       "check/oracle",      "damaged/oracle", "writers/oracle",
-                                               "process/one/two/buster/oracle",        "" };
+    static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
+                                               "permissions/oracle", "kernel/oracle",       "changes/oracle",    "unfollowed/oracle",
+                                               "groups/oracle",      "check/oracle",        "damaged/oracle",    "writers/oracle",
+                                               "process/one/two/buster/oracle",             "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);
