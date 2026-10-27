@@ -5025,6 +5025,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 
 #include "buster/compiler/tier0_x87_test.c"
 #include "buster/compiler/tier0_int128_test.c"
+#include "buster/compiler/tier0_vector_test.c"
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 
@@ -5269,6 +5270,16 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t entries = 0;
                 tier0_test_int128(&tally, &tables, seed, count, &too_deep, &entries);
                 tier0_test_report("int128", tally);
+                printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                uint32_t too_deep = 0;
+                uint64_t entries = 0;
+                tier0_test_vectors(&tally, &tables, seed, count, &too_deep, &entries);
+                tier0_test_report("vectors", tally);
                 printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
                 total.checks += tally.checks;
                 total.failures += tally.failures;

@@ -4738,7 +4738,23 @@ other integers, under live values where
 past the slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
-both arms of a `?:`.
+both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
+same for VECTOR values and `X86` entries, its rows' model plain C (each
+instruction's elements as its definition has them): the rows' rules
+(`tier0_operation_valid`: each of 16 breaks refused, every row of the check
+taken) and the stream's, each break refused at its entry; each row under no
+live values, under 8 floats and 3 integers, and under as many floats as leave
+its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
+one past it and a scratch register past the integer table, which both paths
+refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+registers and on the stack, called from C and calling C (a vector argument on
+the stack among them); and `--count` random programs of vector, integer and
+float statements, masked stores and dropped vectors over the rows (operands and
+results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
+operands, a row of no records), constants, frame objects of each width, DUP,
+STORE's kept value and `?:`, under live values on both stacks, every output
+byte against the check's stack machine. Its coverage must reach every VECTOR
+kind at each width it has, every row and both arms.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
