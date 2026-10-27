@@ -3,10 +3,10 @@
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
 // every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
-// elements, literals, splats, casts, conditionals, globals, arrays and members of vector type. Most of their types are aligned to
-// 16, and one program's to their sizes, 32 and 64, whose locals realign its frame (#552). Then what the lowering refuses by
-// name: vectors on x86-64, operators AVX-512 has no instruction for and other sizes. Include after c_check_program_test.c's
-// runners.
+// elements of lvalues and of values, literals, splats, casts, conditionals, globals, arrays and members of vector type.
+// Most of their types are aligned to 16, and one program's to their sizes, 32 and 64, whose locals realign its frame
+// (#552). Then what the lowering refuses by name: vectors on x86-64, operators AVX-512 has no instruction for and other
+// sizes. Include after c_check_program_test.c's runners.
 
 static const char check_test_vector_types[] =
     "typedef signed char v64qi __attribute__((vector_size(64),aligned(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -92,10 +92,20 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h;}",
         },
         {
+            "vector-rvalue-elements",
+            "static v4si twice(v4si a){return a+a;}static v8df halve(v8df a){return a*0.5;}"
+            "int tested(int n){unsigned h=2166136261u;v4si a={n,2,-3,4},b={5,n*6,7,8};v8sf f;fillf((float*)&f,8,n);v8df d;filld((double*)&d,8,n);"
+            "v16su x;fill(&x,64,n);int out[4]={0};"
+            "long long l=((v2di)a)[n&1];int s=(a+b)[n&3]+(a-b)[1];int c=twice(b)[2];float g=(f*2.0f)[n&7];double e=(n&1?d:-d)[3];"
+            "unsigned char q=((v16qu)b)[n&15];unsigned z=(x>>1)[n&15]+(~x)[15];double r=halve(d)[n&7];int k=({v4si t=a*b;t;})[0];"
+            "out[n&3]=(a^b)[1];out[(n+1)&3]+=(b<<1)[3];FOLD(l);FOLD(s);FOLD(c);FOLD(g);FOLD(e);FOLD(q);FOLD(z);FOLD(r);FOLD(k);FOLD(out);"
+            "return (int)h+(a*3)[n&3];}",
+        },
+        {
             "vector-aligned-locals",
             "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
             "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
-            "v16si array[2]={a,b};array[1]+=array[0];FOLD(array);return (int)h;}",
+            "v16si array[2]={a,b};array[1]+=array[0];FOLD(array);int t=(a*b)[n&15]+(d+d)[n&3];FOLD(t);return (int)h;}",
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)

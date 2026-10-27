@@ -4114,7 +4114,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             const uint32_t local = check_lower_temporary_of(writer, vector);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
-            check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
             check_lower_operand(writer, node, 0, false, vector);
         }
     }
