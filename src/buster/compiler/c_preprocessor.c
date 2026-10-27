@@ -5303,7 +5303,7 @@ static __attribute__((noinline)) PPParameterIndex* pp_define_parameter_large(Pre
 // The parameter list of a function-like macro being defined, from its '(' at `open`, as clang reads it
 // (ReadMacroParameterList): identifiers (keywords too) separated by commas, then `...` or GNU's `name...`, or none.
 // Sets the macro's parameters, flags and body start, or reports the first error where clang does and returns false.
-BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end, PPParameterIndex** parameters)
+static __attribute__((noinline)) bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end, PPParameterIndex** parameters)
 {
     bool result = true;
     bool closed = false;
