@@ -36,8 +36,13 @@ static void check_test_warning_ranges(CheckTest* test)
             }
             parser.options.scalar = scalar != 0;
             parser.tokens.count = count;
-            CheckInput input = { .constant_warnings = columns[0], .constant_warning_ignored = columns[1] };
-            CheckInputReader reader = {
+            CheckInput input =
+            {
+                .constant_warnings = columns[0],
+                .constant_warning_ignored = columns[1]
+            };
+            CheckInputReader reader =
+            {
                 .parser = &parser,
                 .output = &input,
                 .warning_suppressed = columns[2],

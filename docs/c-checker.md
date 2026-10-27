@@ -1470,3 +1470,20 @@ warnings and rejected discarded expressions. `test-checker-deferred` covers
 warning-bearing selections in several bodies. The scaling campaign's original
 C generator and work-count instrumentation live in buster-performance under
 `docs/measurements/nested-selections-603-2026-10-27`.
+
+The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/a3b6790bf081b1d6958a57c7f9073a80f0be15cd/docs/measurements/nested-selections-603-2026-10-27)
+compares main `92c025e7` with the implementation at `1014c296`. At depth
+2048, the eight default-driver cases improve from 8.42–30.57 ms to
+2.04–3.91 ms (4.1–8.4 times faster). Runtime discarded generics' root and
+warning scans fall from 23,065,600 and 46,123,008 token visits to 8,192 bounded
+root queries, 154,432 warning-byte visits and 107,908 index-node visits.
+All five depths and both schedules are retained. Scalar and AVX-512 paths
+pass the independent byte oracle; the available whole driver and the reader's
+initialization/traversal/selection path are measured together with their own
+costs, rather than claiming an isolated block-update rate.
+
+Frozen SQLite has a small measured cost in this paired build: syntax checking
++0.16% and object compilation +0.36%, with about 0.1 MiB more peak RSS and
+byte-identical objects. The record separates the deep Clang enum oracle's
+limit, focused sanitizer evidence, full checker/driver/deferred suites and
+whole-process measurements. It makes no whole-compiler sanitizer/corpus claim.

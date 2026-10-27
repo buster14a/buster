@@ -10,7 +10,15 @@ static void check_test_selection_roots(CheckTest* test)
     static Parser parser;
     const char* source = "int g(int,int);int f(int x){return _Generic(x,int:__builtin_choose_expr(1,"
                          "-(int)(x+g(2,3))+(x?4:5),(x,6)),default:7);}";
-    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PPOptions options =
+    {
+        .language =
+        {
+            .standard = 2017,
+            .gnu = true
+        },
+        .no_standard_includes = true
+    };
     bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
                  pp_run_source(&pp, "selection-roots.c", (const uint8_t*)source, strlen(source));
     Arena scratch = arena_reserve(UINT64_C(1) << 20);
@@ -23,7 +31,8 @@ static void check_test_selection_roots(CheckTest* test)
         check_test_expect(test, parsed, "selection root oracle parsing");
         const uint32_t count = parser.tokens.count;
         scratch.length = 0;
-        CheckInputReader reader = {
+        CheckInputReader reader =
+        {
             .parser = &parser,
             .ends = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, count),
             .postorder_positions = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, count),

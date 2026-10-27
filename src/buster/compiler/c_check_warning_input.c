@@ -157,7 +157,12 @@ static void check_input_warning_range(CheckInputReader* reader, uint32_t first, 
         {
             // count < 1 << 30 bounds the interval depth below 32, including pending right siblings.
             CheckInputWarningInterval stack[BUSTER_CHECK_WARNING_STACK];
-            stack[0] = (CheckInputWarningInterval){ .node = 1, .first = 0, .end = reader->warning_index_base * BUSTER_CHECK_WARNING_BLOCK };
+            stack[0] = (CheckInputWarningInterval)
+            {
+                .node = 1,
+                .first = 0,
+                .end = reader->warning_index_base * BUSTER_CHECK_WARNING_BLOCK
+            };
             uint32_t depth = 1;
             const uint16_t wanted = (uint16_t)((uint8_t)clear | ((uint16_t)(uint8_t)suppress << 8));
             while (depth != 0)
@@ -168,8 +173,18 @@ static void check_input_warning_range(CheckInputReader* reader, uint32_t first, 
                     if (interval.node < reader->warning_index_base)
                     {
                         const uint32_t middle = interval.first + (interval.end - interval.first) / 2;
-                        stack[depth++] = (CheckInputWarningInterval){ .node = interval.node * 2 + 1, .first = middle, .end = interval.end };
-                        stack[depth++] = (CheckInputWarningInterval){ .node = interval.node * 2, .first = interval.first, .end = middle };
+                        stack[depth++] = (CheckInputWarningInterval)
+                        {
+                            .node = interval.node * 2 + 1,
+                            .first = middle,
+                            .end = interval.end
+                        };
+                        stack[depth++] = (CheckInputWarningInterval)
+                        {
+                            .node = interval.node * 2,
+                            .first = interval.first,
+                            .end = middle
+                        };
                     }
                     else
                     {
