@@ -169,6 +169,11 @@ Each upper bound is the time the item would save if its cost went to zero.
    - Follow-up: [#531](https://github.com/buster14a/buster/issues/531).
      [#151](https://github.com/buster14a/buster/issues/151)'s per-function jobs
      are its multicore route.
+   - Since: [#570](https://github.com/buster14a/buster/pull/570) took the stage
+     from 25.6 to 17.5 ms and its system time to zero (this clock on the 9700X,
+     against main at `ad408cf2`). Tier 0's check of each lowered function, about
+     a sixth of what is left, is
+     [#569](https://github.com/buster14a/buster/issues/569).
 5. **`x86_validate` on every Tier 0 record**, about 5 ms (2.7%).
    - `branch_sizing_validate` validates each function's records before sizing
      them, which makes the branch-sizing stage (5.6 ms) 15 times the encoder's
