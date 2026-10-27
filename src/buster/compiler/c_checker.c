@@ -50,6 +50,11 @@ struct CheckBuiltinCall
     uint64_t object_sizes[4];
     uint64_t minimum_alignment;
     bool alignment_known;
+    // The first argument's leftmost identifier past its prefix operators, casts and parentheses, and its declaration's
+    // alignment as clang gives it (check_input_declaration_alignment), its log2 plus 1: 0 when it names no object. An
+    // atomic's address takes it where its lvalue path starts at that identifier (check_graph_atomic_alignment).
+    uint32_t base_token;
+    uint8_t base_alignment;
 };
 
 typedef struct CheckGraph CheckGraph;
@@ -1028,6 +1033,154 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
     memcpy(effect->range_events, checked.range_events, sizeof(effect->range_events));
 }
 
+#define BUSTER_CHECK_ALIGNMENT_STEPS 32u
+
+// A step of an atomic object's address, from its base out: a member's or an element's byte offset (a member's also makes
+// the alignment a declaration's, as getFieldAlignmentSource does), or an explicit cast to a pointer type.
+typedef struct CheckAlignmentStep CheckAlignmentStep;
+struct CheckAlignmentStep
+{
+    uint64_t offset;
+    TypeId cast;
+    bool member;
+};
+
+// The alignment clang's code generation gives an atomic builtin's object (EmitPointerWithAlignment, CGExpr.cpp), from the
+// pointer argument's subgraph. A pointer value gets its pointee type's alignment (an aligned typedef's, which may be less);
+// a cast between pointer types its operand's, but an explicit cast its own pointee type's where the operand's came from a
+// type rather than a declaration; pointer arithmetic its pointer's at the index's offset, or at the element's size for an
+// index that isn't a constant (emitPointerArithmetic); `&` of an lvalue and an array's decay the lvalue's address's: an
+// object's its declaration's (getDeclAlign, from the witness), `*p` the pointer's, a member its base's at the member's
+// offset (a packed record's is 1), and an element its array's or its pointer's as pointer arithmetic has it. A member's or
+// an element's alignment is a declaration's (getFieldAlignmentSource). The steps are read down to the base, then applied
+// from it out. A member's offset is its whole offset from its record, where clang applies each anonymous member's on the
+// way. Returns the alignment's log2, or UINT32_MAX for a step it doesn't model, an object the witness doesn't give, or more
+// than BUSTER_CHECK_ALIGNMENT_STEPS steps.
+static uint32_t check_graph_atomic_alignment(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, const CheckBuiltinCall* witness)
+{
+    CheckAlignmentStep steps[BUSTER_CHECK_ALIGNMENT_STEPS];
+    uint32_t count = 0;
+    uint32_t result = UINT32_MAX;
+    bool lvalue = false;
+    bool declaration = false;
+    bool done = false;
+    while (!done && node < stream->count && count < BUSTER_CHECK_ALIGNMENT_STEPS)
+    {
+        const CheckOp op = (CheckOp)graph->ops[node];
+        const TypeId type = stream->values[node].type;
+        const uint8_t kind = check_action_kind(types, type);
+        const uint32_t operand = graph->operand0[node];
+        const uint32_t second = graph->operand1[node];
+        if (!lvalue && type_kind_is_array(kind))
+        {
+            lvalue = true;
+        }
+        else if (op == CHECK_OP_SELECT && operand < node)
+        {
+            node = operand;
+        }
+        else if (!lvalue && kind != BUSTER_TYPE_KIND_POINTER)
+        {
+            done = true;
+        }
+        else if (!lvalue && op == CHECK_OP_ADDRESS && operand < node)
+        {
+            node = operand;
+            lvalue = true;
+        }
+        else if (!lvalue && op == CHECK_OP_CAST && operand < node)
+        {
+            const TypeId inner = stream->values[operand].type;
+            const uint8_t inner_kind = check_action_kind(types, inner);
+            const bool object = inner_kind == BUSTER_TYPE_KIND_POINTER &&
+                                check_action_kind(types, type_element(types, type_strip_aligned(types, inner))) != BUSTER_TYPE_KIND_VOID;
+            if (object || type_kind_is_array(inner_kind))
+            {
+                steps[count++] = (CheckAlignmentStep){ .cast = type };
+                node = operand;
+            }
+            else
+            {
+                // From void *, an integer or anything else, the cast's own pointee type's.
+                result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, type)));
+                done = true;
+            }
+        }
+        else if (((lvalue && op == CHECK_OP_SUBSCRIPT) || (!lvalue && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT))) && operand < node && second < node)
+        {
+            // The pointer is a subtraction's left operand, and either of an addition's or a subscript's.
+            const uint8_t left = check_action_kind(types, stream->values[operand].type);
+            const bool reverse = op != CHECK_OP_SUBTRACT && left != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(left);
+            const uint32_t base = reverse ? second : operand;
+            const CheckValue* index = stream->values + (reverse ? operand : second);
+            const TypeId element = op == CHECK_OP_SUBSCRIPT ? type : type_element(types, type_strip_aligned(types, type));
+            const uint8_t element_kind = check_action_kind(types, element);
+            const uint64_t size = element_kind == BUSTER_TYPE_KIND_VOID || element_kind == BUSTER_TYPE_KIND_FUNCTION ? 1 : type_size(types, element);
+            int64_t number = 0;
+            uint64_t offset = size;
+            if (check_action_i64(types, index, &number))
+            {
+                offset = size * (number < 0 ? 0 - (uint64_t)number : (uint64_t)number);
+            }
+            steps[count++] = (CheckAlignmentStep){ .offset = offset };
+            node = base;
+            lvalue = type_kind_is_array(check_action_kind(types, stream->values[base].type));
+        }
+        else if (!lvalue)
+        {
+            result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, type)));
+            done = true;
+        }
+        else if (op == CHECK_OP_VALUE)
+        {
+            const bool witnessed = witness != NULL && witness->base_alignment != 0 && graph->tokens != NULL && graph->tokens[node] == witness->base_token;
+            result = witnessed ? (uint32_t)witness->base_alignment - 1 : UINT32_MAX;
+            declaration = true;
+            done = true;
+        }
+        else if (op == CHECK_OP_DEREFERENCE && operand < node)
+        {
+            node = operand;
+            lvalue = false;
+        }
+        else if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && operand < node && (stream->values[node].flags & BUSTER_CHECK_BIT_FIELD) == 0)
+        {
+            TypeId record = type_strip_aligned(types, stream->values[operand].type);
+            record = op == CHECK_OP_ARROW && check_action_kind(types, record) == BUSTER_TYPE_KIND_POINTER ?
+                     type_strip_aligned(types, type_element(types, record)) : record;
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            CheckActionResult found = { 0 };
+            const uint8_t record_kind = type_kind(types, record);
+            const uint32_t member = record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION ?
+                                    check_action_member_lookup(types, record, graph->members[node], &offset, &qualifiers, &found) : 0;
+            done = member == 0 || offset % 8 != 0;
+            steps[count] = (CheckAlignmentStep){ .offset = offset / 8, .member = true };
+            count += !done;
+            node = operand;
+            lvalue = op == CHECK_OP_MEMBER;
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    for (uint32_t i = count; result != UINT32_MAX && i-- > 0;)
+    {
+        if (steps[i].cast != 0 && !declaration)
+        {
+            result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, steps[i].cast)));
+        }
+        else if (steps[i].offset != 0)
+        {
+            const uint32_t low = (uint32_t)__builtin_ctzll(steps[i].offset);
+            result = low < result ? low : result;
+        }
+        declaration |= steps[i].member;
+    }
+    return result;
+}
+
 static void check_graph_special_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
 {
     const uint32_t node = action->node;
@@ -1187,6 +1340,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
     }
     else if (action->op == CHECK_OP_BUILTIN_ATOMIC)
     {
+        const uint32_t walked = action->argument_count != 0 ?
+                                check_graph_atomic_alignment(types, graph, stream, graph->argument_nodes[graph->argument_offsets[node]], witness) : UINT32_MAX;
         const CheckBuiltinAtomicAction input = {
             .id = (CBuiltinId)action->member,
             .arguments = action->arguments,
@@ -1196,8 +1351,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .tag_completion_count = action->tag_completion_count,
             .source_position = action->source_position,
             .extensions = action->extensions,
-            .minimum_alignment = witness != NULL ? witness->minimum_alignment : 0,
-            .alignment_known = witness != NULL && witness->alignment_known,
+            .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
+            .alignment_known = walked < 64,
         };
         CheckBuiltinAtomicResult checked;
         if (check_builtin_atomic_rmw_rule(input.id) != NULL)

@@ -18,7 +18,9 @@
 #define BUSTER_CBUILTIN_RMW_TEST_GNU 0x02u
 #define BUSTER_CBUILTIN_RMW_TEST_BOOL 0x04u
 #define BUSTER_CBUILTIN_RMW_TEST_RELEASE 0x08u
-#define BUSTER_CBUILTIN_RMW_TEST_CASES 140u
+// clang's min and max, also of signed integers.
+#define BUSTER_CBUILTIN_RMW_TEST_ORDERED 0x10u
+#define BUSTER_CBUILTIN_RMW_TEST_CASES 176u
 #define BUSTER_CBUILTIN_RMW_TEST_PAGE 4096u
 #define BUSTER_CBUILTIN_RMW_TEST_PREFIX UINT64_C(0x713596a2d84bc0ef)
 #define BUSTER_CBUILTIN_RMW_TEST_THREADS 4u
@@ -72,6 +74,10 @@ static const CBuiltinAtomicRmwTestSpec cbuiltin_atomic_rmw_test_specs[] =
     { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, 3, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_CAS },
     { CBUILTIN_SYNC_LOCK_TEST_AND_SET, 2, BUSTER_CBUILTIN_RMW_TEST_BOOL },
     { CBUILTIN_SYNC_LOCK_RELEASE, 1, BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_RELEASE },
+    { CBUILTIN_ATOMIC_FETCH_MIN, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_ATOMIC_FETCH_MAX, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_ATOMIC_MIN_FETCH, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
+    { CBUILTIN_ATOMIC_MAX_FETCH, 3, BUSTER_CBUILTIN_RMW_TEST_GNU | BUSTER_CBUILTIN_RMW_TEST_BOOL | BUSTER_CBUILTIN_RMW_TEST_ORDERED },
 };
 
 typedef struct CBuiltinAtomicRmwTestProgram CBuiltinAtomicRmwTestProgram;
@@ -155,7 +161,8 @@ static bool cbuiltin_atomic_rmw_test_expect(CBuiltinAtomicRmwTest* test, bool co
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsync-fetch-and-nand-semantics-changed"
 
-#define BUSTER_CBUILTIN_RMW_TEST_ORACLE(Type) \
+// A signed Type's results are its Unsigned bits, zero-extended as the leaves return them.
+#define BUSTER_CBUILTIN_RMW_TEST_ORACLE(Type, Unsigned) \
     switch (id) \
     { \
     case CBUILTIN_ATOMIC_EXCHANGE_N: result = __atomic_exchange_n(object, (Type)value, order); break; \
@@ -172,6 +179,10 @@ static bool cbuiltin_atomic_rmw_test_expect(CBuiltinAtomicRmwTest* test, bool co
     case CBUILTIN_ATOMIC_OR_FETCH: result = __atomic_or_fetch(object, (Type)value, order); break; \
     case CBUILTIN_ATOMIC_XOR_FETCH: result = __atomic_xor_fetch(object, (Type)value, order); break; \
     case CBUILTIN_ATOMIC_NAND_FETCH: result = __atomic_nand_fetch(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_FETCH_MIN: result = (Unsigned)__atomic_fetch_min(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_FETCH_MAX: result = (Unsigned)__atomic_fetch_max(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_MIN_FETCH: result = (Unsigned)__atomic_min_fetch(object, (Type)value, order); break; \
+    case CBUILTIN_ATOMIC_MAX_FETCH: result = (Unsigned)__atomic_max_fetch(object, (Type)value, order); break; \
     case CBUILTIN_SYNC_FETCH_AND_ADD: result = __sync_fetch_and_add(object, (Type)value); break; \
     case CBUILTIN_SYNC_FETCH_AND_SUB: result = __sync_fetch_and_sub(object, (Type)value); break; \
     case CBUILTIN_SYNC_FETCH_AND_AND: result = __sync_fetch_and_and(object, (Type)value); break; \
@@ -215,29 +226,53 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
         previous.value = __atomic_exchange_n((volatile double*)object_pointer, desired.value, order);
         result = previous.bits;
     }
+    else if (item->format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS && item->bytes == 1)
+    {
+        volatile int8_t* object = object_pointer;
+        int8_t* expected = expected_pointer;
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(int8_t, uint8_t);
+    }
+    else if (item->format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS && item->bytes == 2)
+    {
+        volatile int16_t* object = object_pointer;
+        int16_t* expected = expected_pointer;
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(int16_t, uint16_t);
+    }
+    else if (item->format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS && item->bytes == 4)
+    {
+        volatile int32_t* object = object_pointer;
+        int32_t* expected = expected_pointer;
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(int32_t, uint32_t);
+    }
+    else if (item->format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS && item->bytes == 8)
+    {
+        volatile int64_t* object = object_pointer;
+        int64_t* expected = expected_pointer;
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(int64_t, uint64_t);
+    }
     else if (item->bytes == 1)
     {
         volatile uint8_t* object = object_pointer;
         uint8_t* expected = expected_pointer;
-        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint8_t);
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint8_t, uint8_t);
     }
     else if (item->bytes == 2)
     {
         volatile uint16_t* object = object_pointer;
         uint16_t* expected = expected_pointer;
-        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint16_t);
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint16_t, uint16_t);
     }
     else if (item->bytes == 4)
     {
         volatile uint32_t* object = object_pointer;
         uint32_t* expected = expected_pointer;
-        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint32_t);
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint32_t, uint32_t);
     }
     else if (item->bytes == 8)
     {
         volatile uint64_t* object = object_pointer;
         uint64_t* expected = expected_pointer;
-        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint64_t);
+        BUSTER_CBUILTIN_RMW_TEST_ORACLE(uint64_t, uint64_t);
     }
     return result;
 }
@@ -473,6 +508,13 @@ static void cbuiltin_atomic_rmw_test_refusals(CBuiltinAtomicRmwTest* test)
             const CBuiltinAtomicRmwHelper rejected = cbuiltin_atomic_rmw_helper_emit(spec.id, 1, CBUILTIN_ATOMIC_RMW_BOOL_BITS, &arena);
             cbuiltin_atomic_rmw_test_expect(test, cbuiltin_atomic_rmw_test_empty(&rejected, TIER0_ERROR_UNSUPPORTED) && arena.length == 16,
                 "bool arithmetic/NAND never acquires a raw-byte substitute", i);
+        }
+        if ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_ORDERED) == 0)
+        {
+            Arena arena = { .base = storage, .length = 16, .capacity = sizeof(storage) };
+            const CBuiltinAtomicRmwHelper rejected = cbuiltin_atomic_rmw_helper_emit(spec.id, 8, CBUILTIN_ATOMIC_RMW_SIGNED_BITS, &arena);
+            cbuiltin_atomic_rmw_test_expect(test, cbuiltin_atomic_rmw_test_empty(&rejected, TIER0_ERROR_UNSUPPORTED) && arena.length == 16,
+                "only min and max take signed integer bits", i);
         }
         if (spec.id != CBUILTIN_ATOMIC_EXCHANGE_N)
         {
@@ -869,7 +911,8 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
     for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(cbuiltin_atomic_rmw_test_specs); i += 1)
     {
         const CBuiltinAtomicRmwTestSpec spec = cbuiltin_atomic_rmw_test_specs[i];
-        const uint32_t variants = 4 + ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_BOOL) != 0) + (spec.id == CBUILTIN_ATOMIC_EXCHANGE_N ? 2u : 0u);
+        const bool ordered = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_ORDERED) != 0;
+        const uint32_t variants = 4 + ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_BOOL) != 0) + (spec.id == CBUILTIN_ATOMIC_EXCHANGE_N ? 2u : 0u) + (ordered ? 4u : 0u);
         for (uint32_t v = 0; valid && v < variants; v += 1)
         {
             valid = cbuiltin_atomic_rmw_test_expect(&test, count < BUSTER_CBUILTIN_RMW_TEST_CASES, "bounded complete helper inventory", i);
@@ -877,15 +920,15 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
             {
                 CBuiltinAtomicRmwTestCase* item = items + count;
                 item->spec = spec;
-                item->bytes = v < 4 ? 1u << v : v == 4 ? 1 : v == 5 ? 4 : 8;
+                item->bytes = v < 4 ? 1u << v : v == 4 ? 1 : ordered ? 1u << (v - 5) : v == 5 ? 4 : 8;
                 item->format = v < 4 ? CBUILTIN_ATOMIC_RMW_INTEGER_BITS : v == 4 ? CBUILTIN_ATOMIC_RMW_BOOL_BITS :
-                    v == 5 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS;
+                    ordered ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : v == 5 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS;
                 valid = cbuiltin_atomic_rmw_test_prepare(&test, &arena, allowed, item, count);
                 count += 1;
             }
         }
     }
-    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all30 IDs, four integer widths,18bool formats and two FP exchanges are represented", count);
+    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all 34 IDs, four integer widths, 22 bool formats, two FP exchanges and min/max's four signed widths are represented", count);
     CBuiltinAtomicRmwTest* shared = MAP_FAILED;
     if (valid)
     {

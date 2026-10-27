@@ -57,6 +57,125 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
     return flags;
 }
 
+// The tokens a unit's post-checking stages visit for its declarations: those that declare (`declarations[t] == t`), and
+// with `nodes`, those whose nodes[t] is below `limit` too (the lowering's initializers), in token order into `tokens`,
+// which has room for `count` + 16: how many. The selection, the emission and the lowering visit these rather than every
+// token of the unit, most of which (a header's) declare nothing they emit (#442). The scalar path is the vector path's
+// exact twin.
+static uint32_t check_program_declaring_scalar(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
+{
+    uint32_t written = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        tokens[written] = token;
+        written += declarations[token] == token || (nodes != 0 && nodes[token] < limit);
+    }
+    return written;
+}
+
+// The same, 16 tokens at a time, the loads masked to the columns and each block's tokens compressed in a register, then
+// stored whole (vpcompressd to memory is 8 µops on Zen 5, the register form 2).
+static uint32_t check_program_declaring_vector(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
+{
+    uint32_t written = 0;
+    const __m512i bound = _mm512_set1_epi32((int)limit);
+    __m512i index = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint32_t token = 0; token < count; token += 16)
+    {
+        const __mmask16 live = (__mmask16)_bzhi_u32(0xffff, count - token < 16 ? count - token : 16);
+        __mmask16 keep = _mm512_mask_cmpeq_epi32_mask(live, _mm512_maskz_loadu_epi32(live, declarations + token), index);
+        if (nodes != 0)
+        {
+            keep |= _mm512_mask_cmplt_epu32_mask(live, _mm512_maskz_loadu_epi32(live, nodes + token), bound);
+        }
+        _mm512_storeu_si512(tokens + written, _mm512_maskz_compress_epi32(keep, index));
+        written += (uint32_t)__builtin_popcount(keep);
+        index = _mm512_add_epi32(index, _mm512_set1_epi32(16));
+    }
+    return written;
+}
+
+static uint32_t check_program_declaring(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
+{
+    return scalar ? check_program_declaring_scalar(declarations, nodes, limit, count, tokens) :
+                    check_program_declaring_vector(declarations, nodes, limit, count, tokens);
+}
+
+// How many of objects 1 to `objects` - 1 are `needed` (a byte each): the selection's symbols, before it numbers them.
+static uint32_t check_program_needed_count_scalar(const uint8_t* needed, uint32_t objects)
+{
+    uint32_t count = 0;
+    for (uint32_t object = 1; object < objects; object += 1)
+    {
+        count += needed[object] != 0;
+    }
+    return count;
+}
+
+// The same, 64 objects at a time, the loads masked to the column.
+static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_t objects)
+{
+    uint32_t count = 0;
+    for (uint32_t object = 0; object < objects; object += 64)
+    {
+        const __mmask64 live = _bzhi_u64(~UINT64_C(0), objects - object < 64 ? objects - object : 64) & (object == 0 ? ~UINT64_C(1) : ~UINT64_C(0));
+        const __m512i bytes = _mm512_maskz_loadu_epi8(live, needed + object);
+        count += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(live, bytes, bytes));
+    }
+    return count;
+}
+
+// Numbers the needed objects 1 to `objects` - 1 in object order: object_symbols[object] the object's symbol (from 1;
+// the column is zero for the others already) and symbol_objects[symbol - 1] its object.
+static void check_program_needed_number_scalar(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
+{
+    SymbolId symbol = 0;
+    for (uint32_t object = 1; object < objects; object += 1)
+    {
+        if (needed[object])
+        {
+            symbol_objects[symbol] = object;
+            object_symbols[object] = ++symbol;
+        }
+    }
+}
+
+// The same, finding the needed objects 64 at a time: few objects of a unit are needed, so a block of none is the rule.
+static void check_program_needed_number_vector(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
+{
+    SymbolId symbol = 0;
+    for (uint32_t object = 0; object < objects; object += 64)
+    {
+        const __mmask64 live = _bzhi_u64(~UINT64_C(0), objects - object < 64 ? objects - object : 64) & (object == 0 ? ~UINT64_C(1) : ~UINT64_C(0));
+        const __m512i bytes = _mm512_maskz_loadu_epi8(live, needed + object);
+        uint64_t found = _mm512_mask_test_epi8_mask(live, bytes, bytes);
+        while (found != 0)
+        {
+            const uint32_t at = object + (uint32_t)__builtin_ctzll(found);
+            symbol_objects[symbol] = at;
+            object_symbols[at] = ++symbol;
+            found &= found - 1;
+        }
+    }
+}
+
+static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar)
+{
+    return scalar ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+}
+
+static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar)
+{
+    if (scalar)
+    {
+        check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
+    }
+    else
+    {
+        check_program_needed_number_vector(needed, objects, object_symbols, symbol_objects);
+    }
+}
+
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                       bool scalar, Arena* output, Arena* scratch)
 {
@@ -87,11 +206,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     uint32_t* sources = token_bodies != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
     uint32_t* targets = sources != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
     uint32_t* kinds = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
+    uint32_t* declaring = kinds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)objects + 16) : 0;
     if (valid)
     {
         candidate.status = CHECK_PROGRAM_RESOURCE;
     }
-    valid &= kinds != 0;
+    valid &= declaring != 0;
     uint32_t edges = 0;
     uint32_t body_references = 0;
     uint32_t data_references = 0;
@@ -106,10 +226,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         memset(data_selected, 0, (uint64_t)data->count + 1);
         memset(body_map, 0xff, ((uint64_t)full->body_count + 1) * sizeof(uint32_t));
         memset(token_bodies, 0, (uint64_t)objects * sizeof(uint32_t));
-        for (uint32_t token = 0; token < input->token_count; token += 1)
+        const uint32_t declaring_count = check_program_declaring(input->declarations, 0, 0, input->token_count, declaring, scalar);
+        for (uint32_t d = 0; d < declaring_count; d += 1)
         {
+            const uint32_t token = declaring[d];
             const uint32_t object = input->objects[token];
-            if (input->declarations[token] == token && input->static_objects[token] && object != 0 && object < objects)
+            if (input->static_objects[token] && object != 0 && object < objects)
             {
                 const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
                 bool gnu_inline = false;
@@ -322,22 +444,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-        for (uint32_t object = 1; object < objects; object += 1)
-        {
-            if (needed[object])
-            {
-                candidate.program.object_symbols[object] = ++candidate.program.symbol_count;
-            }
-        }
+        candidate.program.symbol_count = check_program_needed_count(needed, objects, scalar);
         candidate.program.symbol_objects = candidate.program.symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.symbol_count) : 0;
         valid = valid && (candidate.program.symbol_count == 0 || candidate.program.symbol_objects != 0);
-        for (uint32_t object = 1; valid && object < objects; object += 1)
+        if (valid)
         {
-            const SymbolId symbol = candidate.program.object_symbols[object];
-            if (symbol != 0)
-            {
-                candidate.program.symbol_objects[symbol - 1] = object;
-            }
+            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, scalar);
         }
     }
     if (valid)
