@@ -8,11 +8,13 @@ and the follow-ups that rank the work to close the gap.
 
 ## Results
 
-The 9700X job measured these at `1677a3b` (#520), on main `e04462c` with this
-document's instrumentation:
+The 9700X job measured these at `1677a3b` (#520), which it merged into main
+`6b2c922`:
 [run 40421327819, job 121916266526](https://github.com/buster14a/buster/actions/runs/40421327819/job/121916266526),
 step "Attribute sqlite3.c's compile time to the compiler's stages, against tcc".
-The figures are medians of 11 runs.
+The figures are medians of 11 runs. [The record](compile-time-record.txt) holds
+the step's whole output: every run's samples, the stage table, perf's counters
+and profile, and the revision, flags and hashes.
 
 - **4.4 times tcc.** `-c` takes 189.6 ms against tcc's 42.7 ms, 146.9 ms apart.
   #136's speedtest1 record measured 194.8 ms and 42.2 ms at `e04462c`, in
@@ -235,7 +237,12 @@ stages, against tcc" runs, pinned to CPU 2 under the host's lock:
 
 It runs on the daily and dispatched runs, and on pull requests that change the
 clock, the stages' marks or the harness (the `changes` job's `compile_time`).
-It fails without tcc.
+It fails rather than report part of the attribution:
+- without tcc, or with a tcc whose sha256 isn't the reference's below. An
+  upgrade changes the reference, so it updates the hash here and in the step
+  together, and starts a new series of ratios;
+- when perf can't run, a counter reads `<not supported>` or `<not counted>`, or
+  the profile comes out empty.
 
 **Inputs.**
 - **The source.** SQLite 3.53.2's `sqlite3.c`, sha256
@@ -260,9 +267,6 @@ It fails without tcc.
 - **Warm caches only.** Every run follows a warm-up, so the source, the headers
   and the compiler's executable are in the page cache; a cold run would add their
   reads, which needs root to arrange (`drop_caches`).
-- **The raw evidence.** The step's output is in the job's log above. A record of
-  it belongs in buster-performance's `docs/measurements`, with this document
-  linking it.
 - **Run time is #136's, not this one's.** The generated code's run time (speedtest1's 6,866 M
   instructions against clang -O0's 3,922 M, and `switch` as compare chains) is
   #136's, not this document's.
