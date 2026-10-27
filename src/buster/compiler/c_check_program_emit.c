@@ -813,7 +813,7 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
 {
     CheckProgramLowered* lowered = &code->lowered;
     const uint32_t count = program->body_count;
-    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1;
     const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
     uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
     uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
@@ -828,8 +828,9 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         check_program_object_access(program, access, defined, declaring, false);
         for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
         {
-            const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
-            access[symbol] = lowered->runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+            const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
+            const uint32_t symbol = lowered->runtime_symbols[runtime];
+            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {

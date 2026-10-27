@@ -1046,6 +1046,19 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
+            if (code.lowered.initializers.count != 0)
+            {
+                const uint64_t access_mark = scratch.length;
+                uint8_t* defined = NULL;
+                const bool rebuilt = check_program_access(&code, &program, &output, &scratch, &defined);
+                const SymbolId copy = code.lowered.runtime_symbols[CHECK_LOWER_RUNTIME_MEMCPY];
+                const Tier0Function* first = code.lowered.functions;
+                check_test_expect(test, rebuilt && program.body_count != 0 && copy != 0 && copy < first->symbol_count &&
+                                       first->symbol_access[copy] == BUSTER_TIER0_ACCESS_GOT &&
+                                       first->symbol_access[code.lowered.initializers.symbol_base] == BUSTER_TIER0_ACCESS_DIRECT,
+                                  "backend consumers retain final pooled-data and external memcpy access after runtime symbol numbering");
+                arena_pop_to(&scratch, access_mark);
+            }
             snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
             check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
         }
