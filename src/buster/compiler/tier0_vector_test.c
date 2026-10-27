@@ -1451,14 +1451,19 @@ static __m128i tier0_test_vector_sum9(__m128i a0, __m128i a1, __m128i a2, __m128
 //   - STACKED: __m128i (__m128i a0 ... a7, __m128i s, __m512i t), s and t on the stack (no vector register is left), which
 //     returns a0 - a1 - ... - a7 - s - t's last 16 bytes (vpsubq's);
 //   - SUM9: __m128i (nine __m128i), tier0_test_vector_sum9's, the ninth on the stack; and SUMMER: __m128i (__m128i x,
-//     __m128i y), which returns SUM9(x, y, x, y, x, y, x, y, x - y).
+//     __m128i y), which returns SUM9(x, y, x, y, x, y, x, y, x - y);
+//   - KEEP: float (float a, float b, __m512i v), in xmm0, xmm1 and zmm2, which returns b after a row of no records that
+//     takes v and a (#556's review);
+//   - WIDEN: __m512i (__m512i a), which returns a's dwords plus a 16-byte constant's, read as a 64-byte vector.
 #define BUSTER_TIER0_TEST_VECTOR_PICK 0
 #define BUSTER_TIER0_TEST_VECTOR_MIX 1
 #define BUSTER_TIER0_TEST_VECTOR_CALLER 2
 #define BUSTER_TIER0_TEST_VECTOR_STACKED 3
 #define BUSTER_TIER0_TEST_VECTOR_SUM9 4
 #define BUSTER_TIER0_TEST_VECTOR_SUMMER 5
-#define BUSTER_TIER0_TEST_VECTOR_SIGNATURES 6
+#define BUSTER_TIER0_TEST_VECTOR_KEEP 6
+#define BUSTER_TIER0_TEST_VECTOR_WIDEN 7
+#define BUSTER_TIER0_TEST_VECTOR_SIGNATURES 8
 
 typedef struct Tier0TestVectorAbi Tier0TestVectorAbi;
 struct Tier0TestVectorAbi
@@ -1480,9 +1485,9 @@ static bool tier0_test_vector_abi(Tier0Tables* tables, Tier0TestVectorAbi* abi)
     if (valid)
     {
         abi_classify_all(&table, &tables->types);
-        const TypeId results[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { v64, v32, v32, v16, v16, v16 };
-        uint32_t counts[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { 6, 4, 2, 10, 9, 2 };
-        uint32_t named[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { 6, 4, 2, 10, 9, 2 };
+        const TypeId results[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { v64, v32, v32, v16, v16, v16, BUSTER_TYPE_FLOAT, v64 };
+        uint32_t counts[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { 6, 4, 2, 10, 9, 2, 3, 1 };
+        uint32_t named[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { 6, 4, 2, 10, 9, 2, 3, 1 };
         uint8_t variadic[BUSTER_TIER0_TEST_VECTOR_SIGNATURES] = { 0 };
         const TypeId arguments[] = {
             v64, v32, v16, BUSTER_TYPE_DOUBLE, v64, p,
@@ -1491,6 +1496,8 @@ static bool tier0_test_vector_abi(Tier0Tables* tables, Tier0TestVectorAbi* abi)
             v16, v16, v16, v16, v16, v16, v16, v16, v16, v64,
             v16, v16, v16, v16, v16, v16, v16, v16, v16,
             v16, v16,
+            BUSTER_TYPE_FLOAT, BUSTER_TYPE_FLOAT, v64,
+            v64,
         };
         uint32_t at = 0;
         for (uint32_t k = 0; k < BUSTER_TIER0_TEST_VECTOR_SIGNATURES; k += 1)
@@ -1544,6 +1551,10 @@ struct Tier0TestVectorWritten
     uint32_t argument_count;
     uint64_t constants[8];
     uint8_t constant_bytes[1];
+    uint32_t constant_count;
+    // Its operations, or null for the kinds' rows.
+    const Tier0Operation* operations;
+    uint32_t operation_count;
 };
 
 static void tier0_test_vector_put(Tier0TestVectorWritten* written, uint32_t kind, uint32_t class, uint64_t value)
@@ -1615,9 +1626,9 @@ static Tier0Function tier0_test_vector_written_function(const Tier0TestVectorWri
     function.call_result_objects = written->call_count != 0 ? written->call_result_objects : 0;
     function.vector_constants = written->constants;
     function.vector_constant_bytes = written->constant_bytes;
-    function.vector_constant_count = 0;
-    function.operations = tier0_test_vector_rows;
-    function.operation_count = BUSTER_TIER0_TEST_VECTOR_KINDS;
+    function.vector_constant_count = written->constant_count;
+    function.operations = written->operations != 0 ? written->operations : tier0_test_vector_rows;
+    function.operation_count = written->operations != 0 ? written->operation_count : BUSTER_TIER0_TEST_VECTOR_KINDS;
     function.vectors = true;
     return function;
 }
@@ -1675,6 +1686,23 @@ static void tier0_test_vector_run_summer(const void* code, Tier0TestVectorShared
     _mm_storeu_si128((__m128i*)shared->results[0], summer(tier0_test_vector_x(shared, 0), tier0_test_vector_x(shared, 1)));
 }
 
+static void tier0_test_vector_run_keep(const void* code, Tier0TestVectorShared* shared)
+{
+    typedef float (*Keep)(float, float, __m512i);
+    Keep keep = 0;
+    memcpy(&keep, &code, sizeof(keep));
+    const float result = keep(1.5f, 2.25f, tier0_test_vector_z(shared, 0));
+    memcpy(shared->results[0], &result, sizeof(result));
+}
+
+static void tier0_test_vector_run_widen(const void* code, Tier0TestVectorShared* shared)
+{
+    typedef __m512i (*Widen)(__m512i);
+    Widen widen = 0;
+    memcpy(&widen, &code, sizeof(widen));
+    _mm512_storeu_si512(shared->results[0], widen(tier0_test_vector_z(shared, 0)));
+}
+
 // Each hand-written function compiled by both paths and run natively, called from C (whose code, clang's, is the
 // oracle of the convention for the vectors), its result and what it wrote against this file's C of the same operations.
 static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestVectorAbi* abi, Tier0TestVectorShared* shared, uint64_t seed)
@@ -1683,7 +1711,19 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
     Arena arena = arena_reserve(1ull << 24);
     const bool ready = tier0_test_expect(tally, image != 0 && arena.base != 0, "vectors", "no memory");
     uint64_t state = seed ^ 0xa66e6a7eull;
-    for (uint32_t f = 0; f < 4 && ready; f += 1)
+    // KEEP's and WIDEN's rows past the kinds': a row of no records from a VECTOR and an F32 operand to the F32, whose
+    // operand's load writes VECTOR(0), and ADD_D's with a 16-byte second operand, which its ZMM form reads whole.
+    Tier0Operation rows[BUSTER_TIER0_TEST_VECTOR_KINDS + 2];
+    memcpy(rows, tier0_test_vector_rows, sizeof(tier0_test_vector_rows));
+    memset(&rows[BUSTER_TIER0_TEST_VECTOR_KINDS], 0, sizeof(rows[0]));
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS].operand_count = 2;
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS].operand_bytes[0] = 64;
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS].operand_classes[1] = BUSTER_TYPED_CLASS_F32;
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS].result_class = BUSTER_TYPED_CLASS_F32;
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS + 1] = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
+    rows[BUSTER_TIER0_TEST_VECTOR_KINDS + 1].operand_bytes[1] = 16;
+    for (uint32_t f = 0; f < 6 && ready; f += 1)
     {
         Tier0TestVectorWritten written;
         memset(&written, 0, sizeof(written));
@@ -1785,7 +1825,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
             tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 10);
             tier0_test_vector_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
         }
-        else
+        else if (f == 3)
         {
             // SUMMER: locals x, y, x - y and SUM9's result's object.
             name = "SUMMER: SUM9's nine vectors as aggregates, the ninth on the stack";
@@ -1816,6 +1856,52 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
             }
             tier0_test_vector_put(&written, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0);
             tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 3);
+            tier0_test_vector_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (f == 4)
+        {
+            // KEEP: locals a, b and v. a is live on the floating stack when the row loads v into VECTOR(0), xmm1, the
+            // register past it, which b arrives in; b, read once the row's result (a) is dropped, must be b.
+            name = "KEEP: a float parameter's register past a live float, through a row of no records";
+            signature = BUSTER_TIER0_TEST_VECTOR_KEEP;
+            run = tier0_test_vector_run_keep;
+            tier0_test_vector_local(&written, 0, BUSTER_TYPED_CLASS_F32, 0);
+            tier0_test_vector_local(&written, 1, BUSTER_TYPED_CLASS_F32, 0);
+            tier0_test_vector_local(&written, 2, 0, 64);
+            written.parameter_count = 3;
+            written.operations = rows;
+            written.operation_count = BUSTER_TIER0_TEST_VECTOR_KINDS + 2;
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 2);
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F32, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_F32, BUSTER_TIER0_TEST_VECTOR_KINDS);
+            tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_F32, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F32, 1);
+            tier0_test_vector_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_F32, 0);
+        }
+        else
+        {
+            // WIDEN: locals a and the result's object. The 16-byte constant's slot held a's 64 bytes before it, which a
+            // load of the slot whole would add to a's upper dwords.
+            name = "WIDEN: a 16-byte operand read by a ZMM form, its upper bytes zero";
+            signature = BUSTER_TIER0_TEST_VECTOR_WIDEN;
+            result_size = 64;
+            run = tier0_test_vector_run_widen;
+            tier0_test_vector_local(&written, 0, 0, 64);
+            tier0_test_vector_local(&written, 1, 0, 64);
+            written.parameter_count = 1;
+            written.operations = rows;
+            written.operation_count = BUSTER_TIER0_TEST_VECTOR_KINDS + 2;
+            written.constants[0] = 0x0000000100000002ull;
+            written.constants[1] = 0x0000000300000004ull;
+            written.constant_bytes[0] = 16;
+            written.constant_count = 1;
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_VECTOR, 0);
+            tier0_test_vector_put(&written, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, BUSTER_TIER0_TEST_VECTOR_KINDS + 1);
+            tier0_test_vector_put(&written, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, 1);
+            tier0_test_vector_put(&written, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 1);
             tier0_test_vector_put(&written, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0);
         }
         arena_pop_to(&arena, 0);
@@ -1864,16 +1950,31 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
             difference = _mm_sub_epi64(difference, _mm_loadu_si128((const __m128i*)(shared->arguments[9] + 48)));
             memcpy(expected, &difference, 16);
         }
-        else
+        else if (f == 3)
         {
             const __m128i x = tier0_test_vector_x(shared, 0);
             const __m128i y = tier0_test_vector_x(shared, 1);
             const __m128i summed = tier0_test_vector_sum9(x, y, x, y, x, y, x, y, _mm_sub_epi64(x, y));
             memcpy(expected, &summed, 16);
         }
+        else if (f == 4)
+        {
+            const float b = 2.25f;
+            memcpy(expected, &b, sizeof(b));
+        }
+        else
+        {
+            uint8_t constant[64];
+            memset(constant, 0, sizeof(constant));
+            memcpy(constant, written.constants, 16);
+            const __m512i sum = _mm512_add_epi32(tier0_test_vector_z(shared, 0), _mm512_loadu_si512(constant));
+            memcpy(expected, &sum, 64);
+        }
+        // KEEP returns its float in xmm0 rather than through an object.
+        const uint32_t compared = f == 4 ? 4 : result_size;
         if (ran)
         {
-            tier0_test_expect(tally, memcmp(shared->results[0], expected, result_size) == 0, "vectors", "%s: its result differs from C's", name);
+            tier0_test_expect(tally, memcmp(shared->results[0], expected, compared) == 0, "vectors", "%s: its result differs from C's", name);
             tier0_test_expect(tally, f != 0 || memcmp(shared->out[0], written_out, 56) == 0, "vectors", "%s: what it wrote differs from its arguments", name);
         }
     }
@@ -1884,7 +1985,6 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
 // ---------------------------------------------------------------------------------------------------------------------
 // The rules
 
-// A row that breaks one of tier0_operation_valid's rules, from kind `k`'s: `b` picks the break.
 // MASK_LOAD's row with an index too, operand 2 of class `index` (scaled by 1).
 static Tier0Operation tier0_test_vector_indexed_row(uint32_t index)
 {
@@ -1896,6 +1996,7 @@ static Tier0Operation tier0_test_vector_indexed_row(uint32_t index)
     return row;
 }
 
+// A row that breaks one of tier0_operation_valid's rules, from kind `k`'s: `b` picks the break.
 static Tier0Operation tier0_test_vector_broken_row(uint32_t b)
 {
     Tier0Operation row = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
