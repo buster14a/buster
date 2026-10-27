@@ -5170,8 +5170,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
     // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
-    valid = valid && abi_initialize_types(&shared->table, scratch, types, 16, types->types.count);
-    if (valid)
+    // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
+    // table, so a unit without a body needs neither its columns nor its classifications (#613).
+    valid = valid && (program->body_count == 0 || abi_initialize_types(&shared->table, scratch, types, 16, types->types.count));
+    if (valid && program->body_count != 0)
     {
         if (scalar)
         {

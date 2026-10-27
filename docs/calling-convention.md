@@ -510,30 +510,38 @@ result.
 
 ### Levels
 
-`abi_classify_all` (and its twin `abi_classify_all_scalar`) lists every type
-that is classifiable (a complete object type, or `void`) and not classified
-yet, then takes them in levels: the types whose base (an aligned typedef's),
-element (an array's), value (an `_Atomic` type's, whose storage and layout it
-takes) or members (a record's, but a flexible array member, which is no
-complete type: its element) are classified, and for an array of none of a
-record larger than 16 bytes (a zero-length array, or a flexible array member
-of a record of no size) every type whose storage `abi_wide_alignment` reads,
-classified together by `abi_classify`, then the next level, until none is
-left. Each of these is complete when the type is, so no type waits forever.
-(When an `_Atomic` type didn't wait for its value, its storage and layout
-depended on whether the value happened to be finished before it, and the two
-paths could differ.) A record whose row doesn't depend on its members (larger
-than 64 bytes, or with a flexible array member) waits for them only where a
-member can make its copy `LARGER`: when the table has a `LARGER` type
-already, or the call classifies an `_Atomic` of a type of no size, the root
-every `LARGER` type holds. Waiting would add a level for every nesting of
-such records: about 140 more instructions per type in the benchmark's
-classification. A flexible record of no size always waits, since an `_Atomic`
-of it in a later call takes its alignment as its size. `abi_classify` takes a
-level whose types' bases, elements, values and members are classified, as a
-caller's own levels would have them, and needs no such rule. Without scratch
-memory for the lists `abi_classify_all` classifies a type at a time with the
-twin, in passes over the table, until a pass classifies nothing.
+`abi_classify_all` (and its twin `abi_classify_all_scalar`) schedules complete
+object types and `void` in ready frontiers. An aligned typedef waits for its
+base, an array for its element, an `_Atomic` for its value, and every record
+for its members. A flexible array member waits for its element, since the
+incomplete array itself is never classified. Waiting for wide records' members
+also covers the transitive storage reads of `abi_wide_alignment` for arrays
+of no elements. The vector classifier takes each frontier as a batch; a
+singleton takes the scalar classifier directly.
+
+The scheduler links a pending type to just its next unfinished dependency.
+Once a frontier is classified, its waiters resume their member scans and
+either enter the next frontier or link to their next dependency. Each type
+enters the ready queue once, and each member is inspected at most twice.
+Scheduling therefore takes O(types + members) work and O(types) scratch,
+including chains whose type IDs run opposite to dependency order (#613).
+Unlike the earlier repeated scans, all records can wait for their members
+without revisiting every other pending record at each level.
+
+Four private u32 columns hold the ready queue, wait-list heads and links, and
+member cursors, sized to the smaller of the current type count and ABI table
+capacity (16 bytes per entry). No padding is read, no dependency-edge array is
+materialized, and no state survives the call: tag completion and additional
+types are observed by the next call. Already classified rows are retained;
+types beyond an `abi_initialize_types` table's capacity are left alone.
+Without room for all four columns, the exact scalar scan fallback retains
+its previous readiness rules, including wide-storage checks. That fallback
+can still take multiple table passes; the linear-work guarantee needs scratch.
+
+The source lowering's `check_lower_prepare` omits the ABI table altogether
+when the selected program has no function bodies. Static object initializers
+and generated helpers do not consume it; semantic checking and object emission
+still run.
 
 ### Finishing a type
 
@@ -1690,12 +1698,10 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   forwarded). Pass bits and results without those branches, from a table
   indexed by the classes and the type's kind or from the fold's vectors four
   types at a time, are the next try.
-- **The levels.** Their scans (`abi_classify_levels` asking
-  `abi_dependencies_classified` about every pending type, a pass per level)
-  take 18% of the vector classification's cycles and branch on what each type
-  waits for. Each type's level is the longest path below it in the graph of
-  what it waits for, which pointer jumping or a pass in a topological order
-  could give for every type at once.
+- **The levels.** The historical scans took 18% of this profile's vector
+  classification cycles. #613 replaces them with the wait lists and ready
+  frontiers described above; wide records now wait for their members too.
+  The earlier profile and measurements do not describe that new scheduler.
 - **Bit-fields' access units.** `abi_layout` and the parts take a run of
   bit-fields within an eightbyte as its first bit-field's type, at its type's
   offset, where clang's `accumulateBitFields` makes access units of the run's
@@ -1759,8 +1765,8 @@ only full independent call ranges may be repartitioned.
 A future frontend can collect signatures across a unit, avoiding a one-call API
 that underfills vector work. It must expose real completion/ready frontiers,
 not sort types through dependencies or give later tag completion to earlier
-source contexts. The current classification scans for readiness; a producer
-completion list is a candidate, not a demonstrated saving. `abi_finish`'s
+source contexts. Classification uses private wait lists and ready frontiers;
+a producer completion list could remove their construction. `abi_finish`'s
 storage/LLVM-shape work is retained for correctness and must be charged, even
 when the two-byte class result looks cheap.
 
