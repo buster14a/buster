@@ -31,7 +31,8 @@
 //     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, lane_take, lane_alone
 //     and lane_restore.
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
-//     operation to them. Without a team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
+//     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
+//     team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
 //
 // The barrier, dispatch/completion and lane_take use atomics. lane_take adds one to its group's counter, and the last
 // take of a loop resets it, since every lane takes once more than it gets parts. In lane_arrive, each lane counts itself
@@ -293,6 +294,15 @@ static void scratch_release(void)
     for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
     {
         arena_release(&thread_context.scratch[i]);
+    }
+}
+
+// Empties a worker's scratch arenas after its whole operation, keeping their pages for its next one.
+static void scratch_empty(void)
+{
+    for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
+    {
+        arena_pop_to(&thread_context.scratch[i], 0);
     }
 }
 
@@ -785,6 +795,8 @@ struct LaneTeam
     pid_t process;
     bool has_cpus;
     bool stopping;
+    // Whether the workers keep their scratch arenas, emptied, from one operation to the next (lane_team_keep_scratch).
+    bool keep_scratch;
 };
 
 // A zero-initialized handle is closed. Start creates capacity - 1 workers once, validates every requested pin, and
@@ -796,6 +808,11 @@ static __attribute__((unused)) bool lane_team_start(LaneTeam* team, uint32_t cap
 // child, forgets the inherited handle without joining vanished workers. Stopping twice is safe; a closed handle may
 // be started again. The caller's own scratch arenas keep their existing lifetime.
 static __attribute__((unused)) void lane_team_stop(LaneTeam* team);
+// Has the team's workers keep their scratch arenas from one operation to the next, emptied, rather than release them
+// after each: a command whose operations follow one another (link-foreign's, #501) then finds the pages its last one
+// touched, rather than reserving, faulting in and unmapping them again. The workers release them when the team stops.
+// Call it on the owner, between operations; a closed, non-current or running team's is a no-op.
+static __attribute__((unused)) void lane_team_keep_scratch(LaneTeam* team);
 
 typedef struct LaneStart LaneStart;
 struct LaneStart
@@ -870,13 +887,21 @@ static void* lane_team_thread_main(void* parameter)
             thread_context.taken = 0;
             thread_context.running = true;
             team->group.entry(team->group.argument);
-            scratch_release();
+            if (team->keep_scratch)
+            {
+                scratch_empty();
+            }
+            else
+            {
+                scratch_release();
+            }
             thread_context.running = false;
             thread_context.lane = (Lane){ .count = 1 };
             // Everything the operation wrote, including scratch cleanup, precedes the owner's completion wait.
             lane_publish(&worker->completed, request);
         }
     }
+    scratch_release();
     thread_context.team = 0;
     return 0;
 }
@@ -964,6 +989,14 @@ static void lane_team_stop(LaneTeam* team)
             thread_context.team = 0;
             lane_team_join(team, team->capacity);
         }
+    }
+}
+
+static void lane_team_keep_scratch(LaneTeam* team)
+{
+    if (team != 0 && thread_context.team == team && !thread_context.running)
+    {
+        team->keep_scratch = true;
     }
 }
 

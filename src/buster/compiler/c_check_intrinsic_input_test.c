@@ -66,16 +66,27 @@ static void check_test_intrinsic_input_storage(CheckTest* test, const Parser* pa
                     }
                     for (uint32_t i = 0; clean && i < pp->table->count; i += 1)
                     {
-                        clean = reader.intrinsic_names[i] == UINT32_MAX;
+                        bool operand = false;
+                        for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+                        {
+                            operand |= parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
+                                       parser->tokens.names[token] == i;
+                        }
+                        const InternSpan span = pp->table->spans[i];
+                        const BuiltinIntrinsicInfo* info = operand ? builtin_intrinsic_lookup((const char*)pp->table->records + span.offset, span.length) : 0;
+                        const uint32_t expected = !operand ? UINT32_MAX : info == 0 ? 0 :
+                                                  UINT32_C(0x80000000) | (uint32_t)(info - builtin_intrinsic_infos);
+                        clean = reader.intrinsic_names[i] == expected;
                     }
                     check_test_expect(test, clean, "intrinsic initialization overwrites poisoned active columns and sentinel");
                     if (pass == 0)
                     {
                         const uint64_t mark = arena.length;
+                        const uint32_t cached = reader.intrinsic_names[parser->tokens.names[keyword]];
                         arena.capacity = mark;
                         const CheckInputIntrinsicStatus failed = check_input_intrinsic_prepare(&reader, keyword);
                         check_test_expect(test, failed == CHECK_INPUT_INTRINSIC_FAILED && output.resource && output.intrinsic_call_count == 0 &&
-                                          output.intrinsic_declaration_count == 0 && reader.intrinsic_names[parser->tokens.names[keyword]] == UINT32_MAX &&
+                                          output.intrinsic_declaration_count == 0 && reader.intrinsic_names[parser->tokens.names[keyword]] == cached &&
                                           arena.length == mark,
                                           "argument storage exhaustion rolls back call, declaration and name-cache publication");
                         arena.capacity = arena_capacity;
@@ -164,6 +175,47 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
             const uint32_t binding_events = reader.bindings.count;
             const bool initialized = check_input_intrinsic_initialize(&reader);
             check_test_expect(test, initialized && !output.resource, "exact intrinsic candidate preparation has bounded storage");
+            uint32_t expected_calls = 0;
+            uint32_t expected_declarations = 0;
+            for (uint32_t token = 0; initialized && token < parser.tokens.count; token += 1)
+            {
+                if (parser.tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser.tree.roles[token] == PARSE_ROLE_OPERAND)
+                {
+                    const uint32_t name = parser.tokens.names[token];
+                    const InternSpan span = identifiers.spans[name];
+                    if (builtin_intrinsic_lookup((const char*)identifiers.records + span.offset, span.length) != 0)
+                    {
+                        bool first = true;
+                        for (uint32_t earlier = 0; earlier < token; earlier += 1)
+                        {
+                            first &= parser.tokens.kinds[earlier] != PARSE_KIND_IDENTIFIER || parser.tree.roles[earlier] != PARSE_ROLE_OPERAND ||
+                                     parser.tokens.names[earlier] != name;
+                        }
+                        expected_declarations += first;
+                        expected_calls += check_input_intrinsic_call_shape(&parser, token);
+                    }
+                }
+            }
+            check_test_expect(test, initialized && output.intrinsic_declaration_capacity == expected_declarations &&
+                              output.intrinsic_call_capacity == expected_calls,
+                              "deduplicated sizing matches an independent per-operand catalog scan");
+            for (uint32_t limit = 0; limit < 2; limit += 1)
+            {
+                Arena bounded = scratch;
+                bounded.length = 0;
+                bounded.capacity = limit == 0 ? 0 : (uint64_t)identifiers.count * sizeof(uint32_t) - 1;
+                Arena isolated = arena;
+                const uint64_t mark = isolated.length;
+                CheckInput bounded_output = { 0 };
+                CheckInputReader bounded_reader = { .output = &bounded_output, .parser = &parser, .pp = &pp,
+                                                   .arena = &isolated, .scratch = &bounded };
+                const bool bounded_ok = check_input_intrinsic_initialize(&bounded_reader);
+                check_test_expect(test, bounded_ok == (expected_declarations == 0) && bounded_output.resource == (expected_declarations != 0) &&
+                                  bounded_reader.intrinsic_names == 0 && bounded_output.intrinsic_ids == 0 &&
+                                  bounded_output.intrinsic_declarations == 0 && bounded_output.intrinsic_calls == 0 &&
+                                  bounded.length == 0 && isolated.length == mark,
+                                  "insufficient scratch preserves no-hit success and rolls back an intrinsic hit");
+            }
             uint32_t prepared = 0;
             uint32_t failed = 0;
             uint32_t first_argument_call = BUSTER_CHECK_NONE;
@@ -310,14 +362,91 @@ static void check_test_intrinsic_input_fixture(CheckTest* test, const CheckIntri
     check_test_expect(test, signatures[0] != 0 && signatures[0] == signatures[1], "scalar/vector parser paths retain identical intrinsic metadata and operand intervals");
 }
 
+static void check_test_intrinsic_no_scratch_large(CheckTest* test)
+{
+    enum { COUNT = 100000 };
+    InternTable identifiers = { 0 };
+    uint8_t* kinds = malloc(COUNT + 1);
+    uint8_t* roles = malloc(COUNT + 1);
+    uint8_t* deferred = calloc(COUNT + 1, 1);
+    uint32_t* names = malloc((COUNT + 1) * sizeof(uint32_t));
+    Arena arena = arena_reserve(4096);
+    Arena scratch = arena_reserve(4096);
+    bool ready = kinds != 0 && roles != 0 && deferred != 0 && names != 0 && arena.base != 0 && scratch.base != 0 && intern_initialize(&identifiers);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char spelling[32];
+        const int length = snprintf(spelling, sizeof(spelling), "ordinary_name_%u", i);
+        names[i] = intern_find_or_add(&identifiers, (const uint8_t*)spelling, (uint32_t)length);
+        kinds[i] = PARSE_KIND_IDENTIFIER;
+        roles[i] = PARSE_ROLE_OPERAND;
+        ready = names[i] != 0;
+    }
+    const char intrinsic[] = "__builtin_ia32_pause";
+    if (ready)
+    {
+        names[COUNT] = intern_find_or_add(&identifiers, (const uint8_t*)intrinsic, sizeof(intrinsic) - 1);
+        kinds[COUNT] = PARSE_KIND_IDENTIFIER;
+        roles[COUNT] = PARSE_ROLE_OPERAND;
+        ready = names[COUNT] != 0;
+    }
+    check_test_expect(test, ready, "large zero-scratch intrinsic fixture initializes");
+    if (ready)
+    {
+        Preprocessor pp = { .table = &identifiers };
+        Parser parser = { .tokens = { .kinds = kinds, .names = names, .count = COUNT + 1 }, .tree = { .roles = roles } };
+        scratch.capacity = 0;
+        deferred[COUNT] = 1;
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            parser.options.scalar = variant == 0;
+            CheckInput output = { .deferred_tokens = deferred };
+            CheckInputReader reader = { .parser = &parser, .pp = &pp, .output = &output, .arena = &arena, .scratch = &scratch };
+            struct timespec start = { 0 }, end = { 0 };
+            const bool clock_started = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start) == 0;
+            const bool valid = check_input_intrinsic_initialize(&reader);
+            const bool clock_finished = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end) == 0;
+            const int64_t elapsed = ((int64_t)end.tv_sec - (int64_t)start.tv_sec) * INT64_C(1000000000) + end.tv_nsec - start.tv_nsec;
+            check_test_expect(test, valid && !output.resource && reader.intrinsic_names == 0 && output.intrinsic_ids == 0 &&
+                              arena.length == 0 && scratch.length == 0 && clock_started && clock_finished && elapsed < INT64_C(2000000000),
+                              "100000 distinct misses finish within two CPU seconds without scratch or published storage");
+            deferred[COUNT] = 0;
+            const bool hit = check_input_intrinsic_initialize(&reader);
+            check_test_expect(test, !hit && output.resource && reader.intrinsic_names == 0 && output.intrinsic_ids == 0 &&
+                              arena.length == 0 && scratch.length == 0,
+                              "a final intrinsic after 100000 misses fails and rolls back without scratch");
+            deferred[COUNT] = 1;
+        }
+    }
+    if (ready)
+    {
+        scratch.capacity = 4096;
+    }
+    arena_release(&scratch);
+    arena_release(&arena);
+    intern_release(&identifiers);
+    free(names);
+    free(deferred);
+    free(roles);
+    free(kinds);
+}
+
 static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* test, const char* clang)
 {
+    check_test_intrinsic_no_scratch_large(test);
     const CheckIntrinsicInputFixture fixtures[] =
     {
         {
             "scalar result and exact repeated-name cache",
             "unsigned f(unsigned x,unsigned y){__builtin_ia32_pause();return __builtin_ia32_crc32si(x,y)^__builtin_ia32_crc32si(y,x);}\n",
             2, 3, 0, { 0, 2, 2 }, false,
+        },
+        {
+            "repeated hits and misses span distinct-name batches",
+            "unsigned f(unsigned a,unsigned b,unsigned c,unsigned d,unsigned e,unsigned g,unsigned h,unsigned i,unsigned j){"
+            "__builtin_ia32_pause();__builtin_ia32_pause();return a+b+c+d+e+g+h+i+j+a+b+c+d+e+g+h+i+j+"
+            "__builtin_ia32_crc32si(a,b)+__builtin_ia32_crc32si(c,d);}\n",
+            2, 4, 0, { 0, 0, 2, 2 }, false,
         },
         {
             "vector prototype and immediate marker",
@@ -366,7 +495,7 @@ static __attribute__((noinline)) void check_test_intrinsic_inputs(CheckTest* tes
         },
         {
             "ordinary source needs no intrinsic storage",
-            "int f(int x){return x+1;}\n",
+            "int f(int a,int b,int c,int d,int e,int g,int h,int i,int j){return a+b+c+d+e+g+h+i+j+a+b+c;}\n",
             0, 0, 0, { 0 }, false,
         },
         {
