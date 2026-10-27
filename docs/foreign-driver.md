@@ -16,8 +16,8 @@ build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
     INPUT... [-L DIR] [-l LIB] [-u NAME]
 ```
 
-Defaults are a static executable named `a.out`, entry `_start`, one lane,
-and all optional transformations disabled. `-pie` makes a dynamic PIE,
+Defaults are a static executable named `a.out`, entry `_start`, the lanes
+its objects pay for (below), and all optional transformations disabled. `-pie` makes a dynamic PIE,
 `-static` with `-pie` a static PIE (as GNU ld and lld read the two together;
 GCC's `-static-pie` line is `-static -pie --no-dynamic-linker -z text`), and
 `-shared` a shared library, which has no entry point unless `-e` names one,
@@ -29,25 +29,37 @@ DWARF are emitted by default (below, "Debug information"); `-s` and
 dynamic symbol table and runtime dependencies, and `-S` and `--strip-debug`
 omit the DWARF alone. `--scalar` selects the exact resolver, symbol-selection,
 conversion and writer paths. `--lanes N` runs the resolution,
-the conversion and the writer on up to N lanes, at most one per CPU the process
+the conversion and the writer on N lanes, at most one per CPU the process
 may run on: lanes past those share CPUs, and each of their syncs waits for a
-lane the scheduler has set aside. On more than one lane the command starts its
-threads once, a team (`lane_team_start`, "The command owns the threads" in the
-linker's design), as soon as its options are valid; the three stages run on
-them in turn, the threads sleeping between them and keeping their scratch
-arenas from one to the next (`lane_team_keep_scratch`), and the release stops
-them (#501). A link whose threads can't start fails before its resolution.
-On the 9700X, against the cold group per stage before it, the team took 6.8%
-to 17.7% off links on eight lanes of `benchmark-link`'s programs of 1, 2,000
-and 102,400 workers, dynamic and static, and nothing off one lane ([the
+lane the scheduler has set aside. Without it, a link runs on the lanes its
+objects pay for (#594, `foreign_driver_lanes`): one, and one more per 3 MB of
+its objects and of the archives under `--whole-archive`
+(`BUSTER_FOREIGN_DRIVER_LANE_BYTES`), at most 8 (`BUSTER_FOREIGN_DRIVER_LANES`:
+on the 9700X the whole link of synth's shape is fastest on 7 or 8 lanes, one
+per core, and slower on their SMT siblings, [linker
+scaling](linker-scaling.md)'s "Complete foreign links") and one per CPU. The
+calling thread decides them before any lane runs: it opens the command line's
+inputs in link order, as one lane's open phase would (`foreign_open_first`),
+until their objects come to the bytes that pay for the most lanes, and the
+lanes open the rest, and the scripts' inputs. A link of a few objects so runs
+on one lane, opens each input once and starts no thread, as with `--lanes 1`.
+On more than one lane the command then starts its threads once, a team
+(`lane_team_start`, "The command owns the threads" in the linker's design); the
+three stages run on them in turn, the threads sleeping between them and keeping
+their scratch arenas from one to the next (`lane_team_keep_scratch`), and the
+release stops them (#501). A link of `--lanes` whose threads can't start fails
+before its resolution, and one that chose its lanes runs on one. On the 9700X,
+against the cold group per stage before it, the team took 6.8% to 17.7% off
+links on eight lanes of `benchmark-link`'s programs of 1, 2,000 and 102,400
+workers, dynamic and static, and nothing off one lane ([the
 record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)).
 `--time` reports, on standard
-error after the link, each stage's wall time (the arguments, the team's start,
-the interpreter's
-discovery, the resolution with each of its phases on the slowest lane, the
-conversion, the optional passes, the write with each of the writer's phases on
-lane 0, and the release), as wild's `--time` and mold's `--perf` report
-theirs. `--startup-applies-irelative` says that a static link's own startup
+error after the link, each stage's wall time (the arguments, the interpreter's
+discovery, the first inputs' opening, with their objects' bytes when they chose
+the lanes, the team's start, the resolution with each of its phases on the
+slowest lane, the conversion, the optional passes, the write with each of the
+writer's phases on lane 0, and the release), as wild's `--time` and mold's
+`--perf` report theirs. `--startup-applies-irelative` says that a static link's own startup
 applies its `IRELATIVE` relocations (below, "What a static executable and a
 static PIE hold"). `--help` describes the supported
 command forms. The entry is a forced undefined reference during resolution,
@@ -409,10 +421,17 @@ system's start file with a `__libc_start_main` of the test's own are refused,
 saying why. Its threads (#501): a counter of `pthread_create` preloaded into
 `link-foreign` must find a thread per lane past the first, started once for
 the whole command (none on one lane), for a static executable, a PIE, and
-with GC, unwind deduplication and string merging; and a link whose threads
-can't start (a child limited by `RLIMIT_NPROC`, which doesn't bind root) must
-fail before its resolution, saying so, and leave the output as it was, while
-one on one lane links. Its section GC case collects a link
+with GC, unwind deduplication and string merging; by default (#594), none for
+a small object, and for a large one (`_start` and twice 3 MB of data) a thread
+per lane its bytes pay for past the first, whose output must be its link's on
+one lane, byte for byte; and a link whose threads can't start (a child limited
+by `RLIMIT_NPROC`, which doesn't bind root) must, on 3 lanes, fail before its
+resolution, saying so, and leave the output as it was, while one on one lane
+links, and so do by default the large object (on one lane) and a small one.
+An input that doesn't open must fail alike by default and on 1 and 3 lanes:
+a file missing after an object, after the large one and after four of it
+(whose bytes pay for the most lanes, so that the lanes open the missing file),
+and a `-l` name no directory has. Its section GC case collects a link
 after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.
