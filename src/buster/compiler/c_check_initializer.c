@@ -1115,7 +1115,8 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // The type of the expression from `begin` to `end` that an inferring walk (check_initializer_infer_array, before the
 // expressions are checked) reads from the tree, at the expression's root, the one token whose parent is outside it: an
 // identifier's declared type, a compound literal's (at its opening parenthesis), a ?:'s from its second and third
-// operands' (check_init_conditional_type: `n ? v : 0` is a vector, #555's third review), a parenthesized expression's, a call's result where it calls a function by its name, and a cast's (the reader's, at its
+// operands' (check_init_conditional_type: `n ? v : 0` is a vector, #555's third review) and its condition's
+// (check_init_condition_type: `mask ? 1 : 2` of an extension vector is one), a parenthesized expression's, a call's result where it calls a function by its name, and a cast's (the reader's, at its
 // `)`); an int, for which one stands for every scalar (the callers ask only whether the value is a record, a vector or
 // neither), for a constant, a `sizeof` or `_Alignof`, a `!`, a `&&` and a `||`; a subscript's, a member's (`.` and `->`)
 // and an indirection's of such an expression (`x[1]`, `p->a.b`, `*p`), from its base's type; a `-`, `+` or `~`'s, its
@@ -1137,6 +1138,7 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // kind.
 #define BUSTER_CHECK_INIT_ROOT_BINARY PARSE_KIND_COUNT
 #define BUSTER_CHECK_INIT_ROOT_CONDITIONAL (PARSE_KIND_COUNT + 1)
+#define BUSTER_CHECK_INIT_ROOT_CONDITION (PARSE_KIND_COUNT + 2)
 
 // A binary operator's value's type from its operands' (0 for one the walk has no type for), as far as the walk needs it,
 // and 0 where they leave it open, so that an operand of no type is taken for no scalar (#555's second review):
@@ -1182,7 +1184,7 @@ static TypeId check_init_binary_type(const TypeTable* types, uint8_t operator_ki
     }
     return result;
 }
-_Static_assert(PARSE_KIND_COUNT + 1 <= UINT8_MAX, "a step's kind fits a byte");
+_Static_assert(PARSE_KIND_COUNT + 2 <= UINT8_MAX, "a step's kind fits a byte");
 
 // A ?:'s value's type from its second and third operands' (0 for one the walk has no type for): a vector's where either
 // is one (GNU C converts a scalar arm to the other's vector type); a record's, a pointer's or an array's where either is
@@ -1214,6 +1216,33 @@ static TypeId check_init_conditional_type(const TypeTable* types, TypeId second,
     else if (second != 0 && third != 0)
     {
         result = BUSTER_TYPE_INT;
+    }
+    return result;
+}
+
+// A ?:'s value's type from its arms' (check_init_conditional_type's) and its condition's (#555's fifth review): a vector
+// where the arms are one; a vector condition's where they aren't, since clang's extension vectors choose element by
+// element (`mask ? 1 : 2` is a vector); the arms' where the condition is a known scalar, or where they are a pointer, an
+// array or a record (a vector condition takes none); and 0 where a condition of no type could still be a vector.
+static TypeId check_init_condition_type(const TypeTable* types, TypeId arms, TypeId condition)
+{
+    const TypeId arms_base = arms != 0 ? type_strip_aligned(types, arms) : 0;
+    const TypeId condition_base = condition != 0 ? type_strip_aligned(types, condition) : 0;
+    const uint8_t arms_kind = arms_base != 0 ? type_kind(types, arms_base) : 0;
+    const bool arms_object = arms_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(arms_kind) || arms_kind == BUSTER_TYPE_KIND_STRUCT ||
+                             arms_kind == BUSTER_TYPE_KIND_UNION;
+    TypeId result = 0;
+    if (arms_base != 0 && check_vector_type(types, arms_base))
+    {
+        result = arms;
+    }
+    else if (condition_base != 0 && check_vector_type(types, condition_base))
+    {
+        result = condition;
+    }
+    else if (condition != 0 || arms_object)
+    {
+        result = arms;
     }
     return result;
 }
@@ -1302,16 +1331,25 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 const uint32_t literal = opener[first[slot] - begin];
                 result = literal != BUSTER_CHECK_NONE && parser->tree.roles[literal] == PARSE_ROLE_OPEN_COMPOUND ? types[literal] : 0;
             }
-            else if (steps < count && role == PARSE_ROLE_CLOSE_TERNARY && previous[slot] != BUSTER_CHECK_NONE && last[slot] != BUSTER_CHECK_NONE &&
+            else if (steps + 1 < count && role == PARSE_ROLE_CLOSE_TERNARY && previous[slot] != BUSTER_CHECK_NONE && last[slot] != BUSTER_CHECK_NONE &&
                      last[slot] > root)
             {
-                // The second operand, the last child before the `:` (the condition, the first, for GNU's `a ?: b`), then
-                // the third, the last child, the step's alternate.
+                // The second operand, the last child before the `:`, then the third, the last child, the conditional
+                // step's alternate, and then the condition, the first child, the condition step's, outside it. GNU's
+                // `a ?: b` has its condition for its second operand, which takes no step of its own.
+                const bool omitted = parser->tree.roles[previous[slot]] == PARSE_ROLE_OPEN_TERNARY;
+                if (!omitted)
+                {
+                    members[steps] = root;
+                    operators[steps] = BUSTER_CHECK_INIT_ROOT_CONDITION;
+                    alternates[steps] = first[slot];
+                    steps += 1;
+                }
                 members[steps] = root;
                 operators[steps] = BUSTER_CHECK_INIT_ROOT_CONDITIONAL;
                 alternates[steps] = last[slot];
                 steps += 1;
-                root = parser->tree.roles[previous[slot]] == PARSE_ROLE_OPEN_TERNARY ? first[slot] : previous[slot];
+                root = omitted ? first[slot] : previous[slot];
                 descending = true;
             }
             else if (role == PARSE_ROLE_CLOSE_GROUP && open != BUSTER_CHECK_NONE && parser->tree.roles[open] == PARSE_ROLE_OPEN_GROUP &&
@@ -1392,11 +1430,12 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             const bool element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ||
                                  (operators[step] == PARSE_KIND_L_SQUARE && base != 0 && check_vector_type(walker->types, base));
             const bool conditional = operators[step] == BUSTER_CHECK_INIT_ROOT_CONDITIONAL;
-            const bool binary = operators[step] == BUSTER_CHECK_INIT_ROOT_BINARY || conditional;
+            const bool condition = operators[step] == BUSTER_CHECK_INIT_ROOT_CONDITION;
+            const bool binary = operators[step] == BUSTER_CHECK_INIT_ROOT_BINARY || conditional || condition;
             if (binary && alternates[step] != BUSTER_CHECK_NONE)
             {
-                // Both operands, whatever the left one's type: `p - q` is no pointer, and `(p - q) * h` a vector; and a
-                // ?:'s two arms.
+                // Both operands, whatever the left one's type: `p - q` is no pointer, and `(p - q) * h` a vector; a ?:'s
+                // two arms, and then its arms' type with its condition.
                 lefts[step] = result;
                 root = alternates[step];
                 alternates[step] = BUSTER_CHECK_NONE;
@@ -1406,6 +1445,7 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             else if (binary)
             {
                 result = conditional ? check_init_conditional_type(walker->types, lefts[step], result) :
+                         condition   ? check_init_condition_type(walker->types, lefts[step], result) :
                                        check_init_binary_type(walker->types, parser->tokens.kinds[members[step]], lefts[step], result);
             }
             else if (operators[step] == PARSE_KIND_L_SQUARE && !element && alternates[step] != BUSTER_CHECK_NONE)

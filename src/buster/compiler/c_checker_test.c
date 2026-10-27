@@ -3703,6 +3703,14 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // A ?: of an extension vector's condition, element by element a vector whatever its arms (#555's fifth review):
+        // the condition a vector, a vector's compare, and a lane of one beside pointer arms.
+        {
+            "a vector condition's ?: in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef struct { int a, b; } S;\nint f(int n, e4 mask, g4 x, S* p, S* q)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(mask ? 1 : 2), e4), \"vector-valued conditional\");\n    g4 a[] = { mask ? 1 : 2, x };\n    _Static_assert(sizeof a == 2 * sizeof(g4), \"two elements\");\n    g4 d[] = { (mask < 2) ? 3 : 4, x, n ? 5 : 6, 7 };\n    _Static_assert(sizeof d == 3 * sizeof(g4), \"a compare's mask, a vector, then two scalars braced into one\");\n    S c[] = { *(n ? p : q), *(mask[0] ? p : q) };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"two records\");\n    return a[1][0] + d[2][1] + c[1].a;\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
