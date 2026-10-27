@@ -87,15 +87,18 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
            (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
 }
 
-// Adds `spelling`, the name the source gives a symbol, to the link's names and to the names a made one must not be: its
-// NameId, or 0 when the link has no room.
-static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length)
+// Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
+// it could be one: its NameId, or 0 when the link has no room. Every made name has a '.', which no identifier has, so
+// only an asm label with one can be a made name, and only it goes in the table (#442: most units' given names are
+// identifiers, whose probes the table then doesn't pay for).
+static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length, bool label)
 {
     const uint64_t hash = link_hash(spelling, length);
     uint32_t slot = 0;
-    const bool taken = check_program_emit_taken(link, names, spelling, length, hash, &slot);
+    const bool dotted = label && memchr(spelling, '.', length) != 0;
+    const bool taken = dotted && check_program_emit_taken(link, names, spelling, length, hash, &slot);
     const NameId result = link_add_name_hashed(link, spelling, length, hash);
-    if (!taken && result != 0)
+    if (dotted && !taken && result != 0)
     {
         names->taken[slot] = result;
     }
@@ -164,6 +167,23 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
 // lane costs its thread's start, its writer's columns and its arenas' first pages, which its share of the bodies must pay
 // for, and the lane that takes the largest body takes at least as long as it.
 #define BUSTER_CHECK_EMIT_LANE_TOKENS 4096
+// A lane's arenas, as CheckProgramLanes.squeeze_arenas names them (the tests').
+#define BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT 1u
+#define BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH 2u
+#define BUSTER_CHECK_EMIT_SQUEEZE_BYTES 4u
+
+// Why an emission on lanes ran its bodies again on the calling thread alone (CheckProgramLanes.again): its lanes didn't
+// start (lane_run, which counts a lane it couldn't pin as one), or a part ran out of room in its lowering (or its lane
+// had none for its writer), in a body's Tier 0 code or in a body's code after Tier 0. One lane's arenas, the caller's,
+// then decide whether the unit fits.
+typedef enum CheckProgramAgain
+{
+    CHECK_PROGRAM_AGAIN_NONE,
+    CHECK_PROGRAM_AGAIN_START,
+    CHECK_PROGRAM_AGAIN_LOWERING,
+    CHECK_PROGRAM_AGAIN_TIER0,
+    CHECK_PROGRAM_AGAIN_CODE,
+} CheckProgramAgain;
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
@@ -178,7 +198,8 @@ struct CheckProgramLaneArenas
 
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
 // with the emission's link and lowering: the atoms' bytes and the functions' columns of the lanes past the first are in
-// their arenas here (check_program_lanes_release), which the next emission with it reuses.
+// their arenas here (check_program_lanes_release), which the next emission with it reuses, as it reuses the first's
+// scratch for lane 0's writer's columns (CheckEmitRun.columns).
 typedef struct CheckProgramLanes CheckProgramLanes;
 struct CheckProgramLanes
 {
@@ -191,13 +212,21 @@ struct CheckProgramLanes
     // other lanes take the parts it would have and finish theirs first.
     uint32_t slow_lane;
     uint32_t slow_microseconds;
-    // What the last emission ran: its lanes and parts, and whether it ran them again on one lane (lanes that couldn't
-    // start, or a resource's failure, which one lane's arenas, the caller's, decide); with `timing`, how long its steps
-    // took: from its start to the lanes' (the lowering's preparation and the access column), the lanes' run (with their
-    // threads' start), and from the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
+    // A test's lane short of room: the lane that takes the part holding body `squeeze_body` (its index plus one, 0 for
+    // none) has only `squeeze_room` bytes to spare in each of its arenas that `squeeze_arenas` names
+    // (BUSTER_CHECK_EMIT_SQUEEZE_*), as if they were that full, while it makes its writer, if that is its first part, and
+    // works on that part. What fails is a resource's, which runs the emission again on one lane, without the squeeze.
+    uint32_t squeeze_body;
+    uint32_t squeeze_arenas;
+    uint64_t squeeze_room;
+    // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
+    // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
+    // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
+    // the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
     uint32_t active;
     uint32_t parts;
-    bool again;
+    uint32_t squeezed;
+    CheckProgramAgain again;
     bool timing;
     uint64_t prepare_ns;
     uint64_t lanes_ns;
@@ -266,6 +295,8 @@ struct CheckEmitLane
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // The arena of its writer's columns (check_lower_writer_begin): its scratch, but lane 0's (CheckEmitRun.columns).
+    Arena* columns;
     bool prepared;
     bool ready;
 };
@@ -291,6 +322,10 @@ struct CheckEmitRun
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // Lane 0's writer's columns, in base pages, as the other lanes' scratch is: each column has room for any of the
+    // program's bodies, of which a body touches a little at the column's start, and in the caller's scratch, whose pages
+    // past its first 64 KB are huge, each column's first touch cleared a huge page of its own (#531).
+    Arena* columns;
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
@@ -300,6 +335,9 @@ struct CheckEmitRun
     CheckEmitPart* parts;
     uint32_t part_count;
     CheckEmitLane* lane_states;
+    // The driver's --time-stages clock (c_check_clock.c), which the calling thread's laps charge per function when it
+    // compiles the bodies alone (check_program_emit_alone): null on the lanes, whose run its caller's mark charges.
+    CheckClock* stage_clock;
 };
 
 // Body `b`'s raw source rows (c_check_debug.c), from where each entry's code starts now that the branches are sized: the
@@ -353,15 +391,21 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     }
     if (valid)
     {
-        const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+        // The branch columns alone, which sizing reads and writes by: Tier 0's records are valid by construction, which
+        // x86_validate checks above only with `verify` (#532).
+        const BranchSizingCheck shape = run->scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
+                                                      branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
+        check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
         const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                run->scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
                                              x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
         valid = length >= 0;
         if (valid && run->sources)
         {
             check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar);
+            check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
         if (valid && run->unwind)
         {
@@ -375,6 +419,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
                                                        unwind_tier0(code, offsets, (uint32_t)length, &proven);
             valid = valid && (analyzed != UNWIND_OK || memcmp(&proven, &run->frames[b], sizeof(proven)) == 0);
             body->reason = valid ? body->reason : "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
+            check_clock_lap(run->stage_clock, CHECK_STAGE_UNWIND);
         }
         if (valid)
         {
@@ -398,6 +443,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         arena_pop_to(bytes, before);
     }
     arena_pop_to(scratch, work_mark);
+    check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
     return valid;
 }
 
@@ -413,6 +459,7 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     {
         check_lower_part(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
     }
+    check_clock_lap(run->stage_clock, CHECK_STAGE_LOWER);
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
@@ -424,6 +471,7 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         // The entries' first records only for source rows.
         function->entry_records = run->sources;
         run->codes[b] = run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+        check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
         if (run->codes[b].error != TIER0_OK)
         {
             part->tier0_failed = b;
@@ -435,9 +483,10 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
-// Lane `index`'s arenas and writer, for its first part: the caller's arenas for lane 0, and for another lane its own,
-// reserved the first time and otherwise put back (the emission before this one's are done with).
-static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
+// Lane `index`'s arenas, for its first part: the caller's for lane 0, but its writer's columns' (CheckEmitRun.columns),
+// and for another lane its own, reserved the first time and otherwise put back (the emission before this one's are done
+// with), its scratch its writer's columns'. Returns false if one can't be reserved.
+static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     bool valid = true;
     if (index == 0)
@@ -445,6 +494,7 @@ static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* la
         lane->output = run->output;
         lane->scratch = run->scratch;
         lane->bytes = run->bytes;
+        lane->columns = run->columns;
     }
     else
     {
@@ -466,8 +516,16 @@ static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* la
         lane->output = &arenas->output;
         lane->scratch = &arenas->scratch;
         lane->bytes = &arenas->bytes;
+        lane->columns = &arenas->scratch;
     }
-    return valid && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+    return valid;
+}
+
+// Lane `index`'s arenas and writer, for its first part.
+static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
+{
+    return check_program_emit_lane_arenas(run, lane, index) &&
+           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
 }
 
 // A part's failure before it lowered anything: its lane had no room for its writer.
@@ -486,6 +544,42 @@ static void check_program_emit_part_refused(CheckEmitPart* part)
     part->code_failed = part->lower.end;
 }
 
+// The part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body): each of the
+// lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its writer, if this
+// is its first part, and works on the part; then its room comes back. Lane 0's writer's columns, an arena of their own,
+// are squeezed with its scratch. Out of line, so that the lanes' loop carries none of it.
+static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index)
+{
+    CheckProgramLanes* lanes = run->lanes;
+    const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
+    Arena* each[4] = { lane->output, lane->scratch, lane->bytes, lane->columns };
+    const uint32_t names[4] = { BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH, BUSTER_CHECK_EMIT_SQUEEZE_BYTES, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH };
+    const uint32_t count = arenas && lane->columns != lane->scratch ? 4 : 3;
+    uint64_t capacities[4] = { 0, 0, 0, 0 };
+    for (uint32_t i = 0; arenas && i < count; i += 1)
+    {
+        capacities[i] = each[i]->capacity;
+        const bool named = (lanes->squeeze_arenas & names[i]) != 0;
+        each[i]->capacity = named && lanes->squeeze_room < capacities[i] - each[i]->length ? each[i]->length + lanes->squeeze_room : capacities[i];
+    }
+    lane->ready = lane->prepared ? lane->ready :
+                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
+    lane->prepared = true;
+    if (lane->ready)
+    {
+        check_program_emit_part(run, lane, part);
+    }
+    else
+    {
+        check_program_emit_part_refused(part);
+    }
+    for (uint32_t i = 0; arenas && i < count; i += 1)
+    {
+        each[i]->capacity = capacities[i];
+    }
+    lanes->squeezed = index + 1;
+}
+
 // Every lane's entry: the parts by cost (CheckEmitRun.costs), taken costliest first. A lane prepares its writer when it
 // takes its first part, so that one that takes none spends nothing on it.
 static void check_program_emit_lane(void* argument)
@@ -500,15 +594,23 @@ static void check_program_emit_lane(void* argument)
         CheckEmitPart* result = run->parts + part;
         result->lower.first = (uint32_t)run->boundaries[part];
         result->lower.end = (uint32_t)run->boundaries[part + 1];
-        lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
-        lane->prepared = true;
-        if (lane->ready)
+        const uint32_t squeeze = run->lanes->squeeze_body;
+        if (squeeze != 0 && squeeze - 1 >= result->lower.first && squeeze - 1 < result->lower.end)
         {
-            check_program_emit_part(run, lane, result);
+            check_program_emit_squeezed(run, lane, result, index);
         }
         else
         {
-            check_program_emit_part_refused(result);
+            lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
+            lane->prepared = true;
+            if (lane->ready)
+            {
+                check_program_emit_part(run, lane, result);
+            }
+            else
+            {
+                check_program_emit_part_refused(result);
+            }
         }
         if (run->lanes->slow_lane == index + 1)
         {
@@ -543,14 +645,96 @@ static void check_program_emit_alone(CheckEmitRun* run)
     }
 }
 
+// The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
+// program's symbols, `access` 1 to symbol_count (Tier0Function.symbol_access): a symbol this unit doesn't define may be a
+// shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
+// writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
+// another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
+// check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
+// (check_program_emit_lanes) and check_program_access's share it.
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, uint32_t* declaring, bool scalar)
+{
+    memset(defined, 0, (uint64_t)program->object_count + 1);
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        defined[program->bodies[b].object] = 1;
+    }
+    const uint32_t declaring_count = check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar);
+    for (uint32_t d = 0; d < declaring_count; d += 1)
+    {
+        const uint32_t token = declaring[d];
+        const uint32_t object = program->input->objects[token];
+        if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            (program->input->defined[token] || program->input->tentative[token]))
+        {
+            defined[object] = 1;
+        }
+    }
+    for (uint32_t s = 0; s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
+        const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
+        const bool thread_local = !literal && program->input->thread_local[declaration];
+        access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+    }
+}
+
+// How Tier 0 reaches each symbol of a lowered program, as check_lower_finish numbered them (Tier0Function.symbol_access):
+// one column, from `output`, for every body that `code`'s emission lowered of `program`, and `*defined_objects`, from
+// `scratch` (check_program_object_access). It has an entry for every symbol of the emission's link (CheckProgramCode.link):
+// the jump tables' and their labels' too, after the runtime functions', the unit's own and direct (Tier 0 compiles a
+// symbol past its column as direct, but tier0_validate refuses one). The helpers are the unit's, and the C runtime's
+// errno function isn't; libgcc's functions are linked into the image.
+// Returns whether there was room. benchmark-backend-source (tier0_source_benchmark.c) compiles the lowered functions
+// again with it: the emission's own column, made before its lanes, has the runtime functions' provisional symbols
+// (check_lower_runtime), and goes with its scratch.
+static bool check_program_access(CheckProgramCode* code, const CheckProgram* program, Arena* output, Arena* scratch, uint8_t** defined_objects)
+{
+    CheckProgramLowered* lowered = &code->lowered;
+    const uint32_t count = program->body_count;
+    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
+    uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
+    uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
+    // The tokens that declare, for check_program_object_access: pushed last, and given back once it has read them.
+    const uint64_t declaring_mark = scratch->length;
+    uint32_t* declaring = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16);
+    const bool valid = access != 0 && defined != 0 && declaring != 0;
+    *defined_objects = defined;
+    if (valid)
+    {
+        memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
+        check_program_object_access(program, access, defined, declaring, false);
+        for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
+        {
+            const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
+            access[symbol] = lowered->runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+        }
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            lowered->functions[b].symbol_access = access;
+            lowered->functions[b].symbol_count = access_count;
+        }
+    }
+    arena_pop_to(scratch, declaring_mark);
+    return valid;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
-// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
+// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND; without
+// it, only their branch columns are checked (branch_sizing_validate_branches), which sizing needs inside each
+// function, since Tier 0's records are valid by construction and x86_validate of all of them made branch sizing take
+// 14 times the encoder's time on sqlite3.c (#532). With
 // `rows`, each source body's raw source rows too (c_check_debug.c), from `output`. With `lanes`, on up to lanes->lanes
 // lanes (above): one, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest
-// body's, but with lanes->every_lane as many as there are parts for; without, on the calling thread alone.
-static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
+// body's, but with lanes->every_lane as many as there are parts for; without, on the calling thread alone. With
+// `stage_clock` (the driver's --time-stages), each step's time is charged to its stage (c_check_clock.c).
+static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                      const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
-                                     CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes)
+                                     CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
+                                     CheckClock* stage_clock)
 {
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const bool timing = lanes != NULL && lanes->timing;
@@ -570,52 +754,42 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         valid = unwind_initialize();
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_BACKEND;
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_BACKEND_SETUP);
     CheckLowerShared shared;
     const bool lowering = valid;
     if (valid)
     {
         valid = check_lower_prepare(&shared, &result->lowered, program, scalar, rows != NULL, output, scratch);
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     const uint32_t count = program->body_count;
-    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
-    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
-    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
-    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
-    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
-    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image. The
-    // runtime's functions have their provisional symbols while the bodies compile (check_lower_runtime), each its own.
-    const uint32_t access_count = valid ? shared.provisional_runtimes + CHECK_LOWER_RUNTIMES : 0;
+    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
+    // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
+    // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
+    // bodies compile (check_lower_runtime), each its own, and the jump tables theirs after them
+    // (CheckLowerShared.provisional_tables), the unit's own: direct.
+    const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
-    valid = valid && access != 0 && defined != 0;
+    // The tokens that declare, which the pass below visits rather than every token of the unit: pushed last, and given
+    // back before the bodies compile.
+    const uint64_t declaring_mark = scratch->length;
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    valid = valid && access != 0 && defined != 0 && declaring != 0;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        memset(defined, 0, (uint64_t)program->object_count + 1);
-        for (uint32_t b = 0; b < count; b += 1)
-        {
-            defined[program->bodies[b].object] = 1;
-        }
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
-        {
-            const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (program->input->defined[token] || program->input->tentative[token]))
-            {
-                defined[object] = 1;
-            }
-        }
-        for (uint32_t s = 0; s < program->symbol_count; s += 1)
-        {
-            const uint32_t object = program->symbol_objects[s];
-            const uint32_t declaration = program->object_declarations[object];
-            const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
-            const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
-            const bool thread_local = !literal && program->input->thread_local[declaration];
-            access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
-        }
+        check_program_object_access(program, access, defined, declaring, scalar);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
+    arena_pop_to(scratch, declaring_mark);
+    // Lane 0's writer's columns (CheckEmitRun.columns): the lanes' first arenas' scratch, as the other lanes' scratch in
+    // base pages, reserved the first time and otherwise put back; or without lanes, an arena of this emission's own.
+    Arena own_columns = { 0 };
+    Arena* columns = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
+    *columns = valid && columns->base == 0 ? arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36) : *columns;
+    arena_pop_to(columns, 0);
+    valid = valid && columns->base != 0;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
     const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
     CheckEmitRun run = {
@@ -634,6 +808,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         .output = output,
         .scratch = scratch,
         .bytes = bytes,
+        .columns = columns,
     };
     run.codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Code, count) : 0;
     run.bodies = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitBody, count) : 0;
@@ -667,7 +842,12 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         valid = run.orders[lane] != 0;
     }
     valid = valid && run.parts != 0 && run.lane_states != 0 && (active == 1 || run.boundaries != 0);
-    bool again = false;
+    check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
+    CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
+    if (lanes != NULL)
+    {
+        lanes->squeezed = 0;
+    }
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
     if (valid && count != 0)
     {
@@ -680,21 +860,27 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         const uint64_t scratch_before = scratch->length;
         if (active > 1)
         {
-            again = !lane_run(active, check_program_emit_lane, &run, lanes->cpus);
-            for (uint32_t p = 0; !again && p < run.part_count; p += 1)
+            again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
-                again = part->lower.status == CHECK_PROGRAM_RESOURCE ||
-                        (part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY) ||
-                        (part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE);
+                const bool tier0 = part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+                const bool code = part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
+                again = part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
+                        tier0 ? CHECK_PROGRAM_AGAIN_TIER0 :
+                        code ? CHECK_PROGRAM_AGAIN_CODE :
+                               CHECK_PROGRAM_AGAIN_NONE;
             }
+            check_clock_mark(stage_clock, CHECK_STAGE_LANES);
         }
-        if (active == 1 || again)
+        if (active == 1 || again != CHECK_PROGRAM_AGAIN_NONE)
         {
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
+            arena_pop_to(columns, 0);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
+            run.stage_clock = stage_clock;
             check_program_emit_alone(&run);
         }
     }
@@ -732,6 +918,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         result->lowered.count = count;
         result->lowered.output_bytes = output->length - mark;
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
     {
         const CheckOverloadCandidate* candidate = program->input->graph.overload_candidates + i;
@@ -749,27 +936,34 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && (count == 0 || result->function_atoms != 0);
+    // The declaring tokens again, for the attributes' passes (one vector pass: cheaper than holding them through the
+    // bodies' compiles), pushed last and given back after them.
+    const uint64_t attributes_mark = scratch->length;
+    uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
+    const uint32_t declared_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declared, scalar) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(retained_objects, 0, program->object_count);
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; d < declared_count; d += 1)
         {
+            const uint32_t token = declared[d];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count)
             {
                 bool gnu_inline = false;
                 retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t token = 0; valid && token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; valid && d < declared_count; d += 1)
         {
+            const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && attributes != 0 && object != 0 && object < program->object_count)
+            if (attributes != 0 && object != 0 && object < program->object_count)
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];
@@ -812,6 +1006,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             }
         }
     }
+    arena_pop_to(scratch, attributes_mark);
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
     // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
     uint32_t failed = count;
@@ -897,11 +1092,18 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0);
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames;
+    // The jump tables: an atom each, a fixup per entry, and their symbols and their labels'.
+    uint64_t table_entries = 0;
+    for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
+    {
+        table_entries += result->lowered.tables[t].count;
+    }
+    const uint64_t switch_symbols = valid ? (uint64_t)result->lowered.table_count + result->lowered.case_symbol_count : 0;
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0) + (valid ? result->lowered.table_count : 0);
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.symbols;
-    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + runtime.names;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -947,9 +1149,9 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         if (declaration != BUSTER_CHECK_NONE && !made)
         {
             const uint32_t identifier = parser->tokens.names[declaration];
-            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length, true) :
                                              check_program_emit_given_name(&result->link, &names, intern_bytes(identifiers, identifier),
-                                                                           intern_length(identifiers, identifier));
+                                                                           intern_length(identifiers, identifier), false);
             valid = given[s] != 0;
         }
     }
@@ -1031,7 +1233,9 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     {
         const CheckProgramHelper* helper = helpers->items + h;
         char spelling[64];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
+        // An asm statement's helper is named after its statement (c_check_program_asm.c), a builtin's after its builtin.
+        const int length = helper->assembly != 0 ? snprintf(spelling, sizeof(spelling), ".Lbuster_asm_%u", helper->assembly - 1) :
+                                                   snprintf(spelling, sizeof(spelling), ".Lbuster_builtin_%u_%u", helper->id, helper->bytes);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                             BUSTER_LINK_SOURCE_NONE) == helper->symbol;
@@ -1044,6 +1248,17 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)strlen(spelling));
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_NONE) ==
                                  result->lowered.runtime_symbols[runtime];
+    }
+    // The jump tables' symbols, then their labels' (CheckProgramLowered.case_symbol_base): local, with names a source
+    // can't spell, which -c's object leaves out as an assembler leaves clang's .LJTI and .LBB labels (check_driver_object).
+    for (uint32_t k = 0; valid && k < switch_symbols; k += 1)
+    {
+        const bool table = k < result->lowered.table_count;
+        char spelling[48];
+        const int length = snprintf(spelling, sizeof(spelling), table ? ".Lbuster_switch_%u" : ".Lbuster_case_%u", table ? k : k - result->lowered.table_count);
+        const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
+        const uint8_t flags = BUSTER_LINK_SYMBOL_LOCAL | (table ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_NOTYPE);
+        valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == result->lowered.case_symbol_base + k;
     }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
@@ -1060,6 +1275,10 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
     {
         result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
+    for (uint32_t t = 0; valid && binding != NULL && t < result->lowered.table_count; t += 1)
+    {
+        result->link.symbols.source[result->lowered.case_symbol_base + t] = BUSTER_LINK_SOURCE_PROGRAM;
     }
     if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
     {
@@ -1087,9 +1306,23 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             }
         }
     }
+    // Then every reference of a jump table's provisional symbol takes the table's, in the functions that have tables
+    // (CheckLowerTable.function, in their order). In this order each reference is rewritten once: a runtime function's
+    // symbol is below the tables' provisional ones, while a table's final symbol is among the runtime functions'.
+    for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
+    {
+        const uint32_t b = result->lowered.tables[t].function;
+        const Tier0Code* code = run.codes + b;
+        for (uint32_t i = 0; (t == 0 || result->lowered.tables[t - 1].function != b) && i < code->reference_count; i += 1)
+        {
+            const uint64_t table = (uint64_t)code->references[i].target - shared.provisional_tables;
+            code->references[i].target = table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : code->references[i].target;
+        }
+    }
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
+    check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     uint32_t labels = 0;
     CheckEmitBody helper_body;
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
@@ -1120,7 +1353,8 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+                const BranchSizingCheck shape = scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
+                                                         branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
                 const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                        scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
@@ -1187,6 +1421,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             arena_pop_to(scratch, work_mark);
         }
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
     if (valid && frames != 0)
@@ -1207,6 +1442,28 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
+    check_clock_mark(stage_clock, CHECK_STAGE_UNWIND);
+    // Each jump table, in .rodata: an entry per value, its label's offset from the table, which a PC32 fixup gives
+    // (S + A - P, P the entry's place, A its offset in the table), as clang's .long .LBB - .LJTI entries are.
+    for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
+    {
+        const CheckLowerTable* table = result->lowered.tables + t;
+        const uint64_t size = (uint64_t)table->count * 4;
+        uint8_t* data = arena_push(bytes, size, 4);
+        const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 2, size, (uint8_t*)memset(data, 0, size), 0) : 0;
+        const SymbolId symbol = result->lowered.case_symbol_base + t;
+        const SymbolId labels_base = result->lowered.case_symbol_base + result->lowered.table_count;
+        valid = atom != 0 && link_define_symbol(&result->link, symbol, atom, 0, size);
+        for (uint32_t i = 0; valid && i < table->count; i += 1)
+        {
+            valid = link_add_fixup(&result->link, atom, i * 4, BUSTER_LINK_FIXUP_PC32, labels_base + table->entries[i], (int64_t)i * 4) != 0;
+        }
+        if (valid)
+        {
+            result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+    }
+    check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     if (!valid)
     {
         const CheckProgramStatus status = result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
@@ -1229,11 +1486,21 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, temporary);
+    arena_release(&own_columns);
     if (timing)
     {
         lanes->merge_ns = check_program_lanes_now() - lanes_end;
     }
     return valid;
+}
+
+// check_program_emit_timed without a clock: the benchmark's and the tests' emission on lanes.
+static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
+                                     const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
+                                     CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes)
+{
+    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, scalar, output, bytes, scratch, binding, rows, unwind, verify, lanes,
+                                    NULL);
 }
 
 // check_program_emit_lanes on the calling thread alone.

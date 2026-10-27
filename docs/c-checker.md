@@ -26,7 +26,13 @@ checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`executable_write`). A binding that finds the snapshot damaged discards it and
 links once more from a fresh import. `--verify` also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
-([the c-testsuite guide](c-testsuite.md)).
+([the c-testsuite guide](c-testsuite.md)), with `-c` too. Without it, the
+emission checks only each function's branch columns, which branch sizing reads
+and writes by (`branch_sizing_validate_branches`): Tier 0's records are valid by
+construction, and `x86_validate` of them all made branch sizing take 14 times
+the encoder's time on `sqlite3.c`, against 1.33 times without it
+([#532](https://github.com/buster14a/buster/issues/532),
+[the branch sizing guide's contract](branch-sizing.md#contract)).
 
 `-lNAME` (or `-l NAME`) links a shared library besides the C runtime's (the
 value of an option that takes the next argument stays that option's, as
@@ -628,8 +634,19 @@ it doesn't.
 What the lowering covers past scalars (#145's programs):
 
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
-  of their own size and alignment (up to 16 bytes, 1 GB), reached through
+  of their own size and alignment (up to 1 GB each), reached through
   `LOCAL_ADDRESS`. An aggregate's value in the stream is its object's address.
+  Past 16 bytes' alignment, Tier 0 realigns the function's frame
+  ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **Values aligned past 8 bytes.** A scalar local or parameter whose alignment
+  (its type's, an aligned typedef's, or its declaration's `_Alignas`) passes 8
+  bytes is a frame object of its size and alignment, as a long double's is,
+  which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of its class read and write
+  (Tier 0's `tier0_value_object`), so that the rest of the lowering reads and
+  writes it as it would a value's local. A parameter's arrives from its
+  register as a struct of it would, or from its 8-byte stack slot, which
+  Tier 0's prologue copies into the object (an aligned typedef passes as its
+  base, so the slot is aligned to 8 alone).
 - **Copies.** Struct and union assignment and initialization are `COPY`s of
   at most 256 bytes each, the source's address kept in a temporary between
   them; a statement's assignment leaves no address to discard, and neither
@@ -654,8 +671,9 @@ What the lowering covers past scalars (#145's programs):
   returns one in registers returns its bytes' address (`result_size`); one that
   returns it through a hidden pointer takes the pointer as parameter 0, copies
   the bytes there and returns it, and one returned in x87 registers (a struct
-  of a `long double`, in st0) returns its bytes' address too. Those aligned past
-  16 bytes or larger than 64 KB are refused.
+  of a `long double`, in st0) returns its bytes' address too. Those larger than
+  64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
+  stack aligned to it at the call, which realigns the caller's frame.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -665,7 +683,9 @@ What the lowering covers past scalars (#145's programs):
   signature through `abi_assign`). `va_arg` of a struct or a union copies its
   eightbytes from the save area into a frame object of its own, or finds them
   in the overflow area, as `abi_va_arg`'s plan says; its value is their address.
-  `va_arg` of a `long double` reads its 16 bytes in the overflow area.
+  `va_arg` of a `long double` reads its 16 bytes in the overflow area. Named
+  arguments aligned past 16 bytes align the incoming area to them, which
+  Tier 0's incoming frame takes.
 - **Long double (#136's item 8).** Its class is Tier 0's F80, whose values are
   in memory ([the Tier 0 guide](tier0.md#long-double-136s-item-8)): a local or a
   parameter of it is a frame object of 16 bytes aligned to 16, which `LOCAL`,
@@ -680,8 +700,10 @@ What the lowering covers past scalars (#145's programs):
   each entry. A temporary of the class (a statement expression's value or the
   operands live around it, `?:` without its middle operand, a postfix one's old
   value) is a frame object of its own (`check_lower_temporary`).
-  The builtins of its operands and the floating classification builtins on it
-  are refused by name.
+  The floating classification builtins on it (`isnan`, `isinf`, `isinf_sign`,
+  `isfinite`, `signbit` and `fpclassify`) and `fabsl` are `c_builtin_float_lower.c`'s
+  recipes over its argument's frame object, with clang 23's -O0 result for every
+  x87 encoding ([the integration guide](c-builtins-integration.md#floating-checking)).
 - **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
   I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
   classes as long double's is (`check_lower_memory_class`): their locals,
@@ -706,7 +728,9 @@ What the lowering covers past scalars (#145's programs):
   runtime joins as GCC's driver links them (`runtime.c`, `bind.c`). A shift
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
-  and a builtin of 128-bit operands are refused by name.
+  is refused by name. The overflow builtins take 128-bit operands and
+  destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
+  in a frame object of its own.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -759,10 +783,13 @@ What the lowering covers past scalars (#145's programs):
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
   element's size, and the same extents give `sizeof` and the strides of
-  pointer arithmetic over a pointer to a variable-length array. An array
-  declared in a `for` statement's clause or directly in a statement
-  expression's block, one aligned past 16 and one initialized (C23's `= {}`)
-  are refused by name. The source reader doesn't yet take a bound whose
+  pointer arithmetic over a pointer to a variable-length array. One aligned past
+  16 bytes (its element's alignment, or its declaration's `_Alignas`) takes its
+  alignment less 16 bytes more, and its address rounds up to its alignment,
+  `(address + alignment - 1) & -alignment`, where clang's code rounds rsp down:
+  `ALLOCA`'s address is a multiple of 16. An array declared in a `for`
+  statement's clause or directly in a statement expression's block, and one
+  initialized (C23's `= {}`), are refused by name. The source reader doesn't yet take a bound whose
   statement expression holds more than expression statements (a declaration,
   an `if` or a jump: `invalid or unsupported declaration`); the control stream
   already puts such a jump out of a block's first array's bounds before the
@@ -816,6 +843,55 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **Switches (#136's item 7).** A switch's value goes in a temporary, and each
+  case compares it, as clang -O0's code does for a sparse switch, unless clang
+  would build a jump table: then the switch dispatches through one
+  (`check_lower_switch_table`), decided before any body is lowered
+  (`check_lower_switch_tables`) for each switch of four cases or more, which
+  the checked program lists as it writes their controls
+  (`CheckProgram.switches`), and found by its control when its body is
+  lowered (`check_lower_table_of`). LLVM's rule at -O0
+  (`SwitchLowering::findJumpTables`) takes a switch's whole range or nothing:
+  four clusters or more (runs of consecutive values that go to one place;
+  `case 1: case 2:` with nothing between them is one, as it is LLVM's one
+  block) whose cases hold at least a tenth of the range's values (its
+  jump-table density). The class must be one of 32 or 64 bits, and the range
+  at most 65,536 values (`BUSTER_CHECK_LOWER_MAX_TABLE`; LLVM's limit is
+  UINT_MAX). The dispatch, at the switch's first case: a value whose
+  difference from the lowest case's, unsigned, is past the last entry goes to
+  the default or the switch's end, and any other to the table's address plus
+  the entry's 32-bit offset of its label from it (`LOAD` of `I32`, `CONVERT` to
+  `I64`, `PTR_ADD`, `JUMP_INDIRECT`), as clang's code goes. The table is a
+  `.rodata` atom (`.Lbuster_switch_N`) of a PC32 fixup per value, to its
+  label's symbol (`.Lbuster_case_N`, which the emission defines at the label's
+  record as it does `&&label`'s) with the entry's offset as its addend, as
+  clang's `.long .LBB - .LJTI` entries are. The tables and their labels are
+  numbered in source order when they are decided, so that whatever lane lowers
+  a body (#151), they come out as one lane's. Their symbols are the lowering's
+  own, after the runtime functions', which `check_lower_finish` numbers once
+  they are all known: while the bodies compile, a table's address is a
+  provisional symbol after the runtime functions' (`provisional_tables`, which
+  the access column has), whose references the emission's merge replaces after
+  the runtime functions', in the functions that have tables: a table's final
+  symbol falls among the runtime functions' provisional numbers, while theirs
+  are below the tables' provisional ones, so that each reference is rewritten
+  once. An empty GNU range
+  (`case 5 ... 3`) counts for nothing, as clang's Sema drops it. In `-c`'s
+  object the tables' and the labels' symbols are temporaries
+  (`ObjectOptions.temporary_symbols`), as an
+  assembler takes clang's `.LJTI` and `.LBB` labels: left out of its symbol
+  table, where a label inside a function would split the function for a
+  symbolizer, with the relocations against their sections' symbols. Deciding
+  takes a merge sort of the switch's cases, scalar: a pass over a few cases
+  per listed switch. On `sqlite3.c`, whose 53 tables hold 2,776 entries, the
+  tables added about 431,000 instructions (0.019%) to `-c` before the function
+  lanes, and their temporaries 298,000, with no cycles beyond the runs' spread
+  (one executable with the tables on and off, on the 9700X), and its shell runs
+  13.8% faster
+  ([the record](https://github.com/buster14a/buster-performance/blob/6328c2664043f54076850f6c03c5a580ab5bfeb2/docs/measurements/switch-tables-136-2026-10-26/README.md)).
+  With the lanes, on one lane, the tables and their temporaries add about
+  900,000 instructions (0.04%; one executable with the tables on and off, on a
+  Zen 4 laptop's build).
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
@@ -852,6 +928,74 @@ closed, in Clang's constraint order. Earlier complete initializer/asm/control
 errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
+
+### What the lowering costs (#531)
+
+On the 9700X, the lowering (`check_lower_prepare`, then the bodies'
+`check_lower_part`) took 25.7 ms of `-c`'s 190 ms on the frozen `sqlite3.c`,
+five times Tier 0's compile of the same entries (#520's stage clock, with its
+step's options). Laps of its own phases on a Zen 4 laptop's build of main put
+69% of it in the tasks' loop, 12% in Tier 0's check of each lowered function
+(`tier0_validate`), 8% in each body's setup (half of it the first touches of the
+writer's columns), 7% in the program-wide preparation and 4% in each body's end
+(its branch targets and its columns' copy). On the laptop's copy of the file it
+ran about 740 instructions per typed entry, as many in a large body as in a
+small one.
+
+- **Every type's class, once.** The tasks' loop asked each node's types their
+  class, and whether they were aggregates, complex, pointers or `_Bool`, each
+  time by walking the type table (the aligned typedef's base, the enum's
+  underlying type, the integer's width and signedness): about a quarter of the
+  stage. `check_lower_classify_types` makes every type's class and facts
+  (`BUSTER_CHECK_LOWER_TYPE_*`) before the bodies, 64 types at a time: each
+  type's kind looks both up in 64-byte tables with `vpermb`, and the few whose
+  kind doesn't settle them (an aligned typedef's, an enum's, a `_BitInt`'s, a
+  complex type's, and the builtins) take the rules, `check_lower_type_class`
+  and `check_lower_type_facts`, which its twin,
+  `check_lower_classify_types_scalar`, applies to every type. The bodies read
+  the table (`check_lower_class`, `check_lower_facts`), which has a row per type
+  of the unit's table, as the lowering makes none: 4,740 for `sqlite3.c`.
+- **The checked value in place.** Each expansion copied its node's 96-byte
+  `CheckValue`; it reads it where it is.
+- **No task for an empty conversion.** A conversion that writes no entry and
+  can't fail (an array's decay, a pointer's to another, a change of qualifiers:
+  `check_lower_conversion_empty`) isn't pushed.
+- **An entry's append.** In a function that doesn't track its stack
+  (`CheckLowerWriter.track`: one without a statement expression, in a program
+  without a terminal helper), `check_lower_emit` appends without the operand
+  class's bookkeeping, and the function's memory classes (`Tier0Function.x87`
+  and `int128`) come from its entries' classes once it is lowered
+  (`check_lower_entry_classes`, 64 at a time, and its twin).
+- **Lane 0's writer's columns in base pages** ([the lanes
+  guide](function-lanes.md#memory)): in the caller's scratch, each cleared a
+  huge page.
+- **Each statement's nodes prefetched a statement ahead.** The tasks' loop
+  waited on its first touch of each node's checked value and conversions, two
+  arrays too large for the caches. A statement's nodes come before its root in
+  the graph, so before each statement the lowering prefetches the next one's,
+  up to its root (`check_lower_prefetch`, its last 64 nodes at most).
+
+The objects are the same bytes. On the 9700X, against main at `ad408cf2`
+(medians: the whole compile's of 10 rounds of `perf stat -r 3`, the two in
+turn, each after a warm-up of its executable; the stage's of 11 rounds of
+`measure-compile` with #520's clock, each build the other's reference; the
+emission's of `benchmark-check-lanes --lanes 1`'s 11 passes, twice each):
+
+| `sqlite3.c` | main | #531 |
+| --- | ---: | ---: |
+| `lower` stage | 25.6 ms | 17.5 ms |
+| its system time and peak RSS added | 2.9 ms, 56,044 KB | 0.0 ms, 9,824 KB |
+| `-c`, task-clock | 190.5 ms | 181.8 ms |
+| user cycles and instructions | 902M, 2,227M | 864M, 2,133M |
+| kernel cycles | 155M | 145M |
+| peak RSS | 674,216 KB | 627,200 KB |
+| the emission on one lane, warm memory | 37.1 ms | 30.0 ms |
+
+What is left is the tasks' loop's dispatch on tasks and operators, and the
+first touches the prefetch doesn't hide; `tier0_validate`'s check of every
+lowered function, a scalar walk of the stack with a mispredicted `switch` per
+entry, 16% of the stage (#569); and the preparation's passes over every token
+(#517).
 
 ## Correctness tests
 
@@ -1050,6 +1194,72 @@ What the mutants and the bases found, each fixed with its fixture:
 
 The 9700X job's test step checks 8 mutants of the frozen SQLite source and 96
 of the oracle's four musl sources with seed 133, on the frozen headers.
+
+## The source reader's passes over the tokens
+
+`check_input` reads the parser's tree in several passes over every token: the
+counts that size its tables, the walk in source order
+(`check_input_resolve_range`), the expression graph's walk in postorder
+(`check_input_expressions`), and the passes after them. #529 cut the work
+they do per token where little of it was per declaration or expression:
+
+- **Value chains.** The graph's walk gives each token the chain of its
+  values, its children's chains joined, and counted the chain by walking each
+  child's again. An initializer's separators are each a child of the next, so
+  a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
+  of the whole `-c`'s cycles. Each token now keeps its chain's length beside
+  its first and last values (`CheckInputReader.value_counts`), and a parent
+  adds its children's. The scalar path, `--scalar`, walks the chains: the
+  tests that compare the two paths compare the counts with the walks.
+- **One pass before reading.** `check_input_count_tokens` makes every count
+  `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
+  operators, operands and calls, and the names of the builtin constants, the
+  varargs, `transparent_union`, `overloadable`, `_Generic` and
+  `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
+  tokens' names at a time. The same pass writes each token's syntax bits
+  (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
+  builtins the walk prepares, an attribute's start, and a string or
+  `__func__`. The walk in source order tests a bit where it compared the
+  token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
+  instructions fewer, about 70 a token. The scalar path computes each bit with
+  the walk's own tests (`check_input_syntax_of`).
+- **Scans for few tokens.** The passes that act on few tokens test 64 of them
+  at once (16 or 8, by the column's width) and visit only those
+  (`check_input_scan_*`): the constant contexts (static objects, static
+  assertions, case labels), the attribute items, the complete uses (tentative
+  definitions), the asm labels (tokens with attributes, then with
+  declarations) and the intrinsics' operands. Each scalar path visits every
+  token through the same body. The selections are skipped in a unit without
+  a `_Generic` or `__builtin_choose_expr` token, and the VLA finish's scans in
+  one without a variably modified declaration's lifetime.
+- **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
+  distinct identifier, refuses a name that doesn't start with `__` before it
+  scans its catalog, whose names all do (`test-preprocessor` checks it).
+
+`test-checker` checks every scan, count and syntax bit, by both paths,
+against its own reading of columns of every length to 200 that end at a
+`PROT_NONE` page (`c_check_input_scan_test.c`).
+
+On the 9700X (CPU 2, `-c` of the frozen `sqlite3.c` with #520's options, eight
+rounds of `perf stat -r 3` with main's and this change's executables in
+alternating order), the whole compile went from main's 903.3 million user
+cycles and 2,227.2 million user instructions to 820.9 million and 2,014.0
+million (−9.1% and −9.6%), and its task clock from 190.9 ms to 176.1 ms; every
+round's cycles were apart. #520's stage clock (`measure-compile`, 11 runs of
+each in rotating order, both executables with the clock merged in) puts the
+reader's stage, `check-input`, at 64.8 ms (64.3 to 65.3) against main's 80.3 ms
+(79.7 to 80.8), and the whole compile at 175.5 ms against 190.2 ms. The reader
+alone (`benchmark-checker-bindings --only direct`, 11 passes on warm pages)
+went from 67.3 ms to 54.4 ms (−19%). The object is main's, byte for byte, by
+both paths. The scratch the reader writes grew by 3.5 MB (`value_counts` and
+`syntax`), and the compile's peak RSS by 4.3 MB. [The measurement
+record](https://github.com/buster14a/buster-performance/tree/6929480812d31868d77a515f88ddca3bad408429/docs/measurements/check-input-529-2026-10-27)
+has the scripts, the raw outputs and the trees' manifests.
+
+What is left of the reader's per-token work is in its two walks, each of
+which still reads about ten sparse columns at every token, and in
+`check_input_run`'s fill of 22 columns with `NONE` (#528). Building the
+expression graph data-parallel is the next step for the walks.
 
 ## Benchmark and validation limits
 

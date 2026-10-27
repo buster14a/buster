@@ -133,6 +133,10 @@
     X(ATOMIC_SIGNAL_FENCE, 0x197u, "__atomic_signal_fence") \
     X(ATOMIC_ALWAYS_LOCK_FREE, 0x198u, "__atomic_always_lock_free") \
     X(ATOMIC_IS_LOCK_FREE, 0x199u, "__atomic_is_lock_free") \
+    X(ATOMIC_FETCH_MIN, 0x19au, "__atomic_fetch_min") \
+    X(ATOMIC_FETCH_MAX, 0x19bu, "__atomic_fetch_max") \
+    X(ATOMIC_MIN_FETCH, 0x19cu, "__atomic_min_fetch") \
+    X(ATOMIC_MAX_FETCH, 0x19du, "__atomic_max_fetch") \
     X(SYNC_FETCH_AND_ADD, 0x1c0u, "__sync_fetch_and_add") \
     X(SYNC_FETCH_AND_SUB, 0x1c1u, "__sync_fetch_and_sub") \
     X(SYNC_FETCH_AND_OR, 0x1c2u, "__sync_fetch_and_or") \
@@ -234,10 +238,12 @@ _Static_assert(CBUILTIN_VA_START == 0x100 && CBUILTIN_VA_END == 0x104, "special 
 
 // Binding and feature queries resolve bounded exact spellings. The integer action layer's SIMD/scalar lookups
 // deliberately retain their old integer-only contract. A name's bytes are inspected only after its length matches.
+// Every catalog name starts with "__" (test-preprocessor checks it), so a name that doesn't is no builtin's, which the
+// checker asks of each distinct identifier of a unit (#529).
 static __attribute__((unused)) CBuiltinId cbuiltin_resolve(const char* name, uint32_t length)
 {
     CBuiltinId result = CBUILTIN_NONE;
-    if (name != 0 && length != 0 && length < BUSTER_CBUILTIN_MAX_NAME)
+    if (name != 0 && length >= 2 && length < BUSTER_CBUILTIN_MAX_NAME && name[0] == '_' && name[1] == '_')
     {
         const uint32_t count = sizeof(cbuiltin_catalog) / sizeof(cbuiltin_catalog[0]);
         for (uint32_t i = 0; i < count && result == CBUILTIN_NONE; i += 1)

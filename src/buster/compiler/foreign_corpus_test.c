@@ -1825,7 +1825,7 @@ static int run_foreign_corpus_tests(int argc, char** argv)
                 .sources = { "src/buster/compiler/main.c", "src/buster/compiler/main_unit_x86.c", "src/buster/compiler/main_unit_frontend.c",
                              "src/buster/compiler/main_unit_assembler.c", "src/buster/compiler/main_unit_link.c", "src/buster/compiler/main_unit_executable.c",
                              "src/buster/compiler/main_unit_dynamic.c", "src/buster/compiler/main_unit_types.c", "src/buster/compiler/main_unit_checker.c",
-                             "src/buster/compiler/main_unit_check_builtins.c", "src/buster/compiler/main_unit_backend.c", "src/buster/compiler/main_unit_fragments.c",
+                             "src/buster/compiler/main_unit_check_builtins.c", "src/buster/compiler/main_unit_backend.c",
                              "src/buster/compiler/c_lexer_benchmark.c", "src/buster/compiler/x86_64_encoder_benchmark.c", "src/buster/compiler/lane_benchmark.c",
                              "src/buster/compiler/dataflow_benchmark.c", "src/buster/compiler/dominators_benchmark.c", "src/buster/compiler/tier1_allocate_benchmark.c",
                              "src/buster/compiler/object_writer_benchmark.c", "src/buster/compiler/executable_benchmark.c", "src/buster/compiler/import_benchmark.c",

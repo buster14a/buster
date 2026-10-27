@@ -78,17 +78,21 @@ last body, the last part's.
 
 A resource's failure on lanes, or lanes that can't start, run the emission
 again on the calling thread alone, from the arenas as they were: one lane's
-arenas, the caller's, decide whether a unit fits.
+arenas, the caller's, decide whether a unit fits. `CheckProgramLanes.again`
+says why it ran again (`CheckProgramAgain`): lanes that didn't start
+(`lane_run`, which also runs lanes it can't pin, then says so), or a part that
+ran out of room in its lowering (or whose lane had none for its writer), in a
+body's Tier 0 code or in a body's code after Tier 0.
 
 ### Memory
 
-Lane 0 is the calling thread, with the caller's arenas, so one lane's emission
-pushes what source order's did, where it did. Each other lane has three arenas
-of its own (`CheckProgramLanes.arenas`): its functions' lowered columns, its
-writer's columns with its functions' Tier 0 code and what the merge reads, and
-its functions' bytes. The caller keeps them until it is done with the
-emission's link (`check_program_lanes_release`); the next emission with them
-puts them back.
+Lane 0 is the calling thread, with the caller's arenas but for its writer's
+columns, so one lane's emission pushes what source order's did, where it did.
+Each other lane has three arenas of its own (`CheckProgramLanes.arenas`): its
+functions' lowered columns, its writer's columns with its functions' Tier 0
+code and what the merge reads, and its functions' bytes. The caller keeps them
+until it is done with the emission's link (`check_program_lanes_release`); the
+next emission with them puts them back.
 
 A lane's writer has some thirty columns, each with room for any of the
 program's bodies, far apart in its scratch arena, of which a lane touches a
@@ -97,8 +101,12 @@ a 2 MB page, and each lane's arenas are new: on the 9700X, 8 lanes' emissions
 of `sqlite3.c` took 6.7 billion kernel cycles against one lane's 0.17, and
 were slower than 4 lanes'. The lanes' scratch arenas are in base pages
 (`arena_reserve_small`), so a lane clears only what it touches: 0.58 billion.
-The functions' columns and bytes are packed, and keep huge pages past their
-first 64 KB.
+So are lane 0's writer's columns (`CheckEmitRun.columns`), in the first lane's
+scratch of `CheckProgramLanes.arenas`, or without lanes an arena of the
+emission's own: in the caller's scratch, they cleared a huge page each too.
+On one lane on the 9700X, the lowering of `sqlite3.c` added 56 MB to the peak
+RSS, and 9.8 MB with them in base pages (#531). The functions' columns and
+bytes are packed, and keep huge pages past their first 64 KB.
 
 ## The lane rule
 
@@ -118,14 +126,36 @@ as long as it. #113's deferred reader sizes its lanes the same way
 - generated programs of up to 600 functions of many kinds, among them
   libgcc's functions in random first-use orders, computed gotos through static
   tables of labels' addresses, switches, structs by value, long doubles and
-  variadic calls, emitted on one lane and on 2, 3 and 8 lanes, and on 8 with
-  one lane slow, with `-g`'s rows and unwind tables and without: each the one
-  lane's object, byte for byte, by each path;
+  variadic calls, emitted on one lane and on 2, 3 and 8 lanes, on 8 with one
+  lane slow, and on 8 that can't be pinned (CPUs past every one `lane_pin`
+  takes), with `-g`'s rows and unwind tables and without: each the one lane's
+  object, byte for byte, by each path, run again on one lane only when its lanes
+  didn't start;
 - the lane rule on programs of 1 to 1,200 functions;
 - failing programs whose bodies fail at different steps in both orders: one
   lane's failure at every lane count;
+- a lane short of room (`CheckProgramLanes.squeeze_body`, the tests' alone):
+  the lane that takes a body's part has only so many bytes to spare in one of
+  its arenas while it makes its writer and works on the part. In a generated
+  program of its own seed and in the failing programs, by each path, with `-g`
+  and without, the bodies with the fewest and the most tokens are squeezed in
+  each arena from no room up, doubling, until the part fits: each emission one
+  lane's object or failure (the generated program's an object, the failing
+  programs' a failure), the sweeps reaching each reason a lane short of room
+  has, on lane 0 and on the others;
+- lanes that start no thread, in a child limited to the processes it has
+  (`RLIMIT_NPROC`, which doesn't limit root), under an alarm that ends it if
+  its lanes hang: one lane's object or failure;
 - the driver's objects and executables by `--lanes 1`, `2`, `3`, `8` and by
-  default, by each path: the same bytes, and executables that exit alike.
+  default, by each path: the same bytes, and executables that exit alike; with
+  lanes that start no thread, by `--lanes 8`, `--lanes 1`'s objects and
+  executables; and the failing programs' exit statuses and diagnostics by
+  `--lanes 8`, with lanes and without, `--lanes 1`'s.
+
+The lanes' serial retry, which the last three exercise, was otherwise untested
+([#538's review](https://github.com/buster14a/buster/pull/538#pullrequestreview-5664568010)).
+Mutants of the emission that ignore each of its reasons to run again, or that
+never run again, each fail the test.
 
 `./build/compiler benchmark-check-lanes [--passes N] [--lanes LIST] [--cpus
 LIST] [preprocessor options] file...` (`c_check_lanes_benchmark.c`) times the

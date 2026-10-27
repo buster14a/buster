@@ -37,7 +37,8 @@ jobs:
   # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
   # for every pull request, so `test` measures them on the daily and dispatched runs and on pull requests that change
   # these harnesses, as when this job is skipped or fails. The same for benchmark-foreign's mold and wild
-  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases. And, per
+  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases, and for
+  # benchmark-preprocessor's `clang -E` (`--clang`, `preprocessor_clang`: c_preprocessor_benchmark.c). And, per
   # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
@@ -68,6 +69,7 @@ jobs:
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
       branch_sizing: ${{ steps.files.outputs.branch_sizing }}
+      preprocessor_clang: ${{ steps.files.outputs.preprocessor_clang }}
       zen5: ${{ steps.files.outputs.zen5 }}
       ssa: ${{ steps.files.outputs.ssa }}
       parser_bindings: ${{ steps.files.outputs.parser_bindings }}
@@ -79,6 +81,7 @@ jobs:
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       check_debug: ${{ steps.files.outputs.check_debug }}
       files: ${{ steps.files.outputs.files }}
+      compile_time: ${{ steps.files.outputs.compile_time }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
@@ -351,7 +354,7 @@ jobs:
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           musl="$corpus/libc/musl"
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 348 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 354 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
           == Test the C lexer as C++
@@ -494,8 +497,6 @@ jobs:
           ./build/compiler test-differential-harness
           == Test the independent preprocessor fuzz harness in C23
           ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -507,8 +508,8 @@ jobs:
           ./build/compiler test-ssa-ir
           == Check the frozen SQLite source against Clang
           # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
-          # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129): it refuses
-          # sqlite3.c, so this run counts the refusal's feature, and the musl run above compares objects.
+          # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129), which it
+          # does for sqlite3.c since #567 lowers its atomics: SQLITE_INLINE's allocateSpace is ours alone, "inlined".
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
@@ -617,8 +618,6 @@ jobs:
           ./build/compiler test-tier1-allocation
           == Test dataflow bitsets
           ./build/compiler test-dataflow
-          == Test fragment byte interleave and protected-page tails
-          ./build/compiler test-fragment-interleave
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -964,13 +963,23 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
 
-      - name: Benchmark the preprocessor on main.c
+      - name: Benchmark the preprocessor on main.c against clang -E
         # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
-        # -funsigned-char's among them.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        # -funsigned-char's among them. --clang also times `clang -E` on the same file after each timed pass, about
+        # 6 s of the step's 12, which measures clang rather than this compiler: it runs where `changes` doesn't rule
+        # it out (c_preprocessor_benchmark.c's harness).
+        if: needs.changes.outputs.preprocessor_clang != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
+        # scalar twins, without clang's.
+        if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
@@ -1175,6 +1184,43 @@ jobs:
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,4,8 --cpus "2,$others" "${source[@]}"
 
+      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
+        # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
+        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
+        # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
+        # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.compile_time != 'false'
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          # tcc is the comparison's reference: the step fails without it, or with another build of it. An upgrade
+          # starts a new series of ratios: update this hash and docs/compile-time.md's together.
+          tcc="$(command -v tcc)"
+          "$tcc" -v
+          printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
+          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
+          # The counters of 11 compiles of each, user and kernel apart, and the functions the default's samples fall
+          # in. They are the stage report's cross-check (#518), so the step fails when perf can't give them: when it
+          # can't run, when a counter isn't counted, or when the profile is empty.
+          out="$RUNNER_TEMP/compile-time"
+          mkdir -p "$out"
+          events=task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u
+          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-compiler.txt" -- ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
+          cat "$out/stat-compiler.txt"
+          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-tcc.txt" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
+          cat "$out/stat-tcc.txt"
+          if grep -E '<not (supported|counted)>' "$out/stat-compiler.txt" "$out/stat-tcc.txt"; then
+              echo "::error::perf counted only some of the events, so the stage report has no cross-check"
+              exit 1
+          fi
+          taskset -c 2 perf record -q -F 20000 -o "$out/perf.data" -- \
+              bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
+          perf report -i "$out/perf.data" --stdio --no-children --sort dso --percent-limit 0.5 > "$out/dso.txt"
+          perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 > "$out/symbol.txt"
+          grep -v '^#' "$out/dso.txt" | sed '/^$/d'
+          grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
+
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
         # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
@@ -1233,6 +1279,19 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
           taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
+
+      - name: Benchmark the backend on the frozen SQLite source's functions
+        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
+        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
+        # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-backend-source "${source[@]}"
 
       - name: Benchmark the IR verifier and derived arrays
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir,')

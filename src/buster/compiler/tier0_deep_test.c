@@ -8,7 +8,7 @@
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
 #define BUSTER_TIER0_TEST_DEEP_INPUTS 6
-#define BUSTER_TIER0_TEST_DEEP_CASES 9
+#define BUSTER_TIER0_TEST_DEEP_CASES 11
 // The pages of each case's code.
 #define BUSTER_TIER0_TEST_DEEP_PAGES 16
 
@@ -69,7 +69,9 @@ static void tier0_test_deep_local_plus(Tier0TestDeep* deep, uint32_t k)
 }
 
 // Case c's stream, and its name. Each starts with x + k for k from 0 on the integer stack, 15 of them, which fill its
-// table (case 5's 14, a frame pointer's table; case 7's 15 are past it; case 8 holds 13), and returns a U64.
+// table (case 5's 14, a frame pointer's table, and case 9's, a realigned frame's; case 7's 15 are past it; case 8 holds
+// 13, and so does case 10, a realigned frame's with a base, r15, the table's last but rbp), and returns a U64. Cases 9
+// and 10 have an object (local 4, of 16 bytes) aligned to 64 and to 4096, which realigns their frames.
 static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
 {
     static const char* const names[BUSTER_TIER0_TEST_DEEP_CASES] = {
@@ -82,8 +84,23 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         "both stacks at once",
         "rsp moved past the line",
         "a conversion past the floating line",
+        "a realigned frame's 14",
+        "a realigned frame's base past the line",
     };
     deep->count = 0;
+    if (c == 10)
+    {
+        // The stack's position, which with the object aligned to 4096 gives the function a base, kept in local 1.
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+    }
+    if (c == 9 || c == 10)
+    {
+        // The object's first word: x.
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    }
     if (c == 5)
     {
         // The stack's position, which gives the function its frame pointer, kept in local 1.
@@ -110,7 +127,7 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
             tier0_test_deep_local_plus(deep, k);
         }
     }
-    const uint32_t held = c == 5 ? 14 : c == 8 ? 13 : 15;
+    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 ? 13 : 15;
     for (uint32_t k = 0; k < held; k += 1)
     {
         tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, k);
@@ -233,6 +250,46 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
         folds += 1;
     }
+    else if (c == 9)
+    {
+        // Past the line: the object's address modulo 64 (0), its first word (x) and x + 15.
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 63);
+        tier0_test_deep_add(deep, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_ADD, 15);
+        folds += 3;
+    }
+    else if (c == 10)
+    {
+        // Past the base's line: 4104 bytes allocated (rounded up to the frame's 4096), their address in local 2, x ^ 3 stored
+        // there; rsp modulo 4096 (0: the allocation keeps the frame's alignment), the object's address modulo 4096 and the
+        // allocation's modulo 16 (both 0), the object's first word (x) and the allocation's (x ^ 3); rsp restored, while
+        // every place of the frame is r15's.
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4104);
+        tier0_test_deep_add(deep, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4095);
+        tier0_test_deep_add(deep, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_operation(deep, BUSTER_TYPED_XOR, 3);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 4095);
+        tier0_test_deep_add(deep, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 15);
+        tier0_test_deep_add(deep, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, 4);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+        folds += 5;
+    }
     else if (c == 8)
     {
         // Over the 13 integers, a 17th floating value past the floating table, local 1 + 16, its constant through r15, the
@@ -289,7 +346,7 @@ static uint64_t tier0_test_deep_floating_sum(uint64_t x)
 // What case c returns for x.
 static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
 {
-    const uint32_t held = c == 5 ? 14 : c == 8 ? 13 : 15;
+    const uint32_t held = c == 5 || c == 9 ? 14 : c == 8 || c == 10 ? 13 : 15;
     // Case 8's: the integers and its conversion's result, as a double, added to its 16 floating values from the top.
     uint64_t integers = (x & 0xffff) + 16;
     for (uint32_t k = 0; k < 13; k += 1)
@@ -317,6 +374,8 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
         tier0_test_deep_floating_sum(x),
         (x + 1000) + (x ^ 0x5555) + x * 77,
         (uint64_t)floating + x - sum,
+        x + (x + 15),
+        x + (x ^ 3),
     };
     return sum + cases[c];
 }
@@ -349,10 +408,13 @@ static void tier0_test_deep(Tier0TestTally* tally)
 {
     static const uint64_t inputs[BUSTER_TIER0_TEST_DEEP_INPUTS] = { 0, 1, 5, 1000, (1ull << 40) + 3, UINT64_MAX - 7 };
     // x, then case 7's (and case 4's and 5's local 1): the saved rsp and the allocations' addresses; case 8's local 1 is
-    // (double)(x & 0xffff).
-    static const uint8_t local_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
+    // (double)(x & 0xffff); cases 9's and 10's local 4 their object.
+    static const uint8_t local_classes[5] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
     static const uint8_t floating_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
-    static const uint8_t local_flags[4] = { 0, 0, 0, 0 };
+    static const uint8_t local_flags[5] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    static const uint32_t local_sizes[5] = { 0, 0, 0, 0, 16 };
+    static const uint8_t alignments_64[5] = { 0, 0, 0, 0, 6 };
+    static const uint8_t alignments_4096[5] = { 0, 0, 0, 0, 12 };
     const AbiLocation parameter = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
     const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS,
                                .part_bytes = 8,
@@ -375,7 +437,9 @@ static void tier0_test_deep(Tier0TestTally* tally)
         function.count = deep->count;
         function.local_classes = c == 8 ? floating_classes : local_classes;
         function.local_flags = local_flags;
-        function.local_count = c == 7 ? 4 : 2;
+        function.local_count = c == 9 || c == 10 ? 5 : c == 7 ? 4 : 2;
+        function.local_sizes = c == 9 || c == 10 ? local_sizes : 0;
+        function.local_alignments = c == 9 ? alignments_64 : c == 10 ? alignments_4096 : 0;
         function.parameter_count = 1;
         function.parameters = &parameter;
         function.result = result;
@@ -386,11 +450,15 @@ static void tier0_test_deep(Tier0TestTally* tally)
         ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "deep",
                                   "%s: rule \"%s\" at %u, error %d at %u, or the paths differ", name, check.rule != 0 ? check.rule : "", check.node, scalar.error,
                                   scalar.node);
-        // Every case has deep entries, and only the frame pointer's two have push rbp; mov rbp, rsp first.
+        // Every case has deep entries, and only the frame pointer's two and the realigned frames' have push rbp; mov rbp,
+        // rsp first, the realigned ones published as such (case 10's with its base).
         const bool pointer = ready && scalar.count >= 2 && scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
                              scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP;
-        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5 || c == 7), "deep", "%s: %u deep entries, %s frame pointer", name, scalar.deep,
-                                           pointer ? "a" : "no");
+        const uint32_t realigned = c == 9 ? 6 : c == 10 ? 12 : 0;
+        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5 || c == 7 || c == 9 || c == 10) && scalar.frame_alignment_log2 == realigned &&
+                                                      scalar.frame_base == (c == 10),
+                                           "deep", "%s: %u deep entries, %s frame pointer, realigned to 2^%u%s", name, scalar.deep, pointer ? "a" : "no",
+                                           scalar.frame_alignment_log2, scalar.frame_base ? " with a base" : "");
         uint64_t* reads = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
         uint64_t* writes = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
         ready = ready && tier0_test_expect(tally, reads != 0 && writes != 0 && tier0_test_deep_saved(scalar.records, scalar.count, reads, writes), "deep",

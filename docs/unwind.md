@@ -25,7 +25,11 @@ appear exactly once in the ordered branch columns, and its target must be in the
 body or at the beginning of the common epilogue. Branches into a partially
 restored frame, unlisted branches, extra returns and unsupported control flow
 are refused. Early source returns are supported through Tier0's jumps to its
-common epilogue.
+common epilogue. A frameless function (no push or allocation) may end in a
+`ud2` rather than the return: the terminal builtins' helper
+(`c_builtin_terminal_helpers.c`, `__builtin_trap()`'s and
+`__builtin_unreachable()`'s, #523) is a `ud2` alone, whose descriptor has no
+transitions, its CFA RSP + 8 throughout. A `ud2` anywhere else is refused.
 
 The vector path resolves body effects eight records at a time, with a scalar
 twin. It rejects unknown effects, body writes to RSP or unsaved nonvolatile
@@ -52,17 +56,24 @@ as it runs (a variable-length array's storage), are below the pushes, so its CFA
 is RBP + 16 from the mov until RBP's pop, wherever RSP goes, and `frame_size` is
 0. Its 2n + 3 offsets are RBP's push, the mov, the other pushes, the other pops
 and RBP's pop: the release before the pops (`lea rsp, [rbp - 8n]`, or
-`mov rsp, rbp` without other pushes) moves no CFA and has none.
+`mov rsp, rbp` without other pushes) moves no CFA and has none. A realigned frame
+(an object, or a call's outgoing area, aligned past 16 bytes: the Tier 0 guide's
+"Realigned frames") is a frame pointer's: its `and rsp, -alignment` after the
+reservation, and its base's `mov r15, rsp` after that (r15 among the pushes), are
+part of the reservation and have no offsets either.
 
 ### The published frame
 
 `unwind_tier0_frame(code, offsets, size, output)` takes the frame Tier 0
-published with its code (`Tier0Code.frame_saved`, `frame_size` and
-`frame_pointer`: what `tier0_emit_prologue` pushed and reserved) instead of
-proving one. Tier 0's prologue is the code's first records and its epilogue's
+published with its code (`Tier0Code.frame_saved`, `frame_size`, `frame_pointer`,
+`frame_alignment_log2` and `frame_base`: what `tier0_emit_prologue` pushed,
+reserved and realigned) instead of proving one. A published alignment past 16
+bytes must have a frame pointer and fit the `and`'s immediate, and a base needs
+r15 among the pushes. Tier 0's prologue is the code's first records and its epilogue's
 release, pops and ret its last, so each transition is the end of a record the
 frame names by its index: the reader checks that each of those records is the
-instruction it must be (and that the last is the ret) and takes each end from
+instruction it must be (and that the last is the ret, or a frameless function's
+`ud2`) and takes each end from
 the final offsets, with no pass over the body. It takes the producer's word that
 the body keeps the frame, which `unwind_tier0` proves for the fixed frames it
 takes: the tests compare the two on every function both take
@@ -154,7 +165,10 @@ from a function with a variable-length array that each of a computed goto's
 labels calls, from one with values live across the call (called with a
 positive and a negative argument, so that both arms of its last `?:` run), and
 from one of 128-bit integers (Tier 0's `I128` and `U128`, in their frame slots,
-four of them live across the call, its division and remainder libgcc's calls):
+four of them live across the call, its division and remainder libgcc's calls),
+from one with an array aligned to 64 (a realigned frame) and from one with an
+array aligned to 4096 and a variable-length array (a realigned frame with a
+base, r15):
 by default and with `-funwind-tables` or `-g` after
 `-fno-asynchronous-unwind-tables`, the unwinder walks through every function to
 libc's start (by each path, the same bytes); with
@@ -173,6 +187,14 @@ function runs, stepping over calls through as many of its calls as its paths
 need, gives the function and its callers, and the steps must reach every
 instruction of GDB's disassembly of the function.
 
+A second fixture calls `__builtin_trap()` and `__builtin_unreachable()`
+(#523), whose calls reach the terminal helper, a `ud2` with an FDE of no
+transitions: its `SIGILL` handler counts its frames with `backtrace()`, which
+from the trap's address (a signal frame's, through libc's trampoline) must walk
+through the helper and its caller to `main`, by each path into the same bytes
+and from its object linked by GNU ld; without unwind tables, the trap still
+reaches the handler.
+
 ## Checks and measurements
 
 `test-unwind` checks scalar/vector identity, an independent CFI interpreter,
@@ -189,16 +211,22 @@ gets the analyzer's descriptor on every generated function the analyzer takes
 (fixed frames, among programs with records by value, deep values and symbols
 through the GOT and TLS), and on those with variable-length arrays, which have a
 frame pointer and which the analyzer refuses, its prologue's and epilogue's
-records' ends, their bodies leaving RBP alone; then every mask's fixture with
-and without a frame pointer at every kind of reservation, 34 changes to
-prologues, epilogues, frames and inputs (33 refused with the descriptor left
-alone; a frame pointer's reservation the producer doesn't publish, which its CFA
-doesn't follow, taken), and the guarded tails.
+records' ends, their bodies leaving RBP alone (realigned frames' among them,
+with and without a base, from a shape of objects aligned past 16); then every
+mask's fixture with and without a frame pointer, and realigned (to 32 and to
+4096, the `and`'s two forms, with a base where the mask has r15), at every kind
+of reservation, 34 changes to prologues, epilogues, frames and inputs (33
+refused with the descriptor left alone; a frame pointer's reservation the
+producer doesn't publish, which its CFA doesn't follow, taken), 15 to a realigned
+frame's realignment and to what its frame publishes of it (13 refused; a base
+the producer doesn't publish, whose `mov` is then the body's, taken), and the
+guarded tails.
 
 `test-unwind --cross-check` constructs two actual Tier0 functions, including a
 loop with a stack local and all six nonvolatile saves, then again with a leaf
 that allocates on the stack first, which has a frame pointer and its other five
-saves, its CFI with one shared CIE. Their instruction bytes come from the native
+saves, its CFI with one shared CIE, and again with a leaf that also has an
+object aligned to 64, a realigned frame whose base is r15. Their instruction bytes come from the native
 encoder and their CFI comes from this emitter, each leaf's from the published
 frame (and the fixed one's from the analyzer too, the same). GNU as supplies
 only an ELF container and the special process-entry wrapper's code and CFI. The

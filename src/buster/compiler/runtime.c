@@ -17,9 +17,14 @@
 //     -lgcc_s_asneeded), and whose members a link needs for the calls compilers make of their own accord: the 128-bit
 //     integers' division and conversions (__udivti3, __floattidf), the complex types' arithmetic (__muldc3). It defines
 //     no name libc.so.6 exports, so that binding a name to libc.so.6's export before a member of libgcc.a's binds it as
-//     the driver's order does. The direct path doesn't link libgcc_s.so.1, which the driver names as needed: of the
-//     names libgcc.a's members refer to that neither it nor libc defines, it has the unwinder's, which only the
-//     split-stack members (morestack.o) refer to.
+//     the driver's order does;
+//   - libgcc_s.so.1, which the driver names as needed after each libgcc.a (-lgcc_s_asneeded, or --as-needed -lgcc_s
+//     before GCC 16), found in GCC's installation, then the library directories: the unwinder (_Unwind_Resume,
+//     _Unwind_Backtrace, __gcc_personality_v0), which libgcc.a's split-stack member (morestack.o) and a program's own
+//     code refer to, and copies of most of libgcc.a's functions, which a member that defines the name comes before. It
+//     defines no name libc.so.6 or the loader exports either, so that the driver's order (libgcc_s.so.1 before libc.so)
+//     binds as libc.so.6's first does. On a system without it the runtime has none, and a member's reference to the
+//     unwinder is refused (bind.c's BIND_ERROR_MEMBER_UNDEFINED).
 // And for `cc -static main.c -o main` (RUNTIME_KIND_STATIC):
 //   - the crt objects crt1.o, crti.o, crtbeginT.o, crtend.o and crtn.o, in the same order and places;
 //   - the archives of the driver's group, --start-group -lgcc -lgcc_eh -latomic_asneeded -lc --end-group, in its order:
@@ -29,9 +34,9 @@
 // crti.o, crtbeginS.o, crtendS.o and crtn.o. rcrt1.o doesn't define _dl_relocate_static_pie, as crt1.o does (an empty
 // one), so libc.a's member that relocates the executable joins, which refers to _DYNAMIC.
 // And for `cc -shared lib.c -o lib.so` (RUNTIME_KIND_SHARED), a dynamic PIE's but its start object: crti.o,
-// crtbeginS.o, crtendS.o and crtn.o, with libgcc.a and libc.so's libc.so.6, libc_nonshared.a and loader. The start
-// object's unit and piece are there, empty, so that each object keeps its unit (RuntimeObject), and nothing refers to
-// main.
+// crtbeginS.o, crtendS.o and crtn.o, with libgcc.a, libgcc_s.so.1 and libc.so's libc.so.6, libc_nonshared.a and
+// loader. The start object's unit and piece are there, empty, so that each object keeps its unit (RuntimeObject), and
+// nothing refers to main.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
 // (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
@@ -41,22 +46,24 @@
 // The import (runtime_import, runtime_import_static) reads every file once into the runtime's arena, which the atoms
 // then point into, and fills a link of the runtime's own: the crt objects as units 0 to 4 (RuntimeObject), then each
 // archive's members, in the archives' order (RuntimeArchive: libgcc.a first in every kind, libc's archive last), as
-// units after them (Runtime.member_unit on), each object's records a piece. libc.so.6 and the loader become
-// ImportLibraries: their exports with their default versions, their versions and the names they refer to. The loader's
-// version indices are moved past libc.so.6's, so that an index, which a link's symbols hold (LinkSymbols.version),
-// names one library's version. Then it binds each name the runtime refers to (runtime_bind): to a definition in the
-// runtime's own objects (an index of them by name hash, as the libraries' exports have; an absolute symbol is one), to
-// the linker for a name it defines (_GLOBAL_OFFSET_TABLE_, and for a static executable the bounds of its sections and
-// tables, runtime_linker_names), to an export of libc.so.6 or else of the loader, to nothing for a weak reference that
-// none defines, or else to the program (main): RuntimeBinding, by symbol.
+// units after them (Runtime.member_unit on), each object's records a piece. libc.so.6, the loader and libgcc_s.so.1
+// become ImportLibraries: their exports with their default versions, their versions and the names they refer to. The
+// loader's version indices are moved past libc.so.6's, and libgcc_s.so.1's past both, so that an index, which a link's
+// symbols hold (LinkSymbols.version), names one library's version. Then it binds each name the runtime refers to
+// (runtime_bind): to a definition in the runtime's own objects (an index of them by name hash, as the libraries'
+// exports have; an absolute symbol is one), to the linker for a name it defines (_GLOBAL_OFFSET_TABLE_, and for a
+// static executable the bounds of its sections and tables, runtime_linker_names), to an export of libc.so.6, else of
+// the loader, else of libgcc_s.so.1, to nothing for a weak reference that none defines, or else to the program (main):
+// RuntimeBinding, by symbol.
 //
 // What binding's closure over the members needs (bind.c), from the global names (RuntimeNames): the member whose
 // definition each name has; each piece's strong references to names (Runtime.references, a range per piece), with the
 // member each loads (Runtime.reference_members); and its COMDAT groups (RuntimeGroup, a range per piece, each with its
 // atoms and its signature's number among the runtime's distinct signatures), whose first in link order the link keeps.
 //
-// main.c includes this file after import.c. runtime_libraries_import takes BUSTER_LINKER_ENTRY rather than static:
-// main.c's units compile it in one unit alone (link.c). Layout, in this order:
+// main.c includes this file after import.c. runtime_libraries_import and the four runtime_import functions take
+// BUSTER_LINKER_ENTRY rather than static: main.c's units compile them in one unit alone (link.c). Layout, in this
+// order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
 //   - Files: probing and reading.
 //   - The search: GCC's installation, the crt objects and libc's script.
@@ -173,7 +180,8 @@ typedef enum RuntimeBindingKind
     RUNTIME_BINDING_NONE,
     // A definition in another of the runtime's objects: RuntimeBinding.symbol.
     RUNTIME_BINDING_RUNTIME,
-    // An export of libc.so.6 or of the loader: RuntimeBinding.export, its number among both (runtime_export_library).
+    // An export of libc.so.6, the loader or libgcc_s.so.1: RuntimeBinding.export, its number among the three
+    // (runtime_export_library).
     RUNTIME_BINDING_SHARED,
     // A weak reference that nothing defines: 0.
     RUNTIME_BINDING_NOWHERE,
@@ -222,7 +230,9 @@ struct RuntimeNames
     SymbolId* definition;
     uint32_t* member;
     // Its export plus 1, or 0: libc.so.6's exports are numbered first, then the loader's, which a name that libc.so.6
-    // exports doesn't take (runtime_export_library).
+    // exports doesn't take, then libgcc_s.so.1's, which a name that either exports doesn't take
+    // (runtime_export_library). A member of libgcc.a may define a name that libgcc_s.so.1 exports: binding takes the
+    // member first (runtime_export_after_members).
     uint32_t* export;
     // Whether libc.so.6 refers to it, and whether the linker defines it (runtime_linker_names).
     bool* referenced;
@@ -256,6 +266,8 @@ struct Runtime
     String8 libc_script;
     String8 libc_path;
     String8 loader_path;
+    // libgcc_s.so.1, or empty where the search found none (runtime_find_gcc_s).
+    String8 gcc_s_path;
     // Every path probed, in the order the search probed them, and whether a probe found no room among them.
     RuntimeProbe* probes;
     uint32_t probe_count;
@@ -267,6 +279,7 @@ struct Runtime
     ImportObject objects[RUNTIME_OBJECTS];
     String8 libc_bytes;
     String8 loader_bytes;
+    String8 gcc_s_bytes;
     RuntimeArchive archives[BUSTER_RUNTIME_ARCHIVES];
     uint32_t archive_count;
     ImportMember* members;
@@ -278,6 +291,9 @@ struct Runtime
     // The loader that libc.so's script names as needed, whose version indices follow libc.so.6's (see the orientation
     // comment); empty when the script names none, and for a static runtime.
     ImportLibrary loader;
+    // libgcc_s.so.1, which GCC's driver names as needed after libgcc.a, whose version indices follow the loader's (see
+    // the orientation comment); empty without one, and for a static runtime.
+    ImportLibrary gcc_s;
     // Scrt1.o's (or crt1.o's) .note.ABI-tag, which an executable repeats.
     String8 abi_note;
     // By symbol of the runtime's link.
@@ -342,10 +358,10 @@ struct Runtime
 // snapshot's mapping, for a runtime loaded from one). On failure, the error says what went wrong and the runtime's
 // fields where. runtime_import_static does the same for a static executable's runtime, runtime_import_static_pie for a
 // static PIE's and runtime_import_shared for a shared library's.
-static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
 // runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
 // Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
@@ -364,8 +380,8 @@ static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
 // libm.so, in libc.so's subset: import_script) stands for the shared libraries it names, each an absolute path. Each
 // library is imported as libc.so.6 is (import_library), with an index of the names it refers to, and its version
 // indices are moved past the runtime's and the libraries' before it, so that an index names one library's version, as
-// runtime_move_loader_versions moves the loader's. A link needs a library only for a strong reference that binds to it,
-// as GCC's driver links them on Debian and Ubuntu (--as-needed).
+// runtime_move_versions moves the loader's and libgcc_s.so.1's. A link needs a library only for a strong reference that
+// binds to it, as GCC's driver links them on Debian and Ubuntu (--as-needed).
 #define BUSTER_RUNTIME_LIBRARIES 32
 
 // A library's exports at a version other than their name's default (name@VERSION, a .gnu.version entry with the hidden
@@ -443,14 +459,17 @@ static __attribute__((unused)) bool runtime_libraries_refer(const RuntimeLibrari
 static __attribute__((unused)) String8 runtime_libraries_name(const RuntimeLibraries* libraries, uint32_t l);
 // Whether library `l`'s own DT_NEEDED entries name library `m`, which the loader then loads for it.
 static __attribute__((unused)) bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m);
+// Whether library `l`'s DT_NEEDED entries name `soname`: libc.so.6's, the loader's or libgcc_s.so.1's, which the loader
+// then loads for it.
+static __attribute__((unused)) bool runtime_libraries_lists_name(const RuntimeLibraries* libraries, uint32_t l, String8 soname);
 // The first library, in link order, that exports `name` at `version`, its name's default or not (RuntimeHiddenExports),
 // as GNU ld and lld bind a reference that requires that version: an export without a version doesn't satisfy it, though
 // glibc's loader takes one where the requirement isn't hidden. Its index plus 1, or 0.
 static __attribute__((unused)) uint32_t runtime_libraries_export_at(const RuntimeLibraries* libraries, const uint8_t* name, uint32_t length, uint64_t hash,
                                                                    String8 version);
 // The library that a version need's file (vn_file) names, as the loader finds it among those it loaded: a named library
-// by the name it takes in a DT_NEEDED entry (runtime_libraries_name), with its index in *named, or libc.so.6 or the
-// loader by its soname, with UINT32_MAX in *named; 0 for a file the link doesn't have.
+// by the name it takes in a DT_NEEDED entry (runtime_libraries_name), with its index in *named, or libgcc_s.so.1,
+// libc.so.6 or the loader by its soname, with UINT32_MAX in *named; 0 for a file the link doesn't have.
 static __attribute__((unused)) const ImportLibrary* runtime_libraries_provider(const RuntimeLibraries* libraries, const Runtime* runtime, String8 file,
                                                                              uint32_t* named);
 // Whether `library` satisfies a need of the version `name` with `hash`, as glibc's loader checks it (dl-version.c's
@@ -461,11 +480,14 @@ static __attribute__((unused)) bool runtime_library_defines_version(const Import
 // st_size, st_mtim and st_ctim.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
 // The library of an export of the runtime's (RuntimeNames.export less 1, or RuntimeBinding.export): libc.so.6 for one
-// below its exports' count, the loader for the others; and the export's index among that library's.
+// below its exports' count, then the loader, then libgcc_s.so.1; and the export's index among that library's.
 static __attribute__((unused)) const ImportLibrary* runtime_export_library(const Runtime* runtime, uint32_t export, uint32_t* index);
-// Whether a version index that a link's symbol holds (LinkSymbols.version) is one of the loader's, which the import
-// numbers after libc.so.6's.
-static __attribute__((unused)) bool runtime_loader_version(const Runtime* runtime, uint16_t version);
+// Whether an export of the runtime's (as runtime_export_library takes it) is libgcc_s.so.1's, which binding takes only
+// for a name that no member of libgcc.a defines: the driver names libgcc.a before it.
+static __attribute__((unused)) bool runtime_export_after_members(const Runtime* runtime, uint32_t export);
+// Whether a version index that a link's symbol holds (LinkSymbols.version) is one of `library`'s versions: the
+// loader's, which the import numbers after libc.so.6's, or libgcc_s.so.1's, after both.
+static __attribute__((unused)) bool runtime_library_version(const ImportLibrary* library, uint16_t version);
 // The entry of the runtime's global names (RuntimeNames) with these bytes, plus 1, or 0.
 static __attribute__((unused)) uint32_t runtime_find_global_name(const RuntimeNames* names, const uint8_t* bytes, uint32_t length, uint64_t hash);
 // The bytes of an entry of the runtime's global names.
@@ -887,6 +909,24 @@ static const char* const runtime_object_names[RUNTIME_KINDS][RUNTIME_OBJECTS] = 
     },
 };
 
+// libgcc_s.so.1, which GCC's driver names as needed after libgcc.a: in GCC's installation, as -lgcc_s finds GCC's
+// libgcc_s.so first in its -L directories, then in the library directories, which the script or link it finds there
+// names (GROUP ( libgcc_s.so.1 -lgcc ) on Debian and Ubuntu, an absolute path elsewhere). Each path is probed, so that
+// one installed later leaves the runtime stale. A runtime without it is no failure: empty, and failed_file as it was.
+static String8 runtime_find_gcc_s(Runtime* runtime)
+{
+    static const char name[] = "libgcc_s.so.1";
+    char failed[sizeof(runtime->failed_file)];
+    memcpy(failed, runtime->failed_file, sizeof(failed));
+    String8 result = runtime_find_file(runtime, name, true);
+    result = result.length != 0 ? result : runtime_find_file(runtime, name, false);
+    if (result.length == 0)
+    {
+        memcpy(runtime->failed_file, failed, sizeof(failed));
+    }
+    return result;
+}
+
 static RuntimeError runtime_search(Runtime* runtime)
 {
     RuntimeError result = runtime_find_gcc(runtime, runtime_gcc_bases, BUSTER_ARRAY_LENGTH(runtime_gcc_bases)) ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MISSING;
@@ -901,12 +941,13 @@ static RuntimeError runtime_search(Runtime* runtime)
         runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
-    // A dynamic PIE's and a shared library's: libgcc.a, the first archive, then libc.so's script, which names the
-    // second.
+    // A dynamic PIE's and a shared library's: libgcc.a, the first archive, libgcc_s.so.1 if the system has it, then
+    // libc.so's script, which names the second archive.
     if (result == RUNTIME_ERROR_NONE && !runtime_kind_is_static(runtime->kind))
     {
         runtime->archives[0].path = runtime_find_file(runtime, "libgcc.a", true);
         runtime->archive_count = runtime->archives[0].path.length != 0 ? 1 : 0;
+        runtime->gcc_s_path = runtime->archive_count != 0 ? runtime_find_gcc_s(runtime) : (String8){ 0 };
         runtime->libc_script = runtime->archive_count != 0 ? runtime_find_file(runtime, "libc.so", false) : (String8){ 0 };
         result = runtime->libc_script.length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
@@ -1192,10 +1233,17 @@ static RuntimeError runtime_bind(Runtime* runtime)
             const bool linker = definition == 0 && runtime_linker_name(runtime->kind, link->names.bytes[name], link->names.length[name]);
             // A static executable's or a static PIE's runtime has no shared library.
             const bool shared = definition == 0 && !linker && !runtime_kind_is_static(runtime->kind);
-            // libc.so.6's export, or else the loader's, numbered after libc.so.6's.
+            // libc.so.6's export, or else the loader's, numbered after libc.so.6's, or else libgcc_s.so.1's, after
+            // both.
             const uint32_t libc = shared ? import_library_find(&runtime->libc, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
             const uint32_t loader = shared && libc == 0 ? import_library_find(&runtime->loader, link->names.bytes[name], link->names.length[name], link->names.hash[name]) : 0;
-            const uint32_t export = libc != 0 ? libc : loader != 0 ? runtime->libc.exports.count + loader : 0;
+            const uint32_t gcc_s = shared && libc == 0 && loader == 0
+                                       ? import_library_find(&runtime->gcc_s, link->names.bytes[name], link->names.length[name], link->names.hash[name])
+                                       : 0;
+            const uint32_t export = libc != 0     ? libc
+                                    : loader != 0 ? runtime->libc.exports.count + loader
+                                    : gcc_s != 0  ? runtime->libc.exports.count + runtime->loader.exports.count + gcc_s
+                                                  : 0;
             const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
             const RuntimeBindingKind otherwise = export != 0 ? RUNTIME_BINDING_SHARED : weak ? RUNTIME_BINDING_NOWHERE : RUNTIME_BINDING_PROGRAM;
             binding.kind = definition != 0 ? RUNTIME_BINDING_RUNTIME : linker ? RUNTIME_BINDING_LINKER : otherwise;
@@ -1209,8 +1257,9 @@ static RuntimeError runtime_bind(Runtime* runtime)
 }
 
 // Builds the runtime's global names (RuntimeNames). The candidates are the names of its global and weak symbols (a
-// compress of their ids, eight at a time, as runtime_bind's), of libc.so.6's exports and of its references, and the
-// names the linker defines (runtime_linker_names), in that order, indexed by hash. A candidate that repeats an earlier one of its bucket, by hash and bytes, is folded into it;
+// compress of their ids, eight at a time, as runtime_bind's), of libc.so.6's exports and of its references, of the
+// loader's and libgcc_s.so.1's exports, and the names the linker defines (runtime_linker_names), in that order, indexed
+// by hash. A candidate that repeats an earlier one of its bucket, by hash and bytes, is folded into it;
 // the first of each name is numbered by an exclusive prefix sum of the first ones, so that the entries keep the
 // candidates' order, and the entries are indexed again.
 static RuntimeError runtime_global_names(Runtime* runtime)
@@ -1220,6 +1269,7 @@ static RuntimeError runtime_global_names(Runtime* runtime)
     const ImportExports* exports = &runtime->libc.exports;
     const ImportReferences* references = &runtime->libc.references;
     const ImportExports* loader = &runtime->loader.exports;
+    const ImportExports* gcc_s = &runtime->gcc_s.exports;
     RuntimeNames* names = &runtime->global_names;
     Arena* arena = &runtime->tables;
     const uint32_t symbol_count = symbols->count;
@@ -1228,7 +1278,7 @@ static RuntimeError runtime_global_names(Runtime* runtime)
     {
         linker_count += (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime->kind)) != 0 ? 1 : 0;
     }
-    const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count + loader->count + linker_count;
+    const uint64_t bound = (uint64_t)symbol_count + exports->count + references->count + loader->count + gcc_s->count + linker_count;
     runtime->symbol_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count);
     Scratch scratch = scratch_begin(arena);
     SymbolId* named = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count);
@@ -1250,11 +1300,12 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         import_store32(named + named_count, _mm512_maskz_compress_epi64((__mmask8)kept, _mm512_add_epi64(lane_index, _mm512_set1_epi64(batch))), (uint32_t)__builtin_popcount(kept));
         named_count += (uint32_t)__builtin_popcount(kept);
     }
-    // The candidates: the objects' global names, libc's exports and references, the loader's exports, and the names the
-    // linker defines, which a program can refer to whether or not the runtime does.
+    // The candidates: the objects' global names, libc's exports and references, the loader's and libgcc_s.so.1's
+    // exports, and the names the linker defines, which a program can refer to whether or not the runtime does.
     const uint32_t references_end = named_count + exports->count + references->count;
     const uint32_t loader_end = references_end + loader->count;
-    const uint32_t count = loader_end + linker_count;
+    const uint32_t gcc_s_end = loader_end + gcc_s->count;
+    const uint32_t count = gcc_s_end + linker_count;
     for (uint32_t i = 0; result == RUNTIME_ERROR_NONE && i < named_count; i += 1)
     {
         const NameId name = symbols->name[named[i]];
@@ -1281,12 +1332,18 @@ static RuntimeError runtime_global_names(Runtime* runtime)
         memcpy(lengths + references_end, loader->length, loader->count * sizeof(*lengths));
         memcpy(hashes + references_end, loader->hash, loader->count * sizeof(*hashes));
     }
+    if (result == RUNTIME_ERROR_NONE && gcc_s->count != 0)
+    {
+        memcpy(bytes + loader_end, gcc_s->name, gcc_s->count * sizeof(*bytes));
+        memcpy(lengths + loader_end, gcc_s->length, gcc_s->count * sizeof(*lengths));
+        memcpy(hashes + loader_end, gcc_s->hash, gcc_s->count * sizeof(*hashes));
+    }
     if (result == RUNTIME_ERROR_NONE)
     {
         uint32_t taken = 0;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(runtime_linker_names); i += 1)
         {
-            const uint32_t at = loader_end + taken;
+            const uint32_t at = gcc_s_end + taken;
             const bool defined = (runtime_linker_names[i].kinds & BUSTER_RUNTIME_KIND_BIT(runtime->kind)) != 0;
             bytes[at] = defined ? (const uint8_t*)runtime_linker_names[i].name : bytes[at];
             lengths[at] = defined ? (uint32_t)strlen(runtime_linker_names[i].name) : lengths[at];
@@ -1403,6 +1460,12 @@ static RuntimeError runtime_global_names(Runtime* runtime)
             // libc.so.6's, which libc.so's script names first.
             names->export[entry] = names->export[entry] != 0 ? names->export[entry] : exports->count + (c - references_end) + 1;
         }
+        else if (c < gcc_s_end)
+        {
+            // libgcc_s.so.1's, numbered after the loader's, unless libc.so.6 or the loader exports the name too, which
+            // the import checks none does (test-import).
+            names->export[entry] = names->export[entry] != 0 ? names->export[entry] : exports->count + loader->count + (c - loader_end) + 1;
+        }
         else
         {
             names->linker[entry] = true;
@@ -1442,17 +1505,23 @@ static uint64_t runtime_name_filter_bits(uint64_t hash)
 
 static const ImportLibrary* runtime_export_library(const Runtime* runtime, uint32_t export, uint32_t* index)
 {
-    const bool libc = export < runtime->libc.exports.count;
-    *index = libc ? export : export - runtime->libc.exports.count;
-    return libc ? &runtime->libc : &runtime->loader;
+    const uint32_t libc = runtime->libc.exports.count;
+    const uint32_t loader = libc + runtime->loader.exports.count;
+    *index = export < libc ? export : export < loader ? export - libc : export - loader;
+    return export < libc ? &runtime->libc : export < loader ? &runtime->loader : &runtime->gcc_s;
 }
 
-static bool runtime_loader_version(const Runtime* runtime, uint16_t version)
+static bool runtime_export_after_members(const Runtime* runtime, uint32_t export)
+{
+    return export >= runtime->libc.exports.count + runtime->loader.exports.count;
+}
+
+static bool runtime_library_version(const ImportLibrary* library, uint16_t version)
 {
     bool result = false;
-    for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
+    for (uint32_t v = 0; v < library->version_count; v += 1)
     {
-        result = result || runtime->loader.versions[v].index == version;
+        result = result || library->versions[v].index == version;
     }
     return result;
 }
@@ -1622,26 +1691,38 @@ static RuntimeError runtime_fail_member(Runtime* runtime, const RuntimeArchive* 
     return RUNTIME_ERROR_IMPORT;
 }
 
-// Moves the loader's version indices, its versions' and its exports', past libc.so.6's largest, so that an index names
-// one library's version (see the orientation comment). VER_NDX_LOCAL and VER_NDX_GLOBAL, which no export of a library
-// with versions has, stay as they are.
-static void runtime_move_loader_versions(Runtime* runtime)
+// The largest of `count` libraries' version indices, 0 for none.
+static uint16_t runtime_versions_top(const ImportLibrary* const* libraries, uint32_t count)
 {
-    uint16_t base = 0;
-    for (uint32_t v = 0; v < runtime->libc.version_count; v += 1)
+    uint16_t top = 0;
+    for (uint32_t l = 0; l < count; l += 1)
     {
-        base = runtime->libc.versions[v].index > base ? runtime->libc.versions[v].index : base;
+        for (uint32_t v = 0; v < libraries[l]->version_count; v += 1)
+        {
+            top = libraries[l]->versions[v].index > top ? libraries[l]->versions[v].index : top;
+        }
     }
-    ImportLibrary* loader = &runtime->loader;
-    for (uint32_t v = 0; v < loader->version_count; v += 1)
+    return top;
+}
+
+// Moves a library's version indices, its versions' and its exports', past `base`: the loader's past libc.so.6's
+// largest, libgcc_s.so.1's past both, so that an index names one library's version (see the orientation comment).
+// VER_NDX_LOCAL and VER_NDX_GLOBAL, which no export of a library with versions has, stay as they are. False, with
+// nothing moved, if an index would pass 15 bits.
+static bool runtime_move_versions(ImportLibrary* library, uint16_t base)
+{
+    const ImportLibrary* const libraries[] = { library };
+    const bool fits = (uint32_t)base + runtime_versions_top(libraries, 1) < 0x8000;
+    for (uint32_t v = 0; fits && v < library->version_count; v += 1)
     {
-        loader->versions[v].index = (uint16_t)(loader->versions[v].index + base);
+        library->versions[v].index = (uint16_t)(library->versions[v].index + base);
     }
-    for (uint32_t e = 0; e < loader->exports.count; e += 1)
+    for (uint32_t e = 0; fits && e < library->exports.count; e += 1)
     {
-        const uint16_t version = loader->exports.version[e];
-        loader->exports.version[e] = version > VER_NDX_GLOBAL ? (uint16_t)(version + base) : version;
+        const uint16_t version = library->exports.version[e];
+        library->exports.version[e] = version > VER_NDX_GLOBAL ? (uint16_t)(version + base) : version;
     }
+    return fits;
 }
 
 // Imports the runtime of `kind` (see the orientation comment).
@@ -1696,7 +1777,24 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     }
     if (result == RUNTIME_ERROR_NONE && loader)
     {
-        runtime_move_loader_versions(runtime);
+        const ImportLibrary* const before[] = { &runtime->libc };
+        result = runtime_move_versions(&runtime->loader, runtime_versions_top(before, 1)) ? result : runtime_fail_import(runtime, runtime->loader_path, (ImportResult){ 0 });
+    }
+    // libgcc_s.so.1, when the search found one, its version indices moved past the loader's.
+    const bool gcc_s = dynamic && runtime->gcc_s_path.length != 0;
+    if (result == RUNTIME_ERROR_NONE && gcc_s)
+    {
+        runtime->gcc_s_bytes = runtime_read(runtime, runtime->gcc_s_path, &result);
+    }
+    if (result == RUNTIME_ERROR_NONE && gcc_s)
+    {
+        const ImportResult library = import_library(&runtime->gcc_s, runtime->gcc_s_bytes, &runtime->files);
+        result = library.error == IMPORT_ERROR_NONE ? result : runtime_fail_import(runtime, runtime->gcc_s_path, library);
+    }
+    if (result == RUNTIME_ERROR_NONE && gcc_s)
+    {
+        const ImportLibrary* const before[] = { &runtime->libc, &runtime->loader };
+        result = runtime_move_versions(&runtime->gcc_s, runtime_versions_top(before, 2)) ? result : runtime_fail_import(runtime, runtime->gcc_s_path, (ImportResult){ 0 });
     }
     // Every archive's members, one after another.
     if (result == RUNTIME_ERROR_NONE)
@@ -1801,22 +1899,22 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     return result;
 }
 
-static RuntimeError runtime_import(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_DYNAMIC);
 }
 
-static RuntimeError runtime_import_static(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_static(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC);
 }
 
-static RuntimeError runtime_import_static_pie(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_static_pie(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC_PIE);
 }
 
-static RuntimeError runtime_import_shared(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_shared(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_SHARED);
 }
@@ -2223,10 +2321,9 @@ BUSTER_LINKER_ENTRY RuntimeError runtime_libraries_import(RuntimeLibraries* libr
     *libraries = (RuntimeLibraries){ 0 };
     libraries->arena = arena_reserve(BUSTER_RUNTIME_LIBRARIES_BYTES);
     RuntimeError result = libraries->arena.base != 0 ? RUNTIME_ERROR_NONE : RUNTIME_ERROR_MEMORY;
-    // Past libc.so.6's and the loader's indices, which runtime_move_loader_versions made apart.
-    const uint16_t libc_top = runtime_libraries_top(&runtime->libc);
-    const uint16_t loader_top = runtime_libraries_top(&runtime->loader);
-    uint16_t base = libc_top > loader_top ? libc_top : loader_top;
+    // Past libc.so.6's, the loader's and libgcc_s.so.1's indices, which runtime_move_versions made apart.
+    const ImportLibrary* const runtime_libraries[] = { &runtime->libc, &runtime->loader, &runtime->gcc_s };
+    uint16_t base = runtime_versions_top(runtime_libraries, BUSTER_ARRAY_LENGTH(runtime_libraries));
     for (uint32_t n = 0; result == RUNTIME_ERROR_NONE && n < name_count; n += 1)
     {
         char path[BUSTER_RUNTIME_PATH_BYTES];
@@ -2362,7 +2459,7 @@ static const ImportLibrary* runtime_libraries_provider(const RuntimeLibraries* l
         result = file.length == name.length && memcmp(file.pointer, name.pointer, name.length) == 0 ? &libraries->libraries[m] : 0;
         *named = result != 0 ? m : UINT32_MAX;
     }
-    const ImportLibrary* const loaded[] = { &runtime->libc, &runtime->loader };
+    const ImportLibrary* const loaded[] = { &runtime->gcc_s, &runtime->libc, &runtime->loader };
     for (uint32_t r = 0; result == 0 && r < BUSTER_ARRAY_LENGTH(loaded); r += 1)
     {
         const String8 soname = loaded[r]->soname;
@@ -2382,16 +2479,20 @@ static bool runtime_library_defines_version(const ImportLibrary* library, String
     return defined;
 }
 
-static bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m)
+static bool runtime_libraries_lists_name(const RuntimeLibraries* libraries, uint32_t l, String8 soname)
 {
-    const String8 name = runtime_libraries_name(libraries, m);
     bool listed = false;
-    for (uint32_t d = 0; !listed && d < libraries->dependency_count[l]; d += 1)
+    for (uint32_t d = 0; !listed && soname.length != 0 && d < libraries->dependency_count[l]; d += 1)
     {
         const String8 dependency = libraries->dependencies[l][d];
-        listed = dependency.length == name.length && memcmp(dependency.pointer, name.pointer, name.length) == 0;
+        listed = dependency.length == soname.length && memcmp(dependency.pointer, soname.pointer, soname.length) == 0;
     }
     return listed;
+}
+
+static bool runtime_libraries_lists(const RuntimeLibraries* libraries, uint32_t l, uint32_t m)
+{
+    return runtime_libraries_lists_name(libraries, l, runtime_libraries_name(libraries, m));
 }
 
 static bool runtime_libraries_refer(const RuntimeLibraries* libraries, uint32_t l, const uint8_t* name, uint32_t length, uint64_t hash)

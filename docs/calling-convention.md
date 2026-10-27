@@ -1446,17 +1446,20 @@ failure.
 enums, pointers, `float`, `double` and `long double` (#136's item 8),
 `_Complex float`, `double` and `long double` (#133's lowering, as aggregates of
 their two parts), and the structs, unions, arrays and aligned typedefs made of
-them, aligned to 16 at most as Tier 0's frame objects are, with flexible array
-members, bit-fields, packing and member alignments;
+them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
+object or a call's outgoing area aligned past 16, and a value aligned past 8 is
+an object), with flexible array members, bit-fields, packing and member
+alignments;
 no `nullptr_t`, `_BitInt`, vector, complex integer or `_Atomic` type, and none of
 clang's directed records. C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
 clang and GCC write them. Tier 0 holds a call's arguments on its stacks at once (15
-integer and 16 floating values) and copies its aggregates through each stack's
-first free register, and our caller's `r = c_callee(...)` holds `r`'s address
-under the arguments when the result is a struct, a union, a `long double` or a
-128-bit integer, so a compiled world's signature passes at most 13 integer
+integer and 16 floating values, 14 integer ones in a realigned frame, whose
+rbp is the table's last) and copies its aggregates through each stack's first
+free register, and our caller's `r = c_callee(...)` holds `r`'s address under
+the arguments when the result is a struct, a union, a `long double` or a
+128-bit integer, so a compiled world's signature passes at most 12 integer
 values (an aggregate is its address, and a `long double` or a 128-bit integer
 takes an integer depth) and 15 floating ones,
 an argument past them becoming one of the other stack's. Our side is C (`abi_test_write_ours`): per signature, a callee

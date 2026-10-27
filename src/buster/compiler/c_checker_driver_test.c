@@ -386,41 +386,130 @@ static void check_test_driver_libgcc(CheckTest* test, const char* executable, co
     unlink(outputs[1]);
 }
 
-// Split-stack code in the direct path (#483's review): a program that calls __splitstack_getcontext, whose member of
-// libgcc.a makes morestack.o join, which refers to the unwinder that GCC's driver takes from libgcc_s.so.1, as needed,
-// and the direct path doesn't link. Both paths must refuse it with the one error that names the member and
-// _Unwind_Resume, and write no executable.
+static bool check_test_driver_capture(const char* path, char* captured, size_t capacity);
+static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* length);
+
+// The unwinder in the direct path (#489): a program whose own code walks its stack with _Unwind_Backtrace, which GCC's
+// driver takes from libgcc_s.so.1, as needed, and so must the direct path: by both paths, it must link without a
+// diagnostic into an executable that names libgcc_s.so.1 (its DT_NEEDED entry and version need), the same bytes by
+// both, and run, printing what it should. And one that calls __splitstack_getcontext, whose member of libgcc.a makes
+// morestack.o join, whose _Unwind_Resume binds to libgcc_s.so.1 (#489), where #483 refused it, naming morestack.o:
+// binding joins generic-morestack.o too, whose thread-locals it reaches by general- and local-dynamic accesses, which
+// the writer relaxes in a dynamic PIE (#515), so it must link alike, into the same bytes by both paths, which name
+// libgcc_s.so.1 and run, printing nothing. On a system without libgcc_s.so.1 (check_test_driver_has_gcc_s), binding
+// refuses both instead: the
+// backtrace's name as undefined, and morestack.o's _Unwind_Resume naming the member and saying the system has no
+// libgcc_s.so.1.
+static bool check_test_driver_has_gcc_s(void);
+
 static void check_test_driver_split_stack(CheckTest* test, const char* executable, const char* directory)
 {
-    static const char program[] = "extern void __splitstack_getcontext(void* context[10]);\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    void* context[10];\n"
-                                  "    __splitstack_getcontext(context);\n"
-                                  "    return 0;\n"
-                                  "}\n";
-    static const char expected[] = "/libgcc.a(morestack.o): undefined reference to '_Unwind_Resume'; GCC's driver takes it from libgcc_s.so.1, which the direct "
-                                   "path doesn't link\n";
-    char source[256];
-    char output[256];
-    snprintf(source, sizeof(source), "%s/split-stack.c", directory);
-    snprintf(output, sizeof(output), "%s/split-stack", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
-    check_test_expect(test, written, "split-stack program written");
-    for (uint32_t path = 0; written && path < 2; path += 1)
+    static const char split[] = "extern void __splitstack_getcontext(void* context[10]);\n"
+                                "int main(void)\n"
+                                "{\n"
+                                "    void* context[10];\n"
+                                "    __splitstack_getcontext(context);\n"
+                                "    return 0;\n"
+                                "}\n";
+    static const char backtrace[] = "#include <stdio.h>\n"
+                                    "struct _Unwind_Context;\n"
+                                    "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
+                                    "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
+                                    "static int count(struct _Unwind_Context* context, void* argument)\n"
+                                    "{\n"
+                                    "    (void)context;\n"
+                                    "    *(int*)argument += 1;\n"
+                                    "    return 0;\n"
+                                    "}\n"
+                                    "int main(void)\n"
+                                    "{\n"
+                                    "    int frames = 0;\n"
+                                    "    _Unwind_Backtrace(count, &frames);\n"
+                                    "    printf(\"%d\\n\", frames > 0);\n"
+                                    "    return 0;\n"
+                                    "}\n";
+    static const struct
     {
-        char* const vector_arguments[] = { (char*)executable, "-o", output, source, NULL };
-        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", output, source, NULL };
-        char* text = NULL;
-        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
-        const size_t length = text != NULL ? strlen(text) : 0;
-        const bool worded = length > sizeof(expected) - 1 && strncmp(text, "error: /", 8) == 0 && strchr(text, '\n') == text + length - 1 &&
-                            strcmp(text + length - (sizeof(expected) - 1), expected) == 0;
-        check_test_expect(test, status == 1 && worded && access(output, F_OK) != 0,
-                          path == 0 ? "split-stack's API refused, naming libgcc.a(morestack.o) and _Unwind_Resume" : "split-stack's API refused, scalar");
-        free(text);
+        const char* name;
+        const char* source;
+        const char* output;
+        // A part of the refusal without libgcc_s.so.1.
+        const char* unwinder_refusal;
+    } programs[] = {
+        { "backtrace", backtrace, "1\n", "error: undefined reference to '_Unwind_Backtrace'\n" },
+        { "split-stack", split, "",
+          "(morestack.o): undefined reference to '_Unwind_Resume'; GCC's driver takes it from libgcc_s.so.1, which this system doesn't have\n" },
+    };
+    const bool unwinder = check_test_driver_has_gcc_s();
+    if (!unwinder)
+    {
+        printf("  the unwinder: this system has no libgcc_s.so.1, so both programs must be refused\n");
     }
-    unlink(source);
+    for (uint32_t p = 0; p < sizeof(programs) / sizeof(programs[0]); p += 1)
+    {
+        char source[256];
+        char outputs[2][256];
+        snprintf(source, sizeof(source), "%s/%s.c", directory, programs[p].name);
+        snprintf(outputs[0], sizeof(outputs[0]), "%s/%s", directory, programs[p].name);
+        snprintf(outputs[1], sizeof(outputs[1]), "%s/%s-scalar", directory, programs[p].name);
+        const bool written = parse_test_write(source, programs[p].source, strlen(programs[p].source));
+        check_test_expect(test, written, "unwinder program written");
+        uint8_t* bytes[2] = { NULL, NULL };
+        uint64_t lengths[2] = { 0, 0 };
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, NULL };
+            char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+            const bool quiet = text == NULL || text[0] == 0;
+            const bool refused = !unwinder;
+            if (!unwinder)
+            {
+                const size_t length = text != NULL ? strlen(text) : 0;
+                const bool worded = length != 0 && strstr(text, programs[p].unwinder_refusal) != NULL && strchr(text, '\n') == text + length - 1;
+                check_test_expect(test, status == 1 && worded && access(outputs[path], F_OK) != 0,
+                                  path == 0 ? "the unwinder's program refused without libgcc_s.so.1" : "the unwinder's program refused, scalar");
+            }
+            else if (status != 0 || !quiet)
+            {
+                printf("  %s%s: status %d: %s", programs[p].name, path == 0 ? "" : ", scalar", status, text != NULL ? text : "\n");
+            }
+            bytes[path] = status == 0 ? check_test_driver_read_aligned(outputs[path], &lengths[path]) : NULL;
+            const uint8_t needed[] = "libgcc_s.so.1";
+            const bool named = bytes[path] != NULL && memmem(bytes[path], lengths[path], needed, sizeof(needed)) != NULL;
+            char captured[64];
+            const bool ran = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, programs[p].output) == 0;
+            check_test_expect(test, refused || (status == 0 && quiet && named && ran),
+                              path == 0 ? "the unwinder's program links, names libgcc_s.so.1 and runs" : "the unwinder's program, scalar");
+            free(text);
+        }
+        check_test_expect(test,
+                          !unwinder ||
+                              (bytes[0] != NULL && bytes[1] != NULL && lengths[0] == lengths[1] && memcmp(bytes[0], bytes[1], lengths[0]) == 0),
+                          "the unwinder's program the same by both paths");
+        free(bytes[0]);
+        free(bytes[1]);
+        unlink(source);
+        unlink(outputs[0]);
+        unlink(outputs[1]);
+    }
+}
+
+// Whether this system has libgcc_s.so.1 where GCC's driver finds it: cc -print-file-name names its path, or the name
+// alone when it finds none.
+static bool check_test_driver_has_gcc_s(void)
+{
+    FILE* output = popen("cc -print-file-name=libgcc_s.so.1", "r");
+    char path[4096] = { 0 };
+    const bool read = output != NULL && fgets(path, sizeof(path), output) != NULL;
+    if (output != NULL)
+    {
+        pclose(output);
+    }
+    const size_t length = read ? strcspn(path, "\n") : 0;
+    path[length] = 0;
+    return length != 0 && path[0] == '/' && access(path, F_OK) == 0;
 }
 
 // A file's bytes, read whole into memory aligned to 64 bytes, as a snapshot's view takes them (snapshot_view), which the
@@ -624,6 +713,227 @@ static void check_test_driver_complex(CheckTest* test, const char* executable, c
     unlink(outputs[1]);
 }
 
+// The jump tables' switches of check_test_driver_switch_tables, as the test's own clang build computes them.
+static int check_test_switch_dense(int x)
+{
+    int result = -1;
+    switch (x)
+    {
+        case 0: result = 3; break;
+        case 1: result = 5; break;
+        case 2: result = 7; break;
+        case 3: result = 11; break;
+        case 5: result = 13; break;
+        case 7: result = 17; break;
+        default: break;
+    }
+    return result;
+}
+
+static int check_test_switch_wide(long x)
+{
+    int result = 0;
+    switch (x)
+    {
+        case -3: result += 1;
+        case -2: result += 2; break;
+        case 0 ... 2: result += 4; break;
+        case 4: result += 8;
+        case 5: result += 16; break;
+        default: result += 100; break;
+    }
+    return result;
+}
+
+// Whether `bytes` (`length` of them) are an ELF object without the lowering's switch symbols (.Lbuster_switch_N and
+// .Lbuster_case_N) and whose .rodata's relocations are `entries` PC32 ones, each against .text's section symbol: the
+// tables and their labels the lowering's temporaries (check_driver_object), as an assembler leaves clang's .LJTI and
+// .LBB. String literals' .Lbuster_string_N stay, as clang's .L.str do.
+static bool check_test_driver_temporaries(const uint8_t* bytes, uint64_t length, uint32_t entries)
+{
+    Elf64_Ehdr header = { 0 };
+    bool valid = bytes != NULL && length >= sizeof(header);
+    if (valid)
+    {
+        memcpy(&header, bytes, sizeof(header));
+        valid = memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shstrndx < header.e_shnum &&
+                header.e_shoff + (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= length;
+    }
+    Elf64_Shdr names = { 0 };
+    if (valid)
+    {
+        memcpy(&names, bytes + header.e_shoff + header.e_shstrndx * sizeof(Elf64_Shdr), sizeof(names));
+        valid = names.sh_offset + names.sh_size <= length;
+    }
+    uint32_t symtab = 0;
+    uint32_t text = 0;
+    uint32_t rodata = 0;
+    for (uint32_t s = 1; valid && s < header.e_shnum; s += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes + header.e_shoff + s * sizeof(Elf64_Shdr), sizeof(section));
+        const char* name = section.sh_name < names.sh_size ? (const char*)bytes + names.sh_offset + section.sh_name : "";
+        symtab = section.sh_type == SHT_SYMTAB ? s : symtab;
+        text = strcmp(name, ".text") == 0 ? s : text;
+        rodata = strcmp(name, ".rodata") == 0 ? s : rodata;
+    }
+    Elf64_Shdr symbols = { 0 };
+    Elf64_Shdr strings = { 0 };
+    valid = valid && symtab != 0 && text != 0 && rodata != 0;
+    if (valid)
+    {
+        memcpy(&symbols, bytes + header.e_shoff + symtab * sizeof(Elf64_Shdr), sizeof(symbols));
+        valid = symbols.sh_link < header.e_shnum && symbols.sh_entsize == sizeof(Elf64_Sym) && symbols.sh_offset + symbols.sh_size <= length;
+    }
+    if (valid)
+    {
+        memcpy(&strings, bytes + header.e_shoff + symbols.sh_link * sizeof(Elf64_Shdr), sizeof(strings));
+        valid = strings.sh_offset + strings.sh_size <= length;
+    }
+    const uint64_t symbol_count = valid ? symbols.sh_size / sizeof(Elf64_Sym) : 0;
+    for (uint64_t i = 0; valid && i < symbol_count; i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, bytes + symbols.sh_offset + i * sizeof(Elf64_Sym), sizeof(symbol));
+        const char* name = symbol.st_name < strings.sh_size ? (const char*)bytes + strings.sh_offset + symbol.st_name : NULL;
+        valid = name != NULL && strncmp(name, ".Lbuster_switch_", 16) != 0 && strncmp(name, ".Lbuster_case_", 14) != 0;
+    }
+    uint32_t relocations = 0;
+    for (uint32_t s = 1; valid && s < header.e_shnum; s += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes + header.e_shoff + s * sizeof(Elf64_Shdr), sizeof(section));
+        const bool applies = section.sh_type == SHT_RELA && section.sh_info == rodata;
+        valid = !applies || (section.sh_entsize == sizeof(Elf64_Rela) && section.sh_offset + section.sh_size <= length);
+        for (uint64_t r = 0; valid && applies && r < section.sh_size / sizeof(Elf64_Rela); r += 1)
+        {
+            Elf64_Rela relocation;
+            memcpy(&relocation, bytes + section.sh_offset + r * sizeof(Elf64_Rela), sizeof(relocation));
+            Elf64_Sym symbol = { 0 };
+            valid = ELF64_R_SYM(relocation.r_info) < symbol_count && ELF64_R_TYPE(relocation.r_info) == R_X86_64_PC32;
+            if (valid)
+            {
+                memcpy(&symbol, bytes + symbols.sh_offset + ELF64_R_SYM(relocation.r_info) * sizeof(Elf64_Sym), sizeof(symbol));
+                valid = ELF64_ST_TYPE(symbol.st_info) == STT_SECTION && symbol.st_shndx == text;
+            }
+            relocations += 1;
+        }
+    }
+    return valid && relocations == entries;
+}
+
+// Jump tables in the C driver's outputs (#136's item 7): a program of two switches clang -O0 would make tables of, an
+// int's of 8 entries and a long's of 9, and a 128-bit division, which calls libgcc's __udivti3 from the same part of
+// the bodies (one lane's), where the tables' symbols' numbers fall among the runtime functions' provisional ones, each
+// reference rewritten once. Compiled with -c by both paths into the same bytes. The object holds no symbol of the
+// lowering's (.Lbuster_switch_N, .Lbuster_case_N), its tables' 17 entries are relocations against .text's section
+// symbol, and linked by clang it prints what the test's clang build computes, as does the direct path's executable.
+static void check_test_driver_switch_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static int dense(int x)\n"
+                                  "{\n"
+                                  "    int result = -1;\n"
+                                  "    switch (x)\n"
+                                  "    {\n"
+                                  "        case 0: result = 3; break;\n"
+                                  "        case 1: result = 5; break;\n"
+                                  "        case 2: result = 7; break;\n"
+                                  "        case 3: result = 11; break;\n"
+                                  "        case 5: result = 13; break;\n"
+                                  "        case 7: result = 17; break;\n"
+                                  "        default: break;\n"
+                                  "    }\n"
+                                  "    return result;\n"
+                                  "}\n"
+                                  "static int wide(long x)\n"
+                                  "{\n"
+                                  "    int result = 0;\n"
+                                  "    switch (x)\n"
+                                  "    {\n"
+                                  "        case -3: result += 1;\n"
+                                  "        case -2: result += 2; break;\n"
+                                  "        case 0 ... 2: result += 4; break;\n"
+                                  "        case 4: result += 8;\n"
+                                  "        case 5: result += 16; break;\n"
+                                  "        default: result += 100; break;\n"
+                                  "    }\n"
+                                  "    return result;\n"
+                                  "}\n"
+                                  "static unsigned long long quotient(unsigned __int128 n, unsigned long long d)\n"
+                                  "{\n"
+                                  "    return (unsigned long long)(n / d);\n"
+                                  "}\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    unsigned sum = 0;\n"
+                                  "    for (int i = -4; i < 10; i++)\n"
+                                  "    {\n"
+                                  "        sum = sum * 31 + (unsigned)dense(i);\n"
+                                  "        sum = sum * 7 + (unsigned)wide(i - 2);\n"
+                                  "        sum = sum * 3 + (unsigned)quotient(((unsigned __int128)(unsigned)(i + 5) << 70) + 12345, 1000003);\n"
+                                  "    }\n"
+                                  "    printf(\"%u\\n\", sum);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char objects[2][256];
+    char linked_path[256];
+    char direct_path[256];
+    snprintf(source, sizeof(source), "%s/switch-tables.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/switch-tables.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/switch-tables-scalar.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/switch-tables-linked", directory);
+    snprintf(direct_path, sizeof(direct_path), "%s/switch-tables-direct", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "jump tables' program written");
+    char* text = NULL;
+    bool compiled = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "the jump tables' program compiles with -c" : "the jump tables' program compiles with -c, scalar");
+        compiled = compiled && status == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of jump tables");
+    uint64_t length = 0;
+    uint8_t* bytes = compiled ? check_test_driver_read_aligned(objects[0], &length) : NULL;
+    check_test_expect(test, check_test_driver_temporaries(bytes, length, 17),
+                      "the object holds none of the lowering's symbols, and its tables' 17 entries name .text's section symbol");
+    free(bytes);
+    unsigned sum = 0;
+    for (int i = -4; i < 10; i += 1)
+    {
+        sum = sum * 31 + (unsigned)check_test_switch_dense(i);
+        sum = sum * 7 + (unsigned)check_test_switch_wide(i - 2);
+        sum = sum * 3 + (unsigned)(unsigned long long)((((unsigned __int128)(unsigned)(i + 5) << 70) + 12345) / 1000003u);
+    }
+    char expected[32];
+    snprintf(expected, sizeof(expected), "%u\n", sum);
+    char* const link[] = { (char*)clang, "-o", linked_path, objects[0], NULL };
+    const int linked = compiled ? check_test_driver_spawn(link, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "clang's link of the object dispatches through the tables as clang's own code does");
+    char* const direct[] = { (char*)executable, "-o", direct_path, source, NULL };
+    const int built = written ? check_test_driver_spawn(direct, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, built == 0 && check_test_driver_capture(direct_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the direct path's executable dispatches through the tables as clang's own code does");
+    unlink(source);
+    unlink(objects[0]);
+    unlink(objects[1]);
+    unlink(linked_path);
+    unlink(direct_path);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -718,6 +1028,169 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
     text = NULL;
     check_test_expect(test, refused, "-lA alone: libA's b_func undefined, refused");
     const char* const files[] = { a_path, b_path, source, defines_source, library_a, library_b, library_ab, output };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
+// A library whose strong reference to libgcc_s.so.1's _Unwind_Backtrace its own DT_NEEDED doesn't cover (#511's
+// review): clang compiles the helper, which GNU ld links with -shared alone (libhelper.so), and again with
+// libgcc_s.so.1 (libhelper_needs.so). main calls helper, -lhelper: GNU ld's --as-needed keeps libgcc_s.so.1 for the
+// library's reference, and so must the direct path, by both paths, its DT_NEEDED entries GNU ld's (cc -fuse-ld=bfd's)
+// and the program running, where lld drops the library and the program fails to load. With -lhelper_needs, the
+// library's DT_NEEDED loads libgcc_s.so.1 for it, and the executable needs only it; with main defining
+// _Unwind_Backtrace itself, which the executable exports, the reference is main's, and libgcc_s.so.1 isn't needed; and
+// with -lplain_needs beside -lhelper, in either order, a library main calls too whose DT_NEEDED names libgcc_s.so.1, the
+// loader loads it for that one, and GNU ld writes no entry of the executable's own for it. On a system without
+// libgcc_s.so.1 (check_test_driver_has_gcc_s), -lhelper is refused, naming the library and the name.
+static void check_test_driver_unwinder_dependency(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char helper_source[] = "struct _Unwind_Context;\n"
+                                        "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
+                                        "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
+                                        "static int frame(struct _Unwind_Context* context, void* argument)\n"
+                                        "{\n"
+                                        "    (void)context;\n"
+                                        "    *(int*)argument += 1;\n"
+                                        "    return 0;\n"
+                                        "}\n"
+                                        "int helper(void)\n"
+                                        "{\n"
+                                        "    int frames = 0;\n"
+                                        "    _Unwind_Backtrace(frame, &frames);\n"
+                                        "    return frames >= 2 ? 0 : 1;\n"
+                                        "}\n";
+    static const char program[] = "int helper(void);\nint main(void) { return helper(); }\n";
+    static const char plain_source[] = "int plain(void) { return 0; }\n";
+    static const char both[] = "int helper(void);\nint plain(void);\nint main(void) { return helper() + plain(); }\n";
+    static const char defines[] = "int helper(void);\n"
+                                  "int _Unwind_Backtrace(void* trace, void* argument)\n"
+                                  "{\n"
+                                  "    (void)trace;\n"
+                                  "    *(int*)argument = 7;\n"
+                                  "    return 0;\n"
+                                  "}\n"
+                                  "int main(void) { return helper(); }\n";
+    const bool unwinder = check_test_driver_has_gcc_s();
+    char helper_path[256];
+    char helper_object[256];
+    char source[256];
+    char defines_source[256];
+    char library[256];
+    char library_needs[256];
+    char plain_path[256];
+    char plain_object[256];
+    char plain_library[256];
+    char both_source[256];
+    char output[256];
+    char reference[256];
+    char search[300];
+    char gcc_s[4096] = { 0 };
+    snprintf(helper_path, sizeof(helper_path), "%s/helper.c", directory);
+    snprintf(helper_object, sizeof(helper_object), "%s/helper.o", directory);
+    snprintf(source, sizeof(source), "%s/calls_helper.c", directory);
+    snprintf(defines_source, sizeof(defines_source), "%s/defines_unwinder.c", directory);
+    snprintf(library, sizeof(library), "%s/libhelper.so", directory);
+    snprintf(library_needs, sizeof(library_needs), "%s/libhelper_needs.so", directory);
+    snprintf(plain_path, sizeof(plain_path), "%s/plain.c", directory);
+    snprintf(plain_object, sizeof(plain_object), "%s/plain.o", directory);
+    snprintf(plain_library, sizeof(plain_library), "%s/libplain_needs.so", directory);
+    snprintf(both_source, sizeof(both_source), "%s/calls_both.c", directory);
+    snprintf(output, sizeof(output), "%s/calls_helper", directory);
+    snprintf(reference, sizeof(reference), "%s/calls_helper_bfd", directory);
+    snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
+    FILE* found = unwinder ? popen("cc -print-file-name=libgcc_s.so.1", "r") : NULL;
+    const bool located = found != NULL && fgets(gcc_s, sizeof(gcc_s), found) != NULL;
+    if (found != NULL)
+    {
+        pclose(found);
+    }
+    gcc_s[located ? strcspn(gcc_s, "\n") : 0] = 0;
+    const bool written = parse_test_write(helper_path, helper_source, sizeof(helper_source) - 1) && parse_test_write(source, program, sizeof(program) - 1) &&
+                         parse_test_write(defines_source, defines, sizeof(defines) - 1) && parse_test_write(plain_path, plain_source, sizeof(plain_source) - 1) &&
+                         parse_test_write(both_source, both, sizeof(both) - 1);
+    char* const compile[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", helper_object, helper_path, NULL };
+    char* const link_alone[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper.so", "-o", library, helper_object, NULL };
+    char* const link_needs[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper_needs.so", "-o", library_needs, helper_object, gcc_s, NULL };
+    char* const compile_plain[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", plain_object, plain_path, NULL };
+    char* const link_plain[] = { "ld", "-shared", "-soname", "libplain_needs.so", "-o", plain_library, plain_object, gcc_s, NULL };
+    char* text = NULL;
+    bool built = written;
+    char* const* const builds[] = { compile, link_alone, link_needs, compile_plain, link_plain };
+    for (uint32_t b = 0; built && b < (unwinder ? 5u : 2u); b += 1)
+    {
+        built = check_test_driver_spawn(builds[b], &text) == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, built, "a library that refers to the unwinder: clang and GNU ld build it");
+    struct
+    {
+        const char* name;
+        const char* source;
+        const char* library;
+        const char* second;
+        const char* needed;
+    } const cases[] = {
+        { "-lhelper: libgcc_s.so.1 for libhelper's _Unwind_Backtrace", source, "-lhelper", NULL, "libhelper.so libgcc_s.so.1 libc.so.6" },
+        { "-lhelper_needs: libgcc_s.so.1 left to its DT_NEEDED", source, "-lhelper_needs", NULL, "libhelper_needs.so libc.so.6" },
+        { "-lhelper, main defining _Unwind_Backtrace: libhelper alone", defines_source, "-lhelper", NULL, "libhelper.so libc.so.6" },
+        { "-lhelper -lplain_needs: libgcc_s.so.1 left to libplain_needs' DT_NEEDED", both_source, "-lhelper", "-lplain_needs",
+          "libhelper.so libplain_needs.so libc.so.6" },
+        { "-lplain_needs -lhelper: libgcc_s.so.1 left to libplain_needs' DT_NEEDED", both_source, "-lplain_needs", "-lhelper",
+          "libplain_needs.so libhelper.so libc.so.6" },
+    };
+    for (uint32_t c = 0; built && unwinder && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char needed[256] = { 0 };
+        char reference_needed[256] = { 0 };
+        bool listed = true;
+        int ran = 0;
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char* const vector[] = { (char*)executable, "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL };
+            char* const scalar[] = {
+                (char*)executable, "--scalar", "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL,
+            };
+            char* const run[] = { "env", search, output, NULL };
+            const int linked = check_test_driver_spawn(path == 0 ? vector : scalar, &text);
+            free(text);
+            text = NULL;
+            listed = listed && linked == 0 && check_test_driver_needed(output, needed, sizeof(needed)) && strcmp(needed, cases[c].needed) == 0;
+            const int status = linked == 0 ? check_test_driver_spawn(run, &text) : -1;
+            free(text);
+            text = NULL;
+            ran = ran != 0 ? ran : status;
+        }
+        // GNU ld's link of the same program, through GCC's driver.
+        char* const bfd[] = { "cc", "-fuse-ld=bfd", "-o", reference, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL };
+        const bool reference_linked = check_test_driver_spawn(bfd, &text) == 0;
+        free(text);
+        text = NULL;
+        const bool agrees = reference_linked && check_test_driver_needed(reference, reference_needed, sizeof(reference_needed)) && strcmp(reference_needed, needed) == 0;
+        if (!listed || ran != 0 || !agrees)
+        {
+            printf("  %s: DT_NEEDED \"%s\", GNU ld's \"%s\", run status %d\n", cases[c].name, needed, reference_needed, ran);
+        }
+        check_test_expect(test, listed && ran == 0 && agrees, cases[c].name);
+    }
+    if (built && !unwinder)
+    {
+        char* const link[] = { (char*)executable, "-o", output, source, "-L", (char*)directory, "-lhelper", NULL };
+        const int status = check_test_driver_spawn(link, &text);
+        char message[320];
+        snprintf(message, sizeof(message), "%s: undefined reference to '_Unwind_Backtrace'", library);
+        const bool refused = status == 1 && text != NULL && strstr(text, message) != NULL;
+        if (!refused)
+        {
+            printf("  -lhelper without libgcc_s.so.1: status %d: %s\n", status, text != NULL ? text : "");
+        }
+        free(text);
+        text = NULL;
+        check_test_expect(test, refused, "-lhelper without libgcc_s.so.1: libhelper's _Unwind_Backtrace undefined, refused");
+    }
+    const char* const files[] = { helper_path, helper_object, source, defines_source, library, library_needs, plain_path, plain_object, plain_library, both_source, output, reference };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
         unlink(files[f]);
@@ -1217,6 +1690,169 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
         unlink(files[f]);
     }
     rmdir(headers);
+}
+
+// Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
+// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), and the process's lines.
+// Each stage's milliseconds go to `stages` (by CheckStage).
+static bool check_test_driver_time_report(const char* text, double* stages)
+{
+    static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
+                                           "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t" };
+    double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
+    double total = -1;
+    bool valid = check_clock_read(text, stages, phases, &total, NULL);
+    double sum = 0;
+    double phase_sum = 0;
+    for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
+    {
+        sum += stages[s];
+    }
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
+    {
+        phase_sum += phases[p];
+    }
+    for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(process); p += 1)
+    {
+        valid = strstr(text, process[p]) != NULL;
+    }
+    const double stage_error = sum > total ? sum - total : total - sum;
+    const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
+    return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
+}
+
+// --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
+// its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
+// runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
+static void check_test_driver_time_stages(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static int table[4] = { 1, 2, 3, 4 };\n"
+                                  "static int sum(int n) { int s = 0; for (int i = 0; i < n; i++) s += table[i & 3]; return s; }\n"
+                                  "int main(void) { printf(\"%d\\n\", sum(10)); return sum(4) == 10 ? 0 : 1; }\n";
+    char compiler[PATH_MAX];
+    char source[256];
+    char plain[256];
+    char timed[256];
+    char linked[256];
+    snprintf(source, sizeof(source), "%s/time_stages.c", directory);
+    snprintf(plain, sizeof(plain), "%s/time_stages_plain.o", directory);
+    snprintf(timed, sizeof(timed), "%s/time_stages_timed.o", directory);
+    snprintf(linked, sizeof(linked), "%s/time_stages", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const compile_plain[] = { compiler, "-c", source, "-o", plain, NULL };
+    char* const compile_timed[] = { compiler, "-c", "--time-stages", source, "-o", timed, NULL };
+    char* const link[] = { compiler, "--time-stages", source, "-o", linked, NULL };
+    char* const syntax[] = { compiler, "-fsyntax-only", "--time-stages", source, NULL };
+    char* const run[] = { linked, NULL };
+    char* text = NULL;
+    double stages[CHECK_STAGE_COUNT] = { 0 };
+    const int plain_status = made ? check_test_driver_spawn(compile_plain, &text) : -1;
+    check_test_expect(test, plain_status == 0 && text != NULL && strstr(text, "time-stage") == NULL, "-c without --time-stages prints no report");
+    free(text);
+    text = NULL;
+    const int timed_status = made ? check_test_driver_spawn(compile_timed, &text) : -1;
+    const bool object_report = timed_status == 0 && check_test_driver_time_report(text, stages);
+    if (!object_report)
+    {
+        printf("  --time-stages -c: status %d: %s\n", timed_status, text != NULL ? text : "");
+    }
+    check_test_expect(test, object_report && stages[CHECK_STAGE_ENCODE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] > 0 && stages[CHECK_STAGE_EXECUTABLE] == 0 &&
+                                stages[CHECK_STAGE_LANES] == 0,
+                      "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
+    check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
+    free(text);
+    text = NULL;
+    memset(stages, 0, sizeof(stages));
+    const int link_status = made ? check_test_driver_spawn(link, &text) : -1;
+    const bool link_report = link_status == 0 && check_test_driver_time_report(text, stages);
+    if (!link_report)
+    {
+        printf("  --time-stages: status %d: %s\n", link_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int ran = link_status == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, link_report && ran == 0 && stages[CHECK_STAGE_EXECUTABLE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] == 0,
+                      "--time-stages on the direct path reports every stage once, and its executable runs");
+    // The direct path's -g on a program of many functions and tables, enough that each stage takes microseconds: the
+    // DWARF and the static data are their own stages, not the link's.
+    memset(stages, 0, sizeof(stages));
+    static char many[1u << 17];
+    uint64_t length = 0;
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "static int t%u[16] = { %u };\nstatic int f%u(void) { return t%u[0]; }\n", f, f, f, f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "int main(void)\n{\n    int s = 0;\n");
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    s += f%u();\n", f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    return s == 512 * 511 / 2 ? 0 : 1;\n}\n");
+    char debug_source[256];
+    snprintf(debug_source, sizeof(debug_source), "%s/time_stages_debug.c", directory);
+    const bool debug_made = made && length < sizeof(many) && parse_test_write(debug_source, many, length);
+    char* const debug_link[] = { compiler, "--time-stages", "-g", debug_source, "-o", linked, NULL };
+    const int debug_status = debug_made ? check_test_driver_spawn(debug_link, &text) : -1;
+    const bool debug_report = debug_status == 0 && check_test_driver_time_report(text, stages);
+    if (!debug_report)
+    {
+        printf("  --time-stages -g: status %d: %s\n", debug_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int debug_ran = debug_status == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, debug_report && debug_ran == 0 && stages[CHECK_STAGE_DEBUG] > 0 && stages[CHECK_STAGE_PUBLISH_DATA] > 0 &&
+                                stages[CHECK_STAGE_EXECUTABLE] > 0,
+                      "--time-stages -g on the direct path charges the DWARF and the static data to their own stages");
+    // The same program's functions on two lanes (#151): their run is the lanes' stage, not the one lane's stages from
+    // lowering to unwind, and the object is one lane's.
+    char one_lane[256];
+    char two_lanes[256];
+    snprintf(one_lane, sizeof(one_lane), "%s/time_stages_one_lane.o", directory);
+    snprintf(two_lanes, sizeof(two_lanes), "%s/time_stages_two_lanes.o", directory);
+    char* const compile_one[] = { compiler, "-c", "--lanes", "1", debug_source, "-o", one_lane, NULL };
+    char* const compile_two[] = { compiler, "-c", "--time-stages", "--lanes", "2", debug_source, "-o", two_lanes, NULL };
+    memset(stages, 0, sizeof(stages));
+    const int one_status = debug_made ? check_test_driver_spawn(compile_one, &text) : -1;
+    free(text);
+    text = NULL;
+    const int two_status = debug_made ? check_test_driver_spawn(compile_two, &text) : -1;
+    const bool two_report = two_status == 0 && check_test_driver_time_report(text, stages);
+    if (!two_report)
+    {
+        printf("  --time-stages --lanes 2: status %d: %s\n", two_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    check_test_expect(test, one_status == 0 && two_report && stages[CHECK_STAGE_LANES] > 0 && stages[CHECK_STAGE_ENCODE] == 0 &&
+                                check_test_driver_same_files(one_lane, two_lanes),
+                      "--time-stages with the functions on two lanes charges their run to the lanes' stage, and writes one lane's object");
+    memset(stages, 0, sizeof(stages));
+    const int syntax_status = made ? check_test_driver_spawn(syntax, &text) : -1;
+    check_test_expect(test, syntax_status == 0 && check_test_driver_time_report(text, stages) && stages[CHECK_STAGE_PARSE] > 0 && stages[CHECK_STAGE_LOWER] == 0,
+                      "--time-stages -fsyntax-only reports the stages it ran");
+    free(text);
+    text = NULL;
+    // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
+    char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
+    char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
+    const int measured_status = made ? check_test_driver_spawn(measured, &text) : -1;
+    free(text);
+    text = NULL;
+    const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
+    free(text);
+    check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
+    const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
 }
 
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
@@ -1911,12 +2547,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);
+            check_test_driver_unwinder_dependency(&test, clang, executable, directory);
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_time_stages(&test, executable, directory);
         }
         rmdir(directory);
     }
