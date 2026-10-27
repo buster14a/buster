@@ -634,6 +634,27 @@ macro's expansion, an argument being expanded, or a directive's line):
   other macro's is painted where the expansion goes straight out. An empty
   expansion's trailing space is any of its items' but a `##`'s, which
   `pp_substitute` doesn't read.
+- **Arguments of direct objects** (#117). An argument of a simple macro's
+  collected invocation whose enabled macros' names are all direct objects
+  (object-like, not builtins, with a body without `##` that names no macro:
+  `pp_direct_object`, `pp_direct_argument`) has the expansion the main loop
+  would give it behind its barrier, made in place without a capture
+  (`pp_expand_direct_argument`, from `pp_finish_simple`, in the general path's
+  order). Its other tokens are copied in runs, and each direct object's body
+  takes its name's place under an expansion record of its own, its first token
+  with the name's flags, as `pp_expand_object` gives them. A disabled macro's
+  name isn't painted there, where the main loop paints it: the expansion's rescan
+  or `pp_emit_simple` paints it as surely, as for an argument that needs no
+  expansion. The tokens go at the end of `pp->arguments`, where the argument's record
+  then points, so the templates and `pp_substitute_simple` take them as they
+  take an argument written so. The statistics are the main loop's: the expanded
+  argument, its direct expansions, and a buffer run where the argument starts
+  and after each name it expands, while tokens are left. An empty object, an
+  object whose body names a macro, a function-like name, or one argument of
+  that kind leaves the invocation to the main loop. Only vectorized runs take
+  this path, with the history deferred or recorded, so the scalar twins' general
+  path is its twin. On `sqlite3.c`, 2,125 of the 3,529 invocations that took the
+  invocation stack take it.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one

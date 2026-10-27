@@ -1275,6 +1275,26 @@ static const PPTestCase pp_test_cases[] = {
     { "an expansion of a template with ## past 16 tokens",
       "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
       0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
+    // Arguments whose names of macros are all direct objects (pp_direct_argument), expanded in place before the template
+    // or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
+    // ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
+    { "arguments of direct objects, expanded in place",
+      "#define F(a) (a + 1)\n#define G(a, b) [a | b | a]\n#define X 2\n#define T unsigned long\n#define E\n#define N F(1)\nF(X) F(T X) G(X, T) G(T, 3) F(X X) F(E) F(N) G(X, N) G(N, X)\n",
+      0, "c17", "(2 + 1) (unsigned long 2 + 1) [2 | unsigned long | 2] [unsigned long | 3 | unsigned long] (2 2 + 1) ( + 1) ((1 + 1) + 1) [2 | (1 + 1) | 2] [(1 + 1) | 2 | (1 + 1)]\n", false },
+    // A direct object that starts a line in an argument (BUSTER_PP_START_OF_LINE in a file's text, BUSTER_PP_LINE_SPACE
+    // in an expansion's), and that ends one, from a file's text and from an expansion, with clang's line markers.
+    { "arguments of direct objects on new lines",
+      "#define F(a) <a>\n#define X x\n#define W(a) F(a) [F(a)]\nF(\nX) F(X\n) W(\nX) F(\n  X X)\nW(\n  X)\n",
+      0, "c17", "<x> <x> <x> [<x>] <x x>\n<x> [<x>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<x> <x> <x> [<x>] <x x>\n\n\n\n\n<x> [<x>]\n" },
+    // A disabled macro's name beside a direct object in an argument: painted as the main loop paints it, so that it doesn't
+    // expand when the expansion is rescanned before '('.
+    { "arguments of direct objects beside a disabled macro's name",
+      "#define F(x) x\n#define Y y\n#define G(x) F(G Y)(x)\n#define H(x) F(x H Y)\nG(1) H(2) F(Y G) F(Y)(3)\n",
+      0, "c17", "G y(1) 2 H y y G y(3)\n", false },
+    // An argument expanded in place used twice, beside one used as it is, from a file's text and from an expansion.
+    { "arguments of direct objects used twice",
+      "#define D(a, b) a b a b\n#define X x\n#define P(a) [a]\n#define W(a, b) D(a, b) P(a)\nD(X, z) D(z, X) W(X, X) W( X ,z)\n",
+      0, "c17", "x z x z z x z x x x x x [x] x z x z [x]\n", false },
     // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
     // name takes the main loop's path).
     { "poisoned names a template pastes",
