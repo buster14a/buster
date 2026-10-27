@@ -37,7 +37,8 @@ jobs:
   # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
   # for every pull request, so `test` measures them on the daily and dispatched runs and on pull requests that change
   # these harnesses, as when this job is skipped or fails. The same for benchmark-foreign's mold and wild
-  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases. And, per
+  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases, and for
+  # benchmark-preprocessor's `clang -E` (`--clang`, `preprocessor_clang`: c_preprocessor_benchmark.c). And, per
   # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
@@ -68,6 +69,7 @@ jobs:
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
       branch_sizing: ${{ steps.files.outputs.branch_sizing }}
+      preprocessor_clang: ${{ steps.files.outputs.preprocessor_clang }}
       zen5: ${{ steps.files.outputs.zen5 }}
       ssa: ${{ steps.files.outputs.ssa }}
       parser_bindings: ${{ steps.files.outputs.parser_bindings }}
@@ -495,8 +497,6 @@ jobs:
           ./build/compiler test-differential-harness
           == Test the independent preprocessor fuzz harness in C23
           ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -618,8 +618,6 @@ jobs:
           ./build/compiler test-tier1-allocation
           == Test dataflow bitsets
           ./build/compiler test-dataflow
-          == Test fragment byte interleave and protected-page tails
-          ./build/compiler test-fragment-interleave
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -965,13 +963,23 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
 
-      - name: Benchmark the preprocessor on main.c
+      - name: Benchmark the preprocessor on main.c against clang -E
         # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
-        # -funsigned-char's among them.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        # -funsigned-char's among them. --clang also times `clang -E` on the same file after each timed pass, about
+        # 6 s of the step's 12, which measures clang rather than this compiler: it runs where `changes` doesn't rule
+        # it out (c_preprocessor_benchmark.c's harness).
+        if: needs.changes.outputs.preprocessor_clang != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
+        # scalar twins, without clang's.
+        if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
@@ -1271,6 +1279,19 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-backend
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
           taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
+
+      - name: Benchmark the backend on the frozen SQLite source's functions
+        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
+        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
+        # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-backend-source "${source[@]}"
 
       - name: Benchmark the IR verifier and derived arrays
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir,')

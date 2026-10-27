@@ -1087,15 +1087,6 @@ struct ParseDiagnostic
 // every input); what the vector path never takes (K&R definitions, C23's attributes and enum bases, implicit int)
 // still gets a tree of the same roles.
 
-// The experiment is compiled only in main_unit_fragments.c. Grammar decisions and error recovery are shared;
-// normal units contain no sink field, conditional calls, fragment allocation or output.
-#ifndef BUSTER_PARSE_FRAGMENT_SINK
-#define BUSTER_PARSE_FRAGMENT_SINK 0
-#endif
-#if BUSTER_PARSE_FRAGMENT_SINK
-#include "c_fragments.c"
-#endif
-
 typedef enum ParseMode
 {
     // The start of an item: a declaration or statement in a block, a declaration at file scope, a member, a parameter,
@@ -1318,10 +1309,6 @@ struct ParseFrame
     uint8_t comma_role;
     // The asm statement's volatile, inline and goto qualifiers, checked before its `(`.
     uint8_t asm_qualifiers;
-#if BUSTER_PARSE_FRAGMENT_SINK
-    // Attribute arguments may contain nested C groups even though the experiment retains all attribute syntax.
-    bool fragment_attribute;
-#endif
 };
 
 // What a name is bound as: an ordinary identifier or a typedef name, and for a K&R identifier list's names, which are
@@ -1413,9 +1400,6 @@ typedef struct ParseScalar ParseScalar;
 typedef struct ParseBindingTrace ParseBindingTrace;
 struct ParseScalar
 {
-#if BUSTER_PARSE_FRAGMENT_SINK
-    CFragmentSink* fragments;
-#endif
     const uint8_t* kinds;
     const uint32_t* names;
     const uint8_t* flags;
@@ -1504,12 +1488,6 @@ BUSTER_INLINE void parse_scalar_error(ParseScalar* parser, uint32_t token, uint8
 // `argument` is the token the message names, or BUSTER_PARSE_NONE.
 static void parse_scalar_note(ParseScalar* parser, uint32_t token, uint8_t message, uint32_t argument, bool error)
 {
-#if BUSTER_PARSE_FRAGMENT_SINK
-    if (error && parser->fragments != 0)
-    {
-        parser->fragments->syntax_error = true;
-    }
-#endif
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -1692,9 +1670,6 @@ BUSTER_INLINE ParseFrame* parse_scalar_push(ParseScalar* parser, uint32_t opener
     }
     parser->frame_count += 1;
     *frame = (ParseFrame){
-#if BUSTER_PARSE_FRAGMENT_SINK
-        .fragment_attribute = parent->fragment_attribute || (parent->flags & BUSTER_PARSE_FRAME_ATTRIBUTE) != 0,
-#endif
         .opener = opener,
         .scope = scope ? parser->log_count : BUSTER_PARSE_NONE,
         .flags = parent->flags & BUSTER_PARSE_FRAME_INHERITED,
@@ -1975,9 +1950,6 @@ BUSTER_INLINE void parse_scalar_emit(ParseScalar* parser, uint32_t token, uint8_
         {
             parents[entry.position] = parent;
         }
-#if BUSTER_PARSE_FRAGMENT_SINK
-        c_fragment_sink_reduce(parser->fragments, entry.position, parents[entry.position]);
-#endif
     }
     // L, then this token replaces every candidate it hides.
     const uint32_t left_threshold = base + ((info >> 8) & 0xff);
@@ -1995,20 +1967,6 @@ BUSTER_INLINE void parse_scalar_emit(ParseScalar* parser, uint32_t token, uint8_
     if (rule == PARSE_RULE_LEFT)
     {
         parents[token] = left.position;
-#if BUSTER_PARSE_FRAGMENT_SINK
-        if (parser->fragments != 0)
-        {
-            // A known left parent does not finish a string-concatenation subtree: the next STRING_NEXT may be its
-            // child. Keep it until a lower key closes the chain; its already-set parent remains unchanged above.
-            waiting[waiting_count] = (ParseWaiting){
-                .position = token,
-                .threshold = base + ((info >> 16) & 0xff),
-                .left = left.position,
-                .left_key = left.key,
-            };
-            waiting_count += 1;
-        }
-#endif
     }
     else if (rule != PARSE_RULE_OPENER)
     {
@@ -2037,9 +1995,6 @@ static void parse_scalar_finish(ParseScalar* parser)
         {
             parser->parents[entry.position] = parent;
         }
-#if BUSTER_PARSE_FRAGMENT_SINK
-        c_fragment_sink_reduce(parser->fragments, entry.position, parser->parents[entry.position]);
-#endif
     }
 }
 
@@ -2062,11 +2017,6 @@ typedef enum ParseEvent
 typedef struct ParseStep ParseStep;
 struct ParseStep
 {
-#if BUSTER_PARSE_FRAGMENT_SINK
-    bool expression;
-    uint32_t fragment_context;
-    uint8_t fragment_context_role;
-#endif
     uint32_t depth;
     uint32_t scope;
     uint8_t role;
@@ -2269,9 +2219,6 @@ static void parse_scalar_close(ParseScalar* parser, uint32_t i, ParseStep* step)
         // may follow: the declaration's frame says so, past the declarator's groups (`int (f(x)) int x; {...}`).
         const bool kr = (frame->flags & BUSTER_PARSE_FRAME_DEFINITION_PARAMETERS) != 0 && (frame->flags & BUSTER_PARSE_FRAME_KR) != 0;
         const bool type_operand = sizeof_type && role != PARSE_ROLE_CLOSE_COMPOUND;
-#if BUSTER_PARSE_FRAGMENT_SINK
-        c_fragment_sink_group(parser->fragments, frame->opener, i, parser->roles[frame->opener], sizeof_type || frame->role == PARSE_ROLE_OPEN_CAST);
-#endif
         parser->parents[frame->opener] = i;
         parser->frame_count -= 1;
         ParseFrame* parent = &parser->frames[parser->frame_count - 1];
@@ -3894,9 +3841,6 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
     else if (array_designator && parse_kind_starts_initializer_value(kind))
     {
         // GNU omits '=' after one `[index]`. Chained `[index].member` and `[index][index]` still require it.
-#if BUSTER_PARSE_FRAGMENT_SINK
-        c_fragment_sink_implicit_initializer(parser->fragments, i - 1);
-#endif
         frame->mode = PARSE_MODE_INITIALIZER;
         frame->statement = PARSE_ITEM_EXPRESSION;
         step->again = true;
@@ -4266,26 +4210,6 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
         step.again = false;
         step.depth = parser->frame_count - 1;
         ParseFrame* frame = &parser->frames[parser->frame_count - 1];
-#if BUSTER_PARSE_FRAGMENT_SINK
-        const bool expression_mode = frame->mode == PARSE_MODE_OPERAND || frame->mode == PARSE_MODE_OPERATOR || frame->mode == PARSE_MODE_MEMBER ||
-                                     frame->mode == PARSE_MODE_ASSOCIATION || frame->mode == PARSE_MODE_SIZEOF_PAREN || frame->mode == PARSE_MODE_COMPOUND_BODY ||
-                                     frame->mode == PARSE_MODE_INITIALIZER;
-        const bool keyword_expression = frame->mode == PARSE_MODE_KEYWORD_PAREN && i > 0 &&
-                                        (parser->kinds[i - 1] == PARSE_KIND_GENERIC || parser->kinds[i - 1] == PARSE_KIND_TYPE_ARGUMENT);
-        const bool keyword_boundary = frame->role == PARSE_ROLE_OPEN_KEYWORD && (frame->keyword == PARSE_KIND_GENERIC || frame->keyword == PARSE_KIND_TYPE_ARGUMENT) &&
-                                      (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_COLON);
-        const bool initializer_item = (frame->role == PARSE_ROLE_OPEN_INITIALIZER || frame->role == PARSE_ROLE_OPEN_COMPOUND_BODY) &&
-                                      (kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_PERIOD || kind == PARSE_KIND_L_SQUARE ||
-                                       (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON));
-        const bool unspecified_array = (frame->flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) && kind == PARSE_KIND_STAR && parser->kinds[i + 1] == PARSE_KIND_R_SQUARE;
-        const bool declaration_comma = kind == PARSE_KIND_COMMA && ((frame->flags & BUSTER_PARSE_FRAME_DECLARATION) || frame->role == PARSE_ROLE_OPEN_ENUM) && !keyword_boundary;
-        const bool assertion_comma = kind == PARSE_KIND_COMMA && frame->role == PARSE_ROLE_OPEN_KEYWORD && frame->keyword == PARSE_KIND_STATIC_ASSERT;
-        step.expression = (expression_mode || keyword_expression || keyword_boundary || initializer_item) &&
-                          !frame->fragment_attribute && (frame->flags & (BUSTER_PARSE_FRAME_ATTRIBUTE | BUSTER_PARSE_FRAME_ASM)) == 0 &&
-                          !unspecified_array && !declaration_comma && !assertion_comma;
-        step.fragment_context = frame->opener;
-        step.fragment_context_role = frame->role;
-#endif
         binding_mode = frame->mode;
         binding_flags = frame->flags;
         binding_argument = frame->argument;
@@ -4639,9 +4563,6 @@ static void parse_scalar_token(ParseScalar* parser, uint32_t i)
     }
     if (parser->error_token == BUSTER_PARSE_NONE && i < parser->count)
     {
-#if BUSTER_PARSE_FRAGMENT_SINK
-        c_fragment_sink_token(parser->fragments, i, step.role, step.expression, step.fragment_context, step.fragment_context_role);
-#endif
         parse_binding_trace_identifier(parser, i, binding_mode, binding_flags, binding_argument, step.role);
         parse_scalar_emit(parser, i, step.role, step.depth);
         switch (step.event)
@@ -4758,12 +4679,6 @@ static void parse_scalar_reset(ParseScalar* parser)
 // it bound are unbound. Returns the declaration's last token.
 static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
 {
-#if BUSTER_PARSE_FRAGMENT_SINK
-    if (parser->fragments != 0)
-    {
-        parser->fragments->syntax_error = true;
-    }
-#endif
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -4803,21 +4718,13 @@ struct ParseScalarResult
 // Parses tokens [0, count) into `tree`, whose arrays have `count` entries, with the scratch arena's memory for its
 // stacks. `kinds` and `names` have the padding of ParseTokens around them. The diagnostics go to `diagnostics`, which has
 // room for `capacity`, and their number to `*diagnostic_count`.
-#if BUSTER_PARSE_FRAGMENT_SINK
-static ParseScalarResult parse_scalar_fragments_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
-                                                      ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace, CFragmentSink* fragments)
-#else
 BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                              ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace)
-#endif
 {
     ParseScalarResult result = { .errors = 0, .out_of_memory = false, .retyped = false };
     const uint64_t mark = scratch->length;
     const uint64_t slots = (uint64_t)count + 2;
     ParseScalar parser = {
-#if BUSTER_PARSE_FRAGMENT_SINK
-        .fragments = fragments,
-#endif
         .kinds = kinds,
         .names = names,
         .flags = flags,
@@ -4909,19 +4816,6 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
     return result;
 }
 
-#if BUSTER_PARSE_FRAGMENT_SINK
-BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
-                                             ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, ParseBindingTrace* trace)
-{
-    return parse_scalar_fragments_traced(kinds, names, flags, count, language, meanings, tree, scratch, diagnostics, capacity, diagnostic_count, trace, 0);
-}
-
-static ParseScalarResult parse_scalar_fragments(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
-                                               ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count, CFragmentSink* fragments)
-{
-    return parse_scalar_fragments_traced(kinds, names, flags, count, language, meanings, tree, scratch, diagnostics, capacity, diagnostic_count, 0, fragments);
-}
-#endif
 
 BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar(const uint8_t* kinds, const uint32_t* names, const uint8_t* flags, uint32_t count, CLanguage language, ParseMeanings* meanings,
                                       ParseTree* tree, Arena* scratch, ParseDiagnostic* diagnostics, uint32_t capacity, uint32_t* diagnostic_count)
@@ -11898,6 +11792,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     }
     return result;
 }
+
 
 // Parses the unit the preprocessor `pp` produced (pp_run's output). Returns false if it has errors or the parser ran out
 // of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).

@@ -25,7 +25,11 @@ appear exactly once in the ordered branch columns, and its target must be in the
 body or at the beginning of the common epilogue. Branches into a partially
 restored frame, unlisted branches, extra returns and unsupported control flow
 are refused. Early source returns are supported through Tier0's jumps to its
-common epilogue.
+common epilogue. A frameless function (no push or allocation) may end in a
+`ud2` rather than the return: the terminal builtins' helper
+(`c_builtin_terminal_helpers.c`, `__builtin_trap()`'s and
+`__builtin_unreachable()`'s, #523) is a `ud2` alone, whose descriptor has no
+transitions, its CFA RSP + 8 throughout. A `ud2` anywhere else is refused.
 
 The vector path resolves body effects eight records at a time, with a scalar
 twin. It rejects unknown effects, body writes to RSP or unsaved nonvolatile
@@ -62,7 +66,8 @@ published with its code (`Tier0Code.frame_saved`, `frame_size` and
 proving one. Tier 0's prologue is the code's first records and its epilogue's
 release, pops and ret its last, so each transition is the end of a record the
 frame names by its index: the reader checks that each of those records is the
-instruction it must be (and that the last is the ret) and takes each end from
+instruction it must be (and that the last is the ret, or a frameless function's
+`ud2`) and takes each end from
 the final offsets, with no pass over the body. It takes the producer's word that
 the body keeps the frame, which `unwind_tier0` proves for the fixed frames it
 takes: the tests compare the two on every function both take
@@ -172,6 +177,14 @@ function's in clang's object too. GDB's backtrace at every instruction each
 function runs, stepping over calls through as many of its calls as its paths
 need, gives the function and its callers, and the steps must reach every
 instruction of GDB's disassembly of the function.
+
+A second fixture calls `__builtin_trap()` and `__builtin_unreachable()`
+(#523), whose calls reach the terminal helper, a `ud2` with an FDE of no
+transitions: its `SIGILL` handler counts its frames with `backtrace()`, which
+from the trap's address (a signal frame's, through libc's trampoline) must walk
+through the helper and its caller to `main`, by each path into the same bytes
+and from its object linked by GNU ld; without unwind tables, the trap still
+reaches the handler.
 
 ## Checks and measurements
 

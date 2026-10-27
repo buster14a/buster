@@ -339,7 +339,7 @@ designs and the compilers already built this way.
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as twelve translation units: `main.c` itself, the driver's unit, and each
+  it as eleven translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -347,8 +347,7 @@ designs and the compilers already built this way.
   command's branch names its unit. The modules that several units' commands
   run compile in one unit alone, their home, which the others call (#270): the
   lexer in the driver's unit, the preprocessor and the parser in the front
-  end's (but for the fragments' unit, which compiles a parser of its own with
-  the fragment sink), and the linker's modules (`import.c`, `runtime.c`,
+  end's, and the linker's modules (`import.c`, `runtime.c`,
   `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
   unit. Their entry points that other units call take the module's macro
   (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
@@ -650,7 +649,9 @@ designs and the compilers already built this way.
   that keeps or drops the tables, by each path, as executables and as objects
   linked three ways; the options' rule against clang's objects of the fixture;
   and gdb's backtrace at every instruction of each function, whose steps must
-  reach every instruction of gdb's disassembly of it.
+  reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
+  `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -947,8 +948,10 @@ designs and the compilers already built this way.
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
   twin.
   `tier0_generate.c` makes random programs as typed streams and as C,
-  `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
-  `benchmark-backend`. `docs/tier0.md` has the contract, the design and the
+  `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
+  `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
+  the same measurement (`tier0_benchmark_measure.c`) on the functions `-c`
+  compiles of C files. `docs/tier0.md` has the contract, the design and the
   9700X measurements.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
@@ -1046,7 +1049,10 @@ designs and the compilers already built this way.
   places with clang's messages. It also holds the driver. `docs/c-parser.md`
   explains the design and its 9700X measurements. `c_parser_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
-  `c_parser_benchmark.c` provides `benchmark-parser`.
+  `c_parser_benchmark.c` provides `benchmark-parser`. Salter's operator
+  fragments, the alternative to the postorder that #104–#107 measured end to
+  end beside the checker's tree walk, lost and were removed: [the
+  decision](docs/c-parser-fragments.md).
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock), `time-runs` (whole
   processes, and builds compared over their code's placements and fresh
@@ -1145,6 +1151,7 @@ git init -q --template= build/c-testsuite
 git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
 git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
+./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -1188,9 +1195,11 @@ there at a time, so everything takes one lock:
   campaign (#336's binding handoff) has a module of its own, not the whole
   checker's. A step gated so also runs on the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
-  foreign phases, and the first-party performance readers' qualification
-  (`tools/performance`, `docs/performance`, `web/perf`, their pin; a change to
-  `docs/performance` alone runs the job for it). A push
+  foreign phases, `clang -E`'s times beside the preprocessor's benchmark
+  (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
+  performance readers' qualification (`tools/performance`, `docs/performance`,
+  `web/perf`, their pin; a change to `docs/performance` alone runs the job for
+  it). A push
   to main runs none of them: its pull request's run measured what it changes,
   and the full set took the job past its 10 minutes. The daily and dispatched
   runs have 25 minutes.
@@ -4055,7 +4064,11 @@ still replaces them (the benchmark leaves it out of clang's command line). The
 runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
-CPU; like the others, its measurements are informational.
+CPU, with `--clang` on the daily and dispatched runs and on pull requests that
+change `c_preprocessor_benchmark.c` (the `changes` job's `preprocessor_clang`),
+and without it on every other run that measures the preprocessor: clang's times,
+about 6 s of the step's 12, measure clang rather than this compiler. Like the
+others, its measurements are informational.
 
 `./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
@@ -4306,18 +4319,6 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
-## Fragment experiment tests
-
-The test-only expression-fragment experiment is described in
-[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
-`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
-AVX-512 byte routing, including exhaustive short masks and exact protected-page
-boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
-experimental sink, compiled separately in `main_unit_fragments.c`; production
-parser units have no fragment sink. These checks do not establish semantic or
-SSA IR identity. The complete #107 comparison still requires the shared
-semantic consumer and its actual output.
-
 ## Scoped binding kernels
 
 `test-environments [--seed N]` checks the immutable file-scope position index,
@@ -4430,11 +4431,21 @@ the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 [--programs N] [--keep]` emits generated programs of up to 600 functions (of
 libgcc's functions in random first-use orders, computed gotos through static
 tables of labels' addresses, switches, structs by value, long doubles,
-variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, and
-on 8 with a slow lane, by both paths, with `-g`'s rows and unwind tables and
-without: each must be the one lane's object or failure; then the lane rule,
-and the driver's objects and executables by `--lanes` and by default, each one
-lane's, the executables exiting alike. `./build/compiler benchmark-check-lanes
+variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
+8 with a slow lane, and on 8 that can't be pinned (which `lane_run` runs, then
+counts as lanes that didn't start), by both paths, with `-g`'s rows and unwind
+tables and without: each must be the one lane's object or failure, run again
+on one lane only when its lanes didn't start. Then the serial retry's other
+causes, each emission one lane's: a lane short of room
+(`CheckProgramLanes.squeeze_body`: the lane that takes a body's part left only
+so many bytes in one of its arenas, from none up, doubling, until the part
+fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
+code's after it), and lanes that start no thread, in a child that
+`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+objects and executables by `--lanes` and by default, each one lane's, the
+executables exiting alike, and with lanes that don't start, and the failing
+programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
+`./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
@@ -4899,6 +4910,26 @@ one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
 each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode]
+[--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
+measures the same variants on real C. Each file is checked as the driver checks
+it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+their typed streams, with the symbols' access the emission gave them
+(`check_program_access`), make one corpus with the other files' functions, which
+both paths must agree on before the same medians are reported. A file the
+checker rejects, or whose checked program or emission refuses a feature by
+name, is left out with its reason; one that fails otherwise (it doesn't
+preprocess, a resource runs out, a function doesn't join the corpus) fails the
+command, and so does a run left with no function or no typed entry, or a
+timed run that failed on a function (both benchmarks: `tier0_benchmark_measure`),
+and both refuse an unknown `--only` wherever it comes on the line. Its last line
+totals the files measured, left out and failed and the measurement's outcome
+(`measurement=reported`, `failed` or `none`), as the exit status takes them.
+`test-checker` checks these outcomes (`tier0_source_benchmark_test.c`), with the
+resources' failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
+`taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
+to one allowed CPU, where a pull request changes what it measures.
 
 ## Streaming tests
 
