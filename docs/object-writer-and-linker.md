@@ -3047,10 +3047,14 @@ does pays what a static executable pays: a compare of 16 targets per 16
 fixups and of 64 kinds per 64, and a scalar relaxation per access in the
 patch's path for the other kinds (the static executable's 0.89 us for 47
 accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
-accesses" below). The 9700X's measurement of `benchmark-executable --only
-dynamic` before and after is still to be made: the session that wrote this
-had no access to the host, and its VM's Xeon lacks AVX-512 VBMI and GFNI,
-which the compiler needs to run.
+accesses" below). On the 9700X, `benchmark-executable`'s TLS modes (`--tls`)
+against their control, a probe of the same bytes and fixups without TLS, put
+the relaxation at about 19 ns per general-dynamic access to the program's own
+thread-local, 21 ns to `libc.so.6`'s `errno` and 23 ns per local-dynamic access
+with its `DTPOFF32`, on one lane at 2,000 and 180,000 workers: about 3 ns to
+count, 3 ns in the symbols' pass and 12 ns rewriting the chunks (16 ns with the
+`DTPOFF32`)
+([the measurement record](https://github.com/buster14a/buster-performance/blob/e1c95c8c928436542e57f754b8d2fe331e511422/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
 
 #### The unwind tables
 
