@@ -550,6 +550,20 @@ static bool dynamic_test_consumed_call(const Link* link, AtomId atom, FixupId fi
     return !library && (previous == BUSTER_LINK_FIXUP_TLSGD || previous == BUSTER_LINK_FIXUP_TLSLD);
 }
 
+// A PIE's GOT slots of its own thread-locals' offsets from the thread pointer, which no relocation fills and lld's
+// relaxation to local-exec leaves out: test-executable's count (executable_test_tls_slots) but for the imported
+// thread-locals, whose slots TPOFF64 relocations fill (#515's general-dynamic accesses to libc.so.6's errno).
+static uint64_t dynamic_test_own_tls_slots(const Link* link)
+{
+    uint64_t imported = 0;
+    for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
+    {
+        const bool tls = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
+        imported += link->symbols.got_slot[symbol] != 0 && link->symbols.atom[symbol] == 0 && tls && dynamic_test_is_dynamic(link, symbol, false) ? 1 : 0;
+    }
+    return executable_test_tls_slots(link) - imported;
+}
+
 // A relocation the loader needs: where, its type, its symbol's .dynsym name (or 0) and its addend.
 typedef struct DynamicTestRelocation DynamicTestRelocation;
 struct DynamicTestRelocation
@@ -2366,12 +2380,12 @@ static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, 
         // The GOT: as many slots of the image's symbols (RELATIVE) as lld's, which relaxes the same loads and calls, and
         // as many that hold values the loader leaves alone, but for our slot 0 and, in a PIE, the thread-locals'
         // offsets, whose initial-exec accesses lld relaxes to local-exec (a shared library's keep theirs, with TPOFF64
-        // relocations). Its slots of dynamic symbols are the references above (lld's PLT has a slot of its own for a
+        // relocations, and so do an import's in a PIE, which are among the references above). Its slots of dynamic symbols are the references above (lld's PLT has a slot of its own for a
         // call, which ours reads the symbol's slot for).
         const bool library = runtime->kind == RUNTIME_KIND_SHARED;
         const ExecutableTestGot our_got = executable_test_got(file, ET_DYN);
         const ExecutableTestGot their_got = executable_test_got(lld_file, ET_DYN);
-        const uint64_t tls_slots = library ? 0 : executable_test_tls_slots(link);
+        const uint64_t tls_slots = library ? 0 : dynamic_test_own_tls_slots(link);
         dynamic_test_expect(tally, our_got.valid && their_got.valid && our_got.relative == their_got.relative, "as many RELATIVE GOT slots as lld's",
                             our_got.relative * 100000 + their_got.relative);
         dynamic_test_expect(tally, our_got.plain >= 1 + tls_slots && our_got.plain - 1 - tls_slots == their_got.plain, "as many GOT slots without relocations as lld's",
