@@ -2904,7 +2904,8 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   isn't), as the loader's are.
 - **A named library's references.** GNU ld's `--as-needed` also keeps a
   library for a needed library's strong reference that the referring
-  library's own `DT_NEEDED` entries don't cover: `libhelper.so`, linked by
+  library's own `DT_NEEDED` entries don't cover, nor those of another
+  library the program loads: `libhelper.so`, linked by
   `ld -shared` alone, calling `_Unwind_Backtrace`, makes GNU ld keep
   `libgcc_s.so.1` for a program that calls it, where lld drops it and the
   program fails to load ("undefined symbol: _Unwind_Backtrace"). Binding
@@ -2912,7 +2913,10 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   references (`bind_needed_libraries`) records an edge to the loader or
   `libgcc_s.so.1` for such a reference, unless the executable's own exported
   definition satisfies it, and the libraries a needed library's edges reach
-  are needed (`Bind.runtime_needed`), whatever the program's own references:
+  are needed (`Bind.runtime_needed`), whatever the program's own references,
+  but for one that a `DT_NEEDED` entry of a library the program loads names
+  (`bind_runtime_covered`: `-lhelper -lplain`, `libplain.so` naming
+  `libgcc_s.so.1`, gives GNU ld's executable no entry of its own for it):
   `bind_keep_as_needed` keeps their imports, and `dynamic_inputs` makes them
   required, so that their `DT_NEEDED` entries are written without a version
   of theirs an import uses, as GNU ld writes them. Without `libgcc_s.so.1`,

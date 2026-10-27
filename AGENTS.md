@@ -2488,7 +2488,8 @@ exports and members:
   as GNU ld's `--as-needed` keeps it, `libgcc_s.so.1` (or the loader) is
   needed (`Bind.runtime_needed`) for a needed library's strong reference its
   `DT_NEEDED` doesn't cover, and not when main defines the name, the library
-  isn't needed or the reference is weak (without `libgcc_s.so.1`, refused);
+  isn't needed, the reference is weak or another needed library's `DT_NEEDED`
+  names `libgcc_s.so.1` (without `libgcc_s.so.1`, refused);
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`

@@ -818,8 +818,10 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
 // library's reference, and so must the direct path, by both paths, its DT_NEEDED entries GNU ld's (cc -fuse-ld=bfd's)
 // and the program running, where lld drops the library and the program fails to load. With -lhelper_needs, the
 // library's DT_NEEDED loads libgcc_s.so.1 for it, and the executable needs only it; with main defining
-// _Unwind_Backtrace itself, which the executable exports, the reference is main's, and libgcc_s.so.1 isn't needed. On a
-// system without libgcc_s.so.1 (check_test_driver_has_gcc_s), -lhelper is refused, naming the library and the name.
+// _Unwind_Backtrace itself, which the executable exports, the reference is main's, and libgcc_s.so.1 isn't needed; and
+// with -lplain_needs beside -lhelper, in either order, a library main calls too whose DT_NEEDED names libgcc_s.so.1, the
+// loader loads it for that one, and GNU ld writes no entry of the executable's own for it. On a system without
+// libgcc_s.so.1 (check_test_driver_has_gcc_s), -lhelper is refused, naming the library and the name.
 static void check_test_driver_unwinder_dependency(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char helper_source[] = "struct _Unwind_Context;\n"
@@ -838,6 +840,8 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
                                         "    return frames >= 2 ? 0 : 1;\n"
                                         "}\n";
     static const char program[] = "int helper(void);\nint main(void) { return helper(); }\n";
+    static const char plain_source[] = "int plain(void) { return 0; }\n";
+    static const char both[] = "int helper(void);\nint plain(void);\nint main(void) { return helper() + plain(); }\n";
     static const char defines[] = "int helper(void);\n"
                                   "int _Unwind_Backtrace(void* trace, void* argument)\n"
                                   "{\n"
@@ -853,6 +857,10 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
     char defines_source[256];
     char library[256];
     char library_needs[256];
+    char plain_path[256];
+    char plain_object[256];
+    char plain_library[256];
+    char both_source[256];
     char output[256];
     char reference[256];
     char search[300];
@@ -863,6 +871,10 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
     snprintf(defines_source, sizeof(defines_source), "%s/defines_unwinder.c", directory);
     snprintf(library, sizeof(library), "%s/libhelper.so", directory);
     snprintf(library_needs, sizeof(library_needs), "%s/libhelper_needs.so", directory);
+    snprintf(plain_path, sizeof(plain_path), "%s/plain.c", directory);
+    snprintf(plain_object, sizeof(plain_object), "%s/plain.o", directory);
+    snprintf(plain_library, sizeof(plain_library), "%s/libplain_needs.so", directory);
+    snprintf(both_source, sizeof(both_source), "%s/calls_both.c", directory);
     snprintf(output, sizeof(output), "%s/calls_helper", directory);
     snprintf(reference, sizeof(reference), "%s/calls_helper_bfd", directory);
     snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
@@ -874,14 +886,17 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
     }
     gcc_s[located ? strcspn(gcc_s, "\n") : 0] = 0;
     const bool written = parse_test_write(helper_path, helper_source, sizeof(helper_source) - 1) && parse_test_write(source, program, sizeof(program) - 1) &&
-                         parse_test_write(defines_source, defines, sizeof(defines) - 1);
+                         parse_test_write(defines_source, defines, sizeof(defines) - 1) && parse_test_write(plain_path, plain_source, sizeof(plain_source) - 1) &&
+                         parse_test_write(both_source, both, sizeof(both) - 1);
     char* const compile[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", helper_object, helper_path, NULL };
     char* const link_alone[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper.so", "-o", library, helper_object, NULL };
     char* const link_needs[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper_needs.so", "-o", library_needs, helper_object, gcc_s, NULL };
+    char* const compile_plain[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", plain_object, plain_path, NULL };
+    char* const link_plain[] = { "ld", "-shared", "-soname", "libplain_needs.so", "-o", plain_library, plain_object, gcc_s, NULL };
     char* text = NULL;
     bool built = written;
-    char* const* const builds[] = { compile, link_alone, link_needs };
-    for (uint32_t b = 0; built && b < (unwinder ? 3u : 2u); b += 1)
+    char* const* const builds[] = { compile, link_alone, link_needs, compile_plain, link_plain };
+    for (uint32_t b = 0; built && b < (unwinder ? 5u : 2u); b += 1)
     {
         built = check_test_driver_spawn(builds[b], &text) == 0;
         free(text);
@@ -893,11 +908,16 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
         const char* name;
         const char* source;
         const char* library;
+        const char* second;
         const char* needed;
     } const cases[] = {
-        { "-lhelper: libgcc_s.so.1 for libhelper's _Unwind_Backtrace", source, "-lhelper", "libhelper.so libgcc_s.so.1 libc.so.6" },
-        { "-lhelper_needs: libgcc_s.so.1 left to its DT_NEEDED", source, "-lhelper_needs", "libhelper_needs.so libc.so.6" },
-        { "-lhelper, main defining _Unwind_Backtrace: libhelper alone", defines_source, "-lhelper", "libhelper.so libc.so.6" },
+        { "-lhelper: libgcc_s.so.1 for libhelper's _Unwind_Backtrace", source, "-lhelper", NULL, "libhelper.so libgcc_s.so.1 libc.so.6" },
+        { "-lhelper_needs: libgcc_s.so.1 left to its DT_NEEDED", source, "-lhelper_needs", NULL, "libhelper_needs.so libc.so.6" },
+        { "-lhelper, main defining _Unwind_Backtrace: libhelper alone", defines_source, "-lhelper", NULL, "libhelper.so libc.so.6" },
+        { "-lhelper -lplain_needs: libgcc_s.so.1 left to libplain_needs' DT_NEEDED", both_source, "-lhelper", "-lplain_needs",
+          "libhelper.so libplain_needs.so libc.so.6" },
+        { "-lplain_needs -lhelper: libgcc_s.so.1 left to libplain_needs' DT_NEEDED", both_source, "-lplain_needs", "-lhelper",
+          "libplain_needs.so libhelper.so libc.so.6" },
     };
     for (uint32_t c = 0; built && unwinder && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
@@ -907,8 +927,10 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
         int ran = 0;
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            char* const vector[] = { (char*)executable, "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
-            char* const scalar[] = { (char*)executable, "--scalar", "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
+            char* const vector[] = { (char*)executable, "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL };
+            char* const scalar[] = {
+                (char*)executable, "--scalar", "-o", output, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL,
+            };
             char* const run[] = { "env", search, output, NULL };
             const int linked = check_test_driver_spawn(path == 0 ? vector : scalar, &text);
             free(text);
@@ -920,7 +942,7 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
             ran = ran != 0 ? ran : status;
         }
         // GNU ld's link of the same program, through GCC's driver.
-        char* const bfd[] = { "cc", "-fuse-ld=bfd", "-o", reference, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, NULL };
+        char* const bfd[] = { "cc", "-fuse-ld=bfd", "-o", reference, (char*)cases[c].source, "-L", (char*)directory, (char*)cases[c].library, (char*)cases[c].second, NULL };
         const bool reference_linked = check_test_driver_spawn(bfd, &text) == 0;
         free(text);
         text = NULL;
@@ -946,7 +968,7 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
         text = NULL;
         check_test_expect(test, refused, "-lhelper without libgcc_s.so.1: libhelper's _Unwind_Backtrace undefined, refused");
     }
-    const char* const files[] = { helper_path, helper_object, source, defines_source, library, library_needs, output, reference };
+    const char* const files[] = { helper_path, helper_object, source, defines_source, library, library_needs, plain_path, plain_object, plain_library, both_source, output, reference };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
         unlink(files[f]);
