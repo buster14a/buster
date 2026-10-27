@@ -87,12 +87,13 @@ body's Tier 0 code or in a body's code after Tier 0.
 ### Memory
 
 Lane 0 is the calling thread, with the caller's arenas, so one lane's emission
-pushes what source order's did, where it did. Each other lane has three arenas
-of its own (`CheckProgramLanes.arenas`): its functions' lowered columns, its
-writer's columns with its functions' Tier 0 code and what the merge reads, and
-its functions' bytes. The caller keeps them until it is done with the
-emission's link (`check_program_lanes_release`); the next emission with them
-puts them back.
+pushes what source order's did, where it did, but for its writer's columns.
+Each other lane has three arenas of its own (`CheckProgramLanes.arenas`): its
+functions' lowered columns, its writer's columns with its functions' Tier 0
+code and what the merge reads, and its functions' bytes; lane 0's writer's
+columns are in the scratch arena there. The caller keeps them until it is done
+with the emission's link (`check_program_lanes_release`); the next emission
+with them puts them back.
 
 A lane's writer has some thirty columns, each with room for any of the
 program's bodies, far apart in its scratch arena, of which a lane touches a
@@ -101,8 +102,12 @@ a 2 MB page, and each lane's arenas are new: on the 9700X, 8 lanes' emissions
 of `sqlite3.c` took 6.7 billion kernel cycles against one lane's 0.17, and
 were slower than 4 lanes'. The lanes' scratch arenas are in base pages
 (`arena_reserve_small`), so a lane clears only what it touches: 0.58 billion.
-The functions' columns and bytes are packed, and keep huge pages past their
-first 64 KB.
+Lane 0's writer was in the caller's scratch at first, past the checker's, in
+huge pages: on one lane, as the 9700X job's pinned `-c` of `sqlite3.c` runs, it
+took 46 MB of the compile's peak RSS, until its columns took base pages of
+their own too (#528). The rest of lane 0's scratch stays the caller's, whose
+pages the checker touched already. The functions' columns and bytes are packed,
+and keep huge pages past their first 64 KB.
 
 ## The lane rule
 

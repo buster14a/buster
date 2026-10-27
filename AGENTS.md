@@ -4441,9 +4441,9 @@ the failure reported is source order's (the earliest step's, its first
 body's), whatever the lane count. The lowering numbers the runtime's
 functions (libgcc's) and the label symbols part by part, and
 `check_lower_finish` puts them in source order. Lane 0 is the calling thread
-with the caller's arenas; each other lane has its own
-(`CheckProgramLanes.arenas`), which the caller keeps until it is done with the
-link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
+with the caller's arenas but for its writer's columns, in base pages; those and
+each other lane's arenas are `CheckProgramLanes.arenas`, which the caller keeps
+until it is done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 
