@@ -1315,16 +1315,17 @@ path's 11.1.
   any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
   are the same bytes as main's.
 - **Realigned frames (#136)** at about one instruction per entry to code without them. On these programs, which have no
-  object aligned past 16, the 9700X measured the branch with main merged in (`acb5131`) against main's `bbe59b7` in six
-  rounds in alternating order: the vector path at 170.86 instructions per entry against 169.85, its cycles (80.36 to
-  80.74 against 80.45 to 80.79) and alone (78.70 to 79.06 against 78.93 to 79.27) within main's spread, and the scalar
-  path at 573.75 instructions against 570.95 (233.06 cycles against 230.70). The instruction is each function's: the
-  frame alignment's scan before selection, the frame's added fields, and the prologue's and the layout's checks of the
-  realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head ran the vector path 1.15% and the scalar
-  one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after `main.c`'s) sat 14,928 bytes further on, and
-  main moved by as much (`.skip` before the unit's code, no code changed) ran its vector path 0.8% slower. `-c
-  sqlite3.c`'s objects are main's, and its time within main's spread
-  ([the record](https://github.com/buster14a/buster-performance/tree/0373f98c785caface34a91546b277ef57d816344/docs/measurements/aligned-objects-136-2026-10-27)).
+  object aligned past 16, the 9700X measured the branch with main merged in against main twice, six rounds each in
+  alternating order: the vector path at 170.86 instructions per entry against 169.85 both times, its cycles 80.63
+  against 79.83 against main's `51bf882` (1.0% more, and 1.2% alone) and 80.49 against 80.62 against `bbe59b7` (within
+  main's spread), and the scalar path at 573.75 instructions against 570.95 (1.5% and 1.0% more cycles). The
+  instruction is each function's: the frame alignment's scan before selection, the frame's added fields, and the
+  prologue's and the layout's checks of the realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head
+  ran the vector path 1.15% and the scalar one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after
+  `main.c`'s) sat 14,928 bytes further on, and main moved by as much (`.skip` before the unit's code, no code changed)
+  ran its vector path 0.8% slower. `-c sqlite3.c`'s objects are main's and its time within main's spread, at 0.09% more
+  instructions, most of them clang's code for the lowering's `check_lower_part`, which moves with any edit of its body
+  ([the record](https://github.com/buster14a/buster-performance/tree/12adf9e72419f5352e10088edef316bdfaa0624d/docs/measurements/aligned-objects-136-2026-10-27)).
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   On the generated programs the vector path's cycles per entry are about 2.3 times that. On `sqlite3.c` (below) the
   three stages take 41 to 42 cycles per output token, 1.3 times the budget: it is not met.
