@@ -743,7 +743,7 @@ static void check_test_program_refused(CheckTest* test)
 // types, aligned typedefs, complex types of _BitInts, enums and records; and the calling convention's tests' world:
 // complex types of every floating type among them): of the whole world and of every count of its types to 300; then with
 // the kinds' column and both tables ending at a PROT_NONE page, for every count to 200, so that a read or a write past the
-// last type faults.
+// last type faults. And a function's memory classes from its entries' (check_lower_entry_classes), at the page's end too.
 static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -807,6 +807,32 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             }
             free(columns);
             abi_test_world_close(&world);
+        }
+    }
+    // A function's memory classes from its entries' classes (check_lower_entry_classes) against its twin's: columns of
+    // every count to 200 ending at the guard page, of random classes but F80, I128 and U128, with one of those at a random
+    // place in one column of four, and none in the others.
+    for (uint32_t count = 0; guarded && count <= 200; count += 1)
+    {
+        for (uint32_t round = 0; round < 8; round += 1)
+        {
+            uint8_t* classes = mappings[0] + page - count;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                classes[i] = (uint8_t)(check_test_random(test) % BUSTER_TYPED_CLASS_F80);
+            }
+            const uint8_t memory[3] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128 };
+            if (count != 0 && round % 4 != 0)
+            {
+                classes[check_test_random(test) % count] = memory[round % 3];
+            }
+            const uint32_t vector = check_lower_entry_classes(classes, count);
+            const uint32_t scalar = check_lower_entry_classes_scalar(classes, count);
+            const uint32_t expected = count == 0 || round % 4 == 0 ? 0 : round % 3 == 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : BUSTER_CHECK_LOWER_ENTRIES_WIDE;
+            char description[160];
+            snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u by the vector path, %u by the scalar one, for %u", count,
+                     round, vector, scalar, expected);
+            check_test_expect(test, vector == expected && scalar == expected, description);
         }
     }
     for (uint32_t i = 0; i < 3; i += 1)

@@ -833,57 +833,101 @@ static void check_lower_source(CheckLowerWriter* writer, uint32_t token)
     }
 }
 
+// check_lower_emit's entry in a function that tracks its stack (CheckLowerWriter.track: one with a statement expression,
+// or a program with a terminal helper), out of line, as few functions do.
+static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
+{
+    const bool operand = (kind >= BUSTER_TYPED_NEG && kind <= BUSTER_TYPED_SET_GLOBAL) || (kind >= BUSTER_TYPED_DISCARD && kind <= BUSTER_TYPED_BRANCH_TRUE) ||
+                         kind == BUSTER_TYPED_JUMP_VALUE || (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID) || kind == BUSTER_TYPED_ALLOCA ||
+                         kind == BUSTER_TYPED_STACK_RESTORE;
+    const uint8_t top = writer->stack_head != 0 ? writer->stack_classes[writer->stack_head] : BUSTER_TYPED_CLASS_VOID;
+    if (writer->reachable && operand && top != BUSTER_TYPED_CLASS_VOID && writer->count != 0 && writer->classes[writer->count - 1] != top)
+    {
+        // Tier0's operand-class column is the preceding entry's class. A void call or a spill of a different
+        // stack class can interrupt that adjacency. This cancelling pair restores the contract without
+        // reading or changing the pending value, and works for narrow, floating and pointer classes alike.
+        if (writer->count + 2 >= writer->capacity || writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        }
+        else
+        {
+            writer->kinds[writer->count] = BUSTER_TYPED_CONST;
+            writer->classes[writer->count] = top;
+            writer->values[writer->count++] = 0;
+            writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
+            writer->classes[writer->count] = top;
+            writer->values[writer->count++] = 0;
+        }
+    }
+    if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        check_lower_track(writer, kind, class, value);
+        writer->kinds[writer->count] = kind;
+        writer->classes[writer->count] = class;
+        writer->values[writer->count] = value;
+        writer->count += 1;
+    }
+}
+
+// Appends an entry. Its function's memory classes (Tier0Function.x87 and int128) come from its entries' classes once it
+// is lowered (check_lower_entry_classes).
 static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
+    const uint32_t count = writer->count;
     if (class >= BUSTER_TYPED_CLASSES)
     {
         check_lower_unsupported(writer, "values of this type");
     }
-    else if (writer->count >= writer->capacity || writer->count >= BUSTER_TIER0_MAX_ENTRIES)
+    else if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
     {
         check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
     }
-    else
+    else if (writer->track)
     {
-        const bool operand = (kind >= BUSTER_TYPED_NEG && kind <= BUSTER_TYPED_SET_GLOBAL) ||
-                             (kind >= BUSTER_TYPED_DISCARD && kind <= BUSTER_TYPED_BRANCH_TRUE) || kind == BUSTER_TYPED_JUMP_VALUE ||
-                             (kind == BUSTER_TYPED_RETURN && class != BUSTER_TYPED_CLASS_VOID) || kind == BUSTER_TYPED_ALLOCA || kind == BUSTER_TYPED_STACK_RESTORE;
-        const uint8_t top = writer->stack_head != 0 ? writer->stack_classes[writer->stack_head] : BUSTER_TYPED_CLASS_VOID;
-        if (writer->track && writer->reachable && operand && top != BUSTER_TYPED_CLASS_VOID && writer->count != 0 && writer->classes[writer->count - 1] != top)
-        {
-            // Tier0's operand-class column is the preceding entry's class. A void call or a spill of a different
-            // stack class can interrupt that adjacency. This cancelling pair restores the contract without
-            // reading or changing the pending value, and works for narrow, floating and pointer classes alike.
-            if (writer->count + 2 >= writer->capacity || writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES)
-            {
-                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
-            }
-            else
-            {
-                writer->kinds[writer->count] = BUSTER_TYPED_CONST;
-                writer->classes[writer->count] = top;
-                writer->values[writer->count++] = 0;
-                writer->kinds[writer->count] = BUSTER_TYPED_DISCARD;
-                writer->classes[writer->count] = top;
-                writer->values[writer->count++] = 0;
-                writer->x87 |= top == BUSTER_TYPED_CLASS_F80;
-                writer->int128 |= check_lower_wide_class(top);
-            }
-        }
-        if (writer->output->status == CHECK_PROGRAM_OK)
-        {
-            if (writer->track)
-            {
-                check_lower_track(writer, kind, class, value);
-            }
-            writer->x87 |= class == BUSTER_TYPED_CLASS_F80;
-            writer->int128 |= check_lower_wide_class(class);
-            writer->kinds[writer->count] = kind;
-            writer->classes[writer->count] = class;
-            writer->values[writer->count] = value;
-            writer->count += 1;
-        }
+        check_lower_emit_tracked(writer, kind, class, value);
     }
+    else if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        writer->kinds[count] = kind;
+        writer->classes[count] = class;
+        writer->values[count] = value;
+        writer->count = count + 1;
+    }
+}
+
+// Which memory classes a function's `count` entries' classes have (Tier0Function.x87 and int128):
+// BUSTER_CHECK_LOWER_ENTRIES_X87 where one is F80, and BUSTER_CHECK_LOWER_ENTRIES_WIDE where one is I128 or U128. 64
+// classes at a time (the last 64 masked to the count); check_lower_entry_classes_scalar is its twin.
+#define BUSTER_CHECK_LOWER_ENTRIES_X87 1u
+#define BUSTER_CHECK_LOWER_ENTRIES_WIDE 2u
+
+_Static_assert(BUSTER_TYPED_CLASS_U128 == (BUSTER_TYPED_CLASS_I128 | 1), "the 128-bit integers' classes differ in their low bit alone");
+
+static uint32_t check_lower_entry_classes(const uint8_t* classes, uint32_t count)
+{
+    uint64_t x87 = 0;
+    uint64_t wide = 0;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const __mmask64 active = count - first < 64 ? (UINT64_C(1) << (count - first)) - 1 : UINT64_MAX;
+        // The lanes past the count read as 0, VOID's class.
+        const __m512i some = _mm512_maskz_loadu_epi8(active, classes + first);
+        x87 |= _mm512_cmpeq_epi8_mask(some, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F80));
+        wide |= _mm512_cmpeq_epi8_mask(_mm512_and_si512(some, _mm512_set1_epi8((char)~1)), _mm512_set1_epi8(BUSTER_TYPED_CLASS_I128));
+    }
+    return (x87 != 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : 0) | (wide != 0 ? BUSTER_CHECK_LOWER_ENTRIES_WIDE : 0);
+}
+
+static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_t count)
+{
+    uint32_t result = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        result |= classes[i] == BUSTER_TYPED_CLASS_F80 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : 0;
+        result |= check_lower_wide_class(classes[i]) ? BUSTER_CHECK_LOWER_ENTRIES_WIDE : 0;
+    }
+    return result;
 }
 
 static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
@@ -903,9 +947,23 @@ static void check_lower_instruction(CheckLowerWriter* writer, uint8_t kind, uint
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_INSTRUCTION, .node = kind, .type = class, .value = value });
 }
 
+// Whether a conversion from `from` to `to` (check_lower_conversion) writes no entry and can't fail: neither type is
+// complex, both have one class on the stack, a value's or both an aggregate's address, and `to` isn't _Bool, whose
+// conversion normalizes even a _Bool's value. An array's decay to a pointer, a pointer's to another and a change of
+// qualifiers are such conversions, which need no task.
+static bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
+{
+    const uint8_t from_facts = check_lower_facts(writer, from);
+    const uint8_t to_facts = check_lower_facts(writer, to);
+    const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, from);
+    const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, to);
+    return source == target && source < BUSTER_TYPED_CLASSES && ((from_facts ^ to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 &&
+           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 && (to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0;
+}
+
 static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
-    if (to != 0 && from != to)
+    if (to != 0 && from != to && !check_lower_conversion_empty(writer, from, to))
     {
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CONVERSION, .node = from, .type = to });
     }
@@ -2872,8 +2930,6 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
             {
                 check_lower_track(writer, writer->kinds[i], writer->classes[i], writer->values[i]);
             }
-            writer->x87 |= writer->classes[i] == BUSTER_TYPED_CLASS_F80;
-            writer->int128 |= check_lower_wide_class(writer->classes[i]);
             writer->count += 1;
         }
         if (labels[result.count] != BUSTER_CHECK_NONE)
@@ -5638,6 +5694,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 writer->label_entries[k] = writer->labels[label];
             }
         }
+        // The function has long double values (Tier0Function.x87) where its result is one or an entry is of class F80, and
+        // 128-bit integer ones (Tier0Function.int128) where an entry is of class I128 or U128.
+        const uint32_t memory = writer->scalar ? check_lower_entry_classes_scalar(writer->classes, writer->count) : check_lower_entry_classes(writer->classes, writer->count);
+        writer->x87 = writer->x87 || (memory & BUSTER_CHECK_LOWER_ENTRIES_X87) != 0;
+        writer->int128 = (memory & BUSTER_CHECK_LOWER_ENTRIES_WIDE) != 0;
 #define BUSTER_CHECK_LOWER_COPY(field, source, type, length) \
         if (status->status == CHECK_PROGRAM_OK && (length) != 0) \
         { \
