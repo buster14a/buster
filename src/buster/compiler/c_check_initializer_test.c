@@ -1600,6 +1600,25 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
         },
     };
     check_init_test_source(test, copy_override, copy_override_expected, BUSTER_ARRAY_LENGTH(copy_override_expected), true, true, 0);
+    static const char zero_source[] =
+        "unsigned char explicit_zero[64]={0},final_zero[64]={[63]=0},overwrite_zero[64]={[63]=255,[63]=0};\n"
+        "_Thread_local unsigned char tls_explicit_zero[64]={0},tls_overwrite_zero[64]={[63]=255,[63]=0};\n"
+        "const unsigned char const_explicit_zero[64]={0};\n"
+        "struct Z{unsigned a:9;unsigned b:7;} bit_zero={.a=511,.b=127,.a=0,.b=0};\n"
+        "int zero_target;union ZU{int *p;long n;} reloc_zero={.p=&zero_target,.n=0};\n"
+        "double negative_zero_array[2]={-0.0,0.0};\n";
+    static const CheckInitExpected zero_expected[] = {
+        { .name = "explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
+        { .name = "final_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
+        { .name = "overwrite_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
+        { .name = "tls_explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_TBSS },
+        { .name = "tls_overwrite_zero", .size = 64, .class = BUSTER_LINK_CLASS_TBSS },
+        { .name = "const_explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_RODATA },
+        { .name = "bit_zero", .size = 4, .class = BUSTER_LINK_CLASS_BSS },
+        { .name = "reloc_zero", .size = 8, .class = BUSTER_LINK_CLASS_BSS },
+        { .name = "negative_zero_array", .bytes = { [7] = 0x80 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+    };
+    check_init_test_source(test, zero_source, zero_expected, BUSTER_ARRAY_LENGTH(zero_expected), true, true, clang);
     static const char automatic[] = "int f(int x){struct S{int a,b;};struct S s={x,x+1};int a[2]={x,3};return s.a+a[0];}";
     check_init_test_source(test, automatic, 0, 0, true, false, clang);
     static const char* invalid[] = {

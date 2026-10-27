@@ -17,7 +17,8 @@
 //
 // bytes and scratch are distinct, disjoint caller-owned arenas. Their newly allocated suffixes must not overlap
 // inputs or Link tables; live input prefixes in either stable-address arena are permitted.
-// The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds object bytes, sorted
+// The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds encoded writes, sorted
+// bit-range boundaries and final relocations, materialized nonzero object bytes,
 // final relocations and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
 // capacity checks precede publication. A failed call leaves Link (including its error), symbols and byte length
 // unchanged. Empty batches accept null input arrays. Records may be partitioned into batches only when local
@@ -354,6 +355,154 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
     return valid;
 }
 
+// Only bytes owned by this write are inspected. Bit-fields can begin/end inside a byte; the bulk is a bounded
+// byte slice with no readable padding. The scalar twin is also used for tiny slices, including scalar constants.
+static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end, bool scalar)
+{
+    uint8_t nonzero = 0;
+    if (begin < end && (begin % 8) != 0)
+    {
+        const uint32_t width = (uint32_t)(end - begin < 8 - begin % 8 ? end - begin : 8 - begin % 8);
+        nonzero |= (uint8_t)((bytes[begin / 8] >> (begin % 8)) & ((1u << width) - 1));
+        begin += width;
+    }
+    const uint64_t byte_end = end / 8;
+    uint64_t byte = begin / 8;
+    if (!scalar && byte_end - byte >= 64)
+    {
+        __m512i combined = _mm512_setzero_si512();
+        while (byte_end - byte >= 64)
+        {
+            combined = _mm512_or_si512(combined, _mm512_loadu_si512(bytes + byte));
+            byte += 64;
+        }
+        nonzero |= _mm512_test_epi64_mask(combined, combined) != 0;
+    }
+    for (; byte < byte_end; byte += 1)
+    {
+        nonzero |= bytes[byte];
+    }
+    if (begin < end && (end % 8) != 0 && begin <= byte_end * 8)
+    {
+        nonzero |= bytes[byte_end] & (uint8_t)((1u << (end % 8)) - 1);
+    }
+    return nonzero != 0;
+}
+
+static uint32_t check_data_boundary_position(const uint64_t* boundaries, uint32_t count, uint64_t offset)
+{
+    uint32_t begin = 0;
+    uint32_t end = count;
+    while (begin < end)
+    {
+        const uint32_t middle = begin + (end - begin) / 2;
+        if (boundaries[middle] < offset)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin;
+}
+
+// All writes were validated and encoded in source order. Usually every write is zero, or an unoverwritten write
+// proves the object nonzero. Otherwise sort their bit boundaries and walk backwards, assigning each disjoint interval
+// to its last writer with the initializer's next-uncovered disjoint set. Each interval is visited once; large
+// CLEAR ranges cost boundary work, not storage-size work. Scratch depends only on the number of checked writes.
+static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, const CheckInitializer* initializer,
+                                                     const uint8_t (*values)[32], Arena* scratch, bool* nonzero)
+{
+    const uint64_t mark = scratch->length;
+    CheckDataStatus status = CHECK_DATA_OK;
+    uint64_t* boundaries = 0;
+    uint64_t* temporary = 0;
+    uint32_t* next = 0;
+    const uint64_t capacity = (uint64_t)initializer->count * 2;
+    if (capacity > UINT32_MAX)
+    {
+        status = CHECK_DATA_RESOURCE;
+    }
+    else
+    {
+        boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity);
+        temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity);
+        next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
+        if (boundaries == 0 || temporary == 0 || next == 0)
+        {
+            status = CHECK_DATA_RESOURCE;
+        }
+    }
+    uint32_t count = 0;
+    for (uint32_t i = 0; status == CHECK_DATA_OK && i < initializer->count; i += 1)
+    {
+        const CheckInitPart* part = &initializer->parts[i];
+        uint64_t bits = 0;
+        const CheckInitStatus part_status = check_initializer_part_bits(types, part, &bits);
+        assert(part_status == CHECK_INIT_OK);
+        boundaries[count++] = part->bit_offset;
+        boundaries[count++] = part->bit_offset + bits;
+    }
+    for (uint32_t shift = 0; status == CHECK_DATA_OK && shift < 64; shift += 8)
+    {
+        uint32_t counts[256] = { 0 };
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            counts[(boundaries[i] >> shift) & 255] += 1;
+        }
+        uint32_t total = 0;
+        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+        {
+            const uint32_t size = counts[bucket];
+            counts[bucket] = total;
+            total += size;
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t bucket = (uint32_t)((boundaries[i] >> shift) & 255);
+            temporary[counts[bucket]++] = boundaries[i];
+        }
+        uint64_t* swap = boundaries;
+        boundaries = temporary;
+        temporary = swap;
+    }
+    uint32_t unique = 0;
+    for (uint32_t i = 0; status == CHECK_DATA_OK && i < count; i += 1)
+    {
+        if (unique == 0 || boundaries[unique - 1] != boundaries[i])
+        {
+            boundaries[unique] = boundaries[i];
+            next[unique] = unique;
+            unique += 1;
+        }
+    }
+    *nonzero = false;
+    for (uint32_t i = initializer->count; status == CHECK_DATA_OK && !*nonzero && i != 0; i -= 1)
+    {
+        const CheckInitPart* part = &initializer->parts[i - 1];
+        uint64_t bits = 0;
+        const CheckInitStatus part_status = check_initializer_part_bits(types, part, &bits);
+        assert(part_status == CHECK_INIT_OK);
+        const uint32_t begin = check_data_boundary_position(boundaries, unique, part->bit_offset);
+        const uint32_t end = check_data_boundary_position(boundaries, unique, part->bit_offset + bits);
+        uint32_t at = check_init_uncovered(next, begin);
+        while (!*nonzero && at < end)
+        {
+            if (part->kind != CHECK_INIT_CLEAR)
+            {
+                const uint8_t* bytes = part->kind == CHECK_INIT_BYTES ? part->bytes : values[i - 1];
+                *nonzero = check_data_nonzero_bits(bytes, boundaries[at] - part->bit_offset, boundaries[at + 1] - part->bit_offset, false);
+            }
+            next[at] = check_init_uncovered(next, at + 1);
+            at = next[at];
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return status;
+}
+
 static CheckDataStatus check_data_plan_object(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
                                              const SymbolId* object_symbols, uint32_t object_count, const Link* link,
                                              Arena* scratch, CheckDataPlan* plan)
@@ -414,6 +563,11 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     const CheckInitializer* initializer = object->initializer_plan;
     uint8_t* live_parts = 0;
     uint32_t live_count = 0;
+    uint8_t (*values)[32] = 0;
+    bool nonzero = false;
+    bool surviving_nonzero = false;
+    uint64_t nonzero_begin = 0;
+    uint64_t nonzero_end = 0;
     if (status == CHECK_DATA_OK && initializer != 0)
     {
         const TypeAnswer compatible = type_compatible(types, type_unqualified(object->type), type_unqualified(initializer->type));
@@ -430,14 +584,10 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
             status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
             plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
-            plan->bytes = arena_push(scratch, plan->size, 1);
-            if ((live_count != 0 && plan->fixups == 0) || (plan->size != 0 && plan->bytes == 0))
+            values = status == CHECK_DATA_OK ? arena_push(scratch, (uint64_t)initializer->count * sizeof(*values), 1) : 0;
+            if (status == CHECK_DATA_OK && ((live_count != 0 && plan->fixups == 0) || values == 0))
             {
                 status = CHECK_DATA_RESOURCE;
-            }
-            else if (plan->size != 0)
-            {
-                memset(plan->bytes, 0, plan->size);
             }
         }
     }
@@ -502,6 +652,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         const uint32_t shift = (uint32_t)(part->bit_offset % 8);
         const bool valid_type = type_is_valid(types, part->type);
         uint64_t size = part->kind == CHECK_INIT_VALUE && valid_type ? type_size(types, part->type) : part->byte_count;
+        bool part_nonzero = false;
         if (part->bit_width != 0)
         {
             size = ((uint64_t)shift + part->bit_width + 7) / 8;
@@ -517,24 +668,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             {
                 status = CHECK_DATA_INVALID;
             }
-            else if (size != 0)
+            else if (part->kind == CHECK_INIT_BYTES && size != 0)
             {
-                if (part->kind == CHECK_INIT_CLEAR && part->bit_width != 0)
-                {
-                    for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
-                    {
-                        const uint64_t destination = part->bit_offset + bit;
-                        plan->bytes[destination / 8] &= (uint8_t)~(1u << (destination % 8));
-                    }
-                }
-                else if (part->kind == CHECK_INIT_CLEAR)
-                {
-                    memset(plan->bytes + offset, 0, size);
-                }
-                else
-                {
-                    memcpy(plan->bytes + offset, part->bytes, size);
-                }
+                part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
             }
         }
         else if (part->kind == CHECK_INIT_VALUE)
@@ -562,21 +698,13 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                 {
                     status = CHECK_DATA_INVALID;
                 }
-                else
-                {
-                    for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
-                    {
-                        const uint64_t destination = part->bit_offset + bit;
-                        const uint8_t mask = (uint8_t)(1u << (destination % 8));
-                        const uint8_t value_bit = (uint8_t)((scalar.bytes[bit / 8] >> (bit % 8)) & 1);
-                        plan->bytes[destination / 8] = (uint8_t)((plan->bytes[destination / 8] & ~mask) | (value_bit != 0 ? mask : 0));
-                    }
-                }
             }
-            else if (status == CHECK_DATA_OK)
+            if (status == CHECK_DATA_OK)
             {
-                memcpy(plan->bytes + offset, scalar.bytes, size);
-                if (scalar.object != 0 && live_parts[i])
+                memcpy(values[i], scalar.bytes, sizeof(scalar.bytes));
+                const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
+                part_nonzero = check_data_nonzero_bits(values[i], 0, bits, false);
+                if (part->bit_width == 0 && scalar.object != 0 && live_parts[i])
                 {
                     if (offset > UINT32_MAX)
                     {
@@ -597,6 +725,61 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         else
         {
             status = CHECK_DATA_INVALID;
+        }
+        if (size != 0)
+        {
+            const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
+            nonzero |= part_nonzero;
+            if (part_nonzero)
+            {
+                surviving_nonzero = true;
+                nonzero_begin = part->bit_offset;
+                nonzero_end = part->bit_offset + bits;
+            }
+            else if (part->bit_offset < nonzero_end && part->bit_offset + bits > nonzero_begin)
+            {
+                surviving_nonzero = false;
+            }
+        }
+    }
+    if (status == CHECK_DATA_OK && initializer != 0 && nonzero && !surviving_nonzero && plan->fixup_count == 0)
+    {
+        status = check_data_initializer_nonzero(types, initializer, values, scratch, &nonzero);
+    }
+    if (status == CHECK_DATA_OK && initializer != 0 && (nonzero || plan->fixup_count != 0))
+    {
+        plan->bytes = arena_push(scratch, plan->size, 1);
+        if (plan->bytes == 0)
+        {
+            status = CHECK_DATA_RESOURCE;
+        }
+        else
+        {
+            memset(plan->bytes, 0, plan->size);
+        }
+        for (uint32_t i = 0; status == CHECK_DATA_OK && i < initializer->count; i += 1)
+        {
+            const CheckInitPart* part = &initializer->parts[i];
+            const uint64_t offset = part->bit_offset / 8;
+            const uint64_t size = part->kind == CHECK_INIT_VALUE ? type_size(types, part->type) : part->byte_count;
+            if (part->bit_width != 0)
+            {
+                for (uint32_t bit = 0; bit < part->bit_width; bit += 1)
+                {
+                    const uint64_t destination = part->bit_offset + bit;
+                    const uint8_t mask = (uint8_t)(1u << (destination % 8));
+                    const bool value_bit = part->kind == CHECK_INIT_VALUE && ((values[i][bit / 8] >> (bit % 8)) & 1) != 0;
+                    plan->bytes[destination / 8] = (uint8_t)((plan->bytes[destination / 8] & ~mask) | (value_bit ? mask : 0));
+                }
+            }
+            else if (size != 0 && part->kind == CHECK_INIT_CLEAR)
+            {
+                memset(plan->bytes + offset, 0, size);
+            }
+            else if (size != 0)
+            {
+                memcpy(plan->bytes + offset, part->kind == CHECK_INIT_BYTES ? part->bytes : values[i], size);
+            }
         }
     }
     if (status == CHECK_DATA_OK && !check_data_sort_fixups(plan, scratch))
@@ -622,10 +805,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     }
     if (status == CHECK_DATA_OK)
     {
-        uint8_t nonzero = 0;
-        for (uint64_t byte = 0; plan->bytes != 0 && byte < plan->size; byte += 1)
+        if (initializer == 0 && plan->bytes != 0)
         {
-            nonzero |= plan->bytes[byte];
+            nonzero = check_data_nonzero_bits(plan->bytes, 0, plan->size * 8, false);
         }
         const bool initialized = nonzero != 0 || plan->fixup_count != 0;
         const bool tls = (link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;

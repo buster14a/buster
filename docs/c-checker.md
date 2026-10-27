@@ -610,6 +610,15 @@ ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
 combined object/data output uses the program's actual symbol space.
+Before materializing an aggregate, the emitter validates and encodes its scalar
+writes once. All-zero writes and large clear ranges remain symbolic. When
+overwrites can remove earlier nonzero bytes, a backwards last-writer walk over
+sorted bit-range boundaries determines the final state; each interval is visited
+once, with scratch proportional to checked writes rather than declared storage.
+Only a surviving nonzero byte or relocation requires an object-sized scratch
+buffer. Const zero objects keep RODATA and are filled directly during publication;
+negative floating zero is classified by its encoded bytes. The byte-range scan
+has bounded AVX-512 loads and an exact scalar twin, including partial-byte tails.
 Initializer plans retain the exact selected overload candidate and object.
 The standalone source bridge refuses a referenced overloadable symbol until
 its ABI symbol name is available, before publishing any Link state. An unused
