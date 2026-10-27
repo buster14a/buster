@@ -425,13 +425,15 @@ their result's, which the entry pops and pushes as `CALL` pops its arguments. A 
   refused at its depth (`TIER0_ERROR_DEPTH`), as an integer depth past the table is;
 - `FLOATING(j)` and `FLOATING_RESULT`, a floating operand's XMM register and the floating result's;
 - `INTEGER(j)`, `INTEGER_RESULT` and `SCRATCH(k)`, an integer operand's register (an address among them), the integer
-  result's, and up to four free ones, the depth registers past the entry's;
+  result's, and up to four free ones, the depth registers past the entry's. An operand's is in a field no wider than its
+  class, whose register's bits past the class's are unspecified: a base or an index a 64-bit integer's, a 32-bit field a
+  32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
 - the opmask registers by number, k0 to k7, which no value keeps between entries.
 
 `tier0_operation_valid` checks each row: VEX and EVEX forms alone, their operands in their fields (no implicit
 register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
-registers), no branch, symbol or RIP-relative address, each field's role of its class, and each record `x86_validate`
-takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
+registers), no branch, symbol or RIP-relative address, each field's role of its class (an integer operand's no
+narrower than its field), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
 registers and memory through its addresses, and nothing else; which forms a unit's target allows is the front end's to
 decide (#180's policy), as the instruction set of its rows is.
 
@@ -439,8 +441,9 @@ decide (#180's policy), as the instruction set of its rows is.
 `LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
 other bytes or of a value of other bytes, a constant past `vector_constants` or of other bytes, an `X86` entry past
 the operations, of another class than its row's result or of an operand of another class or width, the arms of a
-`?:` of two widths, a call's argument or result of the class, `RETURN` of it and the kinds vectors don't take (their
-arithmetic, compares and conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
+`?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
+vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
+conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
 
 ## Conversions between U64 and floating values (#136's item 5)
 

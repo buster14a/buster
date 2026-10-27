@@ -4851,8 +4851,10 @@ coverage, which must reach each class's every kind, conversion and save and
 both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
 same for VECTOR values and `X86` entries, its rows' model plain C (each
 instruction's elements as its definition has them): the rows' rules
-(`tier0_operation_valid`: each of 16 breaks refused, every row of the check
-taken) and the stream's, each break refused at its entry; each row under no
+(`tier0_operation_valid`: each of 20 breaks refused, integer operands narrower
+than their fields among them, every row of the check and the narrow operands'
+neighbours taken) and the stream's, each break refused at its entry (a vector
+converted and two compared among them); each row under no
 live values, under 8 floats and 3 integers, and under as many floats as leave
 its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
 one past it and a scratch register past the integer table, which both paths
