@@ -292,8 +292,10 @@ events and every five minutes. The platform may delay scheduled wakeups; the
 guard stays closed until a valid lease exists. State is committed before dispatch.
 Head/base/mergeability metadata is batched in one bounded GraphQL query. Review
 and comment events refresh their target immediately; a missed signal is recovered
-within the 15-minute signal refresh interval, subject to GitHub scheduling. The
-selected PR's approvals/commands are read again before every grant. Immutable
+within the 15-minute signal refresh interval while capacity is occupied, subject
+to GitHub scheduling. Every candidate's approvals/commands are refreshed before
+a free-pool choice, so a coalesced promotion cannot remain hidden behind cached
+ordinary work. The selected PR is also read again immediately before its grant. Immutable
 diff classifications and unchanged ledger/check descriptions are reused. Waiting
 maintenance gates poll once a minute; a selected PR polls every five seconds for
 at most three minutes while its dispatch ID is bound. These bounds conserve the

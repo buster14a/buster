@@ -464,6 +464,16 @@ static Buffer ci_test_review_body(const char* decision, const char* sha, bool tr
 static void ci_test_signals(void)
 {
     ci_fixture_init();
+    ci_fixture.current.fork = true;
+    ci_reconcile(false);
+    ++ci_fixture_clock;
+    Buffer missed = ci_test_comment_body("LGTM", true, 900, ci_now());
+    ci_fixture.comments = missed.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.dispatches == 1, "signals: a missed/coalesced approval is re-read before a free-pool choice, without waiting for the signal cache timeout");
+    free(missed.data);
+
+    ci_fixture_init();
     CiState state = {0};
     state.pr_count = 1;
     CiPr* pr = &state.prs[0];

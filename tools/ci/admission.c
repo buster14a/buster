@@ -2145,6 +2145,11 @@ static void ci_reconcile(bool inspect)
         ci_observe(pr, current, now);
     }
     ci_refresh_requests(&state, workflow);
+    CiRun active[BUSTER_CI_CANDIDATES];
+    size_t active_count = ci_active_runs(active, workflow);
+    bool occupied = *state.lease.nonce != 0;
+    if (!inspect) occupied = ci_reap_lease(&state, identities, count, workflow, now);
+    occupied = ci_legacy_and_conflicts(&state, identities, count, active, active_count, workflow, inspect) || occupied;
     for (size_t i = 0; i < count; ++i)
     {
         CiIdentity* current = &identities[i];
@@ -2155,7 +2160,9 @@ static void ci_reconcile(bool inspect)
             ci_copy(pr->code_merge, sizeof(pr->code_merge), current->merge);
         }
         current->code = pr->cached_code;
-        bool refresh = inspect || pr->signals_at == 0 || now < pr->signals_at || now - pr->signals_at >= BUSTER_CI_SIGNAL_REFRESH_SECONDS || target_pr == pr->number;
+        // A coalesced approval event may not be the event that wakes this run. At every free-pool decision,
+        // refresh every candidate before ranking, not only whichever cached candidate would already win.
+        bool refresh = inspect || !occupied || pr->signals_at == 0 || now < pr->signals_at || now - pr->signals_at >= BUSTER_CI_SIGNAL_REFRESH_SECONDS || target_pr == pr->number;
         if (refresh)
         {
             ci_comments(&state, pr, current, now);
@@ -2180,14 +2187,6 @@ static void ci_reconcile(bool inspect)
         ci_save_state(&state);
         ci_background_retries(&state);
     }
-    CiRun active[BUSTER_CI_CANDIDATES];
-    size_t active_count = ci_active_runs(active, workflow);
-    bool occupied = *state.lease.nonce != 0;
-    if (!inspect)
-    {
-        occupied = ci_reap_lease(&state, identities, count, workflow, now);
-    }
-    occupied = ci_legacy_and_conflicts(&state, identities, count, active, active_count, workflow, inspect) || occupied;
     CiCandidate candidates[BUSTER_CI_CANDIDATES] = {0};
     size_t candidate_count = 0;
     for (size_t i = 0; i < count; ++i)
