@@ -142,7 +142,7 @@ static uint8_t check_input_loop_count(CheckInputReader* reader, uint32_t source,
         {
             const uint8_t* bytes = 0;
             const uint32_t length = pp_spelling(reader->pp, kind, end, location, buffer, &bytes);
-            literal = check_literal_number(bytes, length, reader->scratch);
+            check_literal_number(bytes, length, reader->scratch, &literal);
             reader->output->resource |= literal.resource;
         }
         reader->scratch->length = mark;
