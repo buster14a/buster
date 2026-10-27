@@ -105,6 +105,7 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         const char* source;
         uint32_t diagnostics;
         bool rejected;
+        bool quiet;
     } fixtures[] =
     {
         { "issue 487", "unsigned long long f(W a){return __builtin_ia32_ucmpb512_mask(a,a,8,~0ull);}", 1, true },
@@ -154,6 +155,9 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         { "push pop policy", "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\n#pragma GCC diagnostic pop\nunsigned g(V a){return BAD;}", 1, true },
         { "ICE stays hard in dead code", "unsigned f(V a,int n){if(0)return __builtin_ia32_cmpb128_mask(a,a,n,65535);return 0;}", 0, true },
         { "ICE stays hard in sizeof", "unsigned f(V a,int n){return sizeof(__builtin_ia32_cmpb128_mask(a,a,n,65535));}", 0, true },
+        { "-w suppresses range", "unsigned f(V a){return BAD;}", 0, false, true },
+        { "-w suppresses compound literal range", "unsigned f(V a){return (unsigned){BAD};}", 0, false, true },
+        { "ICE stays hard with -w", "unsigned f(V a,int n){return __builtin_ia32_cmpb128_mask(a,a,n,65535);}", 0, true, true },
     };
     char directory[] = "/tmp/buster-x86-diagnostic-XXXXXX";
     const bool ready = mkdtemp(directory) != NULL;
@@ -172,7 +176,7 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         char source[2048];
         const int length = snprintf(source, sizeof(source), "%s%s\n", prefix, fixtures[i].source);
         const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
-        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", path, NULL };
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", fixtures[i].quiet ? "-w" : "-fsyntax-only", path, NULL };
         const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
         const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors);
         char description[512];
@@ -181,7 +185,7 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle.count == fixtures[i].diagnostics, description);
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
-            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0) : -1;
+            const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet) : -1;
             const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors);
             const bool same = status == oracle_status && actual.count == oracle.count &&
                               (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
