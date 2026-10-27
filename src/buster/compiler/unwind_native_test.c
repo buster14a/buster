@@ -4,6 +4,9 @@
 // Actual Tier0 records -> branch sizing -> encoder -> native CFI -> native executable -> GDB/perf. GNU as supplies
 // only the process-entry wrapper and the relocatable container for the already encoded functions/CFI. The two normal
 // functions' CFI is entirely unwind.c's. Fixture source rows are explicit test input, not a codegen source-map API.
+// Three times: with a leaf of a fixed frame, its CFI as pairs, with one that allocates on the stack (a frame pointer's,
+// #395), and with one that also has an object aligned to 64 (a realigned frame's, with r15 its base), their CFI with one
+// shared CIE; GDB stops at every instruction of the leaf outside its loop.
 
 typedef struct UnwindNativeFunction UnwindNativeFunction;
 struct UnwindNativeFunction
@@ -39,9 +42,15 @@ static bool unwind_native_compile(const Tier0Function* function, Arena* arena, U
         const int64_t encoded = valid ? x86_encode(native->code.records, native->code.count, native->bytes, capacity, 0, native->ends) : -1;
         valid &= encoded >= 0 && (uint64_t)encoded == sizing.length;
         native->size = valid ? (uint32_t)encoded : 0;
-        valid &= unwind_tier0(&native->code, native->offsets, native->size, &native->unwind) == UNWIND_OK;
-        UnwindFunction scalar = { 0 };
-        valid &= unwind_tier0_scalar(&native->code, native->offsets, native->size, &scalar) == UNWIND_OK && memcmp(&scalar, &native->unwind, sizeof(scalar)) == 0;
+        // The frame Tier 0 published (unwind_tier0_frame, the C driver's reader); without a frame pointer, the
+        // analyzer's descriptor too, which must be the same, and with one, which the analyzer doesn't take, its refusal.
+        valid &= unwind_tier0_frame(&native->code, native->offsets, native->size, &native->unwind) == UNWIND_OK;
+        UnwindFunction analyzed[2] = { 0 };
+        const UnwindError vector = unwind_tier0(&native->code, native->offsets, native->size, &analyzed[0]);
+        const UnwindError scalar = unwind_tier0_scalar(&native->code, native->offsets, native->size, &analyzed[1]);
+        valid &= native->code.frame_pointer ? vector == UNWIND_ERROR_UNSUPPORTED && scalar == UNWIND_ERROR_UNSUPPORTED :
+                                              vector == UNWIND_OK && scalar == UNWIND_OK && memcmp(&analyzed[0], &native->unwind, sizeof(analyzed[0])) == 0 &&
+                                                  memcmp(&analyzed[1], &native->unwind, sizeof(analyzed[1])) == 0;
     }
     return valid;
 }
@@ -54,8 +63,13 @@ static void unwind_native_entry(uint8_t* kinds, uint8_t* classes, uint64_t* valu
     *count += 1;
 }
 
-static bool unwind_native_functions(Arena* arena, UnwindNativeFunction native[2])
+// The outer function, which calls the leaf, and the leaf: fifteen locals, a loop of 20,000,000 and their sum, and with
+// `frame` 1 a variable-length array's storage first (ALLOCA), which gives it a frame pointer and moves rsp in its body,
+// and a store to it: perf's samples copy the stack from rsp, and the kernel copies nothing of a page never touched. With
+// `frame` 2, an object of 16 bytes aligned to 64 too, which realigns the frame, with r15 its base, and a store to it.
+static bool unwind_native_functions(Arena* arena, UnwindNativeFunction native[2], uint32_t frame)
 {
+    const bool pointer = frame != 0;
     const AbiReturn result = {
         .kind = BUSTER_ABI_RESULT_REGISTERS,
         .part_bytes = 8,
@@ -87,10 +101,29 @@ static bool unwind_native_functions(Arena* arena, UnwindNativeFunction native[2]
     uint8_t kinds[128];
     uint8_t classes[128];
     uint64_t values[128];
-    uint8_t local_classes[15];
-    uint8_t local_flags[15] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    uint8_t local_classes[16];
+    uint8_t local_flags[16] = { BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
+    uint32_t local_sizes[16] = { 0 };
+    uint8_t local_alignments[16] = { 0 };
     memset(local_classes, BUSTER_TYPED_CLASS_U64, sizeof(local_classes));
+    local_classes[15] = BUSTER_TYPED_CLASS_VOID;
+    local_flags[15] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+    local_sizes[15] = 16;
+    local_alignments[15] = 6;
     uint32_t count = 0;
+    if (pointer)
+    {
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_CONST, 4000);
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_ALLOCA, 0);
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_CONST, 1);
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_SET, 0);
+    }
+    if (frame == 2)
+    {
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_LOCAL_ADDRESS, 15);
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_CONST, 2);
+        unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_SET, 0);
+    }
     for (uint32_t local = 0; local < 15; local += 1)
     {
         unwind_native_entry(kinds, classes, values, &count, BUSTER_TYPED_CONST, local == 0 ? 20000000 : local);
@@ -117,27 +150,60 @@ static bool unwind_native_functions(Arena* arena, UnwindNativeFunction native[2]
         .count = count,
         .local_classes = local_classes,
         .local_flags = local_flags,
-        .local_count = 15,
+        .local_count = frame == 2 ? 16 : 15,
+        .local_sizes = frame == 2 ? local_sizes : 0,
+        .local_alignments = frame == 2 ? local_alignments : 0,
         .result = result,
     };
     bool valid = unwind_native_compile(&outer, arena, &native[0]) && unwind_native_compile(&leaf, arena, &native[1]);
-    valid &= native[0].code.reference_count == 1 && native[1].code.reference_count == 0 && native[1].unwind.saved == 63 && native[1].unwind.frame_size != 0;
-    printf("unwind native producer: outer %u bytes / mask %u, leaf %u bytes / mask %u / frame %u: %s\n", native[0].size, native[0].unwind.saved,
-           native[1].size, native[1].unwind.saved, native[1].unwind.frame_size, valid ? "pass" : "FAIL");
+    valid &= native[0].code.reference_count == 1 && native[1].code.reference_count == 0;
+    // Every callee-saved register: rbp the frame pointer (and r15 a realigned frame's base, among the pushes), or a
+    // value's with a fixed frame.
+    valid &= pointer ? native[1].unwind.pointer == 1 && native[1].unwind.saved == 61 : native[1].unwind.pointer == 0 && native[1].unwind.saved == 63 && native[1].unwind.frame_size != 0;
+    valid &= frame == 2 ? native[1].code.frame_alignment_log2 == 6 && native[1].code.frame_base : native[1].code.frame_alignment_log2 == 0 && !native[1].code.frame_base;
+    static const char* const names[3] = { "", " (frame pointer)", " (realigned, with a base)" };
+    printf("unwind native producer%s: outer %u bytes / mask %u, leaf %u bytes / mask %u / frame %u / frame pointer %u: %s\n", names[frame],
+           native[0].size, native[0].unwind.saved, native[1].size, native[1].unwind.saved, native[1].unwind.frame_size, native[1].unwind.pointer, valid ? "pass" : "FAIL");
     return valid;
 }
 
-static bool unwind_native_gdb_script(const char* path, const UnwindFunction* function)
+// The leaf's stops for GDB, in the order it runs them: every record's start but those of its loop, which runs
+// 20,000,000 times (from the first backward branch's target to the last backward branch): the entry and every
+// transition's end among them.
+static uint32_t unwind_native_stops(const UnwindNativeFunction* native, uint32_t* stops)
+{
+    uint32_t first = UINT32_MAX;
+    uint32_t last = 0;
+    for (uint32_t branch = 0; branch < native->code.branch_count; branch += 1)
+    {
+        if (native->code.targets[branch] < native->code.branches[branch])
+        {
+            first = native->code.targets[branch] < first ? native->code.targets[branch] : first;
+            last = native->code.branches[branch] > last ? native->code.branches[branch] : last;
+        }
+    }
+    uint32_t count = 0;
+    for (uint32_t record = 0; record < native->code.count; record += 1)
+    {
+        if (record < first || record > last)
+        {
+            stops[count] = native->offsets[record];
+            count += 1;
+        }
+    }
+    return count;
+}
+
+static bool unwind_native_gdb_script(const char* path, const uint32_t* stops, uint32_t count)
 {
     FILE* file = fopen(path, "w");
     bool valid = file != 0;
     if (file != 0)
     {
         fputs("set pagination off\nset confirm off\nset debuginfod enabled off\n", file);
-        for (uint32_t stop = 0; stop <= function->event_count; stop += 1)
+        for (uint32_t stop = 0; stop < count; stop += 1)
         {
-            const uint32_t offset = stop == 0 ? 0 : function->offsets[stop - 1];
-            fprintf(file, "break *(debug_leaf+%u)\ncommands\nsilent\nprintf \"UNWIND_STOP %u\\n\"\nbt\nframe 1\n", offset, stop);
+            fprintf(file, "break *(debug_leaf+%u)\ncommands\nsilent\nprintf \"UNWIND_STOP %u\\n\"\nbt\nframe 1\n", stops[stop], stop);
             fputs("if $rbx != 101 || $rbp != 102 || $r12 != 103 || $r13 != 104 || $r14 != 105 || $r15 != 106\n"
                   "printf \"UNWIND_BAD_REG\\n\"\nend\nframe 0\ncontinue\nend\n", file);
         }
@@ -187,13 +253,15 @@ static bool unwind_native_oracle_tests(void)
     return valid;
 }
 
-static bool unwind_test_consumers(bool keep)
+static bool unwind_test_consumer(bool keep, uint32_t frame)
 {
     char directory[] = "/tmp/buster-unwind-XXXXXX";
     Arena arena = arena_reserve(64ull << 20);
     bool valid = arena.base != 0 && mkdtemp(directory) != 0;
     UnwindNativeFunction native[2] = { 0 };
-    valid = valid && unwind_native_functions(&arena, native);
+    const bool pointer = frame != 0;
+    static const char* const variants[3] = { "", " (frame pointer, one CIE)", " (realigned with a base, one CIE)" };
+    valid = valid && unwind_native_functions(&arena, native, frame);
     UnwindFunction descriptions[2] = { native[0].unwind, native[1].unwind };
     uint8_t frame_bytes[384];
     uint32_t locations[2];
@@ -202,6 +270,7 @@ static bool unwind_test_consumers(bool keep)
         .capacity = sizeof(frame_bytes),
         .locations = locations,
         .location_capacity = 2,
+        .shared = pointer,
     };
     valid = valid && unwind_write(descriptions, 2, &frames, false) == UNWIND_OK && unwind_test_decode(descriptions, 2, &frames);
     char assembly[512];
@@ -290,13 +359,16 @@ static bool unwind_test_consumers(bool keep)
     uint32_t address_offsets[3];
     DebugOutput debug = debug_test_output(debug_bytes, address_offsets, 3);
     valid = valid && debug_bytes != 0 && debug_write(&unit, &debug, false) == DEBUG_OK && debug_test_native_write(object, executable, &unit, &debug);
-    valid = valid && unwind_native_gdb_script(commands, &native[1].unwind);
+    uint32_t* stops = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, native[1].code.count) : 0;
+    const uint32_t stop_count = stops != 0 ? unwind_native_stops(&native[1], stops) : 0;
+    valid = valid && stops != 0 && unwind_native_gdb_script(commands, stops, stop_count);
     char* gdb[] = { "gdb", "-nx", "-batch", "-x", commands, executable, 0 };
     const bool ran_gdb = valid && object_test_run(gdb, out, err) == 0;
     const String8 backtraces = ran_gdb ? object_test_read_file(&arena, out) : (String8){ 0 };
-    const bool gdb_ok = ran_gdb && unwind_native_backtraces(backtraces.pointer, native[1].unwind.event_count + 1);
+    const bool gdb_ok = ran_gdb && unwind_native_backtraces(backtraces.pointer, stop_count);
     valid &= gdb_ok;
-    printf("unwind native GDB: entry and %u stack transitions, three frames and six restored registers: %s\n", native[1].unwind.event_count, gdb_ok ? "pass" : "FAIL");
+    printf("unwind native GDB%s: %u stops outside the leaf's loop, its entry and %u stack transitions among them, three frames and six restored registers: %s\n",
+           variants[frame], stop_count, native[1].unwind.event_count, gdb_ok ? "pass" : "FAIL");
     if (!gdb_ok && backtraces.pointer != 0)
     {
         printf("%s\n", backtraces.pointer);
@@ -308,7 +380,7 @@ static bool unwind_test_consumers(bool keep)
     const String8 profile = scripted ? object_test_read_file(&arena, out) : (String8){ 0 };
     const bool perf_ok = scripted && debug_test_profile(profile.pointer);
     valid &= perf_ok;
-    printf("unwind native perf: sampled Tier0 leaf -> outer -> process entry with source rows: %s\n", perf_ok ? "pass" : "FAIL");
+    printf("unwind native perf%s: sampled Tier0 leaf -> outer -> process entry with source rows: %s\n", variants[frame], perf_ok ? "pass" : "FAIL");
     if (keep || !valid)
     {
         printf("unwind native fixture files: %s\n", directory);
@@ -320,4 +392,12 @@ static bool unwind_test_consumers(bool keep)
     }
     arena_release(&arena);
     return valid;
+}
+
+static bool unwind_test_consumers(bool keep)
+{
+    const bool fixed = unwind_test_consumer(keep, 0);
+    const bool pointer = unwind_test_consumer(keep, 1);
+    const bool realigned = unwind_test_consumer(keep, 2);
+    return fixed && pointer && realigned;
 }

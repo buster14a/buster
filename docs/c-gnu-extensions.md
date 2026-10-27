@@ -29,7 +29,7 @@ acceptance conditions pass.
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |
 | `weak`, `alias`, `visibility`, constructors/destructors | Parsed and retained; link representation has relevant primitives | Source-to-symbol/atom creation, init/fini entries and execution tests |
 | `section` | Parsed and retained | Custom named-section representation and source emission |
-| Inline assembly statements | Existing parser grammar, kept distinct from asm labels | C constraints, operand substitution, clobbers and control-flow integration with the assembler |
+| Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers ([the inline assembly guide](c-inline-assembly.md)) | `asm goto`, naked functions, and templates that refer to symbols |
 
 The in-progress checker in #133 and declaration processing in #129 must own
 their semantic decisions. This change neither duplicates those implementations

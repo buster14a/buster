@@ -611,6 +611,29 @@ macro's expansion, an argument being expanded, or a directive's line):
   no templates: that path is the templates' twin. `test-preprocessor` compares
   each case's deferred run with its recorded one, and each fuzz case's deferred
   run with its scalar twins' runs.
+- **Templates with `##` and `#`** (#117). A function-like macro of at most 16
+  items of tokens, parameters, `##` and `#`, without `__VA_OPT__`, each `##`
+  between a token or a parameter and not before the variadic parameter (GNU's
+  comma), gets a template too, with masks of its `##`s, of each chain of pastes'
+  first and last operands and of its `#`s. Its invocations, collected
+  (`pp_finish_simple`) or in a file's text without `#` (`pp_invoke_file`), are
+  planned first and change nothing until the plan holds
+  (`pp_template_operators`, `pp_plan_operators`): each operand of a chain must
+  have at most one token, and where two or more have one, they must be
+  identifiers and numbers spelled in at most 64 ASCII letters, digits and `_`,
+  an identifier or a number first. Each paste then makes an identifier or a
+  pp-number without lexing it, as `pp_paste`'s own test finds; anything else
+  takes `pp_substitute`. Then the pastes and strings are made in the items'
+  order, as `pp_substitute` makes them, into the scratch text and the intern
+  table with their statistics and poisoned names' errors (`pp_template_make`),
+  and `pp_template_write` writes each chain's token or `#`'s string, if any, as
+  one more segment: it takes the space pending before it (with its first item's
+  own), and its flags are an argument's placed first, moved past empty operands
+  or pasted onto, as `pp_substitute` gives them. A name a paste makes of a macro
+  that expands (but the invoked one) is read again from the expansions; any
+  other macro's is painted where the expansion goes straight out. An empty
+  expansion's trailing space is any of its items' but a `##`'s, which
+  `pp_substitute` doesn't read.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -892,8 +915,11 @@ clang 23's resource headers give, and carry the project's license
   headers' `<float.h>` define `FLT_EVAL_METHOD` with it.
 
 `test-preprocessor --clang` checks them against clang's: 11 headers, 8 language
-modes, hosted and freestanding, 176 sets in all. For each set, clang
-preprocesses the header with its own set and with ours
+modes, hosted and freestanding, 176 sets in all. Each mode and hosting's sets
+(`pp_test_header_set`) run in a child process with a directory of its own, at
+most `test_process_cpus()` at once (the CPUs, divided among the parallel runner's
+commands), their output printed in the sets' order (#465). For
+each set, clang preprocesses the header with its own set and with ours
 (`-nobuiltininc -isystem`), and:
 
 - the two must define the same macros. Guards and helpers reserved to the
@@ -2242,7 +2268,8 @@ full-corpus reproduction and frozen CI subset.
 - **Files.** With files, each is preprocessed with the options, by both
   kernels, and compared. With `--clang`, our side reads clang's own predefines
   for the same options (`clang -dM -E`, through `--predefines`), so both start
-  from the same macros. clang has no `--buster-headers`, so it gets ours'
+  from the same macros; the files share their options, so clang makes them once
+  for all of them (`pp_test_clang_predefines`). clang has no `--buster-headers`, so it gets ours'
   whole search instead of the directories' options (`pp_clang_arguments`):
   after `-nobuiltininc`, each directory ours keeps, with its option (`-iquote`,
   `-I`, `-isystem` or `-idirafter`), and in clang's resource directory's place
@@ -2500,6 +2527,48 @@ takes the old paths, the times overlap. As whole processes, `parse` of
 change measurably. The first measurement found no gain in time:
 `sqlite3.c`'s 254 templates had crossed into a huge page, which the kernel
 cleared whole, 2 MB per run. They take base pages now.
+
+Its second step is templates for `##` and `#` ("Templates with `##` and `#`"
+in "The main loop", #473, [the
+record](https://github.com/buster14a/buster-performance/blob/c2429b4d2624b6378944e97c60ba1f0d9002774d/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md)).
+On `sqlite3.c`, 3,522 of the 7,051 invocations that went through the
+invocation stack take them; of the 3,529 left, 3,490 have arguments expanded
+first (math.h's declarations). Against main at `dd982df`, with the history
+deferred:
+
+| | main | with the templates for `##` and `#` |
+| --- | ---: | ---: |
+| `sqlite3.c`, directive tables and main loop | 4.767-4.775 ms | 4.761-4.882 ms |
+| `sqlite3.c`, main loop | 4.432-4.439 ms | 4.427-4.538 ms |
+| `sqlite3.c`, instructions/input token | 106.56 | 105.21 |
+| `main.c`, main loop | 20.983-21.018 ms | 20.583-20.829 ms |
+| `main.c`, instructions/input token | 283.95 | 278.15 |
+
+`sqlite3.c`'s time doesn't change measurably, and `main.c`'s main loop takes
+about 0.3 ms less. With the history recorded, which takes the old paths, the
+main loop takes up to 0.07 ms more (5.350-5.411 against 5.421-5.428 ms). As
+whole processes, `-E` and `parse` of `sqlite3.c` don't change, with 240-290 KB
+more peak resident set and 4 or 5 more page faults (more templates, of 272
+bytes rather than 260). `-fsyntax-only` takes 0.2-0.5 ms more
+(147.436-147.585 against 147.680-148.096 ms): its user instructions fall by
+1.7 million and its user cycles rise by 0.4%, in checker code that is the same
+in both binaries but starts at other places in its cache lines. On the PR's
+first head, shifting the checker's unit 32 bytes back to main's offsets took
+about 60% of that difference back. A change to the checker alone (an integer
+literal's result written in place, which takes 0.8 million instructions out of
+main) makes `-fsyntax-only` as much slower as the templates do ([the record's
+addendum](https://github.com/buster14a/buster-performance/blob/c2429b4d2624b6378944e97c60ba1f0d9002774d/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md#addendum-what-the-checkers-slowdown-is)):
+changes that perturb the checker's code layout can move the whole compile by
+about 0.3% in these builds. That doesn't show that all of the templates'
+difference is placement, and the 0.2-0.5 ms above stays this pair's measured
+result. #502 measured the effect directly: with the same instructions, moving
+the checker's unit by 16 to 2,048 bytes changed `-fsyntax-only` of `sqlite3.c`
+by up to 2.2% on main `35f26f6`, and there the templates, rebased onto it,
+took 1.5% fewer user cycles than main at the same shift.
+
+The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
+4.77 ms. The next piece is the arguments expanded before substitution, and the
+rest needs #149 or another budget.
 
 ## Assembly output spacing
 

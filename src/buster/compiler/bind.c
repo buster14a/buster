@@ -46,27 +46,33 @@
 //   - for a strong reference, to a member of libgcc.a (__udivti3, which a compiler's code of a 128-bit integer's
 //     division calls) or of libc_nonshared.a (atexit), which joins the link. The driver names libgcc.a before libc.so,
 //     and it defines no name libc.so.6 exports (runtime.c), so that the export's binding comes first all the same;
+//   - to libgcc_s.so.1's export (the unwinder: _Unwind_Resume, _Unwind_Backtrace, __gcc_personality_v0), which the
+//     driver names as needed after libgcc.a, as libc.so.6's is bound: after the members, since libgcc.a, before it on
+//     the line, defines most of its other names (runtime_export_after_members). Like the loader it is needed only for a
+//     strong reference to one of its names (bind_keep_as_needed), the program's or a needed named library's that the
+//     library's own DT_NEEDED doesn't cover (Bind.runtime_needed), and like libc.so.6 it defines none of the names the
+//     others export (runtime.c), so that its place among them doesn't matter;
 //   - for a weak reference, to nothing: source NONE. As with GNU ld, a weak reference loads no member.
 // Anything else is an error naming it. Members that join can refer to names nothing else does, so binding goes in
 // rounds, each over the symbols the round before added, until no member joins: a frontier walk over a bitset of the
 // members. A name that only the members that joined refer to and nothing defines is an error of its own, naming the
-// member too (BIND_ERROR_MEMBER_UNDEFINED): on GCC's link line only libgcc_s.so.1 could define it, which the driver
-// names as needed after libgcc.a (-lgcc_s_asneeded) and the runtime doesn't import, as it defines the unwinder that
-// libgcc.a's split-stack member (morestack.o) refers to. crtendS.o's and crtn.o's references bind without members, as
-// GNU ld scans libc's group before them. A member's strong reference to a name that a weak one left to nothing is an
-// error, where GNU ld would scan the archive again; libc_nonshared.a's members refer only to libc.so.6 and crtbeginS.o,
-// and the members of libgcc.a that a C program's code needs to each other, to libc.so.6 and to the loader's
-// __tls_get_addr. Last, each definition with default or protected visibility of a name that libc.so.6 or the loader
-// defines too, or that libc.so.6 refers to, is an export (Bind.exports), as GNU ld and lld export them, the loader's
-// names even when it isn't needed: those among the names that took a link symbol, which binding lists as they do.
+// member too (BIND_ERROR_MEMBER_UNDEFINED): on GCC's link line only libgcc_s.so.1 could define it, which a runtime
+// without it lacks: the unwinder that libgcc.a's split-stack member (morestack.o) refers to. crtendS.o's and crtn.o's
+// references bind without members, as GNU ld scans libc's group before them. A member's strong reference to a name that
+// a weak one left to nothing is an error, where GNU ld would scan the archive again; libc_nonshared.a's members refer
+// only to libc.so.6 and crtbeginS.o, and the members of libgcc.a that a C program's code needs to each other, to
+// libc.so.6, to the loader's __tls_get_addr and to libgcc_s.so.1's unwinder. Last, each definition with default or
+// protected visibility of a name that libc.so.6, the loader or libgcc_s.so.1 defines too, or that libc.so.6 refers to,
+// is an export (Bind.exports), as GNU ld and lld export them, the loader's and libgcc_s.so.1's names even when it isn't
+// needed: those among the names that took a link symbol, which binding lists as they do.
 //
 // A shared library's runtime (runtime_import_shared) joins as a dynamic PIE's, without a start object: bind_begin
 // appends crti.o and crtbeginS.o, and nothing refers to main. A name nothing defines binds as a dynamic PIE's, but a
 // strong reference with default visibility that no library exports stays undefined (source NONE), a dynamic symbol for
 // the loader to bind in the libraries the program loads, as GNU ld and lld leave it with -shared (-z undefs); but not a
-// name that only members refer to, which stays the error it is in a PIE: GCC's driver binds it to libgcc_s.so.1, which
-// the library then needs, and left to the loader it would make a library that loads only beside one that defines it
-// (morestack.o's _Unwind_Resume and __gcc_personality_v0, which an isolated dlopen refuses). And every
+// name that only members refer to, which binds to libgcc_s.so.1 as GCC's driver binds it, the library then needing it,
+// or without it stays the error it is in a PIE: left to the loader it would make a library that loads only beside one
+// that defines it (morestack.o's _Unwind_Resume and __gcc_personality_v0, which an isolated dlopen refuses). And every
 // definition with default or protected visibility is an export (bind_shared_exports), not only those of names the
 // libraries define or libc.so.6 refers to.
 //
@@ -113,7 +119,7 @@
 //   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records,
 //     bind_discards and bind_join.
 //   - Binding: bind_relaxed_name, bind_referring_member, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact,
-//     bind_resolve, bind_members, bind_keep_imports, bind_keep_loader, bind_find_exports, bind_exported_lanes,
+//     bind_resolve, bind_members, bind_keep_imports, bind_keep_as_needed, bind_find_exports, bind_exported_lanes,
 //     bind_shared_exports, BindLibraryEdges, bind_library_edges, bind_library_satisfy, bind_library_satisfied_vector,
 //     bind_library_satisfied_exact, bind_library_satisfied, bind_library_versions, bind_needed_libraries,
 //     bind_keep_libraries and bind_library_exports.
@@ -157,10 +163,10 @@ typedef enum BindError
     BIND_ERROR_LIBRARY_VERSION,
     // A strong reference of a member that joined a dynamic PIE's or a shared library's link (libgcc.a's or
     // libc_nonshared.a's) to a name nothing defines and that only the members refer to: Bind.name and Bind.member. GCC's
-    // driver names libgcc_s.so.1 after libgcc.a, as needed (-lgcc_s_asneeded), which the runtime doesn't import, and on
-    // its link line only that library could define the name: it defines the unwinder that libgcc.a's split-stack member
-    // refers to (morestack.o's _Unwind_Resume and __gcc_personality_v0). Refused, where a shared library would otherwise
-    // leave it to the loader and load only beside a library that defines it.
+    // driver names libgcc_s.so.1 after libgcc.a, as needed (-lgcc_s_asneeded), and on its link line only that library
+    // could define the name: it defines the unwinder that libgcc.a's split-stack member refers to (morestack.o's
+    // _Unwind_Resume and __gcc_personality_v0). On a system whose runtime has no libgcc_s.so.1 (runtime.c), refused,
+    // where a shared library would otherwise leave it to the loader and load only beside a library that defines it.
     BIND_ERROR_MEMBER_UNDEFINED,
 } BindError;
 
@@ -202,7 +208,9 @@ struct Bind
     // pages that the caller's arena starts with, and made every link of the C driver fault and clear a huge page.
     BindOverride* overrides;
     uint32_t override_count;
-    // By symbol of the runtime's link: the link's symbol it became, or 0 before its object joined.
+    // By symbol of the runtime's link: the link's symbol it became, written as its object joins, before anything reads
+    // it (the object's fixups' targets are its own symbols). Nothing clears it: a link that joins the crt objects alone
+    // would otherwise touch an entry for every member's symbol (#490).
     SymbolId* symbols;
     // The runtime's members that the link needs, and those that joined it, a bit each.
     uint64_t* members_needed;
@@ -246,6 +254,12 @@ struct Bind
     // don't satisfy (bind_needed_libraries).
     const RuntimeLibraries* libraries;
     uint32_t libraries_needed;
+    // The libraries the driver names as needed that a needed named library's strong reference needs, a bit each
+    // (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S): a reference to a name of theirs that no DT_NEEDED entry of a
+    // library the program loads covers, nor the executable's definition satisfies, as GNU ld's --as-needed counts it
+    // (bind_needed_libraries), from bind_keep_libraries on. bind_keep_as_needed keeps such a library whatever the
+    // program's own references, and dynamic_inputs makes it required.
+    uint32_t runtime_needed;
     // The first error, and the link's name it is about (0 for none); with BIND_ERROR_LIBRARY_UNDEFINED, the library and
     // its reference; with BIND_ERROR_LIBRARY_VERSION, the library, its version need (RuntimeVersionNeeds) and the named
     // library that doesn't define the version, or UINT32_MAX for libc.so.6 or the loader; with
@@ -406,7 +420,7 @@ static uint8_t bind_visibility(uint8_t a, uint8_t b)
 // constraining visibility. The atom of the definition it had stays in the link, without the name.
 static void bind_install(Bind* bind, Link* link, SymbolId symbol, SymbolId from_symbol, AtomId atom)
 {
-    const LinkSymbols* from = &bind->runtime->link.symbols;
+    const LinkSymbols* from = &runtime_symbol_link(bind->runtime, from_symbol)->symbols;
     LinkSymbols* symbols = &link->symbols;
     const uint8_t from_flags = from->flags[from_symbol];
     symbols->atom[symbol] = atom;
@@ -421,7 +435,7 @@ static void bind_install(Bind* bind, Link* link, SymbolId symbol, SymbolId from_
 // in a COMDAT group that was `discarded` joins as a reference.
 static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId symbol, AtomId atom, bool discarded)
 {
-    const LinkSymbols* from = &bind->runtime->link.symbols;
+    const LinkSymbols* from = &runtime_symbol_link(bind->runtime, from_symbol)->symbols;
     LinkSymbols* symbols = &link->symbols;
     const uint8_t from_flags = from->flags[from_symbol];
     const uint8_t flags = symbols->flags[symbol];
@@ -433,14 +447,14 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
     const uint8_t source = symbols->source[symbol];
     const bool program = source == BUSTER_LINK_SOURCE_PROGRAM || (source == BUSTER_LINK_SOURCE_ABSOLUTE && symbol < bind->program_symbols);
     const bool waiting = program && !bind->resolving;
-    const uint32_t entry = waiting ? bind->runtime->symbol_names[from_symbol] - 1 : 0;
+    const uint32_t entry = waiting ? runtime_symbol_names(bind->runtime, from_symbol)[from_symbol] - 1 : 0;
     uint32_t found = bind->override_count;
     for (uint32_t i = 0; waiting && i < bind->override_count; i += 1)
     {
         found = bind->overrides[i].entry == entry ? i : found;
     }
     const SymbolId pending = found < bind->override_count ? bind->overrides[found].symbol : 0;
-    const uint8_t defining_flags = pending != 0 ? from->flags[pending] : flags;
+    const uint8_t defining_flags = pending != 0 ? runtime_symbol_link(bind->runtime, pending)->symbols.flags[pending] : flags;
     const bool defined = symbols->atom[symbol] != 0 || program || source == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool from_weak = (from_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     const bool link_weak = (defining_flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
@@ -509,7 +523,7 @@ static void bind_merge(Bind* bind, Link* link, SymbolId from_symbol, SymbolId sy
 // their alignments (a piece that discards a group needs less).
 static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
 {
-    const Link* from = &bind->runtime->link;
+    const Link* from = runtime_piece_link(bind->runtime, piece);
     const ImportMark begin = bind->runtime->pieces[piece].begin;
     const ImportMark end = bind->runtime->pieces[piece].end;
     uint64_t atom_bytes = 0;
@@ -529,7 +543,8 @@ static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
 static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 {
     const Runtime* runtime = bind->runtime;
-    const Link* from = &runtime->link;
+    const Link* from = runtime_piece_link(runtime, piece);
+    const uint32_t* symbol_names = runtime_piece_symbol_names(runtime, piece);
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     const uint32_t name_count = end.names - begin.names;
@@ -549,7 +564,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     // Names: the piece's bytes are one run in the runtime's name arena, copied at once, and the pointers moved with them
     // (a loaded runtime's offsets by its delta too: Runtime.byte_delta).
     const uint64_t name_bytes = end.name_bytes - begin.name_bytes;
-    const uint8_t* source = runtime->names.base + begin.name_bytes;
+    const uint8_t* source = runtime_piece_names(runtime, piece) + begin.name_bytes;
     uint8_t* copy = arena_push(link->name_arena, name_bytes, 1);
     memcpy(copy, source, name_bytes);
     const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source + runtime->byte_delta));
@@ -599,7 +614,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     SymbolId* taken = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, SymbolId, symbol_count + BUSTER_BIND_BATCH);
     for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
     {
-        const uint32_t entry = runtime->symbol_names[begin.symbols + i];
+        const uint32_t entry = symbol_names[begin.symbols + i];
         taken[i] = entry != 0 ? bind->name_symbols[entry - 1] : 0;
     }
     LinkSymbols* symbols = &link->symbols;
@@ -641,7 +656,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
     {
         const SymbolId from_symbol = begin.symbols + i;
-        const uint32_t entry = runtime->symbol_names[from_symbol];
+        const uint32_t entry = symbol_names[from_symbol];
         if (taken[i] == 0 && entry != 0)
         {
             bind_name_symbol(bind, entry - 1, bind->symbols[from_symbol]);
@@ -683,7 +698,8 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         const __m512i addends = _mm512_maskz_loadu_epi32(lanes, from->fixups.addend + begin.fixups + i);
         _mm512_mask_storeu_epi32(fixups->addend + fixup_first + i, lanes, _mm512_mask_add_epi32(addends, wide, addends, _mm512_set1_epi32((int)wide_delta)));
     }
-    for (uint32_t i = 0; i < fixup_count; i += 1)
+    // The piece's symbols have their link symbols unless the scratch above had no room (BIND_ERROR_FULL).
+    for (uint32_t i = 0; taken != 0 && i < fixup_count; i += 1)
     {
         fixups->target[fixup_first + i] = bind->symbols[from->fixups.target[begin.fixups + i]];
     }
@@ -699,7 +715,8 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint8_t* discarded)
 {
     const Runtime* runtime = bind->runtime;
-    const Link* from = &runtime->link;
+    const Link* from = runtime_piece_link(runtime, piece);
+    const uint32_t* symbol_names = runtime_piece_symbol_names(runtime, piece);
     const ImportMark begin = runtime->pieces[piece].begin;
     const ImportMark end = runtime->pieces[piece].end;
     const NameId name_first = link->names.count;
@@ -728,7 +745,7 @@ static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint
     }
     for (SymbolId symbol = begin.symbols; result && symbol < end.symbols; symbol += 1)
     {
-        const uint32_t entry = runtime->symbol_names[symbol];
+        const uint32_t entry = symbol_names[symbol];
         const SymbolId taken = entry != 0 ? bind->name_symbols[entry - 1] : 0;
         const AtomId from_atom = from->symbols.atom[symbol];
         const AtomId atom = from_atom != 0 ? atoms[from_atom - begin.atoms] : 0;
@@ -887,6 +904,24 @@ static uint32_t bind_referring_member(const Bind* bind, uint32_t entry)
     return result;
 }
 
+// Makes `symbol` an import of a library's export, `index` among `exports`: source RUNTIME_SHARED, the export's version
+// and type, listed in Bind.imports.
+static void bind_import(Bind* bind, LinkSymbols* symbols, SymbolId symbol, const ImportExports* exports, uint32_t index)
+{
+    symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
+    symbols->version[symbol] = exports->version[index];
+    symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
+    if (bind->import_count < bind->capacity)
+    {
+        bind->imports[bind->import_count] = symbol;
+        bind->import_count += 1;
+    }
+    else
+    {
+        bind_fail(bind, BIND_ERROR_FULL, symbols->name[symbol]);
+    }
+}
+
 // Binds `symbol`, which nothing in the link defines (see the orientation comment); with `members`, a member of libgcc.a
 // or libc_nonshared.a that defines it is marked as needed.
 static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool members)
@@ -901,8 +936,12 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     // pieces say which symbols are theirs, so that no other piece's records are read before it joins.
     const RuntimePiece* pieces = runtime->pieces;
     const bool tail_piece = definition >= pieces[RUNTIME_OBJECT_END].begin.symbols && definition < pieces[RUNTIME_OBJECT_INIT_EPILOGUE].end.symbols;
-    const bool after = definition != 0 && !bind->tail_joined && tail_piece && runtime->link.symbols.atom[definition] != 0;
+    const bool after = definition != 0 && !bind->tail_joined && tail_piece && runtime_symbol_link(runtime, definition)->symbols.atom[definition] != 0;
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
+    // libgcc_s.so.1's export, which a member of libgcc.a that defines the name comes before.
+    const bool after_members = export != 0 && runtime_export_after_members(runtime, export - 1);
+    uint32_t index = 0;
+    const ImportExports* exports = export != 0 ? &runtime_export_library(runtime, export - 1, &index)->exports : 0;
     const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     // A reference with a visibility other than default needs a definition within the executable: a library's can't be
@@ -925,37 +964,12 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     }
     else if (library != 0 && shareable)
     {
-        const ImportExports* exports = &bind->libraries->libraries[library - 1].exports;
-        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-        symbols->version[symbol] = exports->version[library_export];
-        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[library_export] & BUSTER_LINK_SYMBOL_TYPE));
+        bind_import(bind, symbols, symbol, &bind->libraries->libraries[library - 1].exports, library_export);
         bind->libraries_needed |= weak ? 0 : 1u << (library - 1);
-        if (bind->import_count < bind->capacity)
-        {
-            bind->imports[bind->import_count] = symbol;
-            bind->import_count += 1;
-        }
-        else
-        {
-            bind_fail(bind, BIND_ERROR_FULL, name);
-        }
     }
-    else if (export != 0 && shareable)
+    else if (export != 0 && !after_members && shareable)
     {
-        uint32_t index = 0;
-        const ImportExports* exports = &runtime_export_library(runtime, export - 1, &index)->exports;
-        symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_SHARED;
-        symbols->version[symbol] = exports->version[index];
-        symbols->flags[symbol] = (uint8_t)((symbols->flags[symbol] & ~BUSTER_LINK_SYMBOL_TYPE) | (exports->flags[index] & BUSTER_LINK_SYMBOL_TYPE));
-        if (bind->import_count < bind->capacity)
-        {
-            bind->imports[bind->import_count] = symbol;
-            bind->import_count += 1;
-        }
-        else
-        {
-            bind_fail(bind, BIND_ERROR_FULL, name);
-        }
+        bind_import(bind, symbols, symbol, exports, index);
     }
     else if (member != 0 && members && !weak)
     {
@@ -965,6 +979,11 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
         const uint32_t m = member - 1;
         bind->members_needed[m / 64] |= 1ull << (m % 64);
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
+    }
+    else if (after_members && shareable)
+    {
+        // libgcc_s.so.1's, needed only for a strong reference (bind_keep_as_needed).
+        bind_import(bind, symbols, symbol, exports, index);
     }
     else if (weak)
     {
@@ -1091,29 +1110,30 @@ static void bind_keep_imports(Bind* bind, const Link* link)
     bind->import_count = kept;
 }
 
-// The loader's imports. libc.so's script names the loader as needed (AS_NEEDED), and GNU ld and lld need such a library
-// only for a strong reference that binds to it. Without one, the weak references to its names are left to nothing,
-// unversioned (source NONE), and drop out of the imports, keeping its export's type: GNU ld and lld write them so,
-// OBJECT WEAK UND for _r_debug, lld demoting them in demoteSymbolsAndComputeIsPreemptible. With one, every reference
-// to its names is an import at its version, the weak ones among them. An import is the loader's by its version, whose
-// index follows libc.so.6's (runtime.c): the loader's exports all have versions, as glibc's do. A pass over the
-// imports, which are tens, shared by both paths.
-static void bind_keep_loader(Bind* bind, Link* link)
+// The imports of a library the driver names as needed: the loader, which libc.so's script names AS_NEEDED, or
+// libgcc_s.so.1 (-lgcc_s_asneeded). GNU ld and lld need such a library only for a strong reference that binds to it,
+// and GNU ld also for a needed named library's that its own DT_NEEDED doesn't cover (`forced`, Bind.runtime_needed).
+// Without one, the weak references to its names are left to nothing, unversioned (source NONE), and drop out of the
+// imports, keeping its export's type: GNU ld and lld write them so, OBJECT WEAK UND for _r_debug, lld demoting them in
+// demoteSymbolsAndComputeIsPreemptible. With one, every reference to its names is an import at its version, the weak
+// ones among them. An import is the library's by its version, whose index follows libc.so.6's and the other's
+// (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens,
+// shared by both paths.
+static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
 {
-    const Runtime* runtime = bind->runtime;
     LinkSymbols* symbols = &link->symbols;
-    bool needed = false;
+    bool needed = forced;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {
         const SymbolId symbol = bind->imports[i];
         const bool strong = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
-        needed = needed || (strong && runtime_loader_version(runtime, symbols->version[symbol]));
+        needed = needed || (strong && runtime_library_version(library, symbols->version[symbol]));
     }
     uint32_t kept = 0;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {
         const SymbolId symbol = bind->imports[i];
-        const bool dropped = !needed && runtime_loader_version(runtime, symbols->version[symbol]);
+        const bool dropped = !needed && runtime_library_version(library, symbols->version[symbol]);
         symbols->source[symbol] = dropped ? BUSTER_LINK_SOURCE_NONE : symbols->source[symbol];
         symbols->version[symbol] = dropped ? 0 : symbols->version[symbol];
         bind->imports[kept] = symbol;
@@ -1122,8 +1142,8 @@ static void bind_keep_loader(Bind* bind, Link* link)
     bind->import_count = kept;
 }
 
-// The link's definitions of names that libc.so.6 or the loader defines too, or libc.so.6 refers to, with default or
-// protected visibility: among the runtime's names that took a link symbol, in the order they took it.
+// The link's definitions of names that libc.so.6, the loader or libgcc_s.so.1 defines too, or libc.so.6 refers to, with
+// default or protected visibility: among the runtime's names that took a link symbol, in the order they took it.
 static void bind_find_exports(Bind* bind, const Link* link)
 {
     const RuntimeNames* names = &bind->runtime->global_names;
@@ -1208,12 +1228,19 @@ static void bind_shared_exports(Bind* bind, const Link* link)
 // The edges of the closure over the libraries the link names with -l (bind_needed_libraries): each a needed library's
 // strong reference to a name that another named library exports, the first on the line that does, unless the
 // referring library's own DT_NEEDED names that library, which the loader then loads for it; and each one to a name no
-// named library, libc.so.6 or the loader exports, which leads to no library (BUSTER_BIND_NO_LIBRARY): only the
-// executable's own definition can satisfy it. By edge: the referring library, its reference, the library it would
+// named library, libc.so.6, the loader or libgcc_s.so.1 exports, which leads to no library (BUSTER_BIND_NO_LIBRARY):
+// only the executable's own definition can satisfy it; and each one that the loader or libgcc_s.so.1 satisfies, which the
+// driver names as needed, unless the referring library's DT_NEEDED names it: the edge leads to that library
+// (BUSTER_BIND_LOADER, BUSTER_BIND_GCC_S), which GNU ld then keeps for the library's sake (its --as-needed counts a
+// needed library's references), where lld drops it and the program fails to load. By edge: the referring library, its reference, the library it would
 // need, the name's hash, and whether the link's own definition of the name satisfies it, a byte; with the edges by
 // their names' hashes (import_index_build) and a filter of them for the vector path, as RuntimeNames' filter: two bits
 // a name in 2^filter_bits words, chosen by the hash's top bits.
 #define BUSTER_BIND_NO_LIBRARY UINT32_MAX
+#define BUSTER_BIND_LOADER (UINT32_MAX - 1)
+#define BUSTER_BIND_GCC_S (UINT32_MAX - 2)
+#define BUSTER_BIND_NEEDS_LOADER 1u
+#define BUSTER_BIND_NEEDS_GCC_S 2u
 
 typedef struct BindLibraryEdges BindLibraryEdges;
 struct BindLibraryEdges
@@ -1241,14 +1268,19 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
         uint32_t export = 0;
         const bool strong = !references->weak[r];
         // The version the reference requires, if any, which only an export at it satisfies, as GNU ld and lld bind it:
-        // of libc.so.6 or the loader, theirs, unchecked, since the runtime keeps only their default exports and the
-        // loader checks it at load; of another library, a named library's.
+        // of libc.so.6, the loader or libgcc_s.so.1, theirs, unchecked, since the runtime keeps only their default
+        // exports and the loader checks it at load; of another library, a named library's.
         const String8 version = libraries->reference_versions[l][r];
         const String8 file = libraries->reference_files[l][r];
-        const String8 libc = bind->runtime->libc.soname;
-        const String8 loader = bind->runtime->loader.soname;
-        const bool runtime_version = version.length != 0 && ((file.length == libc.length && memcmp(file.pointer, libc.pointer, libc.length) == 0) ||
-                                                             (file.length == loader.length && memcmp(file.pointer, loader.pointer, loader.length) == 0));
+        const ImportLibrary* const runtime_libraries[] = { &bind->runtime->libc, &bind->runtime->loader, &bind->runtime->gcc_s };
+        const ImportLibrary* runtime_file = 0;
+        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(runtime_libraries); s += 1)
+        {
+            const String8 soname = runtime_libraries[s]->soname;
+            const bool same = version.length != 0 && soname.length != 0 && file.length == soname.length && memcmp(file.pointer, soname.pointer, soname.length) == 0;
+            runtime_file = same ? runtime_libraries[s] : runtime_file;
+        }
+        const bool runtime_version = runtime_file != 0;
         const uint32_t m = !strong || runtime_version ? 0
                            : version.length != 0      ? runtime_libraries_export_at(libraries, references->name[r], references->length[r], references->hash[r], version)
                                                       : runtime_libraries_export(libraries, references->name[r], references->length[r], references->hash[r], &export);
@@ -1257,23 +1289,31 @@ static uint32_t bind_library_edges(const Bind* bind, uint32_t l, BindLibraryEdge
         // a versioned one no named library exports at its version, the executable's to define.
         const uint32_t entry = strong && m == 0 && version.length == 0 ? runtime_find_global_name(names, references->name[r], references->length[r], references->hash[r]) : 0;
         const bool open = strong && m == 0 && !runtime_version && (version.length != 0 || entry == 0 || names->export[entry - 1] == 0);
+        // The runtime's library that satisfies it, by the file a versioned reference names or by the export of the name:
+        // the loader or libgcc_s.so.1, unless the library's own DT_NEEDED names it.
+        uint32_t index = 0;
+        const ImportLibrary* provider = runtime_file != 0 ? runtime_file
+                                        : strong && m == 0 && entry != 0 && names->export[entry - 1] != 0 ? runtime_export_library(bind->runtime, names->export[entry - 1] - 1, &index)
+                                                                                                           : 0;
+        const bool as_needed = strong && m == 0 && (provider == &bind->runtime->loader || provider == &bind->runtime->gcc_s) &&
+                               !runtime_libraries_lists_name(libraries, l, provider->soname);
         edges->from[edges->count] = l;
         edges->reference[edges->count] = r;
-        edges->to[edges->count] = edge ? m - 1 : BUSTER_BIND_NO_LIBRARY;
+        edges->to[edges->count] = edge ? m - 1 : as_needed ? (provider == &bind->runtime->loader ? BUSTER_BIND_LOADER : BUSTER_BIND_GCC_S) : BUSTER_BIND_NO_LIBRARY;
         edges->hash[edges->count] = references->hash[r];
         edges->satisfied[edges->count] = 0;
-        edges->count += edge || open ? 1 : 0;
+        edges->count += edge || open || as_needed ? 1 : 0;
         result |= edge ? 1u << (m - 1) : 0;
     }
     return result;
 }
 
-// Whether every library that library `l`'s DT_NEEDED entries name is in the link, a named library, libc.so.6 or the
-// loader, so that the definitions its references may bind to are all the link's to see.
+// Whether every library that library `l`'s DT_NEEDED entries name is in the link, a named library, libc.so.6, the
+// loader or libgcc_s.so.1, so that the definitions its references may bind to are all the link's to see.
 static bool bind_library_dependencies_known(const Bind* bind, uint32_t l)
 {
     const RuntimeLibraries* libraries = bind->libraries;
-    const String8 runtime[] = { bind->runtime->libc.soname, bind->runtime->loader.soname };
+    const String8 runtime[] = { bind->runtime->libc.soname, bind->runtime->loader.soname, bind->runtime->gcc_s.soname };
     bool known = true;
     for (uint32_t d = 0; known && d < libraries->dependency_count[l]; d += 1)
     {
@@ -1405,6 +1445,28 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
     return fits;
 }
 
+// The libraries the program loads, a bit each: the `needed` ones, and the named libraries their DT_NEEDED entries name,
+// which the loader loads for them, to the closure.
+static uint32_t bind_libraries_loaded(const RuntimeLibraries* libraries, uint32_t needed)
+{
+    uint32_t loaded = needed;
+    uint32_t added = needed;
+    while (added != 0)
+    {
+        uint32_t next = 0;
+        for (uint32_t l = 0; l < libraries->count; l += 1)
+        {
+            for (uint32_t m = 0; (added & (1u << l)) != 0 && m < libraries->count; m += 1)
+            {
+                next |= runtime_libraries_lists(libraries, l, m) ? 1u << m : 0;
+            }
+        }
+        added = next & ~loaded;
+        loaded |= added;
+    }
+    return loaded;
+}
+
 // The version needs of the libraries the program loads, checked as glibc's loader checks them when it loads them
 // (dl-version.c's _dl_check_map_versions), #398's review: the `needed` libraries, and the named libraries their
 // DT_NEEDED entries name, which the loader loads for them. Each auxiliary entry of a library's .gnu.version_r requires
@@ -1421,21 +1483,7 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
 static void bind_library_versions(Bind* bind, uint32_t needed)
 {
     const RuntimeLibraries* libraries = bind->libraries;
-    uint32_t loaded = needed;
-    uint32_t added = needed;
-    while (added != 0)
-    {
-        uint32_t next = 0;
-        for (uint32_t l = 0; l < libraries->count; l += 1)
-        {
-            for (uint32_t m = 0; (added & (1u << l)) != 0 && m < libraries->count; m += 1)
-            {
-                next |= runtime_libraries_lists(libraries, l, m) ? 1u << m : 0;
-            }
-        }
-        added = next & ~loaded;
-        loaded |= added;
-    }
+    const uint32_t loaded = bind_libraries_loaded(libraries, needed);
     for (uint32_t l = 0; bind->error == BIND_ERROR_NONE && l < libraries->count; l += 1)
     {
         const RuntimeVersionNeeds* needs = &libraries->needs[l];
@@ -1454,6 +1502,23 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
     }
 }
 
+// The loader and libgcc_s.so.1, a bit each (BUSTER_BIND_NEEDS_LOADER, BUSTER_BIND_NEEDS_GCC_S), that a DT_NEEDED entry
+// of a library the program loads (bind_libraries_loaded, from the `needed` libraries) names, so that the loader loads it
+// for that library: GNU ld's --as-needed keeps neither for another needed library's reference then (#511's review).
+static uint32_t bind_runtime_covered(const Bind* bind, uint32_t needed)
+{
+    const RuntimeLibraries* libraries = bind->libraries;
+    const uint32_t loaded = bind_libraries_loaded(libraries, needed);
+    uint32_t covered = 0;
+    for (uint32_t l = 0; l < libraries->count; l += 1)
+    {
+        const bool in = (loaded & (1u << l)) != 0;
+        covered |= in && runtime_libraries_lists_name(libraries, l, bind->runtime->loader.soname) ? BUSTER_BIND_NEEDS_LOADER : 0;
+        covered |= in && runtime_libraries_lists_name(libraries, l, bind->runtime->gcc_s.soname) ? BUSTER_BIND_NEEDS_GCC_S : 0;
+    }
+    return covered;
+}
+
 // The libraries the link names with -l that it needs, from Bind.libraries_needed, the ones the program's strong
 // references bind to. GNU ld's --as-needed counts a needed library's strong references too: a library is needed for one
 // that it satisfies, the first named library that exports the name, unless the referring library's own DT_NEEDED names
@@ -1461,8 +1526,11 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
 // counts a library's references only against the libraries after it on the line, and refuses a link that names them
 // the other way round (-lB -lA, libA referring to libB's name); this counts them against every library, so that such a
 // link works. The references of libc.so.6 and the loader, which come after every named library on the line, count
-// against none. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
-// loader nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
+// against none. A needed library's strong reference to a name of the loader's or libgcc_s.so.1's, which the driver names
+// as needed, makes that library needed too (Bind.runtime_needed), as GNU ld keeps it, unless the referring library's
+// own DT_NEEDED names it, or another's that the program loads does (bind_runtime_covered), or the executable's
+// definition satisfies the reference: lld drops it, and the program fails to load. A needed library's strong reference that nothing defines, neither a named library, libc.so.6, the
+// loader, libgcc_s.so.1 nor the executable, is an error (BIND_ERROR_LIBRARY_UNDEFINED), as GNU ld and lld refuse it
 // (--no-allow-shlib-undefined), where the program would fail to load (#398's review). Then the version needs of the
 // libraries the program loads (bind_library_versions).
 //
@@ -1513,7 +1581,7 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
             uint32_t next = 0;
             for (uint32_t e = 0; e < edges.count; e += 1)
             {
-                const bool leads = (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 && edges.to[e] != BUSTER_BIND_NO_LIBRARY;
+                const bool leads = (added & (1u << edges.from[e])) != 0 && edges.satisfied[e] == 0 && edges.to[e] < libraries->count;
                 next |= leads ? 1u << edges.to[e] : 0;
             }
             added = next & ~needed;
@@ -1527,10 +1595,14 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
         // refuse it (--no-allow-shlib-undefined): unless the library's DT_NEEDED names a library the link doesn't have,
         // whose definitions it can't see, which lld leaves unchecked too (GNU ld searches the system's directories for
         // it and checks the reference against it).
+        // And the loader and libgcc_s.so.1, for a needed library's reference that the executable doesn't satisfy.
         for (uint32_t e = 0; bind->error == BIND_ERROR_NONE && e < edges.count; e += 1)
         {
             const uint32_t l = edges.from[e];
-            const bool open = edges.to[e] == BUSTER_BIND_NO_LIBRARY && edges.satisfied[e] == 0 && (needed & (1u << l)) != 0;
+            const bool live = edges.satisfied[e] == 0 && (needed & (1u << l)) != 0;
+            bind->runtime_needed |= live && edges.to[e] == BUSTER_BIND_LOADER ? BUSTER_BIND_NEEDS_LOADER : 0;
+            bind->runtime_needed |= live && edges.to[e] == BUSTER_BIND_GCC_S ? BUSTER_BIND_NEEDS_GCC_S : 0;
+            const bool open = edges.to[e] == BUSTER_BIND_NO_LIBRARY && live;
             if (open && bind_library_dependencies_known(bind, l))
             {
                 bind->library = l;
@@ -1538,6 +1610,8 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
                 bind_fail(bind, BIND_ERROR_LIBRARY_UNDEFINED, 0);
             }
         }
+        // But not one that a library the program loads already names in its DT_NEEDED, so that the loader loads it.
+        bind->runtime_needed &= ~bind_runtime_covered(bind, needed);
         scratch_end(scratch);
     }
     bind->libraries_needed = needed;
@@ -1946,7 +2020,6 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     else
     {
         memset(bind->name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
-        memset(bind->symbols, 0, runtime->link.symbols.count * sizeof(SymbolId));
         memset(bind->members_needed, 0, words * sizeof(uint64_t));
         memset(bind->members_joined, 0, words * sizeof(uint64_t));
         memset(bind->signatures, 0, signature_words * sizeof(uint64_t));
@@ -2026,8 +2099,9 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         bind->resolved = link->symbols.count;
     }
     bind_keep_imports(bind, link);
-    bind_keep_loader(bind, link);
     bind_keep_libraries(bind, link);
+    bind_keep_as_needed(bind, link, &bind->runtime->loader, (bind->runtime_needed & BUSTER_BIND_NEEDS_LOADER) != 0);
+    bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
     if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
     {
         bind_shared_exports(bind, link);

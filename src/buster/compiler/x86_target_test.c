@@ -73,6 +73,12 @@ static bool x86_target_test_forms(void)
         { X86_FORM_MOVD_X_RM32, 0 },
         { X86_FORM_MOVQ_X_RM64, 0 },
         { X86_FORM_XCHG_RM64_R64, 0 },
+        { X86_FORM_XCHG_RM8_R8, 0 },
+        { X86_FORM_XCHG_RM16_R16, 0 },
+        { X86_FORM_XCHG_RM32_R32, 0 },
+        { X86_FORM_PCMPEQD_X_XM128, 0 },
+        { X86_FORM_PCMPEQD_MM_MM, 0 },
+        { X86_FORM_PCMPEQD_MM_M64, 0 },
         { X86_FORM_LOCK_XADD_M64_R64, 0 },
         { X86_FORM_LOCK_BTC_M64_R64, 0 },
         { X86_FORM_FLD_M80, 0 },
@@ -87,7 +93,11 @@ static bool x86_target_test_forms(void)
         { X86_FORM_PABSB_X_XM128, 1 },
         { X86_FORM_PCMPISTRI_X_XM128_IMM8, 1 },
         { X86_FORM_FNSTCW_M16, 0 },
+        { X86_FORM_FLDCW_M16, 0 },
+        { X86_FORM_FNSTSW_M16, 0 },
+        { X86_FORM_FNCLEX, 0 },
         { X86_FORM_STMXCSR_M32, 0 },
+        { X86_FORM_LDMXCSR_M32, 0 },
         { X86_FORM_LOCK_CMPXCHG_M8_R8, 0 },
         { X86_FORM_LOCK_CMPXCHG_M16_R16, 0 },
         { X86_FORM_LOCK_CMPXCHG_M32_R32, 0 },
@@ -98,6 +108,7 @@ static bool x86_target_test_forms(void)
         { X86_FORM_ROUNDSD_X_XM64_IMM8, 1 },
         { X86_FORM_CMPXCHG16B_M128, 1 },
         { X86_FORM_LZCNT_R64_RM64, 2 },
+        { X86_FORM_XGETBV, 2 },
         { X86_FORM_TZCNT_R64_RM64, 2 },
         { X86_FORM_ANDN_R64_R64_RM64, 2 },
         { X86_FORM_SHLX_R64_RM64_R64, 2 },
@@ -191,7 +202,15 @@ static bool x86_target_test_forms(void)
         passed &= x86_target_validate(vector, 0, 0) == 0;
     }
     // Individual feature controls catch mistakes concealed by the cumulative v4 profile.
-    X86Target partial = { .features = BUSTER_X86_FEATURE(AVX512F) };
+    X86Target partial = { .features = BUSTER_X86_FEATURE(XSAVE) };
+    const X86Instruction xcr0_read = { .form = X86_FORM_XGETBV };
+    x86_target_forms(&partial, vector);
+    passed &= vector[X86_FORM_XGETBV] != 0 && x86_target_validate(vector, &xcr0_read, 1) == 1;
+    partial.features = BUSTER_X86_FEATURE(AVX);
+    x86_target_forms(&partial, vector);
+    passed &= vector[X86_FORM_XGETBV] == 0 && x86_target_validate(vector, &xcr0_read, 1) == 0;
+    partial.features = BUSTER_X86_FEATURE(AVX512F);
+    x86_target_forms(&partial, vector);
     x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVW_K_K] && !vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVQ_K_K];
     partial.features |= BUSTER_X86_FEATURE(AVX512DQ);

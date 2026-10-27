@@ -1,0 +1,82 @@
+name: 9700X admission controller
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('9700X command pr {0} run {1} action {2} priority {3}', inputs.pr || '0', inputs.run || '0', inputs.action, inputs.priority) || '9700X reconcile' }}
+
+on:
+  # The privileged controller always uses reviewed main code, including for fork/conflicting PRs.
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, closed, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [9700X test, 9700X review signal]
+    types: [requested, completed]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: PR number (or supply run)
+        type: string
+      run:
+        description: Current PR request or main maintenance run ID (optional)
+        type: string
+      action:
+        description: Control (never preempts running work)
+        type: choice
+        options: [status, priority, clear, hold, resume, retry]
+        default: status
+      priority:
+        description: Used by the priority action; normal clears an override
+        type: choice
+        options: [critical, high, normal, low]
+        default: normal
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: write
+  checks: write
+  statuses: write
+
+# Serializes ledger/lease writes. This is a controller mutex, not the hardware priority queue.
+# Reconciliation reads live comments/reviews/PRs and recovers dispatch commands from their auditable run names.
+concurrency:
+  group: buster-fast-9700x-controller-v1
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository_id == '1421805693' &&
+      vars.CI_9700X_ADMISSION_ENABLED == 'true' &&
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.name == '9700X review signal' && github.event.action == 'completed') ||
+       (github.event.workflow_run.name == '9700X test' && github.event.workflow_run.event != 'pull_request'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CI_9700X_BACKLOG: ${{ vars.CI_9700X_BACKLOG || '3' }}
+      CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
+    steps:
+      - name: Check out reviewed controller code only
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+          sparse-checkout: tools/ci
+      - name: Build and check the metadata controller
+        run: |
+          cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o "$RUNNER_TEMP/admission"
+          "$RUNNER_TEMP/admission" --self-test
+      - name: Reconcile current identities, signals, checks and the single pool lease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/admission" --reconcile | tee "$RUNNER_TEMP/admission-summary"
+          cat "$RUNNER_TEMP/admission-summary" >> "$GITHUB_STEP_SUMMARY"

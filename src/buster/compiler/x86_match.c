@@ -294,6 +294,20 @@ static bool x86_match_supported(const X86FormDescription* form)
             "loope",
             "loopne",
             "jrcxz",
+            // What C's inline assembly reaches the processor's state with (#147): the CPU's identity and XCR0, the x87's
+            // control and status words, MXCSR, and the exchange that cpuid.h's rbx saving takes; the byte swap of
+            // <linux/swab.h>'s helpers; and SSE2's compare, in its legacy forms alone.
+            "xchg",
+            "bswap",
+            "cpuid",
+            "xgetbv",
+            "fnstcw",
+            "fldcw",
+            "fnstsw",
+            "fnclex",
+            "stmxcsr",
+            "ldmxcsr",
+            "pcmpeqd",
     };
     static const char* const sse[] =
         {

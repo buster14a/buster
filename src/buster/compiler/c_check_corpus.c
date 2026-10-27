@@ -566,12 +566,12 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             for (uint32_t report = 0; report < result->input.report_count; report += 1)
             {
                 const CheckInputReport* diagnostic = result->input.reports + report;
-                if (check_repair_input_report(repair, diagnostic) && diagnostic->token < result->position)
+                if ((check_repair_input_report(repair, diagnostic) || check_repair_loop_report(repair, &result->input, diagnostic)) && diagnostic->token < result->position)
                 {
                     result->token = diagnostic->token;
                     result->position = result->token;
                     result->pragma = diagnostic->pragma;
-                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_message(diagnostic->message));
+                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_report_message(&result->input, diagnostic));
                 }
             }
             if (result->adapted || result->input.diagnostic_graph)
@@ -581,7 +581,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     .scalar = scalar,
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
-                result->resource |= result->stream.status == CHECK_STATUS_RESOURCE;
+                result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
+                result->resource |= result->input.resource || result->stream.status == CHECK_STATUS_RESOURCE;
                 for (uint32_t report = 0; report < result->stream.report_count; report += 1)
                 {
                     const CheckReport* diagnostic = result->stream.reports + report;
@@ -628,7 +629,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); and with
-// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing).
+// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests may also
+// supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team.
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
@@ -636,6 +638,7 @@ static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_timing;
+static const uint32_t* check_corpus_deferred_cpus;
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
@@ -704,6 +707,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
                     path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
                     path->deferred->timing = check_corpus_deferred_timing;
+                    path->deferred->cpus = check_corpus_deferred_cpus;
                 }
                 path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
                                                                                 &path->scratch, path->deferred_lanes, path->deferred_bindings);
@@ -723,7 +727,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->token = path->input.reports[report].token;
                     path->position = path->token;
                     path->pragma = path->input.reports[report].pragma;
-                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_message(path->input.reports[report].message));
+                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
                 }
             }
         }
@@ -735,7 +739,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .scalar = scalar,
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
-        path->resource |= path->stream.status == CHECK_STATUS_RESOURCE;
+        path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             path->phase = "expression";
@@ -1137,7 +1142,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     valid = valid && check_program(&model, parser, &path->input, &path->stream, &path->types, options, &path->output_arena, &path->scratch) &&
             check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
-                                                     &path->scratch, NULL, NULL, true);
+                                                     &path->scratch, NULL, NULL, true, true);
     const bool published = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
                                                          selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
     const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !published && emission.status == CHECK_DATA_UNSUPPORTED));
@@ -1514,6 +1519,17 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->initializer_warnings.count == b->initializer_warnings.count &&
                  a->program_diagnostic.status == b->program_diagnostic.status && a->program_diagnostic.token == b->program_diagnostic.token &&
                  a->program_diagnostic.position == b->program_diagnostic.position;
+    equal &= a->input.packed_member_count == b->input.packed_member_count;
+    for (uint32_t i = 0; equal && i < a->input.packed_member_count; i += 1)
+    {
+        const CheckInputPackedMember* left = a->input.packed_members + i;
+        const CheckInputPackedMember* right = b->input.packed_members + i;
+        equal = left->address == right->address && left->token == right->token && left->member == right->member && left->record == right->record &&
+                left->alignment_log2 == right->alignment_log2 && left->implicit_conversions == right->implicit_conversions && left->suppressed == right->suppressed &&
+                left->member_name.length == right->member_name.length && left->record_name.length == right->record_name.length &&
+                (left->member_name.length == 0 || memcmp(left->member_name.pointer, right->member_name.pointer, left->member_name.length) == 0) &&
+                (left->record_name.length == 0 || memcmp(left->record_name.pointer, right->record_name.pointer, left->record_name.length) == 0);
+    }
     for (uint32_t warning = 0; equal && warning < a->initializer_warnings.count; warning += 1)
     {
         equal = a->initializer_warnings.tokens[warning] == b->initializer_warnings.tokens[warning];
@@ -1555,7 +1571,15 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->parser_binding_event_count == right->parser_binding_event_count &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
-            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL);
+            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL) &&
+            (left->loop_diagnostic == NULL) == (right->loop_diagnostic == NULL);
+    if (equal && left->loop_diagnostic != NULL)
+    {
+        const CheckInputLoopDiagnostic* l = left->loop_diagnostic;
+        const CheckInputLoopDiagnostic* r = right->loop_diagnostic;
+        equal = l->position == r->position && l->statement == r->statement && l->source == r->source && l->pragma == r->pragma &&
+                l->message == r->message && strcmp(l->text, r->text) == 0;
+    }
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&

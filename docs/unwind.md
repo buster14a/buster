@@ -1,10 +1,12 @@
-# Native fixed-frame unwind information
+# Native unwind information
 
 `unwind_tier0.c` derives call-frame transitions from successful Tier0 instruction
-records after branch sizing. `unwind.c` turns those descriptors into native
-`.eh_frame` contributions. This is an opt-in consumer: it does not change
-`tier0.c`, rerun its generic validators, or recover source rows. The companion
-[debug emitter](debug.md) still needs caller-supplied source positions.
+records after branch sizing, or reads them from the frame Tier 0 published
+(`unwind_tier0_frame`, #395). `unwind.c` turns those descriptors into native
+`.eh_frame` contributions. The C driver writes them for every function it
+compiles, as clang has unwind tables ("The C driver's unwind tables" below); the
+analyzer stays an opt-in consumer, which recovers no source rows. The companion
+[debug emitter](debug.md) gives the source rows.
 
 ## Producer contract
 
@@ -23,7 +25,11 @@ appear exactly once in the ordered branch columns, and its target must be in the
 body or at the beginning of the common epilogue. Branches into a partially
 restored frame, unlisted branches, extra returns and unsupported control flow
 are refused. Early source returns are supported through Tier0's jumps to its
-common epilogue.
+common epilogue. A frameless function (no push or allocation) may end in a
+`ud2` rather than the return: the terminal builtins' helper
+(`c_builtin_terminal_helpers.c`, `__builtin_trap()`'s and
+`__builtin_unreachable()`'s, #523) is a `ud2` alone, whose descriptor has no
+transitions, its CFA RSP + 8 throughout. A `ud2` anywhere else is refused.
 
 The vector path resolves body effects eight records at a time, with a scalar
 twin. It rejects unknown effects, body writes to RSP or unsaved nonvolatile
@@ -42,6 +48,41 @@ offsets are instruction-end PCs: pushes, optional allocation, optional release,
 then reverse pops. Unused offsets and `reserved` are zero. `unwind_check` is a
 separate diagnostic boundary. The trusted writer does not repeat that proof;
 it checks representability and output capacity before stores.
+
+A function with a frame pointer (`UnwindFunction.pointer`) pushes RBP and points
+it at the push first, then pushes an ordered subset of the other five (`saved`
+without RBP's bit); its reservation, and whatever its body allocates on the stack
+as it runs (a variable-length array's storage), are below the pushes, so its CFA
+is RBP + 16 from the mov until RBP's pop, wherever RSP goes, and `frame_size` is
+0. Its 2n + 3 offsets are RBP's push, the mov, the other pushes, the other pops
+and RBP's pop: the release before the pops (`lea rsp, [rbp - 8n]`, or
+`mov rsp, rbp` without other pushes) moves no CFA and has none. A realigned frame
+(an object, or a call's outgoing area, aligned past 16 bytes: the Tier 0 guide's
+"Realigned frames") is a frame pointer's: its `and rsp, -alignment` after the
+reservation, and its base's `mov r15, rsp` after that (r15 among the pushes), are
+part of the reservation and have no offsets either.
+
+### The published frame
+
+`unwind_tier0_frame(code, offsets, size, output)` takes the frame Tier 0
+published with its code (`Tier0Code.frame_saved`, `frame_size`, `frame_pointer`,
+`frame_alignment_log2` and `frame_base`: what `tier0_emit_prologue` pushed,
+reserved and realigned) instead of proving one. A published alignment past 16
+bytes must have a frame pointer and fit the `and`'s immediate, and a base needs
+r15 among the pushes. Tier 0's prologue is the code's first records and its epilogue's
+release, pops and ret its last, so each transition is the end of a record the
+frame names by its index: the reader checks that each of those records is the
+instruction it must be (and that the last is the ret, or a frameless function's
+`ud2`) and takes each end from
+the final offsets, with no pass over the body. It takes the producer's word that
+the body keeps the frame, which `unwind_tier0` proves for the fixed frames it
+takes: the tests compare the two on every function both take
+(`unwind_tier0_test_generated`), check every frame pointer's body against the
+semantics tables' effects (no write to RBP), and run both kinds under GDB.
+Its work is constant per function and scalar: there is no column of many items to
+take in lanes. It refuses a frame its records aren't (`UNSUPPORTED`), invalid
+inputs (`INVALID`) and sizes past the format's (`LIMIT`), each leaving the
+descriptor alone.
 
 ## Format and linker handoff
 
@@ -74,41 +115,142 @@ explicit and the executable writer's bounded CIE walk stays small. No final
 terminator is emitted. Late layout resolves these fixups and builds the existing
 native unwind index; the emitter does not need final text addresses.
 
+With `output.shared` (#395), the batch is one CIE and the FDEs after it, each
+pointing back to it, as a compiler's `.eh_frame` is: the CIE first, each FDE 8
+bytes before its location, to the next FDE or `output.size`. Keep the whole batch
+as one EH_FRAME atom: an object's `.eh_frame` holds its atoms as one section,
+which a linker's CIE walk would otherwise count by the function (the executable
+writer's indexes at most eight CIEs per atom, and `link-foreign` refused the
+pairs of more functions), and an executable's index takes one CIE and its FDEs
+in its vector path. A shared batch is the pairs' less 40 bytes per function but
+the first.
+
 The scalar writer appends the CIE and instructions independently. The vector
 writer classifies eight descriptors, forms CFA LEB bytes and expands original
-templates with byte permutations and bounded stores. Its 384 shapes cover 64
-save masks and no allocation or one of five CFA LEB widths. Each pair occupies
-64–184 bytes. Initialization tables are shared and immutable afterward; frame
-analysis needs only bounded stack scratch and a 68-byte descriptor per function.
+templates of FDEs with byte permutations and bounded stores, the CIE copied
+before each (or once). Its 384 shapes cover 64 save masks and no allocation or
+one of five CFA LEB widths; the CIE pointer is a hole, as the range and the CFA
+bytes are. A frame pointer's function, the rare shape, it leaves to the exact
+writer, lane by lane, having sized its FDE in its lane (42 + 13n bytes to a
+multiple of 8). Each FDE occupies 24–144 bytes, and each pair 40 more.
+Initialization tables are shared and immutable afterward; frame analysis needs
+only bounded stack scratch and a 68-byte descriptor per function.
+
+## The C driver's unwind tables
+
+The C driver (`run_check_command`) writes unwind tables when clang's driver would
+have them (`predefines_unwind_tables`, the rule `__GCC_HAVE_DWARF2_CFI_ASM`
+follows): asynchronous ones by default, unless `-ffreestanding`, the last of
+`-fasynchronous-unwind-tables` and `-fno-asynchronous-unwind-tables` saying
+otherwise; synchronous ones with `-funwind-tables`; and with `-fexceptions`, `-g`
+or `-gmodules`. Where clang's tables would be off, the driver's are a superset of
+clang's call frame information: with debug information alone, clang writes it to
+`.debug_frame`, which only debuggers read, and the driver to `.eh_frame`, which
+debuggers read too, and so does the runtime's unwinder (`backtrace()`, a C++
+exception or a thread's cancellation passing through the function); with
+`-fexceptions` alone, clang gives an FDE only to a function that may unwind (one
+that calls), and the driver to every function.
+
+`check_program_emit` (with `unwind`) reads each function's published frame
+after branch sizing, its bodies' then its helpers' (a frame that isn't its
+records is an internal compiler error), and after the last function writes their
+FDEs with one shared CIE into one EH_FRAME atom, each FDE's initial location a
+PC32 fixup to its function's symbol. An executable's writer indexes them in
+`.eh_frame_hdr` with the C runtime's; `-c`'s object has them as its `.eh_frame`,
+with a relocation per function.
+
+`test-check-debug --cross-check` (`c_check_unwind_test.c`) runs a fixture whose
+function counts the frames above it with glibc's `backtrace()`, from `main`,
+from a function with a variable-length array that each of a computed goto's
+labels calls, from one with values live across the call (called with a
+positive and a negative argument, so that both arms of its last `?:` run), and
+from one of 128-bit integers (Tier 0's `I128` and `U128`, in their frame slots,
+four of them live across the call, its division and remainder libgcc's calls),
+from one with an array aligned to 64 (a realigned frame) and from one with an
+array aligned to 4096 and a variable-length array (a realigned frame with a
+base, r15):
+by default and with `-funwind-tables` or `-g` after
+`-fno-asynchronous-unwind-tables`, the unwinder walks through every function to
+libc's start (by each path, the same bytes); with
+`-fno-asynchronous-unwind-tables` alone, it stops at the first. The object has
+one CIE and an FDE per function, each relocated, and walks alike linked by GNU
+ld, lld and `link-foreign`; without tables, it has no `.eh_frame`. The options'
+rule is checked on objects against clang's of the same fixture with the same
+options (those, `-ffreestanding` and `-fasynchronous-unwind-tables` after it,
+`-fexceptions`, each order of `-fasynchronous-unwind-tables` and
+`-fno-asynchronous-unwind-tables`, and `-fno-unwind-tables` after
+`-funwind-tables` with the asynchronous tables on and off): clang's object has
+an FDE per function exactly where ours has, in `.debug_frame` for `-g` alone.
+Every function of the fixture calls, so `-fexceptions`'s FDEs are every
+function's in clang's object too. GDB's backtrace at every instruction each
+function runs, stepping over calls through as many of its calls as its paths
+need, gives the function and its callers, and the steps must reach every
+instruction of GDB's disassembly of the function.
+
+A second fixture calls `__builtin_trap()` and `__builtin_unreachable()`
+(#523), whose calls reach the terminal helper, a `ud2` with an FDE of no
+transitions: its `SIGILL` handler counts its frames with `backtrace()`, which
+from the trap's address (a signal frame's, through libc's trampoline) must walk
+through the helper and its caller to `main`, by each path into the same bytes
+and from its object linked by GNU ld; without unwind tables, the trap still
+reaches the handler.
 
 ## Checks and measurements
 
 `test-unwind` checks scalar/vector identity, an independent CFI interpreter,
-all 64 save masks across CFA LEB boundaries, capacity refusal, signed limits,
-and protected descriptor/byte/location tails from zero through 65 functions.
-The interpreter checks every row transition, including stack release and pops,
-and the constant state between transitions. Corrupted return rules and ranges
-are negative controls for the interpreter. Separate analyzer tests use real
-generated typed functions and deliberate frame, control and store mutations.
+all 64 save masks across CFA LEB boundaries and the 32 a frame pointer leaves,
+as pairs and with one CIE, capacity refusal, signed limits, each rule a frame
+pointer's descriptor must keep, and protected descriptor/byte/location tails
+from zero through 65 functions, a frame pointer's every third. The interpreter
+checks every row transition, including stack release and pops, and the
+constant state between transitions; a frame pointer's rows by the CFA's register
+too. Corrupted return rules and ranges are negative controls for the
+interpreter. Separate analyzer tests use real generated typed functions and
+deliberate frame, control and store mutations. The published frame's reader
+gets the analyzer's descriptor on every generated function the analyzer takes
+(fixed frames, among programs with records by value, deep values and symbols
+through the GOT and TLS), and on those with variable-length arrays, which have a
+frame pointer and which the analyzer refuses, its prologue's and epilogue's
+records' ends, their bodies leaving RBP alone (realigned frames' among them,
+with and without a base, from a shape of objects aligned past 16); then every
+mask's fixture with and without a frame pointer, and realigned (to 32 and to
+4096, the `and`'s two forms, with a base where the mask has r15), at every kind
+of reservation, 34 changes to prologues, epilogues, frames and inputs (33
+refused with the descriptor left alone; a frame pointer's reservation the
+producer doesn't publish, which its CFA doesn't follow, taken), 15 to a realigned
+frame's realignment and to what its frame publishes of it (13 refused; a base
+the producer doesn't publish, whose `mov` is then the body's, taken), and the
+guarded tails.
 
 `test-unwind --cross-check` constructs two actual Tier0 functions, including a
-loop with a stack local and all six nonvolatile saves. Their instruction bytes
-come from the native encoder and their CFI comes from this emitter. GNU as
-supplies only an ELF container and the special process-entry wrapper's code and
-CFI. The native executable writer attaches fixture source rows and checks lane
-and scalar/vector byte identity. GDB stops at entry and every stack transition,
-checking the three-frame chain and the caller's six register values. Perf must
-recover a sampled leaf → outer → process-entry chain with source locations.
-Those explicit fixture rows do not establish automatic source-row production.
+loop with a stack local and all six nonvolatile saves, then again with a leaf
+that allocates on the stack first, which has a frame pointer and its other five
+saves, its CFI with one shared CIE, and again with a leaf that also has an
+object aligned to 64, a realigned frame whose base is r15. Their instruction bytes come from the native
+encoder and their CFI comes from this emitter, each leaf's from the published
+frame (and the fixed one's from the analyzer too, the same). GNU as supplies
+only an ELF container and the special process-entry wrapper's code and CFI. The
+native executable writer attaches fixture source rows and checks lane and
+scalar/vector byte identity. GDB stops at every instruction of the leaf outside
+its loop (its entry and every stack transition among them), checking the
+three-frame chain and the caller's six register values. Perf must recover a
+sampled leaf → outer → process-entry chain with source locations. The leaf that
+allocates writes its allocation: perf's samples copy the stack from RSP, and the
+kernel copies nothing of a page never touched (it can't fault one in at the
+sample), so an untouched allocation's samples have no stack to unwind. Those
+explicit fixture rows do not establish automatic source-row production.
 
 `benchmark-unwind` uses frozen typed programs with integer, floating, call,
 loop and pointer work. It compares the same vector Tier0 producer, branch sizing
-and encoding with no CFI, scalar analysis/emission, and vector analysis/emission.
+and encoding with no CFI, scalar analysis/emission, vector analysis/emission,
+and the C driver's: the published frame and the vector writer's batch with one
+CIE (`published`), whose descriptors must be the analyzer's and whose bytes the
+exact writer's.
 Per-function allocation and cleanup are inside timing. Program generation,
 signature assignment, initialization and byte-identity preflight are outside.
 It reports 21-pass median and range, nanoseconds and user cycles per typed entry,
 whole-unit time, code/CFI bytes and temporary arena use. Options are
-`--functions N`, `--only baseline|scalar|vector` and `--after-scalar MS`.
+`--functions N`, `--only baseline|scalar|vector|published` and `--after-scalar MS`.
 The latter runs the scalar CFI emitter alone before every timed path, with the
 same duration for each; it does not condition with the vector backend chain.
 

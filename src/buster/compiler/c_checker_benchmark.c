@@ -45,6 +45,7 @@ struct String8
 #include "buster/compiler/c_check_builtin_float.c"
 #include "buster/compiler/c_check_builtin_math.c"
 #include "buster/compiler/c_check_builtin_atomic.c"
+#include "buster/compiler/c_check_builtin_atomic_rmw.c"
 #include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_bit_cast.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"

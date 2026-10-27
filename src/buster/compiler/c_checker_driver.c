@@ -61,8 +61,19 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_TARGET: result = "unsupported checker language or target model"; break;
         case CHECK_INPUT_INCOMPLETE_MEMBER: result = "record member has incomplete type"; break;
         case CHECK_INPUT_INCOMPLETE_OBJECT: result = "object has incomplete type"; break;
+        case CHECK_INPUT_LOOP_HINT: result = "invalid '#pragma clang loop' directive"; break;
+        case CHECK_INPUT_LOOP_PLACEMENT: result = "expected a for, while, or do-while loop to follow '#pragma clang loop'"; break;
+        case CHECK_INPUT_LOOP_MISSING: result = "missing argument; expected an integer value"; break;
+        case CHECK_INPUT_LOOP_EXPRESSION: result = "expected expression"; break;
+        case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
     }
     return result;
+}
+
+static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
+    return loop != NULL && report->pragma == loop->pragma && report->token == loop->position ? loop->text : check_driver_input_message(report->message);
 }
 
 static const char* check_driver_report_message(const CheckReport* report)
@@ -140,6 +151,21 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
     }
 }
 
+static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                       const CheckInputPackedMember* member)
+{
+    const CheckWarningSeverity severity = check_diagnostic_severity(input, member->token, CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER);
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[member->token],
+                           "taking address of packed member '%.*s' of class or structure '%.*s' may result in an unaligned pointer value",
+                           (int)member->member_name.length, member->member_name.pointer,
+                           (int)member->record_name.length, member->record_name.pointer);
+    }
+}
+
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
@@ -196,7 +222,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
-            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i)))
+            if (first[token] == UINT64_MAX && (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
             {
                 first[token] = i;
             }
@@ -219,6 +245,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         uint32_t pragma = 0;
+        uint32_t packed = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
             while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
@@ -246,12 +273,25 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
                 flags &= flags - 1;
             }
+            // Addresses are sparse and ordered by the '&' event. A generic selection can put the diagnosed
+            // member after another address in its control expression, so its location is not the iteration key.
+            // Keep these records out of the dense 16-bit warning columns.
+            while (!pp->fatal && packed < input->packed_member_count && input->packed_members[packed].address <= token)
+            {
+                const CheckInputPackedMember* member = input->packed_members + packed;
+                if (show_warnings && !member->suppressed && member->address == token &&
+                    (repair == NULL || check_repair_warning_token(repair, member->token)))
+                {
+                    check_driver_packed_report(parser, pp, input, member);
+                }
+                packed += 1;
+            }
             if (!pp->fatal && reports && first[token] != UINT64_MAX)
             {
                 const uint32_t index = (uint32_t)first[token];
                 const uint32_t phase = (uint32_t)(first[token] >> 32);
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_message(input->reports[index].message);
+                                                                                     check_driver_input_report_message(input, input->reports + index);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (source != BUSTER_CHECK_NONE)
                 {
@@ -425,11 +465,12 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     check_driver_diagnose(parser, pp, code->token, message);
 }
 
-// Writes the checked program's object at `output_path`. With `debug` (-g), the object carries DWARF: the unit the
-// executable's would (c_check_debug.c), relocated against the functions' sections (ObjectOptions.debug).
+// Writes the checked program's object at `output_path`, its functions compiled on `lanes` (check_program_emit_lanes).
+// With `debug` (-g), the object carries DWARF: the unit the executable's would (c_check_debug.c), relocated against the
+// functions' sections (ObjectOptions.debug); and with `unwind`, its functions' unwind tables (check_program_emit's).
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool verify, bool dump_static, bool debug, Arena* scratch)
+                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -439,7 +480,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckProgramRows rows = { 0 };
     CheckDebug dwarf = { 0 };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL, verify);
+                 check_program_emit_lanes(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL, unwind,
+                                          verify, lanes);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -467,10 +509,26 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         ObjectSymbols symbols = { 0 };
         valid = link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) &&
                 object_map_symbols(&symbols, &code.link, scratch);
+        // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
+        // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+        // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
+        const uint32_t switch_symbols = code.lowered.table_count + code.lowered.case_symbol_count;
+        uint8_t* temporary = valid && switch_symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
+        valid = valid && (switch_symbols == 0 || temporary != 0);
+        if (temporary != 0)
+        {
+            memset(temporary, 0, code.link.symbols.count);
+            memset(temporary + code.lowered.case_symbol_base, 1, switch_symbols);
+        }
         if (valid)
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL, .debug_count = debug ? 1 : 0 };
+            const ObjectOptions options = {
+                .temporary_symbols = temporary,
+                .temporary_symbol_count = temporary != 0 ? code.link.symbols.count : 0,
+                .debug = debug ? &dwarf.object : NULL,
+                .debug_count = debug ? 1 : 0,
+            };
             const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
@@ -483,6 +541,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         }
     }
     arena_pop_to(scratch, mark);
+    check_program_lanes_release(lanes);
     arena_release(&bytes);
     arena_release(&output);
     return valid;
@@ -561,6 +620,37 @@ static const char* check_driver_link_name(const Link* link, NameId name, char* b
     return buffer;
 }
 
+// Where a fixup of the link that binding joined to `runtime` (from unit `unit_base` on) comes from, as GNU ld names an
+// input: a member of the runtime's archives as archive(member), or "the program" for the unit's own code, and the name
+// of its target, into `buffer`. A pass over the atoms, on a failed write alone.
+static const char* check_driver_fixup_origin(const Link* link, const Runtime* runtime, uint32_t unit_base, FixupId fixup, char* buffer, uint64_t capacity)
+{
+    AtomId found = 0;
+    for (AtomId atom = 1; found == 0 && atom < link->atoms.count; atom += 1)
+    {
+        const bool inside = link->atoms.fixup_count[atom] != 0 && fixup >= link->atoms.fixup_begin[atom] && fixup - link->atoms.fixup_begin[atom] < link->atoms.fixup_count[atom];
+        found = inside ? atom : 0;
+    }
+    const uint32_t unit = found != 0 ? link->atoms.unit[found] : 0;
+    const bool member = found != 0 && unit >= unit_base + runtime->member_unit && unit - unit_base - runtime->member_unit < runtime->member_count;
+    const uint32_t m = member ? unit - unit_base - runtime->member_unit : 0;
+    const String8 archive = member ? runtime_member_archive(runtime, m)->path : (String8){ 0 };
+    const String8 name = member ? runtime_member_name(runtime, m) : (String8){ 0 };
+    const SymbolId target = fixup < link->fixups.count ? link->fixups.target[fixup] : 0;
+    const NameId target_name = target != 0 && target < link->symbols.count ? link->symbols.name[target] : 0;
+    char target_bytes[256];
+    check_driver_link_name(link, target_name, target_bytes, sizeof(target_bytes));
+    if (member)
+    {
+        snprintf(buffer, capacity, "%.*s(%.*s)'s fixup to '%s'", (int)archive.length, archive.pointer, (int)name.length, name.pointer, target_bytes);
+    }
+    else
+    {
+        snprintf(buffer, capacity, "%s fixup to '%s'", found != 0 && unit < unit_base ? "the program's" : "a", target_bytes);
+    }
+    return buffer;
+}
+
 // The libraries the command line names, -lNAME (or -l NAME), and the directories it adds to their search, -LDIR (or
 // -L DIR), each in its order, for the direct path to link (runtime_libraries_import).
 typedef struct CheckDriverLibraries CheckDriverLibraries;
@@ -604,10 +694,11 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
 // With `debug` (-g), the executable carries DWARF: a unit of the program's functions with their source rows (#395,
-// c_check_debug.c).
+// c_check_debug.c); and with `unwind`, its functions' unwind tables, which .eh_frame_hdr indexes with the runtime's. The
+// functions compile on `lanes` (check_program_emit_lanes).
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
-                                     const CheckDriverLibraries* libraries, Arena* scratch)
+                                     bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch)
 {
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
@@ -654,7 +745,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         {
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
-        if (valid && !check_program_emit(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, debug ? &rows : NULL, verify))
+        if (valid && !check_program_emit_lanes(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding, debug ? &rows : NULL,
+                                               unwind, verify, lanes))
         {
             valid = false;
             again = bind.error == BIND_ERROR_SNAPSHOT;
@@ -710,14 +802,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 {
                     // A member that joined refers to a name nothing defines, as GNU ld words it, with the archive's
                     // path and the member's name: on GCC's link line only libgcc_s.so.1 could define it, which the
-                    // driver names as needed and the direct path doesn't link (morestack.o's unwinder, for split-stack
-                    // code).
+                    // driver names as needed, and this system has none, or one without the name (morestack.o's
+                    // unwinder, for split-stack code).
                     const bool known = bind.member != UINT32_MAX;
                     const String8 archive = known ? runtime_member_archive(&runtime, bind.member)->path : (String8){ 0 };
                     const String8 member = known ? runtime_member_name(&runtime, bind.member) : (String8){ 0 };
-                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, which the direct path doesn't link\n",
-                            (int)archive.length, archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer,
-                            known ? ")" : "", name);
+                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, %s\n", (int)archive.length,
+                            archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer, known ? ")" : "", name,
+                            runtime.gcc_s_path.length != 0 ? "which doesn't define it here" : "which this system doesn't have");
                 }
                 else if (bind.error == BIND_ERROR_LIBRARY_VERSION)
                 {
@@ -790,6 +882,13 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 fprintf(stderr, "error: can't write %s: %s: %s\n", output_path, write.result.call != NULL ? write.result.call : "write",
                         strerror(write.result.system_error));
             }
+            else if (!valid && (error == EXECUTABLE_ERROR_RELOCATION || error == EXECUTABLE_ERROR_FIXUP) && write.result.fixup != 0)
+            {
+                // The fixup's origin and target, a runtime member's as libgcc.a(generic-morestack.o) names one.
+                char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
+                fprintf(stderr, "error: can't link %s: %s (executable error %u)\n", output_path,
+                        check_driver_fixup_origin(&code.link, &runtime, 1, write.result.fixup, origin, sizeof(origin)), (uint32_t)error);
+            }
             else if (!valid)
             {
                 fprintf(stderr, "error: can't link %s (executable error %u)\n", output_path, (uint32_t)error);
@@ -800,6 +899,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
         }
         arena_pop_to(scratch, mark);
+        check_program_lanes_release(lanes);
         arena_release(&arena);
         arena_release(&bytes);
         arena_release(&output);
@@ -810,6 +910,20 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         runtime_release(&runtime);
     }
     return valid;
+}
+
+// How many CPUs the process may run on (sched_getaffinity's), at most the lanes an emission runs: the functions' lanes'
+// default, of which the bodies' tokens then decide how many pay (check_program_emit_lanes).
+static uint32_t check_driver_cpus(void)
+{
+    uint64_t mask[16] = { 0 };
+    const long written = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+    uint32_t cpus = 0;
+    for (long word = 0; word < 16 && word * 8 < written; word += 1)
+    {
+        cpus += (uint32_t)__builtin_popcountll(mask[word]);
+    }
+    return cpus == 0 ? 1 : cpus < BUSTER_CHECK_EMIT_MAX_LANES ? cpus : BUSTER_CHECK_EMIT_MAX_LANES;
 }
 
 static const char* check_driver_object_name(Arena* arena, const char* source)
@@ -857,6 +971,10 @@ static int run_check_command(int count, char** arguments, bool executable)
         .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
     };
     bool missing_value = false;
+    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
+    // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them.
+    CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    bool invalid_lanes = false;
     for (int i = 0; filtered != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -893,6 +1011,15 @@ static int run_check_command(int count, char** arguments, bool executable)
         else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
+        }
+        else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
+        {
+            const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
+            char* end = 0;
+            const unsigned long lane_count = value != 0 ? strtoul(value, &end, 10) : 0;
+            invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
+            lanes.lanes = (uint32_t)lane_count;
+            lanes.every_lane = true;
         }
         else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
@@ -934,7 +1061,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
     // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
@@ -942,11 +1069,13 @@ static int run_check_command(int count, char** arguments, bool executable)
     // an object with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than
     // preprocessing the unit again for them.
     const bool source_rows = parsed && (link || emit_object) && (options.predefines.debug || options.predefines.debug_modules);
+    // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
+    const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [-fsyntax-only | -c] "
-                        "[-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
+                        "[-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1058,6 +1187,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                     const CheckOptions check_options = { .scalar = scalar };
                     CheckStream stream;
                     ready = check_graph_run(&types, &input.graph, &output_arena, &scratch, &check_options, &stream);
+                    ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, &scratch);
                     if (ready)
                     {
                         CheckDriverDiagnostic additional[3] = { 0 };
@@ -1185,7 +1315,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, verify, dump_static, source_rows, &scratch) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, source_rows, unwind_tables, &lanes,
+                                                                               &scratch) ? 0 : 1;
                             }
                             else
                             {
@@ -1199,7 +1330,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (check_program_select_mode(&selected, &program, &data, lower_all ? C_LOWERING_ALL : C_LOWERING_REACHABLE, scalar, &output_arena, &scratch))
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                                 source_rows, &libraries, &scratch) ? 0 : 1;
+                                                                 source_rows, unwind_tables, &libraries, &lanes, &scratch) ? 0 : 1;
                             }
                             else
                             {

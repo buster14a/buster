@@ -402,7 +402,7 @@ static bool pp_test_history_growth(const char* directory, bool with_clang)
         "-std=gnu17",
     };
     uint64_t tokens = 0;
-    result = result && pp_test_file(1, arguments, 0, &options, path, with_clang, directory, &tokens) && tokens == 2801;
+    result = result && pp_test_file(1, arguments, 0, &options, path, with_clang, directory, false, &tokens) && tokens == 2801;
     unlink(path);
     printf("history growth: %s (all eight initial slices, repeated arguments, generated sources)\n", result ? "pass" : "FAIL");
     return result;
