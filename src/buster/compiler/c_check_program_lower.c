@@ -3468,13 +3468,12 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
 }
 
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
+static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const uint32_t node = task.node;
     const CheckOp op = graph->ops[node];
     const CheckValue* value = stream->values + node;
     const uint32_t a = graph->operand0[node];
@@ -3490,7 +3489,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     writer->token = graph->tokens[node];
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
-    if (op == CHECK_OP_VALUE && !task.initialized && value->object != 0 && value->object < program->object_count &&
+    if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
         program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
         const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value->object - 1] : 0;
@@ -3500,20 +3499,20 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            task.initialized = true;
-            check_lower_push(writer, task);
+            initialized = true;
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = initialized, .discard = discard });
             check_lower_initializer(writer, (CheckControl){ .token = value->object - 1, .target = selected - 1 });
         }
     }
     else if (op == CHECK_OP_STATEMENT_VALUE)
     {
-        check_lower_region(writer, task);
+        check_lower_region(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = initialized, .discard = discard });
     }
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
-             ((value->category == CHECK_RVALUE && !task.address) || ((task.address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
+             ((value->category == CHECK_RVALUE && !address) || ((address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
         // A discarded one (a comma's, whose operands have no effects) is nothing.
-        if (!task.discard)
+        if (!discard)
         {
             check_lower_constant(writer, value);
         }
@@ -3525,7 +3524,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             // The final value of a statement region without an expression statement is void.
         }
-        else if (task.address || address_value)
+        else if (address || address_value)
         {
             check_lower_address(writer, object, value->offset);
         }
@@ -3560,7 +3559,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_SELECT)
     {
-        check_lower_operand(writer, node, 0, task.address, 0);
+        check_lower_operand(writer, node, 0, address, 0);
     }
     else if (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY)
     {
@@ -3568,7 +3567,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const bool complex = type_kind(types, type_strip_aligned(types, input_type)) == BUSTER_TYPE_KIND_COMPLEX;
         if (!complex && op == CHECK_OP_REAL)
         {
-            check_lower_operand(writer, node, 0, task.address, 0);
+            check_lower_operand(writer, node, 0, address, 0);
         }
         else if (!complex)
         {
@@ -3579,7 +3578,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             // The part at its offset from the value's address: an lvalue's, or a complex rvalue's, whose value is its
             // object's address.
-            if (!task.address)
+            if (!address)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
             }
@@ -3699,7 +3698,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_DEREFERENCE)
     {
-        if (!task.address && !address_value)
+        if (!address && !address_value)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
         }
@@ -3727,11 +3726,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            if (bit_field && !task.address)
+            if (bit_field && !address)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_READ, .type = check_lower_bit_pack(&field) });
             }
-            else if (!task.address && !address_value)
+            else if (!address && !address_value)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
             }
@@ -3779,7 +3778,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_COMMA)
     {
-        check_lower_operand(writer, node, 1, task.address, task.discard ? BUSTER_TYPE_VOID : value->type);
+        check_lower_operand(writer, node, 1, address, discard ? BUSTER_TYPE_VOID : value->type);
         check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
     }
     else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
@@ -3859,17 +3858,17 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
-        check_lower_bit_assign(writer, node, task.discard);
+        check_lower_bit_assign(writer, node, discard);
     }
     else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
-        check_lower_bit_update(writer, node, task.discard);
+        check_lower_bit_update(writer, node, discard);
     }
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !task.discard });
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !discard });
         check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value->type);
         if (op == CHECK_OP_ASSIGN)
         {
@@ -3950,7 +3949,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             }
             else
             {
-                if (op == CHECK_OP_SUBSCRIPT && !task.address && !address_value)
+                if (op == CHECK_OP_SUBSCRIPT && !address && !address_value)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
                 }
@@ -4010,7 +4009,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         const CheckLowerTaskPacked packed = writer->tasks[--writer->depth];
         const CheckLowerTaskKind kind = (CheckLowerTaskKind)((packed.control >> 32) & UINT8_MAX);
         const uint32_t node = (uint32_t)packed.control;
-        const TypeId type = kind == CHECK_LOWER_INSTRUCTION ? (uint16_t)(packed.control >> 48) : (uint32_t)packed.payload;
+        const TypeId type = (uint32_t)packed.payload;
         const uint64_t value = packed.payload;
         if (sources)
         {
@@ -4020,7 +4019,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (kind == CHECK_LOWER_INSTRUCTION)
         {
-            check_lower_emit(writer, (uint8_t)node, (uint8_t)type, value);
+            check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
         }
         else if (kind == CHECK_LOWER_CONVERSION)
         {
@@ -4098,12 +4097,17 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else
         {
-            const bool batched = !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
+            const bool simple = !sources && !writer->scalar && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
+                                check_lower_value(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0);
+            const bool batched = !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
                                  check_lower_batch_expression(writer, node);
             if (!batched)
             {
                 writer->expression_nodes += 1;
-                check_lower_expand(writer, check_lower_task_unpack(packed));
+                if (!simple)
+                {
+                    check_lower_expand(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0, ((packed.control >> 42) & 1) != 0);
+                }
             }
         }
     }
@@ -5282,7 +5286,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         // One bounded gather per node obtains both columns. This optional table is only for the batch path;
         // no room leaves its exact task loop available, and scalar/source-row lowering allocates none.
-        shared->type_templates = !scalar && !sources && !shared->terminal && program->body_count != 0 ?
+        shared->type_templates = !scalar && !sources && program->body_count != 0 ?
                                  BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)shared->type_count + 1) : NULL;
         for (uint32_t first = 0; shared->type_templates != NULL && first < shared->type_count; first += 16)
         {

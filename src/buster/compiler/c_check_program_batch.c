@@ -85,17 +85,17 @@ static bool check_lower_batch_proof(const CheckValue* value, CheckOp op)
 
 // The scalar payload of a reached leaf. A two/three-node template calls this only after its parent has
 // proved the original evaluation order. A neighboring body's speculative type classification never reads its map.
-static inline __attribute__((always_inline)) bool check_lower_batch_leaf(const CheckLowerWriter* writer, const CheckLowerBatch* batch, uint32_t node, uint8_t* kind, uint64_t* bits)
+static inline __attribute__((always_inline)) bool check_lower_value_payload(const CheckLowerWriter* writer, uint32_t node, uint32_t metadata, bool initialized, uint8_t* kind, uint64_t* bits)
 {
     const CheckProgram* program = writer->program;
     const CheckValue* value = program->stream->values + node;
     const CheckOp op = program->input->graph.ops[node];
-    const uint32_t root = node - batch->first;
-    const uint8_t class = (uint8_t)batch->classes[root];
+    const uint8_t class = (uint8_t)metadata;
     const uint32_t object = value->object;
     const bool known = object != 0 && object < program->object_count;
-    bool valid = ((batch->valid >> root) & 1) != 0 && value->overload_head == 0;
-    valid = valid && (op != CHECK_OP_VALUE || !known || !program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
+    bool valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
+                 (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS) << 8)) == 0 && value->overload_head == 0;
+    valid = valid && (initialized || op != CHECK_OP_VALUE || !known || !program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
     *kind = 0;
     *bits = 0;
     if (valid && check_lower_batch_proof(value, op))
@@ -148,15 +148,50 @@ static void check_lower_batch_write(CheckLowerWriter* writer, uint32_t kinds, ui
     writer->count += (uint32_t)__builtin_popcount(occupied);
 }
 
+// Isolated VALUE nodes need no speculative window. Their scalar template uses the same packed type
+// lookup; taking an address keeps the original helper, including VLA indirection and storage flags.
+static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized)
+{
+    const CheckProgram* program = writer->program;
+    const CheckValue* value = program->stream->values + node;
+    bool valid = false;
+    if (program->input->graph.ops[node] == CHECK_OP_VALUE)
+    {
+        const uint32_t object = value->object;
+        const bool known = object != 0 && object < program->object_count;
+        const bool compound = !initialized && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
+        if (address && value->category == CHECK_LVALUE && value->type != BUSTER_TYPE_VOID && value->overload_head == 0 && known && !compound)
+        {
+            writer->token = program->input->graph.tokens[node];
+            check_lower_address(writer, object, value->offset);
+            valid = true;
+        }
+        else if (!address)
+        {
+            const uint32_t index = type_index(value->type);
+            const uint32_t metadata = index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
+            uint8_t kind = 0;
+            uint64_t bits = 0;
+            valid = check_lower_value_payload(writer, node, metadata, initialized, &kind, &bits);
+            if (valid)
+            {
+                writer->token = program->input->graph.tokens[node];
+                check_lower_emit(writer, kind, (uint8_t)metadata, bits);
+            }
+        }
+    }
+    return valid;
+}
+
 static inline __attribute__((always_inline)) bool check_lower_batch_expression(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckValue* value = program->stream->values + node;
     const CheckOp op = graph->ops[node];
-    const bool candidate = (op < 64 && check_lower_batch_ops[op] != 0) || value->constant_kind == CHECK_CONSTANT_INTEGER;
-    bool valid = false;
-    if (candidate)
+    const uint8_t recipe = op < 64 ? check_lower_batch_ops[op] : 0;
+    bool valid = recipe != 0 && recipe != BUSTER_CHECK_LOWER_BATCH_VALUE && value->overload_head == 0 && !check_lower_batch_proof(value, op);
+    if (valid)
     {
         CheckLowerBatch* batch = writer->batches + ((node / BUSTER_CHECK_LOWER_BATCH) & (BUSTER_CHECK_LOWER_WINDOWS - 1));
         if (node < batch->first || node - batch->first >= BUSTER_CHECK_LOWER_BATCH)
@@ -164,67 +199,53 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
             check_lower_batch_prepare(writer, batch, node);
         }
         const uint32_t root = node - batch->first;
-        uint8_t kind = (uint8_t)batch->kinds[root];
+        const uint8_t kind = (uint8_t)batch->kinds[root];
         const uint8_t class = (uint8_t)batch->classes[root];
-        valid = ((batch->valid >> root) & 1) != 0;
-        uint32_t nodes = 1;
-        uint8_t leaf_kind = 0;
-        uint64_t leaf_bits = 0;
-        if (valid && check_lower_batch_leaf(writer, batch, node, &leaf_kind, &leaf_bits))
-        {
-            writer->token = graph->tokens[node];
-            check_lower_emit(writer, leaf_kind, class, leaf_bits);
-        }
-        else
-        {
-            const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR;
-            const bool pointer = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
-            const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :
-                                op == CHECK_OP_SELECT ? 0 : program->stream->conversions[node].operands[0].type;
-            const TypeId right = binary ? program->stream->conversions[node].operands[1].type : 0;
-            valid = valid && kind != 0 && kind != BUSTER_CHECK_LOWER_BATCH_VALUE && value->overload_head == 0 && !check_lower_batch_proof(value, op) &&
-                    check_lower_batch_target(writer, left, pointer) && (!binary || check_lower_batch_target(writer, right, pointer));
-            if (valid)
-            {
-                const uint32_t a = graph->operand0[node];
-                const uint32_t b = binary ? graph->operand1[node] : 0;
-                const uint32_t entries = 1 + binary + (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER);
-                const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
-                bool joined = root >= 1 + binary && a + 1 + binary == node && (!binary || b + 1 == node) &&
-                              (left == 0 || left == batch->types[root - 1 - binary]) && (!binary || right == 0 || right == batch->types[root - 1]) &&
-                              writer->count <= room && entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth;
-                uint8_t a_kind = 0;
-                uint8_t b_kind = 0;
-                uint64_t a_bits = 0;
-                uint64_t b_bits = 0;
-                joined = joined && check_lower_batch_leaf(writer, batch, a, &a_kind, &a_bits);
-                joined = joined && (!binary || check_lower_batch_leaf(writer, batch, b, &b_kind, &b_bits));
-                writer->token = graph->tokens[node];
-                if (joined)
-                {
-                    const uint32_t kinds = a_kind | (uint32_t)b_kind << 8 | (uint32_t)(kind == BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 0 : kind) << 16;
-                    const uint32_t classes = batch->classes[root - 1 - binary] | (binary ? (uint32_t)batch->classes[root - 1] << 8 : 0) | (uint32_t)class << 16;
-                    const uint8_t occupied = 1 | (binary ? 2 : 0) | (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 4 : 0);
-                    check_lower_batch_write(writer, kinds, classes, a_bits, b_bits, occupied);
-                    writer->token = graph->tokens[binary ? b : a];
-                    nodes += 1 + binary;
-                }
-                else
-                {
-                    if (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER)
-                    {
-                        check_lower_instruction(writer, kind, class, 0);
-                    }
-                    if (binary)
-                    {
-                        check_lower_operand(writer, node, 1, false, right);
-                    }
-                    check_lower_operand(writer, node, 0, false, left);
-                }
-            }
-        }
+        const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR;
+        const bool pointer = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
+        const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :
+                            op == CHECK_OP_SELECT ? 0 : program->stream->conversions[node].operands[0].type;
+        const TypeId right = binary ? program->stream->conversions[node].operands[1].type : 0;
+        valid = ((batch->valid >> root) & 1) != 0 && check_lower_batch_target(writer, left, pointer) &&
+                (!binary || check_lower_batch_target(writer, right, pointer));
         if (valid)
         {
+            uint32_t nodes = 1;
+            const uint32_t a = graph->operand0[node];
+            const uint32_t b = binary ? graph->operand1[node] : 0;
+            const uint32_t entries = 1 + binary + (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER);
+            const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
+            bool joined = root >= 1 + binary && a + 1 + binary == node && (!binary || b + 1 == node) &&
+                          (left == 0 || left == batch->types[root - 1 - binary]) && (!binary || right == 0 || right == batch->types[root - 1]) &&
+                          writer->count <= room && entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth;
+            uint8_t a_kind = 0;
+            uint8_t b_kind = 0;
+            uint64_t a_bits = 0;
+            uint64_t b_bits = 0;
+            joined = joined && check_lower_value_payload(writer, a, batch->metadata[root - 1 - binary], false, &a_kind, &a_bits);
+            joined = joined && (!binary || check_lower_value_payload(writer, b, batch->metadata[root - 1], false, &b_kind, &b_bits));
+            writer->token = graph->tokens[node];
+            if (joined)
+            {
+                const uint32_t kinds = a_kind | (uint32_t)b_kind << 8 | (uint32_t)(kind == BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 0 : kind) << 16;
+                const uint32_t classes = batch->classes[root - 1 - binary] | (binary ? (uint32_t)batch->classes[root - 1] << 8 : 0) | (uint32_t)class << 16;
+                const uint8_t occupied = 1 | (binary ? 2 : 0) | (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 4 : 0);
+                check_lower_batch_write(writer, kinds, classes, a_bits, b_bits, occupied);
+                writer->token = graph->tokens[binary ? b : a];
+                nodes += 1 + binary;
+            }
+            else
+            {
+                if (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER)
+                {
+                    check_lower_instruction(writer, kind, class, 0);
+                }
+                if (binary)
+                {
+                    check_lower_operand(writer, node, 1, false, right);
+                }
+                check_lower_operand(writer, node, 0, false, left);
+            }
             writer->expression_nodes += nodes;
             writer->batch_nodes += nodes;
         }

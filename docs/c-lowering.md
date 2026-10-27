@@ -175,8 +175,13 @@ cache holds only these immutable templates. It reads no semantic payload or
 local map speculatively: the popped expression supplies those facts when it is
 actually reached.
 
-A leaf expands its constant or local/global read template. A unary operation
-or a binary operation can join its immediately
+Isolated `VALUE` nodes use a scalar leaf template and the packed type lookup,
+without preparing a speculative window. Addressed lvalues keep the original
+address helper, including storage flags and VLA indirection. These scalar leaf
+templates can also use the original tracked emitter. They are excluded from
+the reported vector share.
+
+A vector-classified unary operation or binary operation can join its immediately
 preceding leaf operands when their consuming edges need no conversion. Their
 occupied entry slots form a small mask, whose prefix popcounts give the output
 positions; compress stores expand the slots into the kind, class and value
@@ -193,7 +198,7 @@ reordered operands and window edges also keep those operand tasks. Constant
 proofs skip the same children as the scalar loop. Calls, builtins, bit-fields,
 pointer arithmetic, short-circuit and conditional expressions, memory classes,
 floating constants, address-taking and automatic compound initialization retain
-their existing rules. Functions that track their evaluation stack, and source-row
+their existing rules. Operations in functions that track their evaluation stack, and source-row
 emission for `-g`, retain the task loop. `--scalar` selects that original loop
 for every expression.
 
@@ -208,7 +213,8 @@ instruction's class. Instructions, address addends, byte copies and complex
 operations retain all 64 payload bits. Other tasks keep their full TypeId and
 32-bit local identity in the payload word. The dispatch reads those words
 directly; only a consumer which needs a complete task decodes the original C
-record. The scalar expansion uses the same storage and original task rules;
+record. Expression expansion takes its node and flags directly, so its common
+cases reconstruct no aggregate argument. The scalar expansion uses the same storage and original task rules;
 the codec has an independent field-for-field boundary test.
 
 With `--time-stages`, `-c` and the executable driver also print
