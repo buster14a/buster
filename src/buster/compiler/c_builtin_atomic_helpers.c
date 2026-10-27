@@ -16,10 +16,10 @@
 // these symbols pure/readnone, remove repeated calls, or inline their records into a stream that may reorder memory.
 // compiler_barrier is this consumer obligation, not a claim that a RET instruction itself constrains an optimizer.
 //
-// The caller must establish natural object alignment of at least required_alignment for load/store. These helpers
-// do not implement packed/known-unaligned objects lacking that proof, cross-cacheline/page accesses, 16-byte atomics, generic aggregate
-// atomics, or atomic read/modify/write operations. An unknown pointer cast is not alignment proof. A valid typed-object
-// alignment contract must be explicitly established by the source consumer, or that operation needs another fallback.
+// The caller must give load/store objects natural alignment of at least required_alignment, as clang's code generation
+// gives their addresses (c_checker.c's check_graph_atomic_alignment). These helpers do not implement packed/known-unaligned
+// objects, for which clang calls libatomic, cross-cacheline/page accesses, 16-byte atomics, generic aggregate atomics, or
+// atomic read/modify/write operations (c_builtin_atomic_rmw_helpers.c's leaves).
 // Size zero is required for fences. Unsupported IDs/sizes and arena exhaustion publish no bytes or arena length.
 //
 // Baseline x86-64 uses MOV for naturally aligned scalar atomic loads. A MOV followed by MFENCE implements these
