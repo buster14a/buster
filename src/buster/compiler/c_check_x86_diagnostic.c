@@ -60,6 +60,17 @@ static void check_x86_diagnostic_switch(CheckX86DiagnosticWalk* walk, uint32_t i
     }
 }
 
+static void check_x86_diagnostic_initializer(CheckX86DiagnosticWalk* walk, const CheckInitializer* plan)
+{
+    for (uint32_t part = 0; part < plan->count; part += 1)
+    {
+        if (plan->parts[part].kind == CHECK_INIT_VALUE)
+        {
+            check_x86_diagnostic_push(walk, plan->parts[part].node, false);
+        }
+    }
+}
+
 static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t index)
 {
     const CheckProgram* program = walk->program;
@@ -69,13 +80,7 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t 
     if (entry->kind == CHECK_CONTROL_INITIALIZE)
     {
         const CheckInitializer* plan = program->initializers->plans + entry->target;
-        for (uint32_t part = 0; part < plan->count; part += 1)
-        {
-            if (plan->parts[part].kind == CHECK_INIT_VALUE)
-            {
-                check_x86_diagnostic_push(walk, plan->parts[part].node, false);
-            }
-        }
+        check_x86_diagnostic_initializer(walk, plan);
     }
     if (entry->kind == CHECK_CONTROL_ASM)
     {
@@ -137,7 +142,25 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
     CheckProgram* program = walk->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckOp op = graph->ops[node];
-    if (op == CHECK_OP_STATEMENT_VALUE)
+    if (op == CHECK_OP_VALUE)
+    {
+        // Automatic compound literals execute an initializer plan, outside the value leaf's operand columns.
+        const CheckValue value = graph->leaves[node];
+        if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
+            !program->input->static_objects[value.object - 1])
+        {
+            const uint32_t selected = program->initializers != NULL ? program->initializers->declaration_plans[value.object - 1] : 0;
+            if (selected == 0 || selected > program->initializers->count)
+            {
+                check_program_fail(program, CHECK_PROGRAM_INVALID, value.object - 1);
+            }
+            else
+            {
+                check_x86_diagnostic_initializer(walk, program->initializers->plans + selected - 1);
+            }
+        }
+    }
+    else if (op == CHECK_OP_STATEMENT_VALUE)
     {
         const uint32_t region = program->input->expression_regions[graph->tokens[node]];
         if (region != 0 && region <= program->region_count)
@@ -201,11 +224,11 @@ static bool check_program_x86_diagnostics(CheckProgram* program, CheckStream* st
     if (pending && valid)
     {
         memset(walk.seen, 0, count);
-        for (uint32_t b = 0; b < program->body_count; b += 1)
+        for (uint32_t b = 0; program->status == CHECK_PROGRAM_OK && b < program->body_count; b += 1)
         {
             walk.body = program->bodies + b;
             check_x86_diagnostic_push(&walk, 0, true);
-            while (walk.depth != 0)
+            while (walk.depth != 0 && program->status == CHECK_PROGRAM_OK)
             {
                 const uint64_t item = walk.stack[--walk.depth];
                 if (item < program->input->graph.count)
@@ -218,7 +241,7 @@ static bool check_program_x86_diagnostics(CheckProgram* program, CheckStream* st
                 }
             }
         }
-        for (uint32_t i = 0; i < stream->x86_count; i += 1)
+        for (uint32_t i = 0; program->status == CHECK_PROGRAM_OK && i < stream->x86_count; i += 1)
         {
             CheckBuiltinX86Effect* effect = stream->x86 + i;
             for (uint32_t e = 0; e < effect->range_event_count; e += 1)

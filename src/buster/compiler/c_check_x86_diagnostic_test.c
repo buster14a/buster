@@ -51,7 +51,8 @@ static void check_test_x86_diagnostic_storage(CheckTest* test)
     {
         CheckOp op = CHECK_OP_VALUE;
         uint32_t none = BUSTER_CHECK_NONE;
-        CheckInput input = { .graph = { .count = 1, .ops = &op, .operand0 = &none, .operand1 = &none, .operand2 = &none } };
+        CheckValue leaf = { 0 };
+        CheckInput input = { .graph = { .count = 1, .ops = &op, .leaves = &leaf, .operand0 = &none, .operand1 = &none, .operand2 = &none } };
         CheckBuiltinX86Effect effect = { .range_event_count = 1 };
         CheckStream stream = { .x86 = &effect, .x86_count = 1 };
         CheckControl control = { .kind = CHECK_CONTROL_RETURN, .node = 0 };
@@ -137,6 +138,14 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         { "selected choose", "unsigned f(V a){return __builtin_choose_expr(1,BAD,0);}", 1, true },
         { "initializer", "unsigned f(V a){unsigned x=BAD;return x;}", 1, true },
         { "dead initializer", "unsigned f(V a){if(0){unsigned x=BAD;return x;}return 0;}", 0, false },
+        { "scalar compound literal", "unsigned f(V a){return (unsigned){BAD};}", 1, true },
+        { "array compound literal", "unsigned f(V a){return ((unsigned[]){BAD,0})[0];}", 1, true },
+        { "record compound literal", "struct S{unsigned x;};unsigned f(V a){return ((struct S){.x=BAD}).x;}", 1, true },
+        { "nested compound literal", "unsigned f(V a){return (unsigned){(unsigned){BAD}};}", 1, true },
+        { "in-range compound literal", "unsigned f(V a){return (unsigned){__builtin_ia32_cmpb128_mask(a,a,7,65535)};}", 0, false },
+        { "dead compound literal", "unsigned f(V a){if(0)return (unsigned){BAD};return 0;}", 0, false },
+        { "sizeof compound literal", "unsigned f(V a){return sizeof((unsigned){BAD});}", 0, false },
+        { "short-circuited compound literal", "unsigned f(V a){return 0&&((unsigned){BAD});}", 0, false },
         { "ordinary call argument", "void take(unsigned);void f(V a){take(BAD);}", 1, true },
         { "statement expression", "unsigned f(V a){return ({BAD;});}", 1, true },
         { "dead statement expression", "unsigned f(V a){return 0&&({BAD;});}", 0, false },

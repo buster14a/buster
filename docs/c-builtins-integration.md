@@ -579,7 +579,11 @@ expression evaluation edges. Constant conditions select their executable
 edges; unknown conditions retain both. `sizeof`, `alignof`, short-circuited
 operands and unreachable statements do not make a call executable. Initializer
 parts, assembly operands and statement-expression regions supply their own
-roots. The driver reports each surviving event at the builtin's source
+roots. A reached automatic compound-literal value follows its declaration's
+initializer plan and queues its `CHECK_INIT_VALUE` parts; those runtime edges
+are stored outside the leaf's graph operands. Nested compound literals use
+the same bounded worklist, while dead or unevaluated literals supply no roots.
+The driver reports each surviving event at the builtin's source
 location, with the converted immediate and its valid bounds, through
 `-Wargument-outside-range`'s default-error policy. Diagnostic pragmas can
 downgrade or suppress it; `-w` suppresses it too. A failed or incomplete program
