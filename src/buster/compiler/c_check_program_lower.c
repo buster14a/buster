@@ -71,7 +71,9 @@ typedef struct CheckProgramLowered CheckProgramLowered;
 struct CheckProgramLowered
 {
     Tier0Function* functions;
+    // The builtin helpers, then the asm statements' (c_check_program_asm.c), whose plans `asms` has.
     CheckProgramHelpers helpers;
+    CheckProgramAsms asms;
     SymbolId errno_symbol;
     TypeId errno_pointer_type;
     // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
@@ -1856,6 +1858,13 @@ static void check_lower_constant(CheckLowerWriter* writer, const CheckValue* val
     if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
         check_lower_address(writer, value->object, value->offset);
+        // An lvalue's constant address is the object's, which its caller takes, whatever the object's type. An rvalue's is
+        // its value: an address cast to `long` (`(long)&x`, which the checker keeps as a constant: a cast to 64 bits) is
+        // the address's bits in the cast's class.
+        if (value->category == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
     }
     else if (check_lower_complex(writer->program->types, value->type))
     {
@@ -4370,6 +4379,146 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     }
 }
 
+// Pushes, for after the tasks pushed after it, the address of the slot at `offset` in asm operand block `object`.
+static void check_lower_asm_slot(CheckLowerWriter* writer, uint32_t object, uint32_t offset)
+{
+    if (offset != 0)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, offset);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+}
+
+// An asm statement (CHECK_CONTROL_ASM), as check_program_asm_plan planned it, in clang's order: each output's address,
+// with a `+` operand's value loaded through it, then each input's value (a memory input's address). With a helper,
+// they go into its operand block, a frame object, whose address the helper's call takes; a template of no
+// instructions has no helper, and then its operands are evaluated alone: a matching input's value is its output's, a
+// `+` output keeps its own (stored again, as clang's code stores it), and any other output keeps its value, which the
+// template doesn't write. The tasks are pushed last first.
+static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    const CheckProgramAsms* asms = &writer->output->asms;
+    const CheckProgramAsm* plan = asms->plans != 0 && control.target < input->asm_count ? asms->plans + control.target : 0;
+    const CheckInputAsm* statement = plan != 0 ? input->asm_statements + control.target : 0;
+    const uint32_t count = statement != 0 ? statement->output_count + statement->input_count : 0;
+    if (plan == 0 || !plan->planned)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (plan->reason != NULL)
+    {
+        check_lower_unsupported(writer, plan->reason);
+    }
+    else if (count > BUSTER_CHECK_ASM_OPERANDS)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (plan->helper != BUSTER_CHECK_NONE)
+    {
+        const CheckProgramHelper* helper = writer->output->helpers.items + plan->helper;
+        const uint32_t object = plan->block != 0 ? check_lower_object(writer, plan->block, 3) : BUSTER_CHECK_NONE;
+        const TypeId argument = BUSTER_TYPE_ULONG;
+        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, helper->symbol, BUSTER_TYPE_VOID, &argument, plan->block != 0 ? 1 : 0) : 0;
+        check_lower_instruction(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
+        if (plan->block != 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+        }
+        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const CheckAsmPlace* place = plan->places + k;
+            const uint32_t node = statement->operands[k].node;
+            const uint8_t class = check_lower_class(types, place->type);
+            if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            {
+                // A `+` register operand's value, through its address the slot holds.
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+                check_lower_asm_slot(writer, object, place->value);
+            }
+            if (place->written || place->kind == BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_expression(writer, node, true, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+            }
+            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_slot(writer, object, place->slot);
+            }
+        }
+    }
+    else
+    {
+        // Each output a matching input sets keeps its address in a temporary till the input's value comes.
+        uint32_t addresses[BUSTER_CHECK_ASM_OPERANDS];
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const uint32_t tied = plan->places[k].tied;
+            if (tied < statement->output_count && writer->output->status == CHECK_PROGRAM_OK)
+            {
+                addresses[tied] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+            }
+        }
+        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            const CheckAsmPlace* place = plan->places + k;
+            const uint32_t node = statement->operands[k].node;
+            bool matched = false;
+            for (uint32_t i = statement->output_count; i < count; i += 1)
+            {
+                matched |= plan->places[i].tied == k;
+            }
+            if (place->tied < statement->output_count)
+            {
+                // The input in its output's register, as GCC and clang place it (check_asm_tied_type): a narrower integer
+                // zero-extended from its own width, so "=r"(long) : "0"(-1) is 4294967295.
+                const CheckAsmPlace* output = plan->places + place->tied;
+                const uint8_t output_class = check_lower_class(types, output->type);
+                const TypeId placed = check_asm_tied_type(types, place->type, output->type);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, 0);
+                if (placed != output->type)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, output_class, 0);
+                }
+                check_lower_expression(writer, node, false, placed);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, addresses[place->tied]);
+            }
+            else if (place->written && matched)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, addresses[k]);
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            {
+                const uint8_t class = check_lower_class(types, place->type);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (place->written || place->kind == BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, check_lower_class(types, place->type), 0);
+                check_lower_expression(writer, node, false, place->type);
+            }
+        }
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -4422,7 +4571,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     }
     else if (control.kind == CHECK_CONTROL_ASM)
     {
-        check_lower_unsupported(writer, "inline assembly");
+        check_lower_asm(writer, control);
     }
     else if (control.kind == CHECK_CONTROL_SWITCH)
     {
@@ -4622,6 +4771,9 @@ struct CheckLowerShared
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
     uint32_t* signatures;
     uint8_t* incoming;
+    // The naked functions, by object, which the bodies refuse (their basic assembly would be the whole function, without
+    // Tier 0's prologue and epilogue: the second part of #147's claim). Only a program with asm statements has them.
+    uint8_t* naked;
     uint32_t capacity;
     uint32_t local_capacity;
     uint32_t abi_capacity;
@@ -4716,13 +4868,17 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // and the smallest normal, and the nodes of its six operands none. Only a function with long double values writes
     // the table.
     const uint64_t x87_capacity64 = (uint64_t)nodes + 1;
+    // An asm statement's lowering (check_lower_asm) writes its operand block, up to 16 entries an operand besides its
+    // expression's, and its call, with its block and a temporary an operand among the locals.
+    const uint64_t asm_statements = program->status == CHECK_PROGRAM_OK && input != 0 ? input->asm_count : 0;
+    const uint64_t asm_operands = asm_statements != 0 && program->asms != 0 ? program->asms->count : 0;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
-                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
+                                varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 4 + 32;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
-                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + 1;
+                                      varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
@@ -4731,6 +4887,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         lowered->status = lowered->helpers.status;
         lowered->token = lowered->helpers.token;
         lowered->reason = lowered->helpers.reason;
+        valid = false;
+    }
+    // The asm statements' helpers after the builtins', before the runtime's symbols, which come after every helper's.
+    if (valid && !check_program_asm_plan(&lowered->asms, &lowered->helpers, program, scalar, output, scratch))
+    {
+        lowered->status = lowered->asms.status;
+        lowered->token = lowered->asms.token;
         valid = false;
     }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;
@@ -4756,8 +4919,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
     // or from a floating type, an update's two), each of up to two arguments. The runtime functions' provisional symbols
     // (check_lower_runtime) follow the helpers'.
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + 1;
-    const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + 1 : 0;
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + 1;
+    const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements + 1 : 0;
     const uint64_t provisional64 = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     if (valid && (abi_capacity64 > UINT32_MAX || argument_capacity64 > UINT32_MAX || provisional64 + CHECK_LOWER_RUNTIMES >= UINT32_MAX))
     {
@@ -4805,6 +4968,20 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
     shared->local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     shared->local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    shared->naked = valid && input->asm_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    valid = valid && (input->asm_count == 0 || shared->naked != 0);
+    if (shared->naked != 0)
+    {
+        memset(shared->naked, 0, (uint64_t)count + 1);
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const CheckInputAttributes* attributes = input->declarations[token] == token && input->objects[token] <= count ? input->attributes[token] : 0;
+            for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+            {
+                shared->naked[input->objects[token]] |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
+            }
+        }
+    }
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 &&
@@ -4893,6 +5070,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     bool valid = true;
     *status = (CheckProgramLowered){
         .helpers = shared->lowered->helpers,
+        .asms = shared->lowered->asms,
         .errno_symbol = shared->lowered->errno_symbol,
         .errno_pointer_type = shared->lowered->errno_pointer_type,
         .token = BUSTER_CHECK_NONE,
@@ -5057,7 +5235,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // the address each return gives (Tier0Function.result_size).
         const bool aggregate_result = check_lower_aggregate(types, result);
         const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(types, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
-        if (returned != NULL)
+        if (shared->naked != 0 && body.object <= input->token_count && shared->naked[body.object])
+        {
+            check_lower_unsupported(writer, "naked functions");
+        }
+        else if (returned != NULL)
         {
             check_lower_unsupported(writer, returned);
         }

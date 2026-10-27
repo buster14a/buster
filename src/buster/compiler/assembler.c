@@ -3,7 +3,8 @@
 //
 // GNU assembly frontend. asm_assemble consumes a bounded source slice and caller-owned arena, returning the shared
 // Link representation. No C parser, subprocess, allocation per record, or modification of the final encoder record.
-// Layout map: asm_lex; symbols and expressions; operands; directives/statements; matching; fragment layout; emission.
+// Layout map: asm_lex; symbols and expressions; operands; directives/statements; matching; fragment layout; emission;
+// asm_assemble_code, a source's records for code that another function's records hold (C's inline assembly, #147).
 // The public boundary rejects unsupported syntax and validates records before trusted encoding. Layout only promotes
 // branches: each can grow once, alignment is recomputed every round, and a final fixed-layout check covers rel8-only
 // instructions. This terminates after at most branch_count + 1 rounds even when alignment absorbs earlier growth.
@@ -222,6 +223,8 @@ struct AsmParser
     uint32_t cfi_depth;
     bool cfi_active;
     bool prefix;
+    // asm_assemble_code's source: code another function's records hold, which takes no directive but the syntax's.
+    bool code;
 };
 
 static uint64_t asm_clock(void)
@@ -1774,7 +1777,12 @@ static void asm_directive(AsmParser* parser, uint32_t end)
 {
     const uint32_t token = parser->at++;
     const uint32_t location = parser->tokens[token].start;
-    if (asm_is(parser, token, ".intel_syntax") || asm_is(parser, token, ".att_syntax"))
+    if (parser->code && !asm_is(parser, token, ".intel_syntax") && !asm_is(parser, token, ".att_syntax"))
+    {
+        // Code that another function's records hold (asm_assemble_code) has no sections, data or symbols of its own.
+        asm_fail(parser, location, "inline assembly takes no directive but .intel_syntax and .att_syntax");
+    }
+    else if (asm_is(parser, token, ".intel_syntax") || asm_is(parser, token, ".att_syntax"))
     {
         parser->options.intel = asm_is(parser, token, ".intel_syntax");
         parser->prefix = true;
@@ -2857,6 +2865,75 @@ static void asm_emit(AsmParser* parser)
     }
 }
 
+// The source's tokens, asm_assemble's and asm_assemble_code's first phase: the lexer's records, and four lookahead
+// sentinels past them.
+static void asm_lex_source(AsmParser* parser)
+{
+    const String8 source = parser->source;
+    Arena* arena = parser->arena;
+    if (source.length > BUSTER_ASM_MAX_SOURCE || (source.length != 0 && source.pointer == 0))
+    {
+        asm_fail(parser, 0, "invalid source or source exceeds the 16 MiB limit");
+    }
+    else
+    {
+        parser->tokens = BUSTER_ARENA_PUSH_ARRAY(arena, AsmToken, source.length + 4);
+        if (parser->tokens == 0)
+        {
+            asm_fail(parser, 0, "arena exhausted lexing source");
+        }
+        else
+        {
+            asm_lex(parser);
+            // Lexing may emit one token per byte, but retain only the actual records and four lookahead sentinels.
+            // Every lexer store initializes the full record. No full-source clearing or unused-token working set.
+            memset(parser->tokens + parser->token_count, 0, 4 * sizeof(AsmToken));
+            parser->tokens[parser->token_count].start = source.length;
+            parser->tokens[parser->token_count].end = source.length;
+            arena->length = (uint8_t*)(parser->tokens + parser->token_count + 4) - arena->base;
+        }
+    }
+}
+
+// The second phase: the tables, as large as the tokens may need, and the statements parsed into them.
+static void asm_parse_source(AsmParser* parser)
+{
+    Arena* arena = parser->arena;
+    if (parser->result.error == 0)
+    {
+        parser->capacity = parser->token_count + 4;
+        if (parser->options.vectorized)
+        {
+            asm_cache_registers(parser);
+        }
+        uint32_t slots = 16;
+        while (slots < parser->capacity * 2)
+        {
+            slots *= 2;
+        }
+        parser->symbol_mask = slots - 1;
+        parser->symbol_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+        parser->symbols = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSymbol, parser->capacity);
+        parser->fragments = BUSTER_ARENA_PUSH_ARRAY(arena, AsmFragment, parser->capacity);
+        parser->instructions = BUSTER_ARENA_PUSH_ARRAY(arena, AsmInstruction, parser->instruction_capacity);
+        parser->section_capacity = parser->instruction_capacity + BUSTER_LINK_CLASS_COUNT;
+        parser->section_capacity = parser->section_capacity < BUSTER_ASM_MAX_SECTIONS ? parser->section_capacity : BUSTER_ASM_MAX_SECTIONS;
+        parser->sections = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSection, parser->section_capacity);
+        if (parser->symbol_slots == 0 || parser->symbols == 0 || parser->fragments == 0 || parser->instructions == 0 || parser->sections == 0)
+        {
+            asm_fail(parser, 0, "arena exhausted allocating parser tables");
+        }
+        else
+        {
+            memset(parser->symbol_slots, 0, slots * sizeof(uint32_t));
+            parser->symbols[0] = (AsmSymbol){0};
+            asm_sections_initialize(parser);
+            asm_fragment(parser, ASM_LABEL, 0);
+            asm_parse(parser);
+        }
+    }
+}
+
 static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* arena)
 {
     AsmParser parser =
@@ -2871,62 +2948,9 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
     };
     const uint64_t saved = arena->length;
     const uint64_t start = asm_clock();
-    if (source.length > BUSTER_ASM_MAX_SOURCE || (source.length != 0 && source.pointer == 0))
-    {
-        asm_fail(&parser, 0, "invalid source or source exceeds the 16 MiB limit");
-    }
-    else
-    {
-        parser.tokens = BUSTER_ARENA_PUSH_ARRAY(arena, AsmToken, source.length + 4);
-        if (parser.tokens == 0)
-        {
-            asm_fail(&parser, 0, "arena exhausted lexing source");
-        }
-        else
-        {
-            asm_lex(&parser);
-            // Lexing may emit one token per byte, but retain only the actual records and four lookahead sentinels.
-            // Every lexer store initializes the full record. No full-source clearing or unused-token working set.
-            memset(parser.tokens + parser.token_count, 0, 4 * sizeof(AsmToken));
-            parser.tokens[parser.token_count].start = source.length;
-            parser.tokens[parser.token_count].end = source.length;
-            arena->length = (uint8_t*)(parser.tokens + parser.token_count + 4) - arena->base;
-        }
-    }
+    asm_lex_source(&parser);
     const uint64_t lexed = asm_clock();
-    if (parser.result.error == 0)
-    {
-        parser.capacity = parser.token_count + 4;
-        if (options.vectorized)
-        {
-            asm_cache_registers(&parser);
-        }
-        uint32_t slots = 16;
-        while (slots < parser.capacity * 2)
-        {
-            slots *= 2;
-        }
-        parser.symbol_mask = slots - 1;
-        parser.symbol_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-        parser.symbols = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSymbol, parser.capacity);
-        parser.fragments = BUSTER_ARENA_PUSH_ARRAY(arena, AsmFragment, parser.capacity);
-        parser.instructions = BUSTER_ARENA_PUSH_ARRAY(arena, AsmInstruction, parser.instruction_capacity);
-        parser.section_capacity = parser.instruction_capacity + BUSTER_LINK_CLASS_COUNT;
-        parser.section_capacity = parser.section_capacity < BUSTER_ASM_MAX_SECTIONS ? parser.section_capacity : BUSTER_ASM_MAX_SECTIONS;
-        parser.sections = BUSTER_ARENA_PUSH_ARRAY(arena, AsmSection, parser.section_capacity);
-        if (parser.symbol_slots == 0 || parser.symbols == 0 || parser.fragments == 0 || parser.instructions == 0 || parser.sections == 0)
-        {
-            asm_fail(&parser, 0, "arena exhausted allocating parser tables");
-        }
-        else
-        {
-            memset(parser.symbol_slots, 0, slots * sizeof(uint32_t));
-            parser.symbols[0] = (AsmSymbol){0};
-            asm_sections_initialize(&parser);
-            asm_fragment(&parser, ASM_LABEL, 0);
-            asm_parse(&parser);
-        }
-    }
+    asm_parse_source(&parser);
     const uint64_t parsed = asm_clock();
     if (parser.result.error == 0)
     {
@@ -2962,4 +2986,168 @@ static AsmResult asm_assemble(String8 source, const X86MatchIndex* index, AsmOpt
         parser.result.object_options = (ObjectOptions){0};
     }
     return parser.result;
+}
+
+// A symbolic field of asm_assemble_code's records: what the field refers to, the symbol `name` (as the source spells it,
+// in output's bytes) plus `addend`, as a LinkReference has it, the name standing for its target.
+typedef struct AsmCodeReference AsmCodeReference;
+struct AsmCodeReference
+{
+    String8 name;
+    int64_t addend;
+    uint32_t record;
+    // X86_FIXUP_DISPLACEMENT or X86_FIXUP_IMMEDIATE, and BUSTER_LINK_FIXUP_*.
+    uint8_t field;
+    uint8_t kind;
+};
+
+// What asm_assemble_code makes of a source: `count` records, an instruction each, in order, every branch to a label of
+// the source's a rel8 with displacement 0, in `branches` (their indices, ascending) and `targets` (each label's next
+// record, or the count for the end), branch sizing's columns; and its symbolic fields (`references`, a record's
+// displacement's before its immediate's, in record order), each record with one marked BUSTER_X86_FORM_FIXUP. Or an
+// `error` at the source's byte `location`, with nothing kept.
+typedef struct AsmCode AsmCode;
+struct AsmCode
+{
+    X86Instruction* records;
+    uint32_t* branches;
+    uint32_t* targets;
+    AsmCodeReference* references;
+    const char* error;
+    uint32_t count;
+    uint32_t branch_count;
+    uint32_t reference_count;
+    uint32_t location;
+};
+
+// Assembles a source whose instructions another function's records hold (#147: a C asm statement's template, after its
+// operands are substituted), in place among them: instructions and labels, in either syntax and switching with
+// .intel_syntax and .att_syntax, which are its only directives. It has no sections, data or symbols of its own, so it
+// refuses every other directive; a label of its own is only a branch's target (jmp and jcc, which branch sizing grows,
+// with no addend), and every other symbol is the caller's to resolve, by name. Matching is asm_assemble's, by
+// options.vectorized's path; the parser's tables come from `scratch`, which is as it was after, and the result from
+// `output`, which a failure leaves as it was too.
+static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* output, Arena* scratch)
+{
+    AsmParser parser =
+        {
+            .source = source,
+            .arena = scratch,
+            .index = index,
+            .options = options,
+            .section = BUSTER_LINK_CLASS_TEXT,
+            .prefix = !options.intel,
+            .symbol_count = 1,
+            .code = true,
+    };
+    AsmCode result = { 0 };
+    const uint64_t saved = output->length;
+    const uint64_t temporary = scratch->length;
+    asm_lex_source(&parser);
+    asm_parse_source(&parser);
+    if (parser.result.error == 0)
+    {
+        asm_match_instructions(&parser);
+    }
+    const uint32_t count = parser.instruction_count;
+    // Each label's next record: the instructions before its fragment.
+    uint32_t* positions = parser.result.error == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser.fragment_count + 1) : 0;
+    result.records = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, count) : 0;
+    result.branches = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
+    result.targets = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
+    result.references = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AsmCodeReference, 2 * (uint64_t)count) : 0;
+    if (parser.result.error == 0 && (positions == 0 || (count != 0 && (result.records == 0 || result.branches == 0 || result.targets == 0 || result.references == 0))))
+    {
+        asm_fail(&parser, 0, "arena exhausted placing inline assembly's records");
+    }
+    uint32_t at = 0;
+    for (uint32_t f = 0; parser.result.error == 0 && f < parser.fragment_count; f += 1)
+    {
+        positions[f] = at;
+        at += parser.fragments[f].kind == ASM_INSTRUCTION;
+    }
+    for (uint32_t i = 0; parser.result.error == 0 && i < count; i += 1)
+    {
+        AsmInstruction* instruction = &parser.instructions[i];
+        X86Instruction record = instruction->record;
+        const X86FormDescription* form = x86_form_description(record.form);
+        if (instruction->local_branch)
+        {
+            const uint32_t row = record.form;
+            const bool sized = form->relative_bytes == 1 && row + 1 < X86_FORM_COUNT && x86_form_descriptions[row + 1].relative_bytes == 4 &&
+                               strcmp(form->mnemonic, x86_form_descriptions[row + 1].mnemonic) == 0;
+            if (!sized || instruction->expressions[0].value != 0)
+            {
+                asm_fail(&parser, instruction->location, "a branch to inline assembly's own label must be jmp or jcc, without an addend");
+            }
+            else
+            {
+                result.branches[result.branch_count] = i;
+                result.targets[result.branch_count++] = positions[parser.symbols[instruction->expressions[0].plus].fragment];
+            }
+        }
+        for (uint32_t field = X86_FIXUP_DISPLACEMENT; !instruction->local_branch && field <= X86_FIXUP_IMMEDIATE && parser.result.error == 0; field += 1)
+        {
+            for (uint32_t j = 0; j < instruction->request.count && parser.result.error == 0; j += 1)
+            {
+                const X86Operand* operand = &instruction->request.operands[j];
+                const bool displacement = operand->kind == X86_OPERAND_MEMORY || instruction->branch;
+                const AsmExpr expression = instruction->expressions[j];
+                const AsmSymbol* symbol = &parser.symbols[expression.plus];
+                if (expression.plus == 0 || (field == X86_FIXUP_DISPLACEMENT) != displacement)
+                {
+                    continue;
+                }
+                const bool pc_relative = instruction->branch || (operand->mode & BUSTER_X86_MODE_RIP);
+                const uint32_t width = displacement ? 4 : form->immediate_bytes;
+                const bool truncated_lea = strcmp(form->mnemonic, "lea") == 0 && !form->w;
+                const bool signed_field = (displacement && !truncated_lea) || x86_match_sign_extends(form);
+                const bool local = symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
+                char* name = !symbol->defined && !local && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
+                if (symbol->defined)
+                {
+                    asm_fail(&parser, instruction->location, "inline assembly's own label is only a branch's target");
+                }
+                else if (local)
+                {
+                    asm_fail(&parser, symbol->location, "undefined local symbol");
+                }
+                else if (expression.value < INT64_MIN || expression.value > INT64_MAX || (width != 4 && width != 8))
+                {
+                    asm_fail(&parser, instruction->location, "unrepresentable instruction relocation");
+                }
+                else if (name == 0)
+                {
+                    asm_fail(&parser, instruction->location, "arena exhausted placing inline assembly's records");
+                }
+                else
+                {
+                    // A symbol the source doesn't define may be preempted, so a call or jump to it is a CALL (PLT32), as
+                    // asm_instruction_fixups makes an undefined symbol's.
+                    memcpy(name, symbol->name.pointer, symbol->name.length);
+                    result.references[result.reference_count++] = (AsmCodeReference){
+                        .name = { .pointer = name, .length = symbol->name.length },
+                        .addend = (int64_t)expression.value,
+                        .record = i,
+                        .field = (uint8_t)field,
+                        .kind = instruction->branch ? BUSTER_LINK_FIXUP_CALL : pc_relative ? BUSTER_LINK_FIXUP_PC32 : width == 8 ? BUSTER_LINK_FIXUP_ABS64
+                                                                                     : signed_field ? BUSTER_LINK_FIXUP_ABS32S : BUSTER_LINK_FIXUP_ABS32,
+                    };
+                    record.form |= BUSTER_X86_FORM_FIXUP;
+                }
+            }
+        }
+        result.records[i] = record;
+    }
+    if (parser.result.error != 0)
+    {
+        output->length = saved;
+        result = (AsmCode){ .error = parser.result.error, .location = parser.result.location };
+    }
+    else
+    {
+        result.count = count;
+    }
+    scratch->length = temporary;
+    return result;
 }

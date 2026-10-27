@@ -713,6 +713,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
+#include "c_check_program_asm_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -798,6 +799,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{return a+b+c+d+e+f+g+h+i+j;}int tested(int n){return (int)helper(n,1,2,3,4,5,6,7,8,9);}", "floating-stack-arguments", clang);
     check_test_program_source(test,
         "int tested(int n){int x=n;int*p=&x;int a=(*p)++;int b=++*p;*p+=3;return a+2*b+4*x;}", "addressed-local-updates", clang);
+    // An address constant cast to an integer type, of a class other than a pointer's (musl's syscalls take one).
+    check_test_program_source(test,
+        "volatile int lock;long sys(long n,long a){return n*3+(a&7);}long base(void){return (long)&lock;}"
+        "int tested(int n){long a=(long)&lock;long b=(long)(&lock+2);int c=(int)(long)&lock;return (int)(b-a)+(c==(int)a)+(base()==a)+(int)sys(n,(long)&lock)-(int)((long)&lock&7);}",
+        "address-constants-as-integers", clang);
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
@@ -1665,9 +1671,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
-                                "typed-asm-operands-and-machine-boundary", true, false, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                "typed-asm-goto-target", true, false, 0, 0);
+                                "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
+    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                       "typed-asm-goto-target", true, false, 0, 0, "asm goto");
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
@@ -1712,6 +1718,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "overlapping-case-ranges", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){default:return 1;default:return 2;}}", "duplicate-default", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch((double)n){case 1:return 1;}return 0;}", "noninteger-switch", false, false, 0, 0);
+    check_test_program_asm(test, clang);
     check_test_program_build_release();
 }
 
