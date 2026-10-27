@@ -1146,9 +1146,9 @@ they do per token where little of it was per declaration or expression:
   (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
-  token's name and kind with each name and kind, about 50 instructions a
-  token. The scalar path computes each bit with the walk's own tests
-  (`check_input_syntax_of`).
+  token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
+  instructions fewer, about 70 a token. The scalar path computes each bit with
+  the walk's own tests (`check_input_syntax_of`).
 - **Scans for few tokens.** The passes that act on few tokens test 64 of them
   at once (16 or 8, by the column's width) and visit only those
   (`check_input_scan_*`): the constant contexts (static objects, static
