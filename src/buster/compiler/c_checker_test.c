@@ -3550,6 +3550,19 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // #495's review: a subscript's pointer as either operand, and chains of steps around 16, the walk's old limit.
+        {
+            "reversed subscripts in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct W { S s; S t[2]; };\nint f(S* p, int i, struct W* w, S** q)\n{\n    S a[] = { 0[p], 1[p] };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"two\");\n    S b[] = { p[0], i[p], 1[w->t], 0[q][1], 1[0[q]], (i[q])[i] };\n    _Static_assert(sizeof b == 6 * sizeof(S), \"six\");\n    int c[] = { 0[p].a, i[p].b, (1[w->t]).a };\n    _Static_assert(sizeof c == 3 * sizeof(int), \"three scalars\");\n    return a[1].b + b[5].a + c[2];\n}\n",
+            false,
+            false
+        },
+        {
+            "chains of 15, 16 and 17 steps in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct C { S s[2]; struct C* next; };\nint f(S*************** p, S**************** q, S***************** r, struct C* x)\n{\n    S a[] = { ***************p, ***************p };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"15\");\n    S b[] = { ****************q, ****************q };\n    _Static_assert(sizeof b == 2 * sizeof(S), \"16\");\n    S c[] = { *****************r, *****************r };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"17\");\n    S d[] = { x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[1],\n              x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[0], x->s[1] };\n    _Static_assert(sizeof d == 3 * sizeof(S), \"16 and 17 members and subscripts\");\n    return a[1].a + b[1].a + c[1].a + d[2].b;\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
