@@ -108,6 +108,20 @@ On one lane on the 9700X, the lowering of `sqlite3.c` added 56 MB to the peak
 RSS, and 9.8 MB with them in base pages (#531). The functions' columns and
 bytes are packed, and keep huge pages past their first 64 KB.
 
+Lane 0's arena is reserved for exactly the room its writer's columns take
+(`check_lower_writer_bytes`: the writer's pushes on an arena of no memory,
+`arena_measure`, so that the room doesn't depend on what the caller's arenas
+hold), and the first lane's scratch is kept while it has that room. The other
+lanes' arenas are 64 GB each, since their scratch also holds their functions'
+Tier 0 code, whose size isn't known before they run; a lane that can't
+reserve its arenas refuses its parts, and the calling thread runs them again.
+Lane 0 is that last resort, so where its columns' address space can't be
+reserved either (`RLIMIT_AS`, or overcommit refused), they go in the caller's
+scratch, as before #531, if it has their room: an emission then needs no
+address space past the caller's arenas. `test-check-lanes` checks both in a
+child whose address space it limits, and that an emission whose caller's
+scratch has room for all but lane 0's columns makes its object.
+
 ## The lane rule
 
 One lane, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the bodies'

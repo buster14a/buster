@@ -2094,8 +2094,9 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
-  as it was), sizes and counts whose arithmetic overflows, and the page sizes
-  asked for, read back from `/proc/self/smaps`;
+  as it was), sizes and counts whose arithmetic overflows, the page sizes
+  asked for, read back from `/proc/self/smaps`, and a measuring arena's
+  (`arena_measure`) random pushes, which must take what a reserved arena's do;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;
@@ -4536,7 +4537,9 @@ body's), whatever the lane count. The lowering numbers the runtime's
 functions (libgcc's) and the label symbols part by part, and
 `check_lower_finish` puts them in source order. Lane 0 is the calling thread
 with the caller's arenas but for its writer's columns, which take the first
-lane's scratch in base pages (`CheckEmitRun.columns`, #531); each other lane
+lane's scratch in base pages (`CheckEmitRun.columns`, #531), reserved for
+exactly their room (`check_lower_writer_bytes`), or the caller's scratch where
+that address space can't be reserved; each other lane
 has its own (`CheckProgramLanes.arenas`), which the caller keeps until it is
 done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
@@ -4556,7 +4559,14 @@ causes, each emission one lane's: a lane short of room
 so many bytes in one of its arenas, from none up, doubling, until the part
 fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
 code's after it), and lanes that start no thread, in a child that
-`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+`RLIMIT_NPROC` limits (not as root); then in a child whose address space
+`RLIMIT_AS` limits, after an emission whose lane 0's columns must take exactly
+their reservation, emissions with less room than that reservation maps (lane
+0's columns in the caller's scratch) and with it and 1 GB more (in their
+reservation; the 8 lanes' other arenas not reserved), each one lane's; then
+emissions with the least room of the caller's scratch they take, found by
+halving, which must be less than lane 0's columns take, each one lane's; then
+the lane rule, and the driver's
 objects and executables by `--lanes` and by default, each one lane's, the
 executables exiting alike, and with lanes that don't start, and the failing
 programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
