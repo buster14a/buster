@@ -1221,6 +1221,21 @@ counts that size its tables, the walk in source order
 (`check_input_expressions`), and the passes after them. #529 cut the work
 they do per token where little of it was per declaration or expression:
 
+- **Attribute arguments (#605).** `check_input_attribute_validate` counts the
+  arguments in one forward delimiter walk, then fills a compact table of the
+  separating commas as it checks their shapes in a second forward walk.
+  Both skip complete parenthesis, bracket and brace groups through the
+  parser's matching-parent links. A validated list of A arguments retains
+  exactly A - 1 `uint32_t` token indices when A > 1, owned by the output
+  arena and shared immutably by attribute copies and merges. Empty and
+  single-argument attributes allocate no boundary table. The existing outer
+  bounds plus those indices give `check_input_attribute_argument` each
+  half-open argument range in constant time, without reading source tokens.
+  Shape validation, the declaration reader, and the constant reader's
+  preparation and evaluation reuse those ranges; numeric operands still
+  evaluate once, in source order. Malformed delimiters fail before a table
+  is published, and allocation failure reports the attribute's original
+  range as a resource error. No token-sized sparse column is added.
 - **Value chains.** The graph's walk gives each token the chain of its
   values, its children's chains joined, and counted the chain by walking each
   child's again. An initializer's separators are each a child of the next, so

@@ -1055,7 +1055,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
                 {
                     uint32_t begin = attribute->argument_first;
                     uint32_t end = attribute->argument_end;
-                    valid = scalar || check_input_attribute_argument(reader->parser, attribute, argument, &begin, &end);
+                    valid = scalar || check_input_attribute_argument(attribute, argument, &begin, &end);
                     if (valid)
                     {
                         memset(input->attribute_syntax + begin - input->first, 0, end - begin);
@@ -1152,7 +1152,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
         {
             uint32_t first = attribute->argument_first;
             uint32_t end = attribute->argument_end;
-            valid = scalar || check_input_attribute_argument(reader->parser, attribute, argument, &first, &end);
+            valid = scalar || check_input_attribute_argument(attribute, argument, &first, &end);
             const bool type_argument = valid && attribute->kind == CHECK_ATTRIBUTE_ALIGNAS &&
                                        (input->raw ? check_constant_raw_type_start(input, first) : check_constant_type_start(reader->parser, first));
             int64_t integer = 0;
