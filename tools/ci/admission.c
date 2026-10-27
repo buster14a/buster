@@ -2064,8 +2064,6 @@ static void ci_select(CiState* state, CiIdentity* identities, size_t identity_co
         CiCandidate* candidate = &candidates[selected];
         CiLease lease = {0};
         lease.pr = candidate->pr;
-        lease.admitted_at = now;
-        lease.expires_at = now + BUSTER_CI_LEASE_SECONDS;
         ci_copy(lease.phase, sizeof(lease.phase), "dispatch / admission pending");
         ++state->generation;
         snprintf(lease.nonce, sizeof(lease.nonce), "%" PRIu64 "-%" PRIu64, ci_number(ci_env("GITHUB_RUN_ID")), state->generation);
@@ -2096,7 +2094,6 @@ static void ci_select(CiState* state, CiIdentity* identities, size_t identity_co
             ci_copy(lease.head, sizeof(lease.head), final.head);
             ci_copy(lease.base, sizeof(lease.base), final.base);
             ci_copy(lease.merge, sizeof(lease.merge), final.merge);
-            pr->admitted_at = now;
             pr->completed_at = 0;
             pr->active_seconds = 0;
             pr->executor_run = 0;
@@ -2115,14 +2112,20 @@ static void ci_select(CiState* state, CiIdentity* identities, size_t identity_co
             ci_copy(lease.merge, sizeof(lease.merge), run.head);
             ci_copy(lease.workflow_sha, sizeof(lease.workflow_sha), run.head);
         }
-        state->since_fair = ci_fair_after(state->since_fair, candidate, now);
+        // Preflight, command refresh and check publication can take time. Start the lease and its dispatch-binding
+        // budget at the actual write-ahead grant, not the beginning of that earlier reconciliation.
+        lease.admitted_at = ci_now();
+        lease.expires_at = lease.admitted_at + BUSTER_CI_LEASE_SECONDS;
+        CiPr* admitted_pr = ci_find_pr(state, lease.pr);
+        if (admitted_pr != NULL) admitted_pr->admitted_at = lease.admitted_at;
+        state->since_fair = ci_fair_after(state->since_fair, candidate, lease.admitted_at);
         state->lease = lease;
         ci_save_state(state);
         if (candidate->pr != 0)
         {
             ci_dispatch(state);
         }
-        printf("admitted pr=%" PRIu64 " request=%" PRIu64 " priority=%d queued_at=%" PRIu64 " admitted_at=%" PRIu64 " lease=%s\n", candidate->pr, candidate->run, candidate->priority, candidate->queued_at, now, lease.nonce);
+        printf("admitted pr=%" PRIu64 " request=%" PRIu64 " priority=%d queued_at=%" PRIu64 " admitted_at=%" PRIu64 " lease=%s\n", candidate->pr, candidate->run, candidate->priority, candidate->queued_at, lease.admitted_at, lease.nonce);
     }
 }
 

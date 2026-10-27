@@ -43,8 +43,18 @@ permissions:
 
 # Serializes ledger/lease writes. This is a controller mutex, not the hardware priority queue.
 # Reconciliation reads live comments/reviews/PRs and recovers dispatch commands from their auditable run names.
+# Keep this eligibility expression in sync with reconcile.if. Skipped native-PR/ordinary-issue wakeups must not
+# replace an eligible pending controller, particularly the wakeup that binds a freshly dispatched executor.
 concurrency:
-  group: buster-fast-9700x-controller-v1
+  group: >-
+    ${{ github.repository_id == '1421805693' &&
+    vars.CI_9700X_ADMISSION_ENABLED == 'true' &&
+    (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
+    (github.event_name != 'issue_comment' || github.event.issue.pull_request) &&
+    (github.event_name != 'workflow_run' ||
+    (github.event.workflow_run.name == '9700X review signal' && github.event.action == 'completed') ||
+    (github.event.workflow_run.name == '9700X test' && github.event.workflow_run.event != 'pull_request')) &&
+    'buster-fast-9700x-controller-v1' || format('buster-fast-9700x-ignored-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:

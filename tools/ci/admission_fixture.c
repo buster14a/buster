@@ -43,6 +43,7 @@ struct CiFixture
     char status_head[BUSTER_CI_SHA];
     unsigned status_writes;
     unsigned http_calls;
+    unsigned seconds_per_call;
     unsigned state_writes;
     unsigned signal_reads;
 };
@@ -131,6 +132,7 @@ static void ci_fixture_pr_json(Buffer* out)
 static Http ci_fixture_request(const char* method, const char* full_path, const char* body)
 {
     ++ci_fixture.http_calls;
+    ci_fixture_clock += ci_fixture.seconds_per_call;
     const char* prefix = "repos/" BUSTER_CI_REPO "/";
     bool graphql = strcmp(full_path, "graphql") == 0;
     if (!graphql && strncmp(full_path, prefix, strlen(prefix)) != 0)

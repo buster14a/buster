@@ -398,6 +398,14 @@ static void ci_test_controller(void)
     ci_reconcile(false);
     ci_expect(ci_fixture.dispatches == 0, "API: unreviewed public fork cannot reach the physical host");
 
+    ci_fixture_init();
+    ci_fixture.seconds_per_call = 1;
+    uint64_t reconcile_started = ci_now();
+    ci_reconcile(false);
+    CiLease granted = ci_fixture.state.lease;
+    ci_expect(granted.admitted_at > reconcile_started && ci_fixture.run.created_at >= granted.admitted_at && ci_fixture.run.created_at - granted.admitted_at <= 2, "API: admission and binding time start at the actual grant after slow metadata, not reconcile entry");
+    ci_expect(granted.expires_at == granted.admitted_at + BUSTER_CI_LEASE_SECONDS && ci_fixture.state.prs[0].admitted_at == granted.admitted_at, "API: lease expiry and the persistent PR receipt share the actual grant timestamp");
+
     const char* legacy_status[] = {"queued", "queued", "in_progress"};
     for (size_t i = 0; i < sizeof(legacy_status) / sizeof(legacy_status[0]); ++i)
     {

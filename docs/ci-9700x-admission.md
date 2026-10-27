@@ -331,7 +331,10 @@ This is the stable control-plane interface; descriptive labels are unnecessary.
 The required PR check also retains a version-1 JSON receipt in `output.text`.
 
 A global controller concurrency group serializes updates; it is a mutex, not a
-priority queue. Reconciliation rereads live facts on PR/base/comment/review/run
+priority queue. Events whose controller job is ineligible use an isolated ignored
+group: native PR workflow completions and ordinary issue comments cannot replace
+an eligible pending wakeup needed to bind an executor or publish its result.
+Reconciliation rereads live facts on PR/base/comment/review/run
 events and every five minutes. The platform may delay scheduled wakeups; the
 guard stays closed until a valid lease exists. State is committed before dispatch.
 Head/base/mergeability metadata is batched in one bounded GraphQL query. Review
@@ -350,6 +353,9 @@ An unbound dispatch cannot pass the guard. An unbound nonce not found after
 three minutes is revoked; a late arrival then fails closed.
 
 Leases last 40 minutes, covering the qualification/selector/host-hook budgets.
+The admission timestamp and expiry begin at the actual write-ahead grant after
+metadata/preflight and final validation, so that earlier work cannot consume the
+dispatch-binding window or understate queue wait.
 For an identified live PR executor, revocation, conflict, identity change or
 expiry requests cancellation but **retains the slot until Actions confirms a
 terminal run**. UNKNOWN alone does not cancel an unchanged pair. Main/daily/manual
