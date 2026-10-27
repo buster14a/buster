@@ -849,6 +849,26 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                     "case 65535:return 5;default:return 0;}}", "switch-tables-the-most", 1, 65536);
     check_test_program_tables(test, "int f(int a,int b){int r=0;switch(a){case 0:switch(b){case 0:r=1;break;case 1:r=2;break;case 2:r=3;break;case 3:r=4;break;"
                                     "default:r=5;}break;case 1:r=10;break;case 2:r=20;case 3:r+=30;break;default:r=-1;}return r;}", "switch-tables-nested", 2, 8);
+    // Empty GNU ranges (#536's review), which match nothing and which clang drops before LLVM sees the switch: last by
+    // their lower values, where one sized the table short of the case below it and its entry was written past the table's
+    // end; first, below the table's lowest value; as the fourth case, which they don't make; and an unsigned one past
+    // INT32_MAX. Then the same switches swept past their cases on both sides against clang's build.
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 4:return 9;case 5 ... 3:return 11;default:return -1;}}",
+                              "switch-tables-empty-range-last", 1, 5);
+    check_test_program_tables(test, "int f(int x){switch(x){case -5 ... -9:return 1;case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 9;default:return -1;}}",
+                              "switch-tables-empty-range-first", 1, 4);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 9 ... 4:return 9;default:return -1;}}",
+                              "switch-tables-empty-range-fourth", 0, 0);
+    check_test_program_tables(test, "int f(unsigned x){switch(x){case 4294967295u ... 0u:return 1;case 7:return 3;case 8:return 5;case 9:return 7;case 11:return 9;"
+                                    "default:return -1;}}", "switch-tables-empty-range-unsigned", 1, 5);
+    check_test_program_source(test,
+        "static int last(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 4:return 9;case 5 ... 3:return 11;default:return -1;}}"
+        "static int first(int x){switch(x){case -5 ... -9:return 1;case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 9;default:return -1;}}"
+        "static int fourth(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 9 ... 4:return 9;default:return -1;}}"
+        "static int high(unsigned x){switch(x){case 4294967295u ... 0u:return 1;case 7:return 3;case 8:return 5;case 9:return 7;case 11:return 9;default:return -1;}}"
+        "int tested(int n){unsigned s=0;for(int i=-12;i<14;i++){s=s*7+(unsigned)last(i+n);s=s*5+(unsigned)first(i-n);s=s*3+(unsigned)fourth(i+n);"
+        "s=s*11+(unsigned)high((unsigned)(i+n));}return (int)s;}",
+        "switch-table-empty-ranges", clang);
     check_test_program_source(test,
         "int tested(int n){int x=1;switch(n){case 3 ... 1:x=7;break;case 2:x=5;break;default:x=9;}return x;}",
         "empty-gnu-case-range-is-warning-only", clang);

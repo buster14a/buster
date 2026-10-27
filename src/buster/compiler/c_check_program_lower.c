@@ -4046,7 +4046,8 @@ static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, C
 // LLVM's SwitchLowering::findJumpTables, which at -O0 takes a switch's whole range or nothing, makes one of four
 // clusters or more (runs of cases of consecutive values that go to one label) whose cases hold at least a tenth of the
 // range's values (its jump-table density, 10%); here of a class of 32 or 64 bits and a range of at most
-// BUSTER_CHECK_LOWER_MAX_TABLE values. The switch's CASE controls follow it, then its JUMP to its default or its end.
+// BUSTER_CHECK_LOWER_MAX_TABLE values. The switch's CASE controls follow it, then its JUMP to its default or its end;
+// an empty GNU range among them (`case 5 ... 3`) counts for nothing.
 // Returns the table's index, its entries built from `table_arena` and its labels made (check_lower_table_label), or
 // BUSTER_CHECK_NONE. This is per switch, with the cases sorted: a scalar pass over a few cases.
 static uint32_t check_lower_switch_table(CheckLowerWriter* writer, uint32_t index, uint8_t class)
@@ -4065,26 +4066,33 @@ static uint32_t check_lower_switch_table(CheckLowerWriter* writer, uint32_t inde
     const uint64_t mask = narrow ? UINT32_MAX : UINT64_MAX;
     const uint64_t sign = class == BUSTER_TYPED_CLASS_I32 ? UINT64_C(1) << 31 : class == BUSTER_TYPED_CLASS_I64 ? UINT64_C(1) << 63 : 0;
     uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t cases = 0;
     if ((narrow || wide) && count >= 4 && end < writer->body->count && controls[end].kind == CHECK_CONTROL_JUMP && lowered->table_count < writer->table_capacity)
     {
+        // A GNU range whose upper value is below its lower one matches nothing, and clang's Sema drops it before LLVM
+        // sees the switch (#536's review): it takes no part in the table, its values, its range or its clusters.
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckProgramCase* item = program->cases + controls[index + 1 + i].target;
-            writer->table_cases[i] = (CheckLowerCaseRange){
+            writer->table_cases[cases] = (CheckLowerCaseRange){
                 .lower = ((uint64_t)item->lower & mask) ^ sign,
                 .upper = ((uint64_t)item->upper & mask) ^ sign,
                 .label = item->target,
             };
+            cases += writer->table_cases[cases].upper >= writer->table_cases[cases].lower;
         }
-        const CheckLowerCaseRange* sorted = check_lower_sort_cases(writer->table_cases, writer->table_sorted, count);
+    }
+    if (cases >= 4)
+    {
+        const CheckLowerCaseRange* sorted = check_lower_sort_cases(writer->table_cases, writer->table_sorted, cases);
         unsigned __int128 values = 0;
         uint32_t clusters = 0;
-        for (uint32_t i = 0; i < count; i += 1)
+        for (uint32_t i = 0; i < cases; i += 1)
         {
             values += (unsigned __int128)(sorted[i].upper - sorted[i].lower) + 1;
             clusters += i == 0 || sorted[i].label != sorted[i - 1].label || sorted[i].lower != sorted[i - 1].upper + 1;
         }
-        const unsigned __int128 range = (unsigned __int128)(sorted[count - 1].upper - sorted[0].lower) + 1;
+        const unsigned __int128 range = (unsigned __int128)(sorted[cases - 1].upper - sorted[0].lower) + 1;
         if (clusters >= 4 && range <= BUSTER_CHECK_LOWER_MAX_TABLE && values * 100 >= range * 10)
         {
             const uint32_t length = (uint32_t)range;
@@ -4101,7 +4109,7 @@ static uint32_t check_lower_switch_table(CheckLowerWriter* writer, uint32_t inde
                     entries[v] = fallback;
                 }
                 uint32_t label = BUSTER_CHECK_NONE;
-                for (uint32_t i = 0; i < count; i += 1)
+                for (uint32_t i = 0; i < cases; i += 1)
                 {
                     label = i != 0 && sorted[i].label == sorted[i - 1].label ? label : check_lower_table_label(writer, sorted[i].label);
                     for (uint64_t v = sorted[i].lower - sorted[0].lower; v <= sorted[i].upper - sorted[0].lower; v += 1)
