@@ -530,7 +530,9 @@ copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
 and replaces the old definition either way.
 
-Parameter validation keeps a bounded source-list scan for up to 16 names
+Complete empty and one-name parameter lists take a direct definition path;
+variadics and malformed lists keep the ordered reader. Parameter validation
+keeps a bounded source-list scan for up to 16 names
 (#615). The seventeenth parameter materializes a temporary name-to-ordinal
 index, with a geometrically grown, half-full hash table in scratch memory.
 Its descriptor also lives in scratch memory, so ordinary macros carry no

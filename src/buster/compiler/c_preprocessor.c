@@ -5303,7 +5303,7 @@ static __attribute__((noinline)) PPParameterIndex* pp_define_parameter_large(Pre
 // The parameter list of a function-like macro being defined, from its '(' at `open`, as clang reads it
 // (ReadMacroParameterList): identifiers (keywords too) separated by commas, then `...` or GNU's `name...`, or none.
 // Sets the macro's parameters, flags and body start, or reports the first error where clang does and returns false.
-static __attribute__((noinline)) bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end, PPParameterIndex** parameters)
+BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end, PPParameterIndex** parameters)
 {
     bool result = true;
     bool closed = false;
@@ -5424,6 +5424,25 @@ static __attribute__((noinline)) bool pp_define_parameters(Preprocessor* pp, con
     return result;
 }
 
+// The frequent empty and one-name lists need neither a duplicate scan nor the general grammar loop. Only complete,
+// valid shapes take this path; variadics and every malformed list keep the ordered reader and its first diagnostic.
+BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end)
+{
+    const uint32_t first = open + 1;
+    const uint8_t kind = first < end ? data->kinds[first] & 0x7F : C_TOKEN_UNKNOWN;
+    const bool named = kind == C_TOKEN_RAW_IDENTIFIER;
+    const uint32_t close = first + named;
+    const bool result = (named || kind == C_TOKEN_R_PAREN) && close < end && (data->kinds[close] & 0x7F) == C_TOKEN_R_PAREN;
+    if (result)
+    {
+        macro->flags |= BUSTER_PP_MACRO_FUNCTION;
+        macro->parameters_begin = first;
+        macro->parameter_count = named;
+        macro->body_begin = close + 1;
+    }
+    return result;
+}
+
 // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
 // constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
@@ -5459,7 +5478,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
         // Function-like when '(' follows the name with no whitespace or comment between them (a line splice is none).
         if (begin + 1 < end && (data->kinds[begin + 1] & 0x7F) == C_TOKEN_L_PAREN && !pp_file_space(data, begin + 1))
         {
-            valid = pp_define_parameters(pp, data, &macro, begin + 1, end, &parameters);
+            valid = pp_define_parameters_tiny(data, &macro, begin + 1, end) || pp_define_parameters(pp, data, &macro, begin + 1, end, &parameters);
         }
         else if (begin + 1 < end && !pp_file_space(data, begin + 1))
         {
