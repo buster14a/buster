@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Self-tests for differential.c. The only external dependency is clang, which builds our original fixture tool.
+// Self-tests for differential.c. Clang builds our original fixture tool; rm removes passing workspaces.
 // All fake compiler/generator runs are marked as fixtures and count as zero source-to-machine campaign passes.
 // These tests exercise the protocol, process supervision and retained evidence; they cannot qualify Buster codegen.
 

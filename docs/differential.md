@@ -292,6 +292,20 @@ only to the self-tests; `test-differential` campaigns retain their evidence.
 before creating the fixture workspace. Child tools inherit that absolute `TMPDIR`,
 and all tool and artifact paths are absolute.
 
+The CLI lifetime regressions run in the 9700X CI test group and can be repeated with:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror tests/differential/lifecycle.c -o build/test-differential-lifecycle
+./build/test-differential-lifecycle ./build/compiler "$(command -v clang)"
+```
+
+They check successful cleanup, `--keep`, fixture-build and self-test failures,
+missing and no-op cleanup tools, relative `TMPDIR`, and invalid options against
+the exit status, filesystem contents and exact reported path. Expected failures'
+artifacts stay inside the regression driver's private workspace. The driver removes
+that workspace after all eight cases pass, or retains and names it on failure or
+with its own `--keep`. Clang builds the fixtures and `rm` performs normal cleanup.
+
 The pinned real generators were also invoked through the new harness with
 seed 138, producing the expected source files and recording versions/options.
 That control produced two generated programs and zero Buster campaign passes.
