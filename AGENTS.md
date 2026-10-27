@@ -4683,9 +4683,9 @@ runs it.
 ## Type benchmark
 
 `./build/compiler benchmark-types [--seed N] [--requests N] [--records N]
-[--pairs N] [--only construction|layout|conversions]` checks that each vector
-path agrees with its scalar twin, then reports 21 interleaved-pass medians per
-item (time, cycles, instructions, IPC):
+[--pairs N] [--lookups N] [--only construction|layout|conversions|lookups]`
+checks that each vector path agrees with its scalar twin, then reports 21
+interleaved-pass medians per item (time, cycles, instructions, IPC):
 
 - construction: 65,536 derivation requests over a working set of derived
   types, every one a hit and then 1 in 8 a miss into a fresh table, one at a
@@ -4696,7 +4696,11 @@ item (time, cycles, instructions, IPC):
 - conversions: 65,536 pairs of arithmetic codes, drawn as a C program's
   operands are, through the scalar twin and the `vpermb` and `vpermi2b`
   kernels; the promotions; and the same pairs as TypeIds through
-  `type_usual_arithmetic_types` and `type_usual_arithmetic`.
+  `type_usual_arithmetic_types` and `type_usual_arithmetic`;
+- lookups (#591): 65,536 member accesses, skewed toward a few, of 4,096 records
+  shaped as a unit has them (most scanned, some indexed, one in 10 with an
+  anonymous member), by `type_lookup_member`, its scalar twin and the walk; and
+  every record's lookup built again, per member.
 
 Run it under the 9700X's lock with `taskset -c 2`. `docs/c-types.md` has the
 numbers and the layout designs the vector one was chosen over. The default
