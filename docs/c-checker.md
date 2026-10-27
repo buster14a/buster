@@ -666,7 +666,7 @@ What the lowering covers past scalars (#145's programs):
   Tier 0's prologue copies into the object (an aligned typedef passes as its
   base, so the slot is aligned to 8 alone).
 - **Copies.** Struct and union assignment and initialization up to 256 bytes
-  use one bounded `COPY`. Larger copies use one `memmove` runtime call (#597),
+  use one bounded `COPY`. Larger nonvolatile copies use one `memmove` runtime call (#597),
   through the same symbol publication, ABI assignment and live-value preservation
   as other runtime calls. The pointers and `size_t` have unsigned long's U64
   INTEGER ABI on the generated SysV x86-64 target; no new type is created after
@@ -677,6 +677,8 @@ What the lowering covers past scalars (#145's programs):
   cover this producer's actual demand. Small kept assignments retain the
   destination in a temporary (#440), because `COPY` itself has class `VOID`.
   Zero-size copies still evaluate their operands without touching memory.
+  Volatile copies retain the existing inline pieces, including self-assignment's
+  accesses; a library routine may skip copying when its pointers are equal.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,

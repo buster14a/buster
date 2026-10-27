@@ -163,6 +163,8 @@ struct CheckLowerTask
     bool initialized;
     // An expression whose value nobody reads (a statement's): an aggregate's assignment then leaves no address.
     bool discard;
+    // COPY retains volatile accesses through the existing inline pieces, including self-assignment.
+    bool volatile_copy;
 };
 
 typedef struct CheckLowerAbi CheckLowerAbi;
@@ -1249,14 +1251,21 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
 
 static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
 
+static bool check_lower_copy_volatile(const CheckValue* source, TypeId destination)
+{
+    return ((type_qualifiers(source->type) | type_qualifiers(destination)) & BUSTER_TYPE_VOLATILE) != 0 ||
+           (source->flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+}
+
 // `size` bytes copied from the source's address on top of the stack to the destination's under it, which stays when
-// `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger ones call memmove through the ordinary
+// `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger nonvolatile ones call memmove through the ordinary
 // runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
-// the same source and destination, which C aggregate assignment does too. No emitted stream grows with the object size.
+// the same source and destination, which C aggregate assignment does too. The nonvolatile stream never grows with size.
+// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same.
 // A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
 // which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
+static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep, bool volatile_copy)
 {
     if (size == 0)
     {
@@ -1270,7 +1279,7 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     {
         check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
     }
-    else if (size > BUSTER_TIER0_MAX_COPY_BYTES)
+    else if (size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy)
     {
         // Pointers and size_t use the same U64 INTEGER ABI as unsigned long on the generated SysV x86-64 target.
         // Reuse that builtin type so lowering creates no type after the shared ABI classifications are published.
@@ -1286,13 +1295,28 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     else
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-        const uint32_t destination = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t destination = keep ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
-        // Here keep is true and the entire copy fits one bounded COPY.
-        check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
-        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
-        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        if (keep)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        }
+        for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += BUSTER_TIER0_MAX_COPY_BYTES)
+        {
+            const uint64_t piece = size - offset < BUSTER_TIER0_MAX_COPY_BYTES ? size - offset : BUSTER_TIER0_MAX_COPY_BYTES;
+            if (offset + piece != size)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            check_lower_offset(writer, offset);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
+            check_lower_offset(writer, offset);
+            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece);
+        }
+        if (keep)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        }
     }
 }
 
@@ -3803,7 +3827,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !task.discard });
+        const TypeId destination = op == CHECK_OP_ASSIGN ? stream->values[a].type :
+                                   declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
+        const bool volatile_copy = check_lower_copy_volatile(&stream->values[op == CHECK_OP_INITIALIZE ? a : b], destination) ||
+                                   (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_VOLATILE_PART) != 0);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !task.discard, .volatile_copy = volatile_copy });
         check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value->type);
         if (op == CHECK_OP_ASSIGN)
         {
@@ -3992,7 +4020,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (task.kind == CHECK_LOWER_COPY)
         {
-            check_lower_copy(writer, task.value, task.address);
+            check_lower_copy(writer, task.value, task.address, task.volatile_copy);
         }
         else if (task.kind == CHECK_LOWER_FILL)
         {
@@ -4128,7 +4156,8 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     {
         if (aggregate)
         {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type) });
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type),
+                                                     .volatile_copy = check_lower_copy_volatile(&write->value, write->type) });
         }
         else
         {
@@ -4483,7 +4512,8 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         if (node != BUSTER_CHECK_NONE)
         {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false });
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false,
+                                                     .volatile_copy = check_lower_copy_volatile(&writer->program->stream->values[node], writer->result) });
             check_lower_expression(writer, node, false, 0);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         }

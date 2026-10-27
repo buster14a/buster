@@ -4,14 +4,15 @@
 // #597: tiny C aggregate assignments must have bounded typed streams and machine code as the object grows.
 // Include after c_check_program_test.c's source/execution helpers. Clang is an external semantic oracle.
 
-static void check_test_program_copy_shape(CheckTest* test, uint32_t size)
+static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool volatile_copy)
 {
     char source[512];
     snprintf(source, sizeof(source),
              "struct S{unsigned char bytes[%u];};"
-             "void copy(struct S*d,const struct S*s){*d=*s;}"
-             "unsigned char* kept(struct S*d,const struct S*s){return (*d=*s).bytes;}"
-             "void same(struct S*d){*d=*d;}", size);
+             "void copy(%sstruct S*d,const %sstruct S*s){*d=*s;}"
+             "%sunsigned char* kept(%sstruct S*d,const %sstruct S*s){return (*d=*s).bytes;}"
+             "void same(%sstruct S*d){*d=*d;}", size, volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "",
+             volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "", volatile_copy ? "volatile " : "");
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -52,13 +53,13 @@ static void check_test_program_copy_shape(CheckTest* test, uint32_t size)
         {
             const Tier0Function* function = &code.lowered.functions[b];
             counts[path][0] += function->count;
-            check_test_expect(test, function->count <= 24, "one aggregate assignment has a bounded typed stream");
+            check_test_expect(test, function->count <= (volatile_copy ? 64u : 24u), "one nonvolatile aggregate assignment has a bounded typed stream");
         }
         counts[path][1] = code.records;
         counts[path][2] = code.code_bytes;
-        check_test_expect(test, ready && code.records <= 160 && code.code_bytes <= 768,
+        check_test_expect(test, ready && code.records <= (volatile_copy ? 256u : 160u) && code.code_bytes <= (volatile_copy ? 1536u : 768u),
                           "discarded, consumed and self copies have bounded machine records and code bytes");
-        check_test_expect(test, ready && code.lowered.runtime_symbol_count == (uint32_t)(size > BUSTER_TIER0_MAX_COPY_BYTES),
+        check_test_expect(test, ready && code.lowered.runtime_symbol_count == (uint32_t)(size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy),
                           "small copies stay inline and large copies share one runtime symbol");
         parse_release(&parser);
         check_test_types_close(&types);
@@ -77,8 +78,9 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
     static const uint32_t sizes[] = { 1, 15, 16, 255, 256, 257, 1024, 4096, 16384, 65536, 262144 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
     {
-        check_test_program_copy_shape(test, sizes[i]);
+        check_test_program_copy_shape(test, sizes[i], false);
     }
+    check_test_program_copy_shape(test, 513, true);
     static const uint32_t execution_sizes[] = { 255, 256, 257, 4097, 16384, 262145 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(execution_sizes); i += 1)
     {
@@ -96,6 +98,10 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
                  "return (int)(value+floating*4)+ds*100+ss*1000;}", execution_sizes[i]);
         check_test_program_source(test, source, name, clang);
     }
+    check_test_program_source(test,
+        "struct S{unsigned char c[513];};static volatile struct S a,b;"
+        "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);b=a;b=b;"
+        "struct S r=a;b=r;return (b=a).c[512]+r.c[0];}", "aggregate-copy-volatile-accesses", clang);
     check_test_program_source(test,
         "extern void* memmove(void*,const void*,unsigned long);struct S{char c[513];};static struct S a,b;"
         "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(char)(n+i);b=a;return (b=a).c[512]+b.c[0];}",
