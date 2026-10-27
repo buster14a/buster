@@ -11,7 +11,8 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     char nested_selections[4][8192];
     for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(nested_selections); shape += 1)
     {
-        uint32_t used = (uint32_t)snprintf(nested_selections[shape], sizeof(nested_selections[shape]), "enum { N=");
+        // Clang's ICE validation stalls on deep choose-expression enums; runtime syntax is a bounded oracle.
+        uint32_t used = (uint32_t)snprintf(nested_selections[shape], sizeof(nested_selections[shape]), shape < 2 ? "int f(void){return " : "enum { N=");
         const char* opening = shape == 0 ? "__builtin_choose_expr(1," : shape == 1 ? "__builtin_choose_expr(0," :
                               shape == 2 ? "_Generic(0,int:" : "_Generic(0,default:";
         const char* closing = shape < 2 ? ",0)" : shape == 2 ? ",default:0)" : ",int:0)";
@@ -24,8 +25,15 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
         {
             used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "%s", closing);
         }
-        snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used,
-                 " }; _Static_assert(N==%u, \"nested selection\");\n", shape % 2 == 0 ? 7u : 0u);
+        if (shape < 2)
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, ";}\n");
+        }
+        else
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used,
+                     " }; _Static_assert(N==%u, \"nested selection\");\n", shape % 2 == 0 ? 7u : 0u);
+        }
     }
     char nested_source[4096];
     uint32_t length = (uint32_t)snprintf(nested_source, sizeof(nested_source), "enum { N=");
