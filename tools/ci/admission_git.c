@@ -33,8 +33,8 @@ static CiGitResult ci_git_exec(const char* directory, const char* const* command
         setenv("GIT_TERMINAL_PROMPT", "0", 1);
         setenv("GIT_NO_REPLACE_OBJECTS", "1", 1);
         setenv("GIT_LFS_SKIP_SMUDGE", "1", 1);
-        char* arguments[80] = {"/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "credential.helper=", "-c", "core.askPass=/bin/false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "pack.threads=1", "-c", "index.threads=1", NULL};
-        size_t at = 19;
+        char* arguments[80] = {"/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null", "-c", "credential.helper=", "-c", "core.askPass=/bin/false", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "pack.threads=1", "-c", "index.threads=1", "-c", "maintenance.auto=false", "-c", "gc.auto=0", NULL};
+        size_t at = 23;
         if (directory != NULL) { arguments[at++] = "--git-dir"; arguments[at++] = (char*)directory; }
         for (size_t i = 0; command[i] != NULL; ++i)
         {

@@ -113,8 +113,15 @@ static bool ci_git_bounded(const char* base, const char* head, CiGitComputed* co
     bool bounded = true;
     for (;;)
     {
-        pid_t waited = waitpid(child, &status, WNOHANG);
-        if (waited == child) break;
+        siginfo_t exited = {0};
+        int waited = waitid(P_PID, (id_t)child, &exited, WEXITED | WNOHANG | WNOWAIT);
+        if (waited == 0 && exited.si_pid == child)
+        {
+            // Keep the leader's PID reserved until its group is stopped, avoiding a PID-reuse cancellation race.
+            (void)kill(-child, SIGKILL);
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
+            break;
+        }
         if (waited < 0 && errno != EINTR) { bounded = false; break; }
         if (ci_monotonic_ms() - started >= allowed_ms || !ci_git_store_ok())
         {
@@ -126,7 +133,6 @@ static bool ci_git_bounded(const char* base, const char* head, CiGitComputed* co
         struct timespec delay = {.tv_nsec = 20000000};
         (void)nanosleep(&delay, NULL);
     }
-    (void)kill(-child, SIGKILL); // Also reap any helper left after a failed worker.
     ci_git_used_ms += ci_monotonic_ms() - started;
     bool success = bounded && WIFEXITED(status) && WEXITSTATUS(status) == 0 && ci_git_store_ok();
     if (success)
