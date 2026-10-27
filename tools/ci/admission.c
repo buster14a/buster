@@ -204,6 +204,36 @@ static void ci_json_string(Buffer* out, const char* key, const char* value)
     json_quote(out, value);
 }
 
+static void ci_setting_order_json(Buffer* out, const CiSettingOrder* orders)
+{
+    const char* names[] = {"priority_order", "hold_order"};
+    for (size_t i = 0; i < 2; ++i)
+    {
+        buffer_printf(out, ",\"%s\":{\"at\":%" PRIu64 ",\"id\":%" PRIu64 ",\"key\":%" PRIu64 "}", names[i], orders[i].at, orders[i].id, orders[i].key);
+    }
+}
+
+static void ci_setting_order_parse(CiSettingOrder* orders, const Json* json, size_t row, uint64_t at, uint64_t id)
+{
+    const char* names[] = {"priority_order", "hold_order"};
+    for (size_t i = 0; i < 2; ++i)
+    {
+        size_t order = json_get(json, row, names[i]);
+        if (order < json->count)
+        {
+            if (json->rows[order].type != '{') ci_die("invalid command order in durable state");
+            orders[i].at = json_number(json, order, "at");
+            orders[i].id = json_number(json, order, "id");
+            orders[i].key = json_number(json, order, "key");
+        }
+        else
+        {
+            orders[i].at = at;
+            orders[i].id = id;
+        }
+    }
+}
+
 static Buffer ci_state_json(const CiState* state)
 {
     Buffer out = {0};
@@ -238,6 +268,7 @@ static Buffer ci_state_json(const CiState* state)
         json_quote(&out, pr->frozen_merge);
         buffer_printf(&out, ",\"frozen_engine\":"); json_quote(&out, pr->frozen_engine);
         buffer_printf(&out, ",\"command_hash\":%" PRIu64, pr->command_hash);
+        ci_setting_order_json(&out, pr->setting_order);
         buffer_printf(&out, ",\"executor_run\":%" PRIu64, pr->executor_run);
         buffer_printf(&out, ",\"signals_at\":%" PRIu64 ",\"cached_approved\":%s,\"signal_approval_at\":%" PRIu64 ",\"cached_code\":%s,", pr->signals_at, pr->cached_approved ? "true" : "false", pr->signal_approval_at, pr->cached_code ? "true" : "false");
         ci_json_string(&out, "code_merge", pr->code_merge);
@@ -253,9 +284,10 @@ static Buffer ci_state_json(const CiState* state)
         const CiOverride* override = &state->overrides[i];
         buffer_printf(&out, "%s{\"run\":%" PRIu64 ",\"pr\":%" PRIu64 ",\"manual\":%d,\"held\":%s,\"retry\":%s,\"queued_at\":%" PRIu64 ",", i != 0 ? "," : "", override->run, override->pr, override->manual, override->held ? "true" : "false", override->retry ? "true" : "false", override->queued_at);
         ci_json_string(&out, "head", override->head);
+        ci_setting_order_json(&out, override->setting_order);
         buffer_add(&out, "}", 1);
     }
-    buffer_add(&out, "]}", 2);
+    buffer_printf(&out, "],\"command_order_version\":%u}", state->command_order_version);
     if (out.length > 60000)
     {
         ci_die("durable state exceeds Checks API budget; no new admission");
@@ -293,6 +325,9 @@ static CiState ci_state_parse(const char* text)
     CiState state = {0};
     state.generation = json_number(&json, 0, "generation");
     state.dispatch_event = json_number(&json, 0, "dispatch_event");
+    uint64_t order_version = json_number(&json, 0, "command_order_version");
+    if (order_version > 1) ci_die("unsupported command order version");
+    state.command_order_version = (unsigned)order_version;
     state.since_fair = (unsigned)json_number(&json, 0, "since_fair");
     size_t lease = json_get(&json, 0, "lease");
     const char* lease_fields[] = {"pr", "run", "attempt", "nonce", "head", "base", "merge", "workflow_sha", "phase", "admitted_at", "expires_at", "revoking"};
@@ -343,6 +378,7 @@ static CiState ci_state_parse(const char* text)
         pr->command_at = json_number(&json, row, "command_at");
         pr->command_id = json_number(&json, row, "command_id");
         pr->command_hash = json_number(&json, row, "command_hash");
+        ci_setting_order_parse(pr->setting_order, &json, row, pr->command_at, pr->command_id);
         pr->executor_run = json_number(&json, row, "executor_run");
         pr->signals_at = json_number(&json, row, "signals_at");
         pr->cached_approved = strcmp(json_field(&json, row, "cached_approved"), "true") == 0;
@@ -396,6 +432,7 @@ static CiState ci_state_parse(const char* text)
         override->held = strcmp(json_field(&json, row, "held"), "true") == 0;
         override->retry = strcmp(json_field(&json, row, "retry"), "true") == 0;
         override->queued_at = json_number(&json, row, "queued_at");
+        ci_setting_order_parse(override->setting_order, &json, row, 0, 0);
         ci_copy(override->head, sizeof(override->head), json_field(&json, row, "head"));
         if (override->run == 0 || !ci_sha(override->head))
         {
@@ -931,7 +968,7 @@ static CiOverride* ci_find_override(CiState* state, uint64_t run, const char* he
     return result;
 }
 
-static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, const char* actor, uint64_t source)
+static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, const char* actor, uint64_t source, uint64_t issued_at)
 {
     CiOverride* override = NULL;
     bool valid = true;
@@ -953,6 +990,18 @@ static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, 
         {
             override = ci_find_override(state, run.id, run.head, true);
             override->pr = pr != NULL ? pr->number : 0;
+        }
+    }
+    bool setting = command.kind == CI_COMMAND_PRIORITY || command.kind == CI_COMMAND_HOLD || command.kind == CI_COMMAND_RESUME;
+    if (valid && setting)
+    {
+        size_t index = command.kind == CI_COMMAND_PRIORITY ? 0 : 1;
+        CiSettingOrder* order = override != NULL ? &override->setting_order[index] : pr != NULL ? &pr->setting_order[index] : NULL;
+        uint64_t key = (uint64_t)command.kind * 16 + (uint64_t)(command.priority + 2);
+        if (order != NULL)
+        {
+            valid = issued_at > order->at || (issued_at == order->at && (source > order->id || (source == order->id && key != order->key)));
+            if (valid) *order = (CiSettingOrder){issued_at, source, key};
         }
     }
     if (valid && command.kind == CI_COMMAND_PRIORITY)
@@ -1084,7 +1133,7 @@ static void ci_comments(CiState* state, CiPr* pr, CiIdentity* current, uint64_t 
                 }
             }
         }
-        else if (ci_command_new(pr, comment->updated_at, comment->id) || (pr->command_at == comment->updated_at && pr->command_id == comment->id && pr->command_hash != comment->hash))
+        else if (comment->command.kind == CI_COMMAND_PRIORITY || comment->command.kind == CI_COMMAND_HOLD || comment->command.kind == CI_COMMAND_RESUME || ci_command_new(pr, comment->updated_at, comment->id) || (pr->command_at == comment->updated_at && pr->command_id == comment->id && pr->command_hash != comment->hash))
         {
             if (comment->trusted && comment->command.kind == CI_COMMAND_NONE)
             {
@@ -1092,15 +1141,18 @@ static void ci_comments(CiState* state, CiPr* pr, CiIdentity* current, uint64_t 
             }
             else if (comment->trusted)
             {
-                ci_apply(state, pr, comment->command, now, comment->login, comment->id);
+                ci_apply(state, pr, comment->command, now, comment->login, comment->id, comment->updated_at);
             }
             else
             {
                 snprintf(pr->audit, sizeof(pr->audit), "Rejected command by @%s (comment %" PRIu64 "): repository write/maintain/admin permission is required.", comment->login, comment->id);
             }
-            pr->command_at = comment->updated_at;
-            pr->command_id = comment->id;
-            pr->command_hash = comment->hash;
+            if (ci_command_new(pr, comment->updated_at, comment->id) || (pr->command_at == comment->updated_at && pr->command_id == comment->id))
+            {
+                pr->command_at = comment->updated_at;
+                pr->command_id = comment->id;
+                pr->command_hash = comment->hash;
+            }
         }
     }
 }
@@ -1336,9 +1388,9 @@ static void ci_main_sha(char* sha)
     json_free(&response.json);
 }
 
-static void ci_dispatch_event(CiState* state, const Json* event, uint64_t now, uint64_t event_id)
+static void ci_dispatch_event(CiState* state, const Json* event, uint64_t now, uint64_t event_id, bool recover_settings)
 {
-    if (event_id > state->dispatch_event)
+    if (event_id > state->dispatch_event || recover_settings)
     {
         size_t sender = json_get(event, 0, "sender");
         bool authorized = ci_authorized(event, sender);
@@ -1385,7 +1437,13 @@ static void ci_dispatch_event(CiState* state, const Json* event, uint64_t now, u
             }
             else
             {
-                ci_apply(state, pr, command, now, json_field(event, sender, "login"), event_id);
+                bool setting = command.kind == CI_COMMAND_PRIORITY || command.kind == CI_COMMAND_HOLD || command.kind == CI_COMMAND_RESUME;
+                if (event_id > state->dispatch_event || (setting && pr != NULL))
+                {
+                    uint64_t issued_at = json_number(event, 0, "issued_at");
+                    if (issued_at == 0 && !ci_fixture_http) ci_die("manual control is missing its issue time");
+                    ci_apply(state, pr, command, now, json_field(event, sender, "login"), event_id, issued_at != 0 ? issued_at : now);
+                }
             }
             free(line.data);
         }
@@ -1393,7 +1451,7 @@ static void ci_dispatch_event(CiState* state, const Json* event, uint64_t now, u
         {
             printf("Rejected dispatch %" PRIu64 ": sender lacks repository write/maintain/admin permission.\n", event_id);
         }
-        state->dispatch_event = event_id;
+        if (event_id > state->dispatch_event) state->dispatch_event = event_id;
     }
 }
 
@@ -1419,13 +1477,14 @@ static void ci_recover_dispatches(CiState* state, uint64_t now)
     {
         ci_die("more than 100 unprocessed manual controls; operator recovery required");
     }
+    bool recover_settings = state->command_order_version == 0;
     // The Actions API returns reverse chronological runs. Replaying oldest first preserves reset/hold semantics.
     while (count != 0)
     {
         size_t row = rows[--count];
         uint64_t id = json_number(&response.json, row, "id");
         const char* title = json_field(&response.json, row, "display_title");
-        if (id > state->dispatch_event && strcmp(json_field(&response.json, row, "head_branch"), "main") == 0)
+        if ((id > state->dispatch_event || recover_settings) && strcmp(json_field(&response.json, row, "head_branch"), "main") == 0)
         {
             char pr[21] = {0};
             char run[21] = {0};
@@ -1437,11 +1496,13 @@ static void ci_recover_dispatches(CiState* state, uint64_t now)
             {
                 size_t actor = json_get(&response.json, row, "actor");
                 Buffer data = {0};
-                buffer_printf(&data, "{\"sender\":{\"id\":%" PRIu64 ",\"login\":", json_number(&response.json, actor, "id"));
+                const char* created_at = json_field(&response.json, row, "created_at");
+                if (*created_at == 0 && !ci_fixture_http) ci_die("manual control is missing its creation time");
+                buffer_printf(&data, "{\"issued_at\":%" PRIu64 ",\"sender\":{\"id\":%" PRIu64 ",\"login\":", *created_at != 0 ? ci_time(created_at) : now, json_number(&response.json, actor, "id"));
                 json_quote(&data, json_field(&response.json, actor, "login"));
                 buffer_printf(&data, "},\"inputs\":{\"pr\":\"%s\",\"run\":\"%s\",\"action\":\"%s\",\"priority\":\"%s\"}}", pr, run, action, priority);
                 Json recovered = json_parse(data.data);
-                ci_dispatch_event(state, &recovered, now, id);
+                ci_dispatch_event(state, &recovered, now, id, recover_settings);
                 json_free(&recovered);
                 free(data.data);
                 ci_save_state(state);
@@ -1450,10 +1511,11 @@ static void ci_recover_dispatches(CiState* state, uint64_t now)
             {
                 // Non-main/old workflow formats are not commands. Never interpret arbitrary title substrings.
                 printf("Ignored manual-control run %" PRIu64 ": unrecognized exact command envelope.\n", id);
-                state->dispatch_event = id;
+                if (id > state->dispatch_event) state->dispatch_event = id;
             }
         }
     }
+    state->command_order_version = 1;
     json_free(&response.json);
 }
 
@@ -1877,14 +1939,14 @@ static bool ci_legacy_and_conflicts(CiState* state, CiIdentity* identities, size
             }
             bool obsolete = current == NULL || strcmp(run->head, current->head) != 0;
             bool conflict = current != NULL && current->mergeable == 0;
-            if (!inspect && (obsolete || conflict || run->hardware))
+            if (!inspect && (obsolete || conflict))
             {
                 CiIdentity final = ci_get_pr(run->pr, false);
                 bool same = current != NULL && ci_same_pair(current, &final);
                 bool confirmed = (!final.open || strcmp(run->head, final.head) != 0) || (same && final.mergeable == 0);
-                // At cutover, queued legacy PR jobs are replaced by the admission path. Running legacy jobs drain.
-                bool queued_legacy = same && run->hardware && strcmp(run->status, "queued") == 0;
-                if (confirmed || queued_legacy)
+                // Queue metadata can lag an already-running job, and Actions cannot cancel only if still queued.
+                // Clean legacy work drains; the source gate rejects old queued PR jobs before checkout or the lock.
+                if (confirmed)
                 {
                     CiRun exact = ci_get_run(run->id);
                     if (exact.pr == run->pr && strcmp(exact.event, "pull_request") == 0 && strcmp(exact.head, run->head) == 0)
@@ -1897,7 +1959,7 @@ static bool ci_legacy_and_conflicts(CiState* state, CiIdentity* identities, size
         if (run->hardware && run->id != state->lease.run)
         {
             // Repair/startup: don't dispatch alongside legacy, unrelated maintenance or a bypassed workflow gate.
-            // The runner group's exact-default-workflow restriction prevents untrusted PR YAML bypassing admission.
+            // The exact-default-workflow source gate prevents untrusted PR YAML bypassing admission.
             occupied = true;
         }
     }
@@ -2173,6 +2235,10 @@ static void ci_reconcile(bool inspect)
             // Closure expires PR-wide commands. Later comments work even if the initial/reopen webhook was missed.
             pr->command_at = ci_closed_after(current->number);
             pr->command_id = pr->command_at != 0 ? UINT64_MAX : 0;
+            for (size_t setting = 0; setting < 2; ++setting)
+            {
+                pr->setting_order[setting] = (CiSettingOrder){pr->command_at, pr->command_id, 0};
+            }
         }
         ci_observe(pr, current, now);
         ci_resolve_merge(current, NULL);

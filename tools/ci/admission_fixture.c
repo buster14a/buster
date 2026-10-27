@@ -17,6 +17,7 @@ struct CiFixture
     bool background_enabled;
     bool background_ready;
     bool legacy;
+    bool legacy_running;
     bool dispatch_returns_id;
     bool cancel_terminal;
     const char* comments;
@@ -282,7 +283,7 @@ static Http ci_fixture_request(const char* method, const char* full_path, const 
             }
             else if (run == &ci_fixture.native && ci_fixture.legacy)
             {
-                buffer_printf(&out, "{\"total_count\":1,\"jobs\":[{\"name\":\"%s\",\"status\":\"queued\",\"conclusion\":null}]}", BUSTER_CI_REQUIRED);
+                buffer_printf(&out, "{\"total_count\":1,\"jobs\":[{\"name\":\"%s\",\"status\":\"%s\",\"conclusion\":null}]}", BUSTER_CI_REQUIRED, ci_fixture.legacy_running ? "in_progress" : "queued");
             }
             else if (run == &ci_fixture.background)
             {

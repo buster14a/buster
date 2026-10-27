@@ -273,6 +273,13 @@ permission. Exact command envelopes in the resulting Actions run names are an
 auditable recovery log: even a coalesced/cancelled controller wakeup is recovered
 in order. Arbitrary title substrings and non-main controller runs are ignored.
 Comment edits use `(updated_at, comment ID, body hash)`; replay cannot retry twice.
+Priority and hold have independent durable ordering for each PR/run target.
+Comments use their edit time and dispatch controls their creation time, with
+stable source IDs breaking same-second ties. A delayed older comment cannot
+overwrite a newer dispatch setting; a priority change does not discard a separate
+hold/resume. Status queries do not advance those setting clocks. The one-time
+ledger migration recovers PR settings from bounded dispatch history without
+replaying an already-processed retry.
 Deleting a manual command does not undo an already-applied override; reset it
 explicitly. The required check and controller job summary show effective priority,
 queue position, blocked reason, admitted SHA/run/state, expiry and command outcome.
@@ -305,9 +312,13 @@ Only background workflows that actually reached their hosted admission job can
 receive a lease. A run still pending behind its ref's existing concurrency group
 cannot deadlock the active gate by taking its lease. The original per-PR stale
 commit cancellation, per-ref groups, job timeouts, host pinning, benchmark gates
-and host-wide shared lock remain. At cutover, legacy queued PR hardware work is
-cancelled/replaced; legacy running work and unrelated maintenance drain before
-new admission. Other repositories' use of the host still goes through the lock.
+and host-wide shared lock remain. At cutover, clean legacy work and unrelated
+maintenance drain before new admission. A run listed as queued can already have
+a running job, and Actions has no atomic cancel-if-queued operation. Clean legacy
+PR runs therefore are not cancelled just to replace their queue entry; the active
+host source gate refuses old queued PR jobs before checkout or taking the lock.
+Confirmed conflicts, closure and obsolete heads still receive scoped cancellation.
+Other repositories' use of the host still goes through the lock.
 
 ## Durable state and failure recovery
 
