@@ -341,10 +341,12 @@ that design, the cost exceeded anything a reader could recover. It doesn't
 measure #106's one-pass prefix-driven checker, or a parser that skips the tree
 for expressions: both would need the checker's semantic actions written for
 fragment kinds, and both stay untested; the paragraph before this section says
-what would reopen them. Nor did #106's identity criterion pass in full: the
-results were identical up to the checked program, while the lowered IR and the
-`-c` objects weren't compared. Keeping A didn't depend on them, since #107's
-rule asks identical results only of a variant fast enough to adopt.
+what would reopen them, and
+[#544](https://github.com/buster14a/buster/issues/544) tracks them. Nor did the
+identity criterion of #106 pass in full: the results were identical up to the
+checked program, while the lowered IR and the `-c` objects weren't compared.
+Keeping A didn't depend on them, since #107's rule asks identical results only
+of a variant fast enough to adopt.
 
 ## Reproducing
 
