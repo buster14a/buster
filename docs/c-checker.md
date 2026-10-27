@@ -811,9 +811,9 @@ What the lowering covers past scalars (#145's programs):
   instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
   The SQLite control adds 0.0112% instructions and shows mixed, small timing
   changes within process/copy variability. The
-  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/ba29feb94743ba51f9e04ee13d1de58cfe9bb4a2/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
-  record exact sources and limits; supplemental object/stage receipts are
-  tracked in [performance PR #27](https://github.com/buster14a/buster-performance/pull/27).
+  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/b5a850b6171da718b16feb4db341109476e3db19/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
+  record exact sources and limits, five byte-identical baseline/head objects
+  and their stage receipts ([performance PR #27](https://github.com/buster14a/buster-performance/pull/27)).
   The control stream puts a `STACK_SAVE` before each block's first array, an
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
