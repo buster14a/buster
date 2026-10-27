@@ -273,6 +273,13 @@ permission. Exact command envelopes in the resulting Actions run names are an
 auditable recovery log: even a coalesced/cancelled controller wakeup is recovered
 in order. Arbitrary title substrings and non-main controller runs are ignored.
 Comment edits use `(updated_at, comment ID, body hash)`; replay cannot retry twice.
+Priority and hold have independent durable ordering for each PR/run target.
+Comments use their edit time and dispatch controls their creation time, with
+stable source IDs breaking same-second ties. A delayed older comment cannot
+overwrite a newer dispatch setting; a priority change does not discard a separate
+hold/resume. Status queries do not advance those setting clocks. The one-time
+ledger migration recovers PR settings from bounded dispatch history without
+replaying an already-processed retry.
 Deleting a manual command does not undo an already-applied override; reset it
 explicitly. The required check and controller job summary show effective priority,
 queue position, blocked reason, admitted SHA/run/state, expiry and command outcome.

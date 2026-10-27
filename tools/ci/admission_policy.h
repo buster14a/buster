@@ -199,6 +199,14 @@ static CiCommand ci_command(const char* body)
     return result;
 }
 
+typedef struct CiSettingOrder CiSettingOrder;
+struct CiSettingOrder
+{
+    uint64_t at;
+    uint64_t id;
+    uint64_t key;
+};
+
 typedef struct CiPr CiPr;
 struct CiPr
 {
@@ -217,6 +225,7 @@ struct CiPr
     uint64_t command_at;
     uint64_t command_id;
     uint64_t command_hash;
+    CiSettingOrder setting_order[2];
     char audit[256];
     uint64_t check;
     char check_base[BUSTER_CI_SHA];
@@ -251,6 +260,7 @@ struct CiOverride
     bool held;
     bool retry;
     uint64_t queued_at;
+    CiSettingOrder setting_order[2];
 };
 
 typedef struct CiLease CiLease;
@@ -276,6 +286,7 @@ struct CiState
     uint64_t check;
     uint64_t generation;
     uint64_t dispatch_event;
+    unsigned command_order_version;
     unsigned since_fair;
     CiLease lease;
     CiPr prs[BUSTER_CI_ITEMS];

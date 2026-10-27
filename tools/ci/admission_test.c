@@ -105,15 +105,15 @@ static void ci_test_policy(void)
     current.approved = true;
     candidate = ci_pr_candidate(pr, &current, NULL);
     ci_expect(candidate.priority == 1, "current trusted approval gets P1");
-    ci_apply(&state, pr, ci_command("/ci priority critical"), 101, "maintainer", 1);
+    ci_apply(&state, pr, ci_command("/ci priority critical"), 101, "maintainer", 1, 101);
     candidate = ci_pr_candidate(pr, &current, NULL);
     ci_expect(candidate.priority == 0, "P0 manual override wins automatic approval");
-    ci_apply(&state, pr, ci_command("/ci priority normal"), 102, "maintainer", 2);
+    ci_apply(&state, pr, ci_command("/ci priority normal"), 102, "maintainer", 2, 102);
     candidate = ci_pr_candidate(pr, &current, NULL);
     ci_expect(candidate.priority == 1 && pr->manual == -1, "normal reset restores approval priority");
-    ci_apply(&state, pr, ci_command("/ci hold"), 103, "maintainer", 3);
+    ci_apply(&state, pr, ci_command("/ci hold"), 103, "maintainer", 3, 103);
     ci_expect(!ci_pr_candidate(pr, &current, NULL).eligible, "hold prevents admission");
-    ci_apply(&state, pr, ci_command("/ci resume"), 104, "maintainer", 4);
+    ci_apply(&state, pr, ci_command("/ci resume"), 104, "maintainer", 4, 104);
     ci_expect(ci_pr_candidate(pr, &current, NULL).eligible, "resume restores eligibility without a push");
     current.mergeable = 0;
     ci_expect(!ci_pr_candidate(pr, &current, NULL).eligible, "confirmed conflict never admitted");
@@ -150,7 +150,7 @@ static void ci_test_policy(void)
     ci_expect(pr->outcome == 0 && pr->seen_at == 110, "base advance requalifies without a rebase or invalidating current-head approvals");
     pr->held = false;
     pr->outcome = 2;
-    ci_apply(&state, pr, ci_command("/ci retry"), 130, "maintainer", 5);
+    ci_apply(&state, pr, ci_command("/ci retry"), 130, "maintainer", 5, 130);
     ci_expect(pr->outcome == 0 && pr->queued_at == 130, "retry queues exactly the current revision");
     CiOverride override = {0};
     override.manual = 4;
@@ -277,7 +277,7 @@ static void ci_test_controller(void)
     ci_fixture.native.pr = 0;
     ci_reconcile(false);
     ci_expect(ci_fixture.state.prs[0].request_run == ci_fixture.native.id, "API: a fork run with an empty pull_requests array binds by its unique live repository-ID/SHA pair");
-    ci_apply(&ci_fixture.state, &ci_fixture.state.prs[0], ci_command("/ci priority high run 4000"), ci_now(), "maintainer", 1);
+    ci_apply(&ci_fixture.state, &ci_fixture.state.prs[0], ci_command("/ci priority high run 4000"), ci_now(), "maintainer", 1, ci_now());
     ci_expect(ci_fixture.state.override_count == 1 && ci_fixture.state.overrides[0].manual == 1 && ci_fixture.dispatches == 0, "API: fork run controls work without turning a priority override into code approval");
     CiRun ambiguous = ci_get_run(ci_fixture.native.id);
     ci_fixture.state.prs[1] = ci_fixture.state.prs[0];
@@ -666,6 +666,93 @@ static void ci_test_dispatch_controls(void)
     ci_fixture.events = "[]";
 }
 
+static Buffer ci_test_dispatch_setting(uint64_t id, uint64_t issued_at, const char* action, const char* priority, uint64_t run)
+{
+    Buffer out = {0};
+    buffer_printf(&out, "[{\"id\":%" PRIu64 ",\"created_at\":", id);
+    ci_fixture_date(&out, issued_at);
+    buffer_printf(&out, ",\"head_branch\":\"main\",\"display_title\":\"9700X command pr 546 run %" PRIu64 " action %s priority %s\",\"actor\":{\"login\":\"maintainer\",\"id\":123}}]", run, action, priority);
+    return out;
+}
+
+static void ci_test_setting_order(void)
+{
+    ci_fixture_init();
+    ci_fixture.current.code = false;
+    Buffer dispatch = ci_test_dispatch_setting(7001, ci_now() - 5, "priority", "high", 0);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    Buffer comment = ci_test_comment_body("/ci priority low", true, 200, ci_now() - 10);
+    ci_fixture.comments = comment.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].manual == 1, "ordering: a delayed older comment cannot overwrite a newer dispatch priority across reconciliations");
+    free(comment.data);
+    comment = ci_test_comment_body("/ci priority low", true, 201, ci_now() - 2);
+    ci_fixture.comments = comment.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].manual == 4, "ordering: a newer comment supersedes the older dispatch priority");
+    free(dispatch.data);
+    dispatch = ci_test_dispatch_setting(7002, ci_now() - 4, "priority", "critical", 0);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].manual == 4, "ordering: delayed dispatch recovery uses creation time, not its later processing time");
+    free(comment.data);
+    comment = ci_test_comment_body("/ci hold", true, 202, ci_now() - 3);
+    ci_fixture.comments = comment.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].held && ci_fixture.state.prs[0].manual == 4, "ordering: an earlier unobserved hold is independent of the later priority setting");
+    free(dispatch.data);
+    dispatch = ci_test_dispatch_setting(7003, ci_now() - 1, "resume", "normal", 0);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    ci_reconcile(false);
+    ci_expect(!ci_fixture.state.prs[0].held && ci_fixture.state.prs[0].manual == 4, "ordering: a delayed/replayed old hold cannot undo a newer resume or reset priority");
+    free(dispatch.data);
+    dispatch = ci_test_dispatch_setting(7004, ci_now() - 2, "priority", "high", 4000);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    free(comment.data);
+    comment = ci_test_comment_body("/ci priority low run 4000", true, 203, ci_now() - 3);
+    ci_fixture.comments = comment.data;
+    ci_reconcile(false);
+    CiOverride* override = ci_find_override(&ci_fixture.state, 4000, ci_fixture.current.head, false);
+    ci_expect(override != NULL && override->manual == 1 && ci_fixture.state.prs[0].manual == 4, "ordering: run-specific settings have their own durable order and do not overwrite PR-wide settings");
+    Buffer serialized = ci_state_json(&ci_fixture.state);
+    CiState restored = ci_state_parse(serialized.data);
+    ci_expect(restored.command_order_version == 1 && restored.prs[0].setting_order[0].at == ci_now() - 2 && restored.overrides[0].setting_order[0].id == 7004, "ordering: per-setting clocks survive controller restart");
+    free(serialized.data);
+    free(restored.saved_json);
+    free(comment.data);
+    free(dispatch.data);
+
+    ci_fixture_init();
+    ci_fixture.current.code = false;
+    ci_reconcile(false);
+    ci_fixture.state.command_order_version = 0;
+    ci_fixture.state.dispatch_event = 7002;
+    ci_fixture.state.prs[0].manual = 4;
+    ci_fixture.state.prs[0].command_at = ci_now() - 10;
+    ci_fixture.state.prs[0].command_id = 200;
+    dispatch = ci_test_dispatch_setting(7001, ci_now() - 5, "priority", "high", 0);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].manual == 1 && ci_fixture.state.dispatch_event == 7002 && ci_fixture.state.command_order_version == 1, "ordering migration: recover newer PR settings from prior dispatch history without regressing the global cursor");
+    free(dispatch.data);
+    ci_fixture.state.command_order_version = 0;
+    uint64_t queued = ci_fixture.state.prs[0].queued_at;
+    dispatch = ci_test_dispatch_setting(7000, ci_now() - 1, "retry", "normal", 0);
+    ci_fixture.commands = dispatch.data;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.prs[0].queued_at == queued && ci_fixture.state.dispatch_event == 7002, "ordering migration: never replay an already-processed retry");
+    free(dispatch.data);
+
+    Json old = json_parse("{}");
+    CiSettingOrder orders[2] = {0};
+    ci_setting_order_parse(orders, &old, 0, 15, 77);
+    ci_expect(orders[0].at == 15 && orders[1].id == 77, "ordering migration: old ledger rows retain their existing comment cursor baseline");
+    json_free(&old);
+}
+
 static int ci_self_test(void)
 {
     ci_test_json();
@@ -678,6 +765,7 @@ static int ci_self_test(void)
     ci_test_signals();
     ci_test_guard();
     ci_test_dispatch_controls();
+    ci_test_setting_order();
     ci_fixture_http = false;
     free(ci_fixture.worker_event);
     ci_fixture.worker_event = NULL;
