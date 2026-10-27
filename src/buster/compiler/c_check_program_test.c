@@ -1812,6 +1812,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return r+effects[0]+effects[1]*10+effects[2]*100+b[7]+b[15]+b[32]+__builtin_memcmp(a,b,1)+__builtin_memcmp(a,b,0);}",
         "memory-builtin-small-constants-and-effects", clang);
     check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int change_rounding(int);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;change_rounding(n);"
+        "__builtin_memcpy(b,a,(unsigned long)(1.0+0x1.fffffffffffffp-1));change_rounding(0);return b[0]+b[1]*256;}",
+        "memory-builtin-runtime-size-under-fenv", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;clear_fp();"
+        "__builtin_memcpy(b,a,__builtin_constant_p(1.0/3.0));return b[0]+b[1]*256+fp_state()*65536;}",
+        "memory-builtin-size-query-runtime-answer", clang);
+    check_test_program_source(test,
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
         "return (int)y+x+__builtin_constant_p(n++);}", "builtin-hints-and-unevaluated-query", clang);

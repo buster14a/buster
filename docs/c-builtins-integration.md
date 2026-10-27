@@ -202,6 +202,11 @@ not rely on `COPY`, whose shared-IR contract requires equal or disjoint ranges.
 Known larger sizes omit these small-size tests. The recipe caller supplies
 locals with the usual pointer, size and value classes; size metadata is its
 proof about the converted size local, not a request to skip source effects.
+Only ordinary, fault-free integer rvalues without evaluation or floating
+environment effects supply that proof. A size evaluated under `FENV_ACCESS`
+keeps its runtime rounding behavior even if the checker retains a folded value.
+Queries also keep their separate runtime plan: a query's source proof is not
+used as the memory operation's runtime size.
 
 `strlen` probes its first eight bytes in order with one conditional branch per
 byte, stopping at the first zero. If all eight are nonzero, it starts at the
