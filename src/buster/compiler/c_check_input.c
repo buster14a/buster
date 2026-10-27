@@ -4884,11 +4884,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
     // The tree's traversal: the parser's where it derived it (parse_tree_columns), else the reader's own, in its scratch,
-    // derived below once the columns are reserved. Each column has room for parse_tree_columns' sentinel and the slot
-    // past it.
+    // derived below once the columns are reserved: five columns with room for parse_tree_columns' sentinel, and two
+    // temporaries.
     const bool derived = parser->postorder != 0 && parser->positions != 0 && parser->ends != 0 && parser->first_children != 0 && parser->next_siblings != 0;
-    const uint64_t slots = (uint64_t)count + 2;
-    uint32_t* traversal = derived || !valid ? 0 : arena_push_array(scratch, 6 * slots, sizeof(uint32_t), 64);
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* traversal = derived || !valid ? 0 : arena_push_array(scratch, 7 * slots, sizeof(uint32_t), 64);
     valid &= derived || traversal != 0;
     reader.postorder = derived ? parser->postorder : parser->postorder != 0 ? parser->postorder : traversal;
     reader.postorder_positions = derived ? parser->positions : traversal != 0 ? traversal + slots : 0;
@@ -5043,19 +5043,19 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it, as
             // with --scalar from the walk's (parse_tree_columns' twins); otherwise, the C driver's tree_only parse, all
             // of it in parse_tree_columns' two passes.
-            uint32_t* const before = traversal + 5 * slots;
+            uint32_t* const last_children = traversal + 5 * slots;
             if (parser->postorder != 0 || parser->options.scalar)
             {
                 if (parser->postorder == 0)
                 {
-                    parse_postorder(parser->tree.parents, count, before, traversal);
+                    parse_postorder(parser->tree.parents, count, last_children, traversal);
                 }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
             else
             {
-                parse_tree_columns(parser->tree.parents, count, before, traversal, traversal + slots, traversal + 2 * slots, traversal + 3 * slots,
-                                   traversal + 4 * slots, 0, 0);
+                parse_tree_columns(parser->tree.parents, count, last_children, traversal + 6 * slots, traversal, traversal + slots, traversal + 2 * slots,
+                                   traversal + 3 * slots, traversal + 4 * slots, 0, 0);
             }
         }
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes

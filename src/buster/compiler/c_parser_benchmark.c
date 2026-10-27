@@ -653,12 +653,12 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
         // The tree's columns as the parser derives them, then with the subtree sizes, then the twin from that postorder, as
         // the checker's reader derived them before the parser published them.
         case PARSE_TIMED_TREE:
-            parse_tree_columns(k->parents, count, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends, buffers->first_children,
-                               buffers->next_siblings, 0, 0);
+            parse_tree_columns(k->parents, count, buffers->last_children, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends,
+                               buffers->first_children, buffers->next_siblings, 0, 0);
             break;
         case PARSE_TIMED_TREE_SIZES:
-            parse_tree_columns(k->parents, count, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends, buffers->first_children,
-                               buffers->next_siblings, buffers->subtree_starts, buffers->sizes);
+            parse_tree_columns(k->parents, count, buffers->last_children, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends,
+                               buffers->first_children, buffers->next_siblings, buffers->subtree_starts, buffers->sizes);
             break;
         case PARSE_TIMED_TREE_LINKS:
             parse_tree_links(k->parents, buffers->postorder, count, buffers->positions, buffers->subtree_ends, buffers->first_children, buffers->next_siblings);

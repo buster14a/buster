@@ -1207,6 +1207,7 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     }
     for (uint32_t way = 0; way < 3; way += 1)
     {
+        uint32_t last_children[8];
         uint32_t before[8];
         uint32_t derived_postorder[8];
         uint32_t derived[4][8];
@@ -1219,7 +1220,8 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
         }
         else
         {
-            parse_tree_columns(good, 6, before, derived_postorder, derived[0], derived[1], derived[2], derived[3], way == 1 ? starts : 0, way == 1 ? derived_sizes : 0);
+            parse_tree_columns(good, 6, last_children, before, derived_postorder, derived[0], derived[1], derived[2], derived[3], way == 1 ? starts : 0,
+                               way == 1 ? derived_sizes : 0);
         }
         const ParseTestColumns columns = { derived[0], derived[1], derived[2], derived[3] };
         failures += parse_test_check_columns(good, 6, &columns, scratch) != BUSTER_PARSE_NONE;
