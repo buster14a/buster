@@ -488,9 +488,29 @@ static void check_unwind_test_policy(CheckDebugTestTally* tally, const char* sou
                             set->debug_frame ? "clang's object has as many FDEs in .debug_frame as ours in .eh_frame" : "clang's object has as many FDEs as ours", theirs);
 }
 
+// Whether the trap fixture's program runs as its unwind tables (or their absence) make it: its SIGILL handler prints
+// the signal, main's count and its own. With tables, it returns 0 having counted main's and the four frames above it;
+// without them, it returns 1 having printed 4 1 1, both walks stopped at depth: the handler ran, and nothing else
+// exited with 1.
+static bool check_unwind_test_trap_run(const char* program, bool tables, Arena* arena)
+{
+    char report[PATH_MAX + 8];
+    snprintf(report, sizeof(report), "%s.out", program);
+    char* run[] = { (char*)program, 0 };
+    const int status = object_test_run(run, report, "/dev/null");
+    const String8 printed = foreign_test_read(arena, report);
+    int number = 0;
+    int baseline = 0;
+    int frames = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d", &number, &baseline, &frames) == 3;
+    const bool walked = status == 0 && baseline >= 3 && frames == baseline + 4;
+    const bool stopped = status == 1 && baseline == 1 && frames == 1;
+    return read && number == SIGILL && (tables ? walked : stopped);
+}
+
 // The trap fixture (check_unwind_test_trap_text, #523) by default: its executable by each path, the same bytes, and
 // its object linked by cc through GNU ld, each of whose handlers must count the frames through the trap's helper; and
-// its executable without unwind tables, which must still trap into the handler (it exits with 1, the walk stopped).
+// its executable without unwind tables, which must still trap into the handler (check_unwind_test_trap_run).
 static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
     char source[PATH_MAX];
@@ -513,11 +533,7 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
         check_debug_test_expect(tally, files[0].pointer != 0 && files[1].pointer != 0 && files[0].length == files[1].length &&
                                            memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
                                 "the trap's executable by the vector path is --scalar's, byte for byte", outputs[0]);
-        char report[PATH_MAX + 40];
-        snprintf(report, sizeof(report), "%s.out", outputs[0]);
-        char* run[] = { outputs[0], 0 };
-        const int status = files[0].pointer != 0 ? object_test_run(run, report, "/dev/null") : -1;
-        check_debug_test_expect(tally, status == (tables ? 0 : 1),
+        check_debug_test_expect(tally, files[0].pointer != 0 && check_unwind_test_trap_run(outputs[0], tables, arena),
                                 tables ? "the trap's handler walks through the trap's helper to main" : "without unwind tables, the trap still reaches its handler",
                                 outputs[0]);
         if (tables)
@@ -533,9 +549,7 @@ static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* direc
             char* arguments[] = { (char*)"cc", (char*)"-fuse-ld=bfd", (char*)"-o", program, object, 0 };
             const bool linked = made && object_test_run(arguments, "/dev/null", errors) == 0;
             check_debug_test_expect(tally, linked, "cc links the trap's object through GNU ld", errors);
-            char* linked_run[] = { program, 0 };
-            snprintf(report, sizeof(report), "%s.out", program);
-            check_debug_test_expect(tally, linked && object_test_run(linked_run, report, "/dev/null") == 0,
+            check_debug_test_expect(tally, linked && check_unwind_test_trap_run(program, true, arena),
                                     "the linked trap's handler walks through the trap's helper to main", program);
         }
     }
