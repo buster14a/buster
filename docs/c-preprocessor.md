@@ -2554,8 +2554,13 @@ about 60% of that difference back. A change to the checker alone (an integer
 literal's result written in place, which takes 0.8 million instructions out of
 main) makes `-fsyntax-only` as much slower as the templates do ([the record's
 addendum](https://github.com/buster14a/buster-performance/blob/c2429b4d2624b6378944e97c60ba1f0d9002774d/docs/measurements/preprocessor-paste-templates-117-2026-10-26/README.md#addendum-what-the-checkers-slowdown-is)):
-the whole compile moves by about 0.3% with any change that moves the
-checker's code.
+changes that perturb the checker's code layout can move the whole compile by
+about 0.3% in these builds. That doesn't show that all of the templates'
+difference is placement, and the 0.2-0.5 ms above stays this pair's measured
+result. #502 measured the effect directly: with the same instructions, moving
+the checker's unit by 16 to 2,048 bytes changed `-fsyntax-only` of `sqlite3.c`
+by up to 2.2% on main `35f26f6`, and there the templates, rebased onto it,
+took 1.5% fewer user cycles than main at the same shift.
 
 The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
 4.77 ms. The next piece is the arguments expanded before substitution, and the
