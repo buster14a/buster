@@ -318,26 +318,32 @@ static void snapshot_test_same_runtime(SnapshotTestTally* tally, const Runtime* 
         found = runtime_find_global_name(b, runtime_global_name(a, e), a->length[e], a->hash[e]) == e + 1;
     }
     snapshot_test_expect(tally, found, "each global name found in the loaded runtime", index);
-    // libc.so.6's, then the loader's.
-    for (uint32_t library = 0; library < 2; library += 1)
+    // libc.so.6's, then the loader's and libgcc_s.so.1's.
+    const ImportLibrary* const xs[] = { &imported->libc, &imported->loader, &imported->gcc_s };
+    const ImportLibrary* const ys[] = { &loaded->libc, &loaded->loader, &loaded->gcc_s };
+    static const char* const library_versions[] = { "libc.so.6's soname and versions", "the loader's soname and versions", "libgcc_s.so.1's soname and versions" };
+    static const char* const library_exports[] = { "libc.so.6's exports' versions and types", "the loader's exports' versions and types",
+                                                   "libgcc_s.so.1's exports' versions and types" };
+    for (uint32_t library = 0; library < BUSTER_ARRAY_LENGTH(xs); library += 1)
     {
-        const ImportLibrary* x = library == 0 ? &imported->libc : &imported->loader;
-        const ImportLibrary* y = library == 0 ? &loaded->libc : &loaded->loader;
+        const ImportLibrary* x = xs[library];
+        const ImportLibrary* y = ys[library];
         bool versions = x->version_count == y->version_count && snapshot_test_same_string(x->soname, y->soname);
         for (uint32_t v = 0; versions && v < x->version_count; v += 1)
         {
             versions = snapshot_test_same_string(x->versions[v].name, y->versions[v].name) && x->versions[v].hash == y->versions[v].hash &&
                        x->versions[v].index == y->versions[v].index && x->versions[v].base == y->versions[v].base;
         }
-        snapshot_test_expect(tally, versions, library == 0 ? "libc.so.6's soname and versions" : "the loader's soname and versions", index);
+        snapshot_test_expect(tally, versions, library_versions[library], index);
         snapshot_test_expect(tally,
                              x->exports.count == y->exports.count && snapshot_test_same_column(x->exports.version, y->exports.version, x->exports.count * sizeof(uint16_t)) &&
                                  snapshot_test_same_column(x->exports.flags, y->exports.flags, x->exports.count),
-                             library == 0 ? "libc.so.6's exports' versions and types" : "the loader's exports' versions and types", index);
+                             library_exports[library], index);
     }
     bool paths = snapshot_test_same_string(imported->gcc_directory, loaded->gcc_directory) && snapshot_test_same_string(imported->gcc_versions, loaded->gcc_versions) &&
                  snapshot_test_same_string(imported->libc_script, loaded->libc_script) && snapshot_test_same_string(imported->libc_path, loaded->libc_path) &&
-                 snapshot_test_same_string(imported->loader_path, loaded->loader_path) && snapshot_test_same_string(imported->abi_note, loaded->abi_note);
+                 snapshot_test_same_string(imported->loader_path, loaded->loader_path) && snapshot_test_same_string(imported->gcc_s_path, loaded->gcc_s_path) &&
+                 snapshot_test_same_string(imported->abi_note, loaded->abi_note);
     for (uint32_t i = 0; i < RUNTIME_OBJECTS; i += 1)
     {
         paths = paths && snapshot_test_same_string(imported->object_paths[i], loaded->object_paths[i]);

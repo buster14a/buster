@@ -533,7 +533,8 @@ static uint16_t interpreter_typed_ir_type(uint32_t class)
         IR_I64,
         IR_F32,
         IR_F64,
-        // Typed long double and the 128-bit integers have no execution model here.
+        // Typed long double, the 128-bit integers and vectors have no execution model here.
+        IR_VOID,
         IR_VOID,
         IR_VOID,
         IR_VOID,
@@ -877,10 +878,11 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : function->classes[i];
         const uint64_t value = end ? 0 : function->values[i];
         frame->entry += !end;
-        // Validate the dispatch domain before classifying effects; long double and the 128-bit integers (the classes from F80
-        // on) have no InterpreterValue, and an indirect jump (#133) goes to a label's address, which an interpreted function
-        // has no code at.
-        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || class >= BUSTER_TYPED_CLASS_F80)
+        // Validate the dispatch domain before classifying effects; long double, the 128-bit integers and vectors (the
+        // classes from F80 on) have no InterpreterValue, an indirect jump (#133) goes to a label's address, which an
+        // interpreted function has no code at, and a machine operation (#136) has no model here.
+        if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86 ||
+            class >= BUSTER_TYPED_CLASS_F80)
         {
             result->status = INTERPRETER_INVALID;
             break;
