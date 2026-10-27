@@ -12,9 +12,9 @@ The 9700X job measured these at `1677a3b` (#520), which it merged into main
 `6b2c922`:
 [run 40421327819, job 121916266526](https://github.com/buster14a/buster/actions/runs/40421327819/job/121916266526),
 step "Attribute sqlite3.c's compile time to the compiler's stages, against tcc".
-The figures are medians of 11 runs. [The record](compile-time-record.txt) holds
-the step's whole output: every run's samples, the stage table, perf's counters
-and profile, and the revision, flags and hashes.
+The figures are medians of 11 runs. [The measurement record](https://github.com/buster14a/buster-performance/tree/2dddeb09612d54f243cf0521e6bb937cfe2f80f7/docs/measurements/compile-time-518-2026-10-27)
+holds the step's whole output and the job's log: every run's samples, the stage
+table, perf's counters and profile, and the revision, flags and hashes.
 
 - **4.4 times tcc.** `-c` takes 189.6 ms against tcc's 42.7 ms, 146.9 ms apart.
   #136's speedtest1 record measured 194.8 ms and 42.2 ms at `e04462c`, in
