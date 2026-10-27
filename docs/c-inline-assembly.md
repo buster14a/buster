@@ -249,7 +249,9 @@ have 6). `check_program_asm_names` makes one hash table of them, and the
 emission makes one pass over the program's symbols. That pass looks up only
 names of the asm names' lengths, and only in a unit whose templates name
 anything. Every program's planning reads one attribute list per body, to find
-its naked functions.
+its naked functions. [The second part's record](https://github.com/buster14a/buster-performance/tree/dd7e140f93f23d4300e36eb4de7f7b126c4b4d93/docs/measurements/inline-asm-naked-147-2026-10-27)
+has its default path's numbers against main: `sqlite3.c`'s `-c` writes the same
+object, in 0.28% less wall time and 0.083% fewer user instructions.
 [The measurement record](https://github.com/buster14a/buster-performance/tree/681f0282cc14230610b11c8defd91afc6cbc910b/docs/measurements/inline-asm-147-2026-10-27)
 has the commands, the logs and the default path's numbers against main.
 
