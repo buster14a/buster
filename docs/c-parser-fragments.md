@@ -9,7 +9,11 @@ complete paths, from a unit's preprocessed tokens to the checker's results, with
 one semantic consumer whose results had to be identical, against the postorder
 the parser emits. The postorder won on every corpus, by 14% to 51% of the whole
 path, and the vector parser's postorder (D, the compiler's default) was the
-fastest of the four paths. By #107's rule the fragment code was then removed;
+fastest of the four paths. What was measured is an adapter: the checker kept
+walking the tree, and the fragments supplied only each operator's operands. The
+result is about fragments beside this checker's tree, not about a one-pass
+prefix-driven checker or a parser that skips the tree ("What the decision
+covers"). By #107's rule the fragment code was then removed;
 commit [`6c5b21a1`](https://github.com/buster14a/buster/tree/6c5b21a18eda1dd620322d889295980178a97999/src/buster/compiler)
 has all of it, consumer and benchmark included, for anyone who wants to run it
 again ("Reproducing"), and [the record](https://github.com/buster14a/buster-performance/tree/cbf9a269b02e21705c21c173f914d36835e28f30/docs/measurements/parser-fragments-107-2026-10-26) has the measurements' logs,
@@ -66,6 +70,17 @@ expression inside a cast's type name), on one explicit stack, the walk
 advancing only the top one, as the visit ledger requires. Variant B flattened
 each expression when its cursor started; C decoded windows as it read.
 
+This is an adapter, not the consumer #106 designed. #106 asked for one driver
+that reads expressions in preorder and runs each operator's semantic action when
+its last child completes, switching between postorder (declarations and
+statements) and preorder (expressions) by tagged continuations on one explicit
+stack. Here the postorder walk stayed the driver: it visited every token of the
+tree, expressions' included, and the fragment cursors ran in step with it. The
+checker's semantic actions are written per token of the tree (the next
+section), so a driver of #106's kind needs them written again for fragment
+kinds; that wasn't built, and neither was a parser that skips the tree for
+expressions.
+
 C's constructs that need context before their children (`&&`, `||`, `?:`,
 `sizeof`, `_Alignof`, `typeof`, `_Generic`) get it in this checker from the
 declaration walk in source order (constant contexts, query types, selections),
@@ -97,8 +112,15 @@ and the parser's diagnostics, every column of the checker's input and graph
 (token nodes, declarations, regions, VLAs, asm operands and the rest), the typed
 stream, the initializers and the checked program. The reader also compared each
 operator's operands with its children's in the tree as it took them, and had to
-read every published expression of a unit without reports. On the 9700X and
-locally:
+read every published expression of a unit without reports.
+
+The comparison stops at the checked program: nothing lowered it. So #106's own
+criterion, each function's IR (`check_program_lower`'s output, Tier 0's input)
+the same instruction for instruction, and the `-c` objects byte for byte that
+the claim on #106 named were not compared, and stay unverified. The
+benchmark's `--to-ir` run lowered SQLite on every path without a failure, but
+its first pass compares nothing past the checker's typed stream. On the 9700X
+and locally:
 
 | Inputs | Units | The checker accepted | Fragment readings | Differences |
 | --- | ---: | ---: | ---: | ---: |
@@ -221,13 +243,13 @@ faster on SQLite and 18.5% faster on libc: the two parsers leave equal columns
 in different places in memory and in the caches, which this measurement didn't
 separate.
 
-No reader of these fragments could have rescued B or C. The sink and the index
-alone cost 112.5 ticks a token on SQLite, 18.4% of A's whole path, and 37.0 on
-libc, 9.7%, and the walk builds every token's nodes either way: the fragments
-replace only the gathering of an operator's operands, a few loads and stores of
-the children's values. Even a walk that cost nothing would leave B and C slower
-than A on libc, at 392.8 and 391.7 ticks a token against 380.1, where #107's
-rule needs both real corpora 3% faster.
+No reader of these fragments beside this checker's tree walk could have rescued
+B or C. The sink and the index alone cost 112.5 ticks a token on SQLite, 18.4%
+of A's whole path, and 37.0 on libc, 9.7%, and the walk builds every token's
+nodes either way: the fragments replace only the gathering of an operator's
+operands, a few loads and stores of the children's values. Even a walk that cost
+nothing would leave B and C slower than A on libc, at 392.8 and 391.7 ticks a
+token against 380.1, where #107's rule needs both real corpora 3% faster.
 
 ### Counters
 
@@ -287,11 +309,12 @@ postorder's does, so it can't beat D's postorder either.
 #107's rule adopts B or C only if it is faster than A by more than the
 run-to-run spread, and by at least 3% on the parse and consumption of both real
 corpora, with no increase in retained memory that a later stage pays for, and
-with identical results. The results were identical, but B and C took 46% to 47%
-more cycles than A on SQLite and 14% more on libc, each path's processes within
-0.6% of each other, and kept more than 100 bytes a token on top of the tree. A
-stays: the parser keeps emitting its tree and postorder, which the vector parser
-(D) builds fastest.
+with identical results. The results were identical as far as they were
+compared, up to the checked program, but B and C took 46% to 47% more cycles
+than A on SQLite and 14% more on libc, each path's processes within 0.6% of each
+other, and kept more than 100 bytes a token on top of the tree. A stays: the
+parser keeps emitting its tree and postorder, which the vector parser (D) builds
+fastest.
 
 The fragment sink and its builder, the readers, the interleave kernel, the
 consumer, their tests and the benchmark were removed with the fragments' unit:
@@ -309,6 +332,19 @@ would come back with a checker that needs no token the fragments drop (no token
 node on a group's closer, no region on a statement expression's, designators
 and builtins in fragment terms), so that a parser could skip the tree for
 expressions and the fragments would replace work rather than add it.
+
+### What the decision covers
+
+The decision is about the design measured: fragments built as a second output of
+the scalar parser, beside its tree, and read beside the checker's tree walk. For
+that design, the cost exceeded anything a reader could recover. It doesn't
+measure #106's one-pass prefix-driven checker, or a parser that skips the tree
+for expressions: both would need the checker's semantic actions written for
+fragment kinds, and both stay untested; the paragraph before this section says
+what would reopen them. Nor did #106's identity criterion pass in full: the
+results were identical up to the checked program, while the lowered IR and the
+`-c` objects weren't compared. Keeping A didn't depend on them, since #107's
+rule asks identical results only of a variant fast enough to adopt.
 
 ## Reproducing
 

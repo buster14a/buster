@@ -10,8 +10,8 @@ accept with the same tree. `compiler file.c` runs the preprocessor and the
 parser; nothing is written yet.
 
 Salter's [operator fragments](c-parser-fragments.md), the alternative output
-that #104–#107 measured end to end against the postorder, with the checker
-reading both, lost: the parser keeps the postorder.
+that #104–#107 measured end to end against the postorder, read beside the
+checker's tree walk, lost: the parser keeps the postorder.
 
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
