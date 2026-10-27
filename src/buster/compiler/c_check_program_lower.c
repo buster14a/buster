@@ -3634,12 +3634,16 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
-        // The member's offset as the checker found it (CheckStream.member_offsets), for a node it checked without a
-        // diagnostic. A bit-field's address, which only its stores ask for, is its first byte's.
+        // A struct's or union's member, at the offset the checker found it at (CheckStream.member_offsets), for a node it
+        // checked without a diagnostic; not a vector's elements (`v.y`), which share the operator. A bit-field's address,
+        // which only its stores ask for, is its first byte's.
+        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : stream->values[a].type;
+        const uint8_t record_kind = check_action_kind(types, record);
         const uint64_t offset = stream->member_offsets[node];
         const bool bit_field = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0;
         CheckLowerBitField field = { 0 };
-        if (stream->diagnostics[node] != CHECK_DIAG_NONE || (!bit_field && offset % 8 != 0))
+        if (stream->diagnostics[node] != CHECK_DIAG_NONE || (record_kind != BUSTER_TYPE_KIND_STRUCT && record_kind != BUSTER_TYPE_KIND_UNION) ||
+            (!bit_field && offset % 8 != 0))
         {
             check_lower_unsupported(writer, "this member access");
         }

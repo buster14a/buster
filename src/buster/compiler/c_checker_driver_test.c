@@ -1000,7 +1000,8 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
 // every 40th and an anonymous struct of two bit-fields every 60th, written, read and their offsets taken; and 300 small
 // structs each read by a function of its own. Both paths must write the same object, which clang links into a program
 // that prints what clang's own build prints, and so must the direct path's executable: the lowering's offsets, which it
-// takes from the checker's stream, are clang's.
+// takes from the checker's stream, are clang's. And a vector's element through a pointer, `(*p).y`, a MEMBER node that
+// is no record's member, which the lowering must still refuse rather than read at the stream's offset 0.
 #define BUSTER_CHECK_TEST_DRIVER_MEMBERS 2000
 #define BUSTER_CHECK_TEST_DRIVER_RECORDS 300
 
@@ -1091,6 +1092,19 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
     check_test_expect(test, ran[0], "clang's build of the members' program runs");
     check_test_expect(test, ran[0] && ran[1] && strcmp(captured[1], captured[0]) == 0, "clang's link of the members' object prints what clang's build prints");
     check_test_expect(test, ran[0] && ran[2] && strcmp(captured[2], captured[0]) == 0, "the direct path's members' program prints what clang's build prints");
+    static const char swizzle[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return (*p).y; }\n";
+    const bool swizzle_written = parse_test_write(source, swizzle, sizeof(swizzle) - 1);
+    for (uint32_t path = 0; swizzle_written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL,
+                          path == 0 ? "a vector's element through a pointer is refused as a member access" :
+                                      "a vector's element through a pointer is refused as a member access, scalar");
+        free(text);
+        text = NULL;
+    }
     unlink(source);
     unlink(objects[0]);
     unlink(objects[1]);
