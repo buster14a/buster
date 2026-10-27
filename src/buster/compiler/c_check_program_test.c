@@ -642,6 +642,7 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
+#include "c_check_program_asm_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -662,8 +663,42 @@ static void check_test_program_refused(CheckTest* test)
     arena_release(&scratch);
 }
 
+// The x87's encodings, from n: zero, negative zero, a denormal, two pseudo-denormals, one, an unnormal, a pseudo-zero,
+// the infinities, a pseudo-infinity, quiet and signaling NaNs, a pseudo-NaN, the largest value and the largest unnormal.
+#define BUSTER_CHECK_TEST_X87_ENCODINGS \
+    "typedef union{struct{unsigned long m;unsigned short e;}b;long double x;}L;" \
+    "static const unsigned long ms[16]={0,0,1,0x8000000000000000UL,0x8000000000000001UL,0x8000000000000000UL,0x4000000000000000UL,0," \
+    "0x8000000000000000UL,0x8000000000000000UL,0,0xc000000000000000UL,0x8000000000000001UL,0x4000000000000000UL,0xffffffffffffffffUL," \
+    "0x7fffffffffffffffUL};" \
+    "static const unsigned short es[16]={0,0x8000,0,0,0x8000,0x3fff,0x3fff,0x3fff,0x7fff,0xffff,0x7fff,0x7fff,0x7fff,0x7fff,0x7ffe,0x7ffe};" \
+    "long double make(int n){L l;l.b.m=ms[(unsigned)n%16];l.b.e=es[(unsigned)n%16];return l.x;}"
+
+// The builtins of long double that this compiler's own main.c calls (#148, #129): clang -O0 classifies an x87 value by
+// the x87's compares or by its bits, by builtin, which the encodings tell apart. The fpclassify's normal and subnormal
+// selectors are constants, since clang evaluates the two in an order its own build decides (check_lower_floating_prepare).
+static __attribute__((noinline)) void check_test_program_long_double_builtins(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int tested(int n){long double x=make(n);return __builtin_isnan(x)+2*__builtin_isinf(x)+4*__builtin_isfinite(x)+8*__builtin_signbit(x)+"
+        "16*__builtin_fpclassify(0,1,2,3,4,x)+128*(__builtin_isinf_sign(x)+1);}", "long-double-classification-encodings", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int seen;int mark(int v){seen=seen*10+v;return v;}"
+        "int tested(int n){seen=0;long double x=make(n);L l;l.x=__builtin_fabsl(x);int r=__builtin_fpclassify(mark(1),mark(2),3,4,mark(5),x);"
+        "return (int)l.b.e+(int)(l.b.m>>48)*3+r*100000+seen+__builtin_signbit(x)*500000;}", "long-double-fabsl-and-fpclassify-selectors", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);"
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int tested(int n){long double x=make(n);clear_fp();int a=__builtin_fpclassify(11,22,33,44,55,x);int f=fp_state();"
+        "clear_fp();int b=__builtin_isinf_sign(x);int g=fp_state();clear_fp();int c=__builtin_isnan(x);int h=fp_state();"
+        "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
@@ -693,6 +728,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{return a+b+c+d+e+f+g+h+i+j;}int tested(int n){return (int)helper(n,1,2,3,4,5,6,7,8,9);}", "floating-stack-arguments", clang);
     check_test_program_source(test,
         "int tested(int n){int x=n;int*p=&x;int a=(*p)++;int b=++*p;*p+=3;return a+2*b+4*x;}", "addressed-local-updates", clang);
+    // An address constant cast to an integer type, of a class other than a pointer's (musl's syscalls take one).
+    check_test_program_source(test,
+        "volatile int lock;long sys(long n,long a){return n*3+(a&7);}long base(void){return (long)&lock;}"
+        "int tested(int n){long a=(long)&lock;long b=(long)(&lock+2);int c=(int)(long)&lock;return (int)(b-a)+(c==(int)a)+(base()==a)+(int)sys(n,(long)&lock)-(int)((long)&lock&7);}",
+        "address-constants-as-integers", clang);
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
@@ -1467,9 +1507,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
-                                "typed-asm-operands-and-machine-boundary", true, false, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                "typed-asm-goto-target", true, false, 0, 0);
+                                "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
+    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                       "typed-asm-goto-target", true, false, 0, 0, "asm goto");
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
@@ -1489,7 +1529,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "long double g;int tested(int n){long double x=n+0.5L;g=x;return g>1;}", "long-double-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
-    check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
     // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
@@ -1514,6 +1554,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "overlapping-case-ranges", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){default:return 1;default:return 2;}}", "duplicate-default", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch((double)n){case 1:return 1;}return 0;}", "noninteger-switch", false, false, 0, 0);
+    check_test_program_asm(test, clang);
     check_test_program_build_release();
 }
 
