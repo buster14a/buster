@@ -632,6 +632,18 @@ back all its output on failure and validates the completed Link on success.
 Tests pass these atoms through the production ELF writer and independently
 compare bytes, symbol targets and relocation addends with Clang's object files.
 
+Static bit-field writes (`check_data_bit_field_value`, #601) merge only the
+partial boundary bytes and replace each interior byte once. They consume the
+validated integer's low bits, including signed and 128-bit values; an unaligned
+128-bit field can occupy 17 destination bytes. Clears mask the boundaries and
+zero the interior with `memset`, including ranges wider than a scalar. Neither
+helper reads or writes beyond the checked extent, requires padding, or changes
+the source order of overlapping designated writes and union replacements.
+`c_check_data_bit_field_test.c` checks every scalar width and byte offset against
+an independent bitwise reference at guarded allocation edges, larger clears,
+ordered overlapping plans and adjacent relocations. Source fixtures also pass
+packed 128-bit fields and replacements through the ELF writer and Clang.
+
 ## Backend handoff
 
 `c_check_program.c` consumes the typed stream, source control records, asm
