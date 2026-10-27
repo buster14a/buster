@@ -1804,7 +1804,9 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
 
-static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, const CheckStream* stream,
+#include "c_check_x86_diagnostic.c"
+
+static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
@@ -2145,6 +2147,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         {
             check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, options.scalar);
         }
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
     }
     if (!valid || program->status != CHECK_PROGRAM_OK)
     {
