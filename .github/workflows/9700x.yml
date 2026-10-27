@@ -184,11 +184,12 @@ jobs:
           fi
 
   test:
-    name: ${{ vars.CI_9700X_ADMISSION_ENABLED == 'true' && ((github.event_name == 'pull_request' && '9700X queue request') || (inputs.target_pr && '9700X admitted execution')) || 'Build and execute on Ryzen 7 9700X' }}
+    # Fork previews cannot depend on the base repository's variables being present. They always use the controller.
+    name: ${{ (vars.CI_9700X_ADMISSION_ENABLED == 'true' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && ((github.event_name == 'pull_request' && '9700X queue request') || (inputs.target_pr && '9700X admitted execution')) || 'Build and execute on Ryzen 7 9700X' }}
     needs: [changes, admission]
     # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (the daily and
     # dispatched runs) or failed.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]

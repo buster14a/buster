@@ -90,6 +90,9 @@ rebase merely because a PR is behind its base.
 
 In active mode, a native PR workflow supplies the independent hosted `changes`
 preview; its skipped physical job is named `9700X queue request`. A selected PR
+from a public fork always takes that hosted-only preview path, even if repository
+variables are absent from its event context. The host source gate also enforces
+the boundary when a fork changes its own workflow. A selected PR
 gets a `workflow_dispatch` on reviewed `main`, whose physical job is named
 `9700X admitted execution`. That dispatch's native check belongs to `main`; it is
 **not** the PR's required result. Instead the controller publishes the existing
