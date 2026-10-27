@@ -1682,6 +1682,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
         "vla-typedef-captures-bound-once", clang);
     check_test_program_source(test,
+        "int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;"
+        "x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];"
+        "return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}", "vla-declaration-span-scopes-and-commas", clang);
+    check_test_program_source(test,
         "int tested(int n){n+=10;int(*p)[++n],x=(n*=2),(*q)[++n];return (int)sizeof(*p)+(int)sizeof(*q)+n+x;}",
         "vla-declarator-and-initializer-order", clang);
     check_test_program_source(test,
