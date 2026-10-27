@@ -2752,6 +2752,161 @@ static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOption
     return failures;
 }
 
+// The first difference between parser `a`'s parse and `b`'s, or null: their tokens, trees, postorders and subtree
+// sizes, diagnostics, errors and the vector path's statistics. Every column is a parse's own, so both read alike past
+// what a parse writes.
+static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
+{
+    const uint32_t count = a->tokens.count;
+    const char* result = count != b->tokens.count ? "token count" :
+                         a->errors != b->errors || a->fatal != b->fatal ? "errors" :
+                         a->diagnostic_count != b->diagnostic_count ? "diagnostics' count" :
+                         a->statistics.fallback_items != b->statistics.fallback_items || a->statistics.fallback_tokens != b->statistics.fallback_tokens ||
+                         a->statistics.flagged_tokens != b->statistics.flagged_tokens || a->statistics.whole != b->statistics.whole ? "statistics" :
+                         (a->tree.roles == 0) != (b->tree.roles == 0) ? "whether a tree was made" :
+                         (a->postorder == 0) != (b->postorder == 0) ? "whether a postorder was made" : 0;
+    for (uint32_t t = 0; result == 0 && t < count; t += 1)
+    {
+        result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || a->tokens.sources[t] != b->tokens.sources[t] ||
+                 a->tokens.flags[t] != b->tokens.flags[t] ? "tokens" :
+                 a->tree.roles != 0 && (a->tree.roles[t] != b->tree.roles[t] || a->tree.depths[t] != b->tree.depths[t] || a->tree.parents[t] != b->tree.parents[t]) ? "tree" :
+                 a->postorder != 0 && (a->postorder[t] != b->postorder[t] || a->sizes[t] != b->sizes[t]) ? "postorder" : 0;
+    }
+    for (uint32_t d = 0; result == 0 && d < a->diagnostic_count; d += 1)
+    {
+        const ParseDiagnostic* x = &a->diagnostics[d];
+        const ParseDiagnostic* y = &b->diagnostics[d];
+        result = x->token != y->token || x->argument != y->argument || x->message != y->message || x->place != y->place || x->error != y->error ? "diagnostics" : 0;
+    }
+    return result;
+}
+
+// #528: a parse's temporaries in an arena it borrows (ParseOptions.scratch), as the C driver lends its checker's
+// scratch. Units in turn on one Parser for each path, which borrows the arena with the caller's data below its length
+// and dirty pages above it: each parse's own temporaries, and a pattern written before each parse. The units: the
+// fixtures' sources, valid code of which the vector path sends some declarations to the scalar parser (`_Generic`, a
+// declarator's group, a parameter's array qualifier, a K&R definition), an error and an unclosed brace (which it sends
+// whole), and random streams. Each must parse as it does on a fresh Parser with arenas of its own (parse_test_parse_difference), and
+// leave the arena's length and the caller's data as they were. Valid units must take the vector path's fallback, and
+// others its errors.
+static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char* directory, uint64_t seed)
+{
+    static const char* const written[] = {
+        "typedef int T;\nint a(int x) { return x + 1; }\nint g(int v) { return _Generic(v, int: 1, default: 0); }\n"
+        "void (*signal(int s, void (*h)(int)))(int) { return h; }\nint b(char *const argv[__restrict]) { return argv != 0; }\n"
+        "int k(p, q) int p; int q; { return p + q; }\nint c(void) { T t = 2; return t; }\n",
+        "int f(void) { return (1 + ; }\n",
+        "int g(void) { if (1) { return 2; }\n",
+    };
+    const uint32_t fixtures = (uint32_t)(sizeof(parse_test_fixtures) / sizeof(parse_test_fixtures[0]));
+    const uint32_t streams = 64;
+    const uint32_t units = fixtures + (uint32_t)(sizeof(written) / sizeof(written[0])) + streams;
+    const uint64_t held_bytes = 12345;
+    const uint64_t dirt_bytes = 8ull << 20;
+    uint32_t failures = 0;
+    uint32_t fallbacks = 0;
+    uint32_t rejected = 0;
+    uint64_t state = seed ^ 0x528528528ull;
+    static char text[1 << 16];
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/borrowed.c", directory);
+    Arena borrowed = arena_reserve(1ull << 36);
+    uint8_t* held = arena_push(&borrowed, held_bytes, 1);
+    bool ready = held != 0;
+    if (ready)
+    {
+        memset(held, 0x3c, held_bytes);
+    }
+    const uint64_t mark = borrowed.length;
+    static Parser reused[2];
+    for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+    {
+        const ParseOptions parse_options = { .scalar = scalar != 0, .scratch = &borrowed };
+        ready = parse_initialize(&reused[scalar], &parse_options, options->language);
+    }
+    for (uint32_t u = 0; ready && u < units; u += 1)
+    {
+        size_t length = 0;
+        if (u < fixtures)
+        {
+            length = (size_t)snprintf(text, sizeof(text), "%s", parse_test_fixtures[u].source);
+        }
+        else if (u < units - streams)
+        {
+            length = (size_t)snprintf(text, sizeof(text), "%s", written[u - fixtures]);
+        }
+        else
+        {
+            length = parse_test_stream(text, sizeof(text), &state, 1 + (uint32_t)(parse_test_random(&state) % 200), u % 2 == 1);
+        }
+        ready = parse_test_write(path, text, length);
+        for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+        {
+            static InternTable table;
+            static Preprocessor pp;
+            static Parser fresh;
+            const ParseOptions fresh_options = { .scalar = scalar != 0 };
+            const bool preprocessed = intern_initialize(&table) && pp_initialize(&pp, options, &table) && pp_run(&pp, path);
+            uint8_t* dirt = preprocessed ? arena_push(&borrowed, dirt_bytes, 64) : 0;
+            if (dirt != 0)
+            {
+                memset(dirt, 0xa5, dirt_bytes);
+            }
+            arena_pop_to(&borrowed, mark);
+            if (dirt != 0)
+            {
+                parse_translation_unit(&reused[scalar], &pp);
+                bool kept = borrowed.length == mark;
+                for (uint64_t i = 0; i < held_bytes; i += 1)
+                {
+                    kept &= held[i] == 0x3c;
+                }
+                const bool fresh_ready = parse_initialize(&fresh, &fresh_options, options->language);
+                if (fresh_ready)
+                {
+                    parse_translation_unit(&fresh, &pp);
+                }
+                const char* difference = fresh_ready ? parse_test_parse_difference(&reused[scalar], &fresh) : "a fresh parser's reservation";
+                if (!kept || difference != 0)
+                {
+                    failures += 1;
+                    const ParseStatistics* x = &reused[scalar].statistics;
+                    const ParseStatistics* y = &fresh.statistics;
+                    printf("borrowed scratch: unit %u (%s path): %s; fallback %llu items, %llu tokens, %llu flagged, whole %u, %u errors, against a fresh "
+                           "parser's %llu, %llu, %llu, %u, %u\n    %s", u, scalar ? "scalar" : "vector",
+                           !kept ? "the borrowed arena's length or the caller's data below it changed" : difference, (unsigned long long)x->fallback_items,
+                           (unsigned long long)x->fallback_tokens, (unsigned long long)x->flagged_tokens, x->whole, reused[scalar].errors,
+                           (unsigned long long)y->fallback_items, (unsigned long long)y->fallback_tokens, (unsigned long long)y->flagged_tokens, y->whole, fresh.errors,
+                           text);
+                }
+                parse_release(&fresh);
+                fallbacks += scalar == 0 && reused[0].errors == 0 && reused[0].statistics.fallback_items != 0;
+                rejected += scalar == 0 && reused[0].errors != 0;
+            }
+            else
+            {
+                failures += 1;
+                printf("borrowed scratch: unit %u doesn't preprocess, or the arena has no room\n    %s", u, text);
+            }
+            pp_release(&pp);
+            intern_release(&table);
+        }
+    }
+    if (!ready || fallbacks == 0 || rejected == 0)
+    {
+        failures += 1;
+        printf("borrowed scratch: %s\n", !ready ? "a parser or the arena couldn't be reserved, or a unit written" :
+                                          "no valid unit took the vector path's fallback, or none was rejected");
+    }
+    parse_release(&reused[0]);
+    parse_release(&reused[1]);
+    arena_release(&borrowed);
+    remove(path);
+    printf("borrowed scratch: %u units on one parser for each path, against fresh parsers: %u valid through the fallback, %u rejected, %u failures\n", units,
+           fallbacks, rejected, failures);
+    return failures;
+}
+
 // Every block alignment: each snippet's source, and `file`'s -E text if given, after 0 to 63 file-scope `;`.
 static uint32_t parse_test_alignments(const char* file, const PPOptions* options, const char* directory)
 {
@@ -3365,6 +3520,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             plain.no_standard_includes = true;
             plain.include_count = 0;
             failures += parse_test_streams(streams, seed, &plain, directory, keep);
+            failures += parse_test_borrowed_scratch(&plain, directory, seed);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
             failures += parse_test_driver(directory);

@@ -7703,16 +7703,19 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
     // K1's second part, and the roles after the colons it resolved.
     parse_secondary_scalar(kernels, count, kernels->stack);
     parse_after_colons(kernels, count);
-    // K4, K5 and K6.
+    // K4, K5 and K6, which a unit the kernels can't take skips, as parse_vector does.
     parse_parents_scalar(kernels, count);
     const bool statements_ok = parse_statements(kernels, count, statements);
-    const ParseCheckFrames frames = parse_check_frames(kernels);
-    parse_check_scalar(kernels, names, input->flags, count, typed, &frames, kernels->check_classes, 0, 0);
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        result.flagged_tokens += kernels->flags[i] != 0;
-    }
     result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    if (!result.everything)
+    {
+        const ParseCheckFrames frames = parse_check_frames(kernels);
+        parse_check_scalar(kernels, names, input->flags, count, typed, &frames, kernels->check_classes, 0, 0);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            result.flagged_tokens += kernels->flags[i] != 0;
+        }
+    }
     result.fallback = parse_fallback(kernels, input, result.everything);
     // The names this unit declared as typedefs, for the next one.
     parse_typedefs_clear(kernels);
@@ -11539,14 +11542,20 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     // K4, K5 and K6.
     parse_parents_vector(kernels, count, buffers);
     const bool statements_ok = parse_statements_vector(kernels, count, buffers);
-    parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
-    for (uint32_t block = 0; block < count; block += 64)
-    {
-        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
-        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
-        result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
-    }
     result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    // A unit the kernels can't take goes to the scalar parser whole, without K6's flags. Where its brackets don't
+    // balance, or K5 can't settle its statements, the kernels before K6 leave some of what it reads unwritten, so it
+    // would flag tokens by what a parse's reused temporaries held before (#528).
+    if (!result.everything)
+    {
+        parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
+        for (uint32_t block = 0; block < count; block += 64)
+        {
+            const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+            const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+            result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
+        }
+    }
     result.fallback = parse_fallback(kernels, input, result.everything);
     parse_typedefs_clear(kernels);
     parse_kernels_predeclared(kernels, predeclared, false);
@@ -11685,7 +11694,7 @@ struct ParseStatistics
     // Top-level declarations the scalar parser took on the vector path, and their tokens.
     uint64_t fallback_items;
     uint64_t fallback_tokens;
-    // Tokens the vector path flagged.
+    // Tokens the vector path flagged: none where the whole unit went to the scalar parser before K6.
     uint64_t flagged_tokens;
     // The whole unit went to the scalar parser: unbalanced brackets, a typedef the pass can't read, a do without its
     // while, or an error the fallback found (which the scalar parser then reports as it would alone).
