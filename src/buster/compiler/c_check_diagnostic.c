@@ -8,6 +8,9 @@
 #define CHECK_WARNING_EXCESS_INITIALIZERS 0x100u
 #define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
+#define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
+
+#include "c_check_packed_diagnostic.c"
 
 typedef enum CheckWarningSeverity
 {
@@ -43,6 +46,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wcompare-distinct-pointer-types", NULL, "comparison of distinct pointer types" },
     { "-Wconditional-type-mismatch", NULL, "pointer/integer type mismatch in conditional expression" },
     { "-Wpointer-type-mismatch", NULL, "pointer type mismatch" },
+    { "-Waddress-of-packed-member", NULL, "taking address of packed member may result in an unaligned pointer value" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -136,6 +140,15 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
 {
     uint32_t first = BUSTER_CHECK_NONE;
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
+    for (uint32_t i = 0; policies && i < input->packed_member_count; i += 1)
+    {
+        const CheckInputPackedMember* member = input->packed_members + i;
+        if (!member->suppressed && member->token < first &&
+            check_diagnostic_severity(input, member->token, CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER) >= CHECK_WARNING_ERROR)
+        {
+            first = member->token;
+        }
+    }
     for (uint32_t at = 0; policies && input->attributes != NULL && at < input->token_count && at < first; at += 1)
     {
         const uint32_t warnings = check_diagnostic_attribute_warnings(input, at);

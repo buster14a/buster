@@ -151,6 +151,21 @@ static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input
     }
 }
 
+static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, const CheckInput* input,
+                                       const CheckInputPackedMember* member)
+{
+    const CheckWarningSeverity severity = check_diagnostic_severity(input, member->token, CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER);
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[member->token],
+                           "taking address of packed member '%.*s' of class or structure '%.*s' may result in an unaligned pointer value",
+                           (int)member->member_name.length, member->member_name.pointer,
+                           (int)member->record_name.length, member->record_name.pointer);
+    }
+}
+
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
@@ -230,6 +245,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         }
         const CheckInput* pragma_input = original_pragmas != NULL ? original_pragmas : input;
         uint32_t pragma = 0;
+        uint32_t packed = 0;
         for (uint32_t token = 0; !pp->fatal && token <= count; token += 1)
         {
             while (!pp->fatal && pragma < pragma_input->fp_pragma_count && pragma_input->fp_pragmas[pragma].token == token)
@@ -256,6 +272,19 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                     pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning));
                 }
                 flags &= flags - 1;
+            }
+            // Addresses are sparse and ordered by the '&' event. A generic selection can put the diagnosed
+            // member after another address in its control expression, so its location is not the iteration key.
+            // Keep these records out of the dense 16-bit warning columns.
+            while (!pp->fatal && packed < input->packed_member_count && input->packed_members[packed].address <= token)
+            {
+                const CheckInputPackedMember* member = input->packed_members + packed;
+                if (show_warnings && !member->suppressed && member->address == token &&
+                    (repair == NULL || check_repair_warning_token(repair, member->token)))
+                {
+                    check_driver_packed_report(parser, pp, input, member);
+                }
+                packed += 1;
             }
             if (!pp->fatal && reports && first[token] != UINT64_MAX)
             {
@@ -1072,6 +1101,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                     const CheckOptions check_options = { .scalar = scalar };
                     CheckStream stream;
                     ready = check_graph_run(&types, &input.graph, &output_arena, &scratch, &check_options, &stream);
+                    ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, &scratch);
                     if (ready)
                     {
                         CheckDriverDiagnostic additional[3] = { 0 };
