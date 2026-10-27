@@ -2587,9 +2587,31 @@ the checker's unit by 16 to 2,048 bytes changed `-fsyntax-only` of `sqlite3.c`
 by up to 2.2% on main `35f26f6`, and there the templates, rebased onto it,
 took 1.5% fewer user cycles than main at the same shift.
 
+Its third step expands arguments of direct objects in place ("Arguments of
+direct objects" in "The main loop", [the
+record](https://github.com/buster14a/buster-performance/tree/44e42c04/docs/measurements/preprocessor-direct-arguments-117-2026-10-27)).
+Against main at `530304fc`, with the preprocessor's unit at six placements
+(#509's `build.sh shifts`) and main's executables again as the floor, the
+history deferred, the medians of 12 runs:
+
+| | main | with the arguments expanded in place | main again |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, directive tables and main loop | 4.757 ms | 4.623 ms | 4.749 ms |
+| `sqlite3.c`, main loop | 4.445 ms | 4.311 ms | 4.436 ms |
+| `sqlite3.c`, instructions/input token | 105.56 | 102.57 | 105.56 |
+| `main.c`, main loop | 20.721 ms | 20.541 ms | 20.723 ms |
+
+`sqlite3.c`'s main loop takes 0.13 ms (3%) less, its runs' ranges apart from
+main's at every placement. As whole processes, by `time-runs --copies 3` over
+the same placements, `-E` and `parse` of `sqlite3.c` take 0.8 to 1.1% fewer
+user cycles in each of three rounds (main against itself within 0.22%), about
+0.1 to 0.15 ms of 18.3 ms, and `-fsyntax-only` doesn't change measurably.
+
 The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
-4.77 ms. The next piece is the arguments expanded before substitution, and the
-rest needs #149 or another budget.
+4.62 ms. Of the invocations still left to the invocation stack, most have an
+argument that invokes a function-like macro (1,143 of the 3,346 arguments
+expanded first, before this step) or names an object-like macro whose body
+names a macro; the rest needs #149 or another budget.
 
 ## Assembly output spacing
 
