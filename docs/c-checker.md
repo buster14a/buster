@@ -771,13 +771,15 @@ What the lowering covers past scalars (#145's programs):
   AVX-512DQ where the row needs them; a scalar operand converts to the element's
   type and is splat into every element, a shift's count at the shifted vector's
   type. `op=` loads, computes and stores back. An element is read and written at
-  its place in the vector's bytes, an rvalue's stored into a temporary first. A
-  cast between vectors of the same bytes changes no bits. Integer division and
-  remainder, and 8-bit multiplication and shifts, which clang computes an
-  element at a time, are refused by name, and so are a cast between a vector
-  and an integer, vectors of other sizes and of `bool`. A vector local or
-  parameter aligned past 16 bytes, as the intrinsics' types are, waits for Tier 0
-  to realign a frame: it is refused as any such object is.
+  its place in the vector's bytes, an rvalue's after it is set into a temporary
+  (`SET_LOCAL`, which leaves nothing on the stack). A cast between vectors of the
+  same bytes changes no bits. Integer division and remainder, and 8-bit
+  multiplication and shifts, which clang computes an element at a time, are
+  refused by name, and so are a cast between a vector and an integer, vectors of
+  other sizes and of `bool`. A vector local or parameter aligned past 16 bytes,
+  as the intrinsics' types are, is a frame object of its alignment, for which
+  Tier 0 realigns the function's frame
+  ([the Tier 0 guide](tier0.md#realigned-frames-136)).
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame

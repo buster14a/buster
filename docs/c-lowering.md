@@ -300,18 +300,23 @@ injected where the real ones arise, with the status each would have
 
 The issue's case is `main.c`'s unit, whose intrinsic headers define about 5,200
 inline functions of which the compiler uses about 50. It can't be measured yet.
-The checker takes the unit (with #496's builtins), and the lowering takes vector
-types and their operators ([the checker guide](c-checker.md#backend-handoff)),
-but `-c` of it with `build.sh`'s flags still refuses 827 of its functions, by
-their first refusal (2026-10-27, with #496 and the atomics' branch):
+Since #543 the checker refuses the unit at its `#pragma clang section` lines,
+and `-c` its file-scope `asm`
+([#619](https://github.com/buster14a/buster/issues/619)). Without those lines,
+the lowering takes vector types and their operators
+([the checker guide](c-checker.md#backend-handoff)), and `-c` of the unit with
+`build.sh`'s flags for the 9700X (`-march=znver5`) selects 8,486 functions,
+lowers 7,963 and refuses 523, by their first refusal (2026-10-27, on #136's
+producer branch):
 
-- 666 for vector locals and parameters aligned to 32 or 64 bytes, as the
-  intrinsics' types are, which wait for Tier 0 to realign a frame
-  ([#136](https://github.com/buster14a/buster/issues/136)'s objects aligned past
-  16 bytes);
-- 108 for vector, x86 and bit-cast builtins (#148);
-- 32 for inline assembly, and 13 for long double builtins, which other pull
-  requests take.
+- 520 for vector, x86 and bit-cast builtins (#148);
+- 2 for inline assembly operands of vector types in their constraints'
+  registers (`shift_in_previous` and `encode_group`, #147);
+- 1 for a `_BitInt` (`cbuiltin_test_overflow`).
+
+With `--lower-all`, 8,735 of the unit's 13,847 definitions lower; most of the
+others wait for the intrinsics' builtins (4,856), MMX's 8-byte vectors (174) or
+AVX512-FP16's `_Float16` (79).
 
 Where it works today, selection lets units compile that lowering everything
 can't: of musl's math files, the referenced definitions lower and all of them
