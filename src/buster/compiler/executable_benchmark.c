@@ -50,6 +50,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#include <elf.h>
 
 typedef struct String8 String8;
 struct String8
@@ -887,11 +888,57 @@ static bool executable_benchmark_tls_runs(const char* path, uint32_t count)
     return result;
 }
 
-// A dynamic PIE's probes as the last write relaxed them in the link's bytes (#515): each general-dynamic one to
-// local-exec, its offset from the thread pointer below 0, each imported one to initial-exec, every one reaching the
-// same GOT slot (errno's), and each local-dynamic one to its mov %fs:0, its DTPOFF32 below 0; and each control probe
-// as it was, its lea's and call's opcodes in place.
-static bool executable_benchmark_tls_relaxed(const Link* link, SymbolId first, uint32_t count, bool local, bool imported, bool control)
+// Whether the dynamic PIE `file` (`size` bytes, at base 0) has an R_X86_64_TPOFF64 relocation in .rela.dyn at `place`
+// against the dynamic symbol `name`: the slot an initial-exec access to `name` reads.
+static bool executable_benchmark_tpoff_slot(const uint8_t* file, uint64_t size, uint64_t place, const char* name)
+{
+    Elf64_Ehdr header;
+    bool result = size >= sizeof(header);
+    if (result)
+    {
+        memcpy(&header, file, sizeof(header));
+        result = header.e_shoff <= size && header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shstrndx < header.e_shnum &&
+                 (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= size - header.e_shoff;
+    }
+    const Elf64_Shdr* sections = result ? (const Elf64_Shdr*)(file + header.e_shoff) : 0;
+    const Elf64_Shdr* names = result ? &sections[header.e_shstrndx] : 0;
+    bool found = false;
+    for (uint32_t i = 0; result && !found && i < header.e_shnum; i += 1)
+    {
+        const Elf64_Shdr* rela = &sections[i];
+        const bool named = rela->sh_type == SHT_RELA && names->sh_offset + rela->sh_name + sizeof(".rela.dyn") <= size &&
+                           memcmp(file + names->sh_offset + rela->sh_name, ".rela.dyn", sizeof(".rela.dyn")) == 0;
+        const Elf64_Shdr* symbols = named && rela->sh_link < header.e_shnum ? &sections[rela->sh_link] : 0;
+        const Elf64_Shdr* strings = symbols != 0 && symbols->sh_link < header.e_shnum ? &sections[symbols->sh_link] : 0;
+        const bool readable = strings != 0 && rela->sh_offset + rela->sh_size <= size && symbols->sh_offset + symbols->sh_size <= size &&
+                              strings->sh_offset + strings->sh_size <= size;
+        for (uint64_t at = 0; readable && !found && at + sizeof(Elf64_Rela) <= rela->sh_size; at += sizeof(Elf64_Rela))
+        {
+            Elf64_Rela entry;
+            memcpy(&entry, file + rela->sh_offset + at, sizeof(entry));
+            const uint64_t symbol = ELF64_R_SYM(entry.r_info);
+            Elf64_Sym record = { 0 };
+            const bool listed = (symbol + 1) * sizeof(Elf64_Sym) <= symbols->sh_size;
+            if (listed)
+            {
+                memcpy(&record, file + symbols->sh_offset + symbol * sizeof(Elf64_Sym), sizeof(record));
+            }
+            const uint64_t length = strlen(name) + 1;
+            found = entry.r_offset == place && ELF64_R_TYPE(entry.r_info) == R_X86_64_TPOFF64 && listed && record.st_name + length <= strings->sh_size &&
+                    memcmp(file + strings->sh_offset + record.st_name, name, length) == 0;
+        }
+    }
+    return found;
+}
+
+// A dynamic PIE's probes as the last write relaxed them in the link's bytes (#515), each against its own target: each
+// general-dynamic one to local-exec and each local-dynamic one to its mov %fs:0, the offset (the lea's, or the
+// DTPOFF32's) its thread-local's own offset from the thread pointer (the symbol's reference after layout); each
+// imported one to initial-exec, its field reaching a slot of `file` that an R_X86_64_TPOFF64 against errno fills; and
+// each control probe as it was, its lea's and call's opcodes in place. The probes are link-only code: nothing calls
+// them (the control's call is to the first probe, chosen for its fixup's kind alone, and would recurse if run).
+static bool executable_benchmark_tls_relaxed(const Link* link, const uint8_t* file, uint64_t size, SymbolId first, uint32_t count, bool local, bool imported,
+                                             bool control)
 {
     static const uint8_t lea[4] = { 0x66, 0x48, 0x8d, 0x3d };
     static const uint8_t call[4] = { 0x66, 0x66, 0x48, 0xe8 };
@@ -903,14 +950,19 @@ static bool executable_benchmark_tls_relaxed(const Link* link, SymbolId first, u
     uint64_t slot = 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
-        const AtomId atom = link->symbols.atom[first + 1 + 2 * i];
+        const SymbolId function = first + 1 + 2 * i;
+        const AtomId atom = link->symbols.atom[function];
         const uint8_t* code = link->atoms.bytes[atom];
         int32_t field = 0;
         memcpy(&field, code + (local ? 19 : 16), sizeof(field));
         // An initial-exec field's slot: from the end of the add, at byte 20.
         const uint64_t reached = link->atoms.address[atom] + 20 + (uint64_t)(int64_t)field;
         const bool kept = memcmp(code + 4, lea, sizeof(lea)) == 0 && memcmp(code + 12, call, sizeof(call)) == 0;
-        result = control ? kept : memcmp(code + 4, expected, sizeof(gd_le)) == 0 && (imported ? (i == 0 || reached == slot) : field < 0);
+        const bool relaxed = memcmp(code + 4, expected, sizeof(gd_le)) == 0;
+        // The first probe's slot is checked against the file; the others must reach the same one.
+        const bool target = imported ? (i == 0 ? executable_benchmark_tpoff_slot(file, size, reached, "errno") : reached == slot)
+                                     : field == (int32_t)link->symbols.reference[function + 1];
+        result = control ? kept : relaxed && target;
         slot = i == 0 ? reached : slot;
     }
     return result;
@@ -1098,14 +1150,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
             printf("\n");
         }
     }
-    if (result && relaxes)
-    {
-        result = executable_benchmark_tls_relaxed(&program.link, tls_first, functions, local, imported, control);
-        printf("  %s: %u %s, %s path, %s\n", tls, functions,
-               control ? "probes without TLS, none rewritten" : imported ? "accesses relaxed to initial-exec through errno's GOT slot" : "accesses relaxed to local-exec",
-               exact ? "exact" : "vector", result ? "every probe's bytes checked" : "failed");
-    }
-    else if (result && tls != 0)
+    if (result && tls != 0 && !relaxes)
     {
         result = executable_benchmark_tls_runs(path, functions);
         const uint32_t objects = functions < BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS ? functions : BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS;
@@ -1119,6 +1164,13 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     if (file >= 0)
     {
         close(file);
+    }
+    if (result && relaxes)
+    {
+        result = executable_benchmark_tls_relaxed(&program.link, bytes, size, tls_first, functions, local, imported, control);
+        printf("  %s: %u %s, %s path, %s\n", tls, functions,
+               control ? "probes without TLS, none rewritten" : imported ? "accesses relaxed to initial-exec through errno's GOT slot" : "accesses relaxed to local-exec",
+               exact ? "exact" : "vector", result ? "every probe checked against its target" : "failed");
     }
     for (uint32_t place = 0; result && place < 2; place += 1)
     {
