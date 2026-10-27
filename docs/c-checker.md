@@ -705,6 +705,35 @@ What the lowering covers past scalars (#145's programs):
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
   and a builtin of 128-bit operands are refused by name.
+- **Vectors (#136).** GNU C's vector types and Clang's extended ones of 16, 32
+  or 64 bytes (the intrinsics' `__m128` to `__m512i`, elements other than
+  `bool`) are Tier 0's VECTOR ([the Tier 0 guide](tier0.md#vectors-136)), a
+  memory class: their locals, parameters and temporaries are frame objects of
+  their bytes (`check_lower_temporary_of`), their globals are read and written
+  through their addresses, and each `LOAD`, `STORE` and `SET` of one has its
+  bytes as its value, which the class doesn't carry. A function with one says so
+  (`Tier0Function.vectors`), from the classes its entries have, which one
+  bitmask gathers with long double's and the 128-bit integers'. Their entries
+  are AVX-512 forms: the target needs AVX-512F and AVX-512VL, which the lowering
+  takes from the preprocessor's target (`CheckProgramOptions.target_features`,
+  from `-march` and the `-m` flags), and without them a vector's first entry is
+  refused by name. The convention passes a vector in a register as wide as the
+  target's (64 bytes with AVX-512F, 32 with AVX), as clang's ABI does; a call
+  passes and returns one as the 128-bit integers are passed, through a frame
+  object of its bytes. An operator is an X86 entry of its row
+  (`c_check_program_vectors.c`): an instruction per operator and element type
+  where AVX-512 has one (`+ - * / & | ^ << >>`, the compares through an opmask
+  and `VPMOVM2*`'s -1 or 0 elements, negation, complement), with AVX-512BW or
+  AVX-512DQ where the row needs them; a scalar operand converts to the element's
+  type and is splat into every element, a shift's count at the shifted vector's
+  type. `op=` loads, computes and stores back. An element is read and written at
+  its place in the vector's bytes, an rvalue's stored into a temporary first. A
+  cast between vectors of the same bytes changes no bits. Integer division and
+  remainder, and 8-bit multiplication and shifts, which clang computes an
+  element at a time, are refused by name, and so are a cast between a vector
+  and an integer, vectors of other sizes and of `bool`. A vector local or
+  parameter aligned past 16 bytes, as the intrinsics' types are, waits for Tier 0
+  to realign a frame: it is refused as any such object is.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame

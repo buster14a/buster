@@ -297,14 +297,19 @@ injected where the real ones arise, with the status each would have
 (`c_lowering_source_benchmark_test.c`).
 
 The issue's case is `main.c`'s unit, whose intrinsic headers define about 5,200
-inline functions of which the compiler uses about 50. It can't be measured yet:
+inline functions of which the compiler uses about 50. It can't be measured yet.
+The checker takes the unit (with #496's builtins), and the lowering takes vector
+types and their operators ([the checker guide](c-checker.md#backend-handoff)),
+but `-c` of it with `build.sh`'s flags still refuses 827 of its functions, by
+their first refusal (2026-10-27, with #496 and the atomics' branch):
 
-- the checker refuses four of its expressions, three AVX-512 builtins outside
-  [#148](https://github.com/buster14a/buster/issues/148)'s frozen own-main scope
-  (`__builtin_ia32_prold512`, `__builtin_ia32_gathersiv16si`,
-  `__builtin_ia32_vec_ext_v16qi`) and `#pragma clang loop`;
-- Tier 0 lowers no vector types, so none of the compiler's own functions, nor
-  the intrinsics they call, can be lowered either way.
+- 666 for vector locals and parameters aligned to 32 or 64 bytes, as the
+  intrinsics' types are, which wait for Tier 0 to realign a frame
+  ([#136](https://github.com/buster14a/buster/issues/136)'s objects aligned past
+  16 bytes);
+- 108 for vector, x86 and bit-cast builtins (#148);
+- 32 for inline assembly, and 13 for long double builtins, which other pull
+  requests take.
 
 Where it works today, selection lets units compile that lowering everything
 can't: of musl's math files, the referenced definitions lower and all of them
@@ -327,7 +332,7 @@ includes it:
 
 A program that skips nothing costs the same either way, so the selection's own
 work is in the noise. These are small units: the measurement that matters,
-`main.c`'s, waits on the two items above.
+`main.c`'s, waits on the items above.
 
 That comparison is within one tree. Against main, on the same work, a harness of
 `benchmark-lowering-source` reduced to the driver's selection
