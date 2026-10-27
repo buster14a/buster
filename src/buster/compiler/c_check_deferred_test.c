@@ -94,6 +94,17 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
+    {
+        "string-initializer-indices",
+        "const char* before[]={\"first\",\"second\"};\n"
+        "const char* f(int i){static const char* t[]={\"body\" \" one\",\"body two\",__func__};"
+        "_Static_assert(sizeof \"condition\"==10,\"message\" \" tail\");return t[i];}\n"
+        "char between[][4]={\"ab\",(\"cd\")};\n"
+        "const char* g(int i){struct Row{char text[4];const char* p;};"
+        "static struct Row t[]={{\"xy\",\"body three\"},{\"za\",\"body four\"}};return t[i].p;}\n"
+        "const char* after[]={\"last\",\"final\"};\n",
+        true,
+    },
     { "statement-expressions", "int f(int a) { int r = ({ int t = a + 1; t * 2; }); return r + ({ a; }); }\nint g(int b) { return ({ int u = b; u; }); }\n", true },
     { "variable-length-arrays", "int f(int n, int a[n]) { int b[n]; b[0] = a[0]; return (int)sizeof b + b[0]; }\nint g(int m) { int c[m][2]; return (int)sizeof c; }\n", true },
     { "varargs",
