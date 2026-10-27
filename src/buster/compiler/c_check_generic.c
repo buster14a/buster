@@ -78,6 +78,8 @@ static uint32_t check_generic_masks(const TypeId* keys, TypeId key, bool scalar)
     uint32_t empty = 0;
     if (scalar)
     {
+        // Keep --scalar an independent executable oracle; Clang otherwise folds both branches into the same masks.
+        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
         for (uint32_t lane = 0; lane < BUSTER_CHECK_GENERIC_GROUP; lane += 1)
         {
             matches |= (uint32_t)(keys[lane] == key) << lane;
