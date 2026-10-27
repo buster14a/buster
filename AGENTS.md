@@ -1764,15 +1764,21 @@ read) and its extended attributes (`oracle_hash_attributes`: ACLs, security
 labels and capabilities among them), and the kind, permissions and extended
 attributes of the directory it is in (an `mkdir` in a directory that isn't
 there yet fails, and once it is succeeds, for a path that isn't there either
-way); a directory's names where the run listed them, or needed them to
-be none (`rmdir`'s, and `rename`'s target's); and which of them is the same
-file (a hard link, which `#pragma once` takes once). So every place an
-`#include`, `__has_include` or `#embed` looked for a header and found none
-counts, in any directory (one that other runs' files go into, or a nested
+way); a directory, where the run listed it or needed it empty (`rmdir`'s, and
+`rename`'s target's), as `getdents64` gives it (`oracle_listing`: each entry
+in the file system's order, with its inode, offset, type and name, so a file
+made anew with the same name and bytes is another listing); and which of them
+is the same file (a hard link, which `#pragma once` takes once). So every
+place an `#include`, `__has_include` or `#embed` looked for a header and found
+none counts, in any directory (one that other runs' files go into, or a nested
 header's), and so does a missing `#include`, whose run is kept. A file the run
 makes was one that wasn't there; a file it changes after it read it isn't
-kept; the files it writes are its outputs. What the cache leaves out
-(`oracle_path_rule`): the package manager's files (under `/usr` but
+kept. The files it writes are among what it looked at, as they were before it:
+their bytes are read at the run's first look at each, while its call waits,
+so that a run that reads its output before it writes it (an `#embed` of it)
+runs again when those bytes change, and a compile into the path the last one
+wrote is taken when the object there is the one that compile left. What the
+cache leaves out (`oracle_path_rule`): the package manager's files (under `/usr` but
 `/usr/local`, and `/bin`, `/sbin` and `/lib*`), the package database's
 identity standing for them, and the kernel's (`/proc`, `/sys`), which describe
 the processes and the machine. A path in one of the run's roots is kept
@@ -1930,6 +1936,12 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   header in `/dev/shm` in no root, each compiled again; runs that follow
   `/proc/self/cwd` and `/dev/fd/3` to a file, not kept; and one that reads
   `/proc/self/fd/3`'s link and `/dev/stdin` and writes `/dev/null`, kept;
+- outputs: a run that reads its output before it writes it (traced sh), run
+  again when those bytes differ and taken when they are an entry's; clang's
+  object where the last compile left one, run again once, then taken, and in
+  the other directory, without one, taken;
+- listings (traced sh's `ls -i`): a file made anew with the same name and
+  bytes, its inode another, run again;
 - changes (traced sh): `mkdir`'s path, which the run made, there the next time;
   `mkdir` in a directory made since; and `rmdir` of a directory whose file
   goes; each run again;

@@ -37,6 +37,10 @@
 //     them); a source in a root in /dev/shm ($TMPDIR there) and a header in /dev/shm in no root, each compiled again
 //     when they change; runs that follow /proc/self/cwd and /dev/fd/3 to a file, not kept; and one that reads
 //     /proc/self/fd/3's link and /dev/stdin and writes /dev/null, kept;
+//   - outputs: a run that reads its output before it writes it (traced sh), run again when those bytes differ and
+//     taken when they are an entry's; clang's object where the last compile left one, run again once, then taken, and
+//     in the other directory, without one, taken;
+//   - listings (traced sh's ls -i): a file made anew with the same name and bytes, its inode another, run again;
 //   - changes (traced sh): mkdir's path, which the run made, there the next time; mkdir in a directory made since; and
 //     rmdir of a directory whose file goes; each run again;
 //   - what the tracing can't follow, with a program the test compiles: openat2 with RESOLVE_IN_ROOT, not kept, and
@@ -1199,7 +1203,9 @@ static void oracle_test_kernel(OracleTest* test)
         uint64_t lengths[3] = { 0 };
         for (uint32_t i = 0; compiled && i < 3; i += 1)
         {
-            // Compiled, taken, and compiled again once the source gives another object.
+            // Compiled, taken, and compiled again once the source gives another object, each without the object there
+            // (which, there, would be among what the run looked at: oracle_test_outputs).
+            oracle_test_unlink(root, "main.o");
             compiled &= i == 1 || oracle_test_write_text(root, "main.c", i == 0 ? "int f(void) { return 1; }\n" : "int f(void) { return 2; }\n");
             compiled &= oracle_test_compile(&cache, compile, root, "main.o", i == 1, &objects[i], &lengths[i]);
         }
@@ -1256,6 +1262,100 @@ static void oracle_test_kernel(OracleTest* test)
     oracle_test_expect(test, refused && cache.counts->unkept == unkept + 4, "kernel: a run that follows a process's links into the file system, not kept");
     const bool links = oracle_test_traced(&cache, named, directory, false, "linked\n") && oracle_test_traced(&cache, named, directory, true, "linked\n");
     oracle_test_expect(test, links && cache.counts->unkept == unkept + 4, "kernel: a descriptor's link, /dev/stdin and /dev/null, kept");
+    oracle_cache_close(&cache);
+}
+
+// --- Outputs and listings ---
+
+// The files a run writes are among what it looked at, as they were before it: a run that reads its output before it
+// writes it (traced sh, #550's fourth review's case) runs again when those bytes differ, and takes an entry whose run
+// found the same; and clang writing an object where the last compile left one (as a test that compiles into one path
+// does) runs again the first time, then takes its entry whenever the object there is the one it wrote, and in the
+// other directory, without one, takes the first compile's.
+static void oracle_test_outputs(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "outputs");
+    const char* directory = test->runs[0];
+    char object[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(object, sizeof(object), "%s/object.o", directory);
+    char* arguments[] = { "sh", "-c", "cat \"$1/object.o\"; printf fixed > \"$1/object.o\"", "sh", (char*)directory, 0 };
+    const char* files[] = { object };
+    static const char* const before[] = { "first", "other", "first", "other" };
+    bool read = true;
+    for (uint32_t i = 0; read && i < 4; i += 1)
+    {
+        // first and other, each run, then first and other, each taken; the output "fixed" after each.
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: outputs", .arguments = arguments, .files = files, .file_count = 1, .dependencies = true };
+        read = oracle_test_write_epoch(directory, "object.o", before[i]) && oracle_run(&run) && run.taken == (i >= 2) && run.output != 0 && strcmp(run.output, before[i]) == 0;
+        oracle_run_release(&run);
+        uint64_t length = 0;
+        char* after = oracle_test_read(object, &length);
+        read = read && after != 0 && strcmp(after, "fixed") == 0;
+        free(after);
+    }
+    oracle_test_unlink(directory, "object.o");
+    oracle_test_expect(test, read, "outputs: a run that reads its output before it writes it, run again when those bytes differ");
+    char* compile[] = { "clang", "-c", "-O0", "output.c", "-o", "output.o", 0 };
+    bool compiled = true;
+    char* objects[4] = { 0 };
+    uint64_t lengths[4] = { 0 };
+    for (uint32_t i = 0; compiled && i < 4; i += 1)
+    {
+        // Into an empty place, over that object (run), over the second's (taken), and in the other directory (taken).
+        const char* place = test->runs[i == 3 ? 1 : 0];
+        if (i == 0 || i == 3)
+        {
+            oracle_test_unlink(place, "output.o");
+        }
+        compiled = oracle_test_write_text(place, "output.c", "int output(void) { return 7; }\n") &&
+                   oracle_test_compile(&cache, compile, place, "output.o", i >= 2, &objects[i], &lengths[i]);
+    }
+    for (uint32_t i = 1; compiled && i < 4; i += 1)
+    {
+        compiled = lengths[i] == lengths[0] && memcmp(objects[i], objects[0], lengths[0]) == 0;
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        free(objects[i]);
+    }
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        oracle_test_unlink(test->runs[d], "output.c");
+        oracle_test_unlink(test->runs[d], "output.o");
+    }
+    oracle_test_expect(test, compiled, "outputs: clang's object where the last compile left one, run again once, then taken");
+    oracle_cache_close(&cache);
+}
+
+// What a run that lists a directory reads of it, getdents64's inodes among it (traced sh's `ls -i`): a file of the same
+// name and bytes made anew in it, renamed over the one it had, runs it again, with the new file's inode.
+static void oracle_test_listings(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "listings");
+    const char* directory = test->runs[0];
+    char listed[BUSTER_ORACLE_PATH_BYTES + 16];
+    char file[BUSTER_ORACLE_PATH_BYTES + 32];
+    char fresh[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(listed, sizeof(listed), "%s/listed", directory);
+    snprintf(file, sizeof(file), "%s/a", listed);
+    snprintf(fresh, sizeof(fresh), "%s/a.new", listed);
+    static const char script[] = "ls -i \"$1/listed\"";
+    bool anew = oracle_test_directory(directory, "listed") && oracle_test_write_epoch(listed, "a", "same\n");
+    for (uint32_t i = 0; anew && i < 3; i += 1)
+    {
+        // Listed (run), listed again (taken), and with a made anew (run).
+        anew &= i != 2 || (oracle_test_write_epoch(listed, "a.new", "same\n") && rename(fresh, file) == 0);
+        struct stat status;
+        char expected[64];
+        anew &= stat(file, &status) == 0;
+        snprintf(expected, sizeof(expected), "%llu a\n", (unsigned long long)status.st_ino);
+        anew &= oracle_test_traced(&cache, script, directory, i == 1, expected);
+    }
+    oracle_test_unlink(listed, "a");
+    rmdir(listed);
+    oracle_test_expect(test, anew, "listings: a file made anew with the same name and bytes, its inode another, run again");
     oracle_cache_close(&cache);
 }
 
@@ -1751,6 +1851,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_permissions(&test);
         oracle_test_path_rules(&test);
         oracle_test_kernel(&test);
+        oracle_test_outputs(&test);
+        oracle_test_listings(&test);
         oracle_test_changes(&test);
         oracle_test_unfollowed(&test);
         oracle_test_groups(&test);
@@ -1767,7 +1869,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
     }
     oracle_epoch_end(epoch);
     static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
-                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "changes/oracle",
+                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "outputs/oracle",
+                                               "listings/oracle",    "changes/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
                                                "writers/oracle",     "process/one/two/buster/oracle",            "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
