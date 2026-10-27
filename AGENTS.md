@@ -2815,8 +2815,9 @@ alone and run alike. The checks:
   from binding's bytes (the relaxation can't be repeated), and run; and
   refused, by every lane count and the exact twins, without an output: that
   assembly written without `__tls_get_addr` named (at its first access to
-  `errno`), a local-dynamic access to `errno`, and a call of `__tls_get_addr`
-  that no access makes;
+  `errno`) and a call of `__tls_get_addr` that no access makes; and a
+  local-dynamic access to `errno`, which `link_check` refuses
+  (`LINK_ERROR_BINDING`);
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;

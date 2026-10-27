@@ -2994,7 +2994,9 @@ and lld do in an executable (lld's `handleTlsRelocation` with its
   (`executable_check_direct`, and `executable_is_refused` for the exact
   report), on both paths, so a `TLSGD` to an import is no longer refused.
   A local-dynamic access to an import stays refused: its module is the
-  image's.
+  image's, and the representation can't hold one (`link_check` refuses a
+  `TLSLD` or `DTPOFF32` to a shared library's symbol, `LINK_ERROR_BINDING`,
+  as lld refuses it).
 - **`__tls_get_addr`** is `ExecutableDynamic.tls_get_addr`, which
   `dynamic_inputs` names (`dynamic_global`), 0 when the link doesn't refer to
   it. Each call of it must be an access's, which consumes it, as in a static
@@ -3030,11 +3032,12 @@ relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
 are compared with lld's links with `--cross-check`, and both run.
 `dynamic_test_tls_refusals` writes what a PIE refuses, by every lane count
 and the exact twins, without an output: the fixture without `__tls_get_addr`
-named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`), a
-local-dynamic access to `errno` (the same, at the access) and a call of
-`__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`, naming
-it). `test-checker-driver` links a call of `__splitstack_getcontext` by both
-paths into the same bytes, which name `libgcc_s.so.1` and run.
+named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`) and a
+call of `__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`,
+naming it); a local-dynamic access to `errno` binds, and `link_check` refuses
+it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
+call of `__splitstack_getcontext` by both paths into the same bytes, which
+name `libgcc_s.so.1` and run.
 
 **The cost.** A dynamic PIE that doesn't refer to `__tls_get_addr` (every
 program the direct path compiled before split-stack code: Tier 0 reaches
