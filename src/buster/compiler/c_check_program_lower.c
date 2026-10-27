@@ -4434,9 +4434,6 @@ struct CheckLowerShared
     // Each body's own signature, its index in its part's batch, and whether the body starts its variadic list.
     uint32_t* signatures;
     uint8_t* incoming;
-    // The naked functions, by object, which the bodies refuse (their basic assembly would be the whole function, without
-    // Tier 0's prologue and epilogue: the second part of #147's claim). Only a program with asm statements has them.
-    uint8_t* naked;
     uint32_t capacity;
     uint32_t local_capacity;
     uint32_t abi_capacity;
@@ -4620,20 +4617,6 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
     shared->local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     shared->local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    shared->naked = valid && input->asm_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
-    valid = valid && (input->asm_count == 0 || shared->naked != 0);
-    if (shared->naked != 0)
-    {
-        memset(shared->naked, 0, (uint64_t)count + 1);
-        for (uint32_t token = 0; token < count; token += 1)
-        {
-            const CheckInputAttributes* attributes = input->declarations[token] == token && input->objects[token] <= count ? input->attributes[token] : 0;
-            for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-            {
-                shared->naked[input->objects[token]] |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
-            }
-        }
-    }
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 &&
@@ -4827,7 +4810,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     {
         const CheckProgramBody body = program->bodies[b];
         const TypeId type = input->declared_types[body.declaration];
-        const TypeId result = type_return(types, type);
+        // A naked function's code is its templates' (check_program_asm_plan_naked): its own is a void function of no
+        // parameters, locals or statements, which the emission doesn't compile, its one entry at its first statement.
+        const CheckProgramNaked* naked = lowered->asms.naked != 0 ? lowered->asms.naked + b : 0;
+        const bool bare = naked != 0 && naked->planned;
+        const TypeId result = bare ? BUSTER_TYPE_VOID : type_return(types, type);
         Tier0Function* function = &lowered->functions[b];
         *function = (Tier0Function){ 0 };
         writer->count = 0;
@@ -4856,7 +4843,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->token = body.declaration;
         check_lower_source(writer, body.declaration);
         writer->hidden = BUSTER_CHECK_NONE;
-        writer->variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        writer->variadic = !bare && (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
         writer->save_anchor = BUSTER_CHECK_NONE;
         writer->overflow_anchor = BUSTER_CHECK_NONE;
         writer->varargs_count = 0;
@@ -4880,9 +4867,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // the address each return gives (Tier0Function.result_size).
         const bool aggregate_result = check_lower_aggregate(types, result);
         const char* returned = aggregate_result ? check_lower_by_value(writer, result, true) : check_lower_class(types, result) == UINT8_MAX ? check_lower_type_feature(types, result) : NULL;
-        if (shared->naked != 0 && body.object <= input->token_count && shared->naked[body.object])
+        if (bare && naked->reason != NULL)
         {
-            check_lower_unsupported(writer, "naked functions");
+            check_lower_unsupported(writer, naked->reason);
         }
         else if (returned != NULL)
         {
@@ -4904,7 +4891,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->result_size = 16;
         }
         uint32_t declared = 0;
-        for (uint32_t parameter = input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
+        for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
         {
             const TypeId parameter_type = input->declared_types[parameter];
             const CheckInputAttributes* attributes = input->attributes[parameter];
@@ -4971,7 +4958,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             writer->result_object = check_lower_temporary(writer, check_lower_class(types, result));
         }
-        for (uint32_t declaration = shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
+        for (uint32_t declaration = bare ? BUSTER_CHECK_NONE : shared->local_first[body.opening]; declaration != BUSTER_CHECK_NONE; declaration = shared->local_next[declaration])
         {
             if (writer->local_map[input->objects[declaration]] == BUSTER_CHECK_NONE)
             {
@@ -5028,7 +5015,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 writer->local_map[input->objects[declaration]] = local;
             }
         }
-        for (uint32_t i = 0; i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
+        for (uint32_t i = 0; !bare && i < body.entry_count && status->status == CHECK_PROGRAM_OK; i += 1)
         {
             if (sources)
             {
@@ -5049,8 +5036,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         const bool falls = writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
                                            writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN;
         check_lower_place(writer, body.count);
-        // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer).
-        check_lower_source(writer, program->parser->tree.parents[body.opening]);
+        // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
+        // function's one entry its first statement's `asm`, where its code starts, as clang's row is.
+        const bool first_asm = bare && body.count != 0 && program->controls[body.first].kind == CHECK_CONTROL_ASM;
+        check_lower_source(writer, first_asm ? input->asm_statements[program->controls[body.first].target].token : program->parser->tree.parents[body.opening]);
         for (uint32_t local = 0; local < writer->local_count; local += 1)
         {
             if (writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_DECLARED)

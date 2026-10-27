@@ -4,7 +4,9 @@ The C driver's lowering compiles GNU C's `asm` statements (#147's "Inline
 assembly" item). `c_check_program_asm.c` plans each statement, `assembler.c`'s
 `asm_assemble_code` assembles its template into records, and
 `c_check_program_lower.c`'s `check_lower_asm` lowers the statement's operands.
-Tier 0 doesn't change: it sees an ordinary call.
+Tier 0 doesn't change: it sees an ordinary call. A naked function's statements
+are its whole code instead, and the names templates define and refer to become
+symbols of the unit's object or executable.
 
 ## The shape: a helper per statement
 
@@ -38,6 +40,52 @@ function's. It is 16-byte aligned there, as clang -O0's function bodies have it.
 A template can't reach the function's frame, which Tier 0 lays out otherwise than
 clang anyway. Moving a helper's records into its caller's code would be a
 follow-up, if a measurement shows the call matters.
+
+## Naked functions
+
+A naked function's body may hold only `asm` statements: basic ones, and
+extended ones whose operands are integer constants (`"i"(7)`).
+`check_program_asm_plan_naked` substitutes their templates and joins them in
+order into one source. Between statements it restores AT&T syntax, since clang
+parses each statement afresh. It assembles that source once, into the
+function's whole code: no prologue, epilogue or trailing trap of the
+compiler's, as with clang. The lowering gives the body a bare `void` function,
+with no parameters, locals or statements, which the emission doesn't compile.
+It takes the planned code instead.
+
+The function's unwind entry has no CFA instructions, as clang's has (its CIE's
+rule, the call's), whatever the templates push. `unwind_tier0_frame` and
+`--verify`'s analyzer don't see the function. Its one source row is at its
+first statement.
+
+`main.c`'s two naked functions, `interpreter_native_bridge` and
+`x86_semantics_test_enter`, compile into clang's bytes, at clang's offsets in an
+object of the three functions this part of #147 claimed (but the padding
+between functions: ours `int3`, clang's a `nop`).
+
+## Labels and names
+
+A template's named labels, `.L` ones among them, are local symbols with no type,
+each at its record's offset in its helper's or its naked function's code, as GNU
+as and clang make them. Every other symbolic field refers to a name, which the
+emission resolves (`check_program_emit_asm_symbols`):
+
+- a label some template of the unit defines;
+- else the unit's own symbol of that link name (its asm label or its
+  identifier), such as a static that `__attribute__((used))` keeps;
+- else an undefined global symbol of its own, as GNU as and clang make one. The
+  direct path binds it, as it binds the unit's other undefined names.
+
+A branch to a label of the template's own, with no addend, is sized as before.
+A call to it, or a branch with an addend, is a reference from the branch's
+rel32 form. `check_program_asm_names` gives the unit's names one table, which
+the emission's symbols follow. Its pass over the program's symbols looks up
+only names of the asm names' lengths.
+
+A label in a helper is inside the helper, not the statement's function: its
+address is right, as data and as a call's target. Jumping to it from outside
+runs the helper's epilogue, which only a template that leaves the helper as it
+came in can rely on.
 
 ## Placement
 
@@ -108,13 +156,14 @@ template is printed as it is, without substitution.
 
 `asm_assemble_code` takes the text through the assembler's lexer, parser and
 matcher. It runs the vector path or the scalar twin, as the checker's path does.
-It returns the records, the local branches as branch sizing's columns, and its
-symbolic fields as references by name. It accepts instructions, labels and the
-syntax directives. It refuses:
+It returns the records, the local branches as branch sizing's columns, its
+symbolic fields as references by name, and its named labels. It accepts
+instructions, labels and the syntax directives. It refuses:
 
 - every other directive: a template has no sections, data or symbols of its own;
-- its own labels, but as a `jmp`'s or `jcc`'s target without an addend;
-- undefined local labels;
+- its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
+  addend, and `loop` and `jrcxz` to any of its labels;
+- undefined numeric labels;
 - what the matcher doesn't take.
 
 The matcher's index admits every form the assembler's syntax takes, whatever
@@ -124,7 +173,10 @@ with asm statements, and frees it after the planning.
 
 The matcher admits `cpuid`, `xgetbv`, `xchg`, `fnstcw`, `fldcw`, `fnstsw`,
 `fnclex`, `stmxcsr`, `ldmxcsr` and SSE2's `pcmpeqd`, which `main.c`'s statements
-use, and the `bswap` of `<linux/swab.h>`'s helpers, besides its families in
+use, and the `bswap` of `<linux/swab.h>`'s helpers. For `main.c`'s naked
+functions it also admits `pushfq`, `popfq`, SSE2's `movq`, the x87's `fld` and
+`fstp` of every width, the string instructions with their prefixes (`rep movsb`)
+and AVX-512F's `vmovdqa64` and `vmovdqu64`. Its other families are in
 [the assembler's guide](assembler.md).
 `test-assembler --cross-check` compares them with GNU as. An `xchg` takes its
 memory operand first in Intel order, as the catalogue has it: `xchgl %ecx,(%rdi)`,
@@ -163,9 +215,14 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
-- templates that refer to symbols, and templates the assembler refuses, with its
-  message;
-- naked functions.
+- templates the assembler refuses, with its message;
+- a label two templates define, a `.L` name no template defines, and a label
+  with one of the unit's symbols' names, which GNU as and clang reject;
+- a label in a template of no instructions, which would be a place in its
+  function's code;
+- in a naked function, statements other than `asm` statements, which clang
+  rejects, operands other than integer constants, and a body of no
+  instructions.
 
 ## Why it is scalar
 
@@ -186,6 +243,13 @@ and the plan's walk 0.3%. That is about 0.55 µs a statement. The matcher's
 index costs its initialization once per unit, 0.7 to 0.9 ms in
 `benchmark-assembler`. For `main.c`'s 58 statements, the statements' own work
 is about 30 µs. Vectorizing it across statements would save no more than that.
+
+The names are scalar too: a unit's templates have few of them (`main.c`'s units
+have 6). `check_program_asm_names` makes one hash table of them, and the
+emission makes one pass over the program's symbols. That pass looks up only
+names of the asm names' lengths, and only in a unit whose templates name
+anything. Every program's planning reads one attribute list per body, to find
+its naked functions.
 [The measurement record](https://github.com/buster14a/buster-performance/tree/681f0282cc14230610b11c8defd91afc6cbc910b/docs/measurements/inline-asm-147-2026-10-27)
 has the commands, the logs and the default path's numbers against main.
 
@@ -219,15 +283,37 @@ has the commands, the logs and the default path's numbers against main.
   - `Z`'s constants at its boundaries;
   - constraints of a register and bounded immediates, whose constants their
     letters take and don't, in templates that assemble only with an immediate
-    (`%c1`'s displacement) or only with a register (`%b1`'s `%cl`).
+    (`%c1`'s displacement) or only with a register (`%b1`'s `%cl`);
+  - naked functions: an AT&T one with a constant operand; one whose label is a
+    second entry, which another function's template takes the address of;
+    `interpreter_native_bridge`'s shape (its own frame, the flags, `rep movsb`,
+    `movq` to and from XMM, `fldl` and `fstpt`, a call through a register, a
+    numeric label); and `x86_semantics_test_enter`'s, in Intel syntax (statics
+    RIP-relative, a jump through one to another naked function, which jumps
+    back to the first one's label, and AVX-512's moves);
+  - templates that call the harness's function and read its data, call the
+    unit's static function and update its static, and take a `.L` label's
+    address that another statement's template defines;
+  - a label inside a helper at its exact record, whose snippet another
+    statement's template calls.
 
-  Each refusal above is checked by name.
+  Each refusal above is checked by name, but the label with a unit symbol's
+  name, which the emission refuses: `test-checker-driver` checks that one
+  through the driver, beside an executable the direct path links, from both
+  paths into the same bytes. That executable's naked function has a label
+  another template takes the address of, and its template calls libc's `puts`
+  by name.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the
   branch columns, the references, each refusal, and the arenas after a failure.
   `--cross-check` compares the newly admitted instructions with GNU as.
 
 ## Pending
 
-Naked functions, whose basic `asm` is the whole function, and templates that
-refer to the unit's symbols by name or to labels another statement defines, are
-the second part of [#147's claim](https://github.com/buster14a/buster/issues/147#issuecomment-6427604943).
+What the lowering still refuses of what GCC and clang take:
+
+- labels in templates of no instructions (a place in the caller's code), and
+  numeric labels or `.` as data;
+- naked functions of no instructions, and naked functions' operands other than
+  integer constants (clang's `"m"(global)`, printed RIP-relative);
+- the matcher's gaps: `fstp` without a suffix (GNU as assumes `fstps`), Intel's
+  `tbyte ptr`, MMX's `movq`, and the instructions outside its families.
