@@ -2278,6 +2278,8 @@ static void ci_reconcile(bool inspect)
     free(state.saved_json);
 }
 
+static CiLease ci_guard_admitted;
+
 static bool ci_guard_once(bool output)
 {
     ci_read_only = true;
@@ -2324,6 +2326,10 @@ static bool ci_guard_once(bool output)
         }
         printf("lease=%s pr=%" PRIu64 " run=%" PRIu64 " attempt=%" PRIu64 " head=%s base=%s merge=%s\n", lease->nonce, lease->pr, lease->run, lease->attempt, lease->head, lease->base, lease->merge);
     }
+    // Transfer the same authenticated lease that was checked above. A second ledger read could
+    // otherwise observe another run's lease after cancellation/terminal-status propagation.
+    if (admitted) ci_guard_admitted = *lease;
+    else memset(&ci_guard_admitted, 0, sizeof(ci_guard_admitted));
     json_free(&event);
     free(state.saved_json);
     return admitted;
@@ -2374,10 +2380,8 @@ static int ci_host_source_guard(void)
 static int ci_guard_transfer(const char* path, bool checkout)
 {
     if (ci_guard(false) != 0) return 1;
-    CiState state = ci_load_state();
-    if (checkout) ci_git_materialize(&state.lease, path);
-    else ci_git_pack(&state.lease, path);
-    free(state.saved_json);
+    if (checkout) ci_git_materialize(&ci_guard_admitted, path);
+    else ci_git_pack(&ci_guard_admitted, path);
     return 0;
 }
 
