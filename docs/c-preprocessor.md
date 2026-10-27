@@ -530,11 +530,26 @@ copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
 and replaces the old definition either way.
 
+Parameter validation builds a temporary name-to-ordinal index (#615). Up to
+16 distinct names use one masked AVX-512 comparison, with an exact scalar
+twin; larger lists use a geometrically grown, half-full hash table in scratch
+memory. Duplicate checks stay in source order, and the same index validates
+every `#parameter` in the replacement list. The count stays 32-bit until the
+4,096-parameter limit has been checked, including malformed longer lists.
+Allocation failure is fatal and releases the temporary index.
+
 A function-like macro is compiled at its first expansion (`pp_compile_macro`)
 into body items: tokens, parameters (by index), `#` with its parameter, `##`,
 and `__VA_OPT__` with its content. Each parameter gets a bit saying whether it
 is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
+
+That first expansion rebuilds the temporary index while storing the parameter
+ids, then resolves replacement identifiers and stringizing operands through
+it. The implicit `__VA_ARGS__` keeps an earlier explicit parameter's ordinal;
+GNU named variadics use their own name. The index is released after each
+definition or first expansion. Unused definitions retain no extra table, and
+later invocations consume the already compiled parameter ordinals.
 
 The producer `pp_compile_macro` also records literal runs for the consumer
 `pp_substitute`. A `PP_ITEM_TOKEN` uses its otherwise unused 16-bit
