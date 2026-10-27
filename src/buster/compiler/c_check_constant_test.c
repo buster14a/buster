@@ -73,14 +73,14 @@ static __attribute__((noinline)) void check_test_constant_parameter_sources(Chec
             uint64_t length = 0;
             if (source != 0)
             {
-                length = (uint64_t)snprintf(source, capacity, "unsigned long f(void){return sizeof(int (*)(");
+                length = (uint64_t)snprintf(source, capacity, "enum { A=sizeof(int (*)(");
                 for (uint32_t i = 0; i < count; i += 1)
                 {
                     const uint32_t name = form == 2 && i == 1 ? 0 : form == 3 && i + 1 == count ? 0 : i;
                     length += form == 1 ? (uint64_t)snprintf(source + length, capacity - length, "%sint", i == 0 ? "" : ",") :
                                           (uint64_t)snprintf(source + length, capacity - length, "%sint p%u", i == 0 ? "" : ",", name);
                 }
-                length += (uint64_t)snprintf(source + length, capacity - length, "%s));}\n", count == 0 ? "void" : "");
+                length += (uint64_t)snprintf(source + length, capacity - length, "%s)) }; _Static_assert(A==8,\"prototype pointer\");\n", count == 0 ? "void" : "");
             }
             char path[160];
             snprintf(path, sizeof(path), "%s/%u-%u.c", directory, count, form);
