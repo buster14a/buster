@@ -27,11 +27,13 @@
 // A compiler's run (OracleRun.dependencies) is traced (--- Tracing ---): its entry holds every path its processes
 // looked at, those they found and those they didn't, and the names of each directory they listed, each as the run found
 // it when it first looked (oracle_probe_look, before the run could change it): a file by SHA-256 of its bytes if it is
-// in one of the run's roots and of its identity otherwise, a path that isn't there as one, a directory as one. An entry
-// is taken only if each of them is as it was, so that a header created where an #include, __has_include or #embed
-// looked for one, in any directory, makes the run run again. The files a run writes are its outputs, whatever was there
-// before, and a file it changes after it read it isn't kept. The package manager's files and the kernel's are left out (oracle_system_path): the package
-// database's identity stands for them. A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH
+// in one of the run's roots and of its identity otherwise, a path that isn't there as one, a directory as one, each
+// with its permissions. An entry is taken only if each of them is as it was, so that a header created where an
+// #include, __has_include or #embed looked for one, in any directory, makes the run run again. The files a run writes
+// are its outputs, whatever was there before, and a file it changes after it read it isn't kept. The package manager's
+// files and the kernel's are left out (oracle_path_rule): the package database's identity stands for the first, and a
+// run that follows a process's links into the file system (/proc/self/cwd, /dev/fd/3) isn't kept; /dev's other paths
+// are kept, /dev/shm's files among them. A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH
 // (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and clang's __TIMESTAMP__; the entries of a
 // tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files' modification times. A test that compares with
 // compilers fixes the epoch (oracle_epoch_begin).
@@ -700,7 +702,7 @@ static void oracle_epoch_end(bool set)
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
     oracle_sha256_begin(hash);
-    oracle_hash_text(hash, "buster oracle 3");
+    oracle_hash_text(hash, "buster oracle 4");
     oracle_hash_text(hash, purpose);
     oracle_hash_bytes(hash, cache->host, BUSTER_ORACLE_KEY_BYTES);
 }
@@ -1155,11 +1157,13 @@ static bool oracle_run_rooted(const OracleRun* run, const char* path)
 }
 
 // A probe as the run finds it now, into `look`. A path ('p'): what lstat gives (none and its errno, a symbolic link and
-// its target, a directory, a file, another kind) and, through a link, what stat gives. A file is its identity, or rooted
-// if it is in one of the run's roots (through a link, if its target is), which tests write anew for each run, so that
-// its bytes stand for it instead (oracle_probe_digest); the system's headers, the repository's sources and the frozen
-// corpora keep their identities from one run to the next until they change. A directory is only one, as other runs may
-// add their files to it. A directory's names ('l'): oracle_listing's. False if a link can't be read.
+// its target, a directory, a file, another kind) and, through a link, what stat gives, with the permissions of what it
+// leads to (its mode's bits, its owner and group). A file is its identity, or rooted if it is in one of the run's roots
+// (through a link, if its target is), which tests write anew for each run, so that its bytes stand for it instead
+// (oracle_probe_digest); the system's headers, the repository's sources and the frozen corpora keep their identities
+// from one run to the next until they change. A directory is only one, with its permissions, as other runs may add
+// their files to it; another kind (a device node, a FIFO) is its kind and device number. A directory's names ('l'):
+// oracle_listing's. False if a link can't be read.
 static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLook* look)
 {
     const char kind = probe[0];
@@ -1193,6 +1197,14 @@ static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLoo
         oracle_hash_bytes(&hash, &type, 1);
         char resolved[BUSTER_ORACLE_PATH_BYTES];
         look->rooted = type == 'f' && oracle_run_rooted(run, path) && (!linked || (realpath(path, resolved) != 0 && oracle_run_rooted(run, resolved)));
+        // What access, execve and a directory's search read of whatever the path leads to: its mode's permission bits
+        // and its owner and group, which a rooted file's bytes and a directory's kind don't show.
+        const uint64_t permissions[3] = {
+            (uint64_t)(status.st_mode & 07777),
+            (uint64_t)status.st_uid,
+            (uint64_t)status.st_gid,
+        };
+        oracle_hash_bytes(&hash, permissions, type != '-' ? sizeof(permissions) : 0);
         if (type == 'f')
         {
             const int64_t identity[7] = {
@@ -1504,21 +1516,113 @@ static int oracle_trace_descriptor(pid_t pid, int descriptor, char* path, size_t
     return result;
 }
 
-// Whether the cache leaves `path` out of what a run looked at: the package manager's files (under /usr but /usr/local,
-// and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which merged-usr systems link into /usr), which the package
-// database's identity in every key stands for, and the kernel's (/proc, /sys, /dev). A path with ".." in it isn't
-// left out, as it may lead out of them.
-static bool oracle_system_path(const char* path)
+// What the cache makes of a path a run looked at (oracle_path_rule).
+typedef enum OraclePath
 {
-    static const char* const systems[] = { "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/sys", "/dev" };
-    bool system = false;
-    for (uint32_t s = 0; s < sizeof(systems) / sizeof(systems[0]); s += 1)
+    // Among what the run looked at.
+    ORACLE_PATH_KEPT,
+    // Left out of it.
+    ORACLE_PATH_LEFT_OUT,
+    // A path the cache can't look at as the run's process sees it: the run isn't kept.
+    ORACLE_PATH_REFUSED,
+} OraclePath;
+
+// Whether `path` is `directory` or is in it, with what follows the directory ("" or "/...") into `rest`.
+static bool oracle_path_under(const char* path, const char* directory, const char** rest)
+{
+    const size_t length = strlen(directory);
+    const bool under = strncmp(path, directory, length) == 0 && (path[length] == 0 || path[length] == '/');
+    *rest = under ? path + length : "";
+    return under;
+}
+
+// What follows a process's directory in `rest`, which follows /proc: "/PID", "/self" or "/thread-self", then a task's
+// "/task/TID" if it has one. Null if `rest` names no process.
+static const char* oracle_process_part(const char* rest)
+{
+    const char* name = rest[0] == '/' ? rest + 1 : "";
+    const size_t digits = strspn(name, "0123456789");
+    const size_t length = digits != 0 ? digits : strncmp(name, "thread-self", 11) == 0 ? 11 : strncmp(name, "self", 4) == 0 ? 4 : 0;
+    const char* result = length != 0 && (name[length] == 0 || name[length] == '/') ? name + length : 0;
+    const size_t task = result != 0 && strncmp(result, "/task/", 6) == 0 ? strspn(result + 6, "0123456789") : 0;
+    result = task != 0 && (result[6 + task] == 0 || result[6 + task] == '/') ? result + 6 + task : result;
+    return result;
+}
+
+// What the cache makes of `link` (a process's own path after its directory, as "/fd/3" or "/cwd/x.h"), which the run's
+// call follows to its end if `followed`. A process's links into the file system (cwd, root, exe, fd/N and
+// map_files/RANGE) lead to what that process sees, which the cache, another process, can't look at: a path past one of
+// them, or one that follows cwd, root, a mapping or a descriptor but the standard three (the key's input and the run's
+// captures), is refused. A link itself, which readlink reads, names what its process opened (as LLVM reads its files'
+// real paths), and following exe reaches the tool or what the run executed, which it traced: both are left out, as is
+// everything else the kernel has of a process.
+static OraclePath oracle_process_link(const char* link, bool followed)
+{
+    const char* name = link[0] == '/' ? link + 1 : "";
+    const size_t length = strcspn(name, "/");
+    const char* after = name + length;
+    const bool directory = (length == 3 && strncmp(name, "cwd", 3) == 0) || (length == 4 && strncmp(name, "root", 4) == 0);
+    const bool executable = length == 3 && strncmp(name, "exe", 3) == 0;
+    const bool descriptors = length == 2 && strncmp(name, "fd", 2) == 0;
+    const bool mappings = length == 9 && strncmp(name, "map_files", 9) == 0;
+    // A descriptor's or a mapping's own link: "/N" after its directory, and nothing after that.
+    const char* entry = after[0] == '/' ? after + 1 : "";
+    const bool single = entry[0] != 0 && strchr(entry, '/') == 0;
+    const bool standard = descriptors && single && (strcmp(entry, "0") == 0 || strcmp(entry, "1") == 0 || strcmp(entry, "2") == 0);
+    const bool past = (directory || executable) ? after[0] != 0 : (descriptors || mappings) && after[0] != 0 && !single;
+    const bool refused = past || (followed && ((directory && after[0] == 0) || (descriptors && single && !standard) || (mappings && single)));
+    return refused ? ORACLE_PATH_REFUSED : ORACLE_PATH_LEFT_OUT;
+}
+
+// What the cache makes of `path`, which the run looked at with a call that follows a symbolic link at its end if
+// `followed` (all but lstat, readlink, readlinkat, and newfstatat and statx with AT_SYMLINK_NOFOLLOW):
+//   - a path in one of the run's roots is kept, wherever $TMPDIR is (/dev/shm, say);
+//   - the package manager's files (under /usr but /usr/local, and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which
+//     merged-usr systems link into /usr) are left out: the package database's identity in every key stands for them;
+//   - the kernel's (/proc and /sys), which describe the processes and the machine, are left out, but for a process's
+//     links into the file system (oracle_process_link), which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to;
+//   - any other path is kept, the rest of /dev's among them: a device node by its kind and number, and /dev/shm's
+//     files, an ordinary tmpfs's, as any other directory's.
+// A path with ".." in it may lead out of where it starts, and isn't left out: it is kept, or refused where a process's
+// own paths may lead elsewhere (/proc, /sys and /dev/fd).
+static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool followed)
+{
+    static const char* const packaged[] = { "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32" };
+    static const char* const streams[] = { "/dev/stdin", "/dev/stdout", "/dev/stderr" };
+    static const char* const descriptors[] = { "/fd/0", "/fd/1", "/fd/2" };
+    const char* rest = "";
+    const bool parent = strstr(path, "/..") != 0;
+    const bool kernel = oracle_path_under(path, "/proc", &rest) || oracle_path_under(path, "/sys", &rest) || oracle_path_under(path, "/dev/fd", &rest);
+    bool package = false;
+    for (uint32_t p = 0; p < sizeof(packaged) / sizeof(packaged[0]); p += 1)
     {
-        const size_t length = strlen(systems[s]);
-        system |= strncmp(path, systems[s], length) == 0 && (path[length] == 0 || path[length] == '/');
+        package |= oracle_path_under(path, packaged[p], &rest);
     }
-    const bool local = strncmp(path, "/usr/local", 10) == 0 && (path[10] == 0 || path[10] == '/');
-    return system && !local && strstr(path, "/..") == 0;
+    package &= !oracle_path_under(path, "/usr/local", &rest);
+    // The process's own paths: /proc/PID's (and its task's), and /dev/fd's and the standard streams', which lead to
+    // /proc/self/fd's.
+    char link[BUSTER_ORACLE_PATH_BYTES + 8];
+    const char* process = oracle_path_under(path, "/proc", &rest) ? oracle_process_part(rest) : 0;
+    if (oracle_path_under(path, "/dev/fd", &rest))
+    {
+        snprintf(link, sizeof(link), "/fd%s", rest);
+        process = link;
+    }
+    for (uint32_t s = 0; s < sizeof(streams) / sizeof(streams[0]); s += 1)
+    {
+        if (oracle_path_under(path, streams[s], &rest))
+        {
+            snprintf(link, sizeof(link), "%s%s", descriptors[s], rest);
+            process = link;
+        }
+    }
+    const OraclePath own = process != 0 ? oracle_process_link(process, followed) : ORACLE_PATH_LEFT_OUT;
+    return oracle_run_rooted(run, path) ? ORACLE_PATH_KEPT
+           : parent && (kernel || process != 0) ? ORACLE_PATH_REFUSED
+           : parent                            ? ORACLE_PATH_KEPT
+           : kernel || process != 0            ? own
+           : package                           ? ORACLE_PATH_LEFT_OUT
+                                               : ORACLE_PATH_KEPT;
 }
 
 // The kernel's sizes of a notification and its response (SECCOMP_GET_NOTIF_SIZES), which may be larger than the
@@ -1588,16 +1692,21 @@ static void oracle_trace_answer(OracleRun* run)
                            : named[0] == '/' ? snprintf(path, sizeof(path), "%s", named)
                                              : snprintf(path, sizeof(path), "%s/%s", strcmp(base, "/") == 0 ? "" : base, named);
         named_read = named_read && length >= 0 && (size_t)length < sizeof(path);
+        // Whether the call follows a symbolic link at the path's end (oracle_path_rule); a listing's directory was
+        // opened, which does.
+        const bool followed = !(number == SYS_lstat || number == SYS_readlink || number == SYS_readlinkat ||
+                                ((number == SYS_newfstatat || number == SYS_statx) && (at & AT_SYMLINK_NOFOLLOW) != 0));
+        const OraclePath rule = named_read && length > 0 ? oracle_path_rule(run, path, followed) : ORACLE_PATH_LEFT_OUT;
         // The process may have ended, and its pid gone to another, while the path was read.
         const bool valid = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request->id) == 0;
-        if (valid && named_read && length > 0 && !oracle_system_path(path))
+        if (valid && rule == ORACLE_PATH_KEPT)
         {
             char probe[BUSTER_ORACLE_PATH_BYTES + 1];
             probe[0] = listing ? 'l' : 'p';
             memcpy(probe + 1, path, (size_t)length + 1);
             oracle_looks_add(run, probe);
         }
-        run->untraced |= valid && (!known || !named_read);
+        run->untraced |= valid && (!known || !named_read || rule == ORACLE_PATH_REFUSED);
         struct seccomp_notif_resp* response = (struct seccomp_notif_resp*)response_bytes;
         response->id = request->id;
         response->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;

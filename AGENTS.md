@@ -1799,16 +1799,28 @@ which tests write anew for each run, and otherwise by its identity (what
 `stat` gives of it, as the runtime snapshot's probes: the system's headers,
 the repository's sources and the frozen corpora keep theirs from one run to
 the next until they change); a path that isn't there, and why; a symbolic
-link and its target; a directory as one; a directory's names where the run
-listed them; and which of them is the same file (a hard link, which `#pragma
-once` takes once). So every place an `#include`, `__has_include` or `#embed`
-looked for a header and found none counts, in any directory (one that other
-runs' files go into, or a nested header's), and so does a missing `#include`,
-whose run is kept. A file the run makes was one that wasn't there; a file it
-changes after it read it isn't kept; the files it writes are its outputs. The
-package manager's files (under `/usr` but `/usr/local`, and `/bin`, `/sbin`
-and `/lib*`) and the kernel's (`/proc`, `/sys`, `/dev`) are left out, the
-package database's identity standing for them (`oracle_system_path`). A
+link and its target; a directory as one; another kind (a device node, a FIFO)
+by its kind and device number; each with the permissions of what it leads to
+(its mode's bits, owner and group, which `access` and `execve` read); a
+directory's names where the run listed them; and which of them is the same
+file (a hard link, which `#pragma once` takes once). So every place an
+`#include`, `__has_include` or `#embed` looked for a header and found none
+counts, in any directory (one that other runs' files go into, or a nested
+header's), and so does a missing `#include`, whose run is kept. A file the run
+makes was one that wasn't there; a file it changes after it read it isn't
+kept; the files it writes are its outputs. What the cache leaves out
+(`oracle_path_rule`): the package manager's files (under `/usr` but
+`/usr/local`, and `/bin`, `/sbin` and `/lib*`), the package database's
+identity standing for them, and the kernel's (`/proc`, `/sys`), which describe
+the processes and the machine. A path in one of the run's roots is kept
+wherever `$TMPDIR` is, and so is the rest of `/dev`: its device nodes, and
+`/dev/shm`'s files, an ordinary tmpfs's. A process's links into the file
+system (`/proc/PID`'s `cwd`, `root`, `exe`, `fd/N` and `map_files`, which
+`/dev/fd` and `/dev/stdin` lead to) are what that process sees, which the
+cache, another process, can't look at: read as links (`readlink`, which LLVM
+reads its files' real paths through), they are left out, and so is following
+`exe` or a standard descriptor; a run that follows another one, or a path past
+one (`/proc/self/cwd/x.h`), isn't kept (`oracle_process_link`). A
 process answers its traced runs' calls while it waits for any of them, so that
 runs under way at once all go on; a call the tracing can't follow (io_uring's,
 files opened by handle, another architecture's) makes its run unkept. On this
@@ -1923,6 +1935,15 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   after it read it, not kept; two runs at once, each waiting on a file the
   other writes, finished in the other order; clang's `__TIMESTAMP__` following
   the epoch and sh's not, whose run of `stat` has its file's time in its entry;
+- permissions (traced sh): a directory's mode, which `test -x` reads, and a
+  script's in a root made 0644 from 0755 with the same bytes, each run again
+  when they change; and as root, a file given another owner;
+- the kernel's paths: `oracle_path_rule`'s answers for 42 paths, followed to
+  their ends and not (a path in a root under `/usr` among them); a source in a
+  root in `/dev/shm` (`$TMPDIR` there), changed to give another object, and a
+  header in `/dev/shm` in no root, each compiled again; runs that follow
+  `/proc/self/cwd` and `/dev/fd/3` to a file, not kept; and one that reads
+  `/proc/self/fd/3`'s link and `/dev/stdin` and writes `/dev/null`, kept;
 - process groups: what a run leaves running when it ends, and what a run
   killed at its time limit started, killed (the markers they would write later
   aren't there); the limit on the monotonic clock, with a pidfd and without;

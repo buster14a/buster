@@ -26,6 +26,12 @@
 //   - tracing (traced sh): a file a child process read and a path a test found absent, each run again when it
 //     changes; two runs at once, finished in the other order; clang's __TIMESTAMP__ following SOURCE_DATE_EPOCH and
 //     sh's not, whose run of `stat` has its file's time in its entry;
+//   - permissions (traced sh): a directory's mode, which `test -x` reads, and a script's in a root made 0644 from
+//     0755, each run again when they change; and as root, a file's owner;
+//   - the kernel's paths: the path rule's answers for 42 paths, followed to their ends and not (a root under /usr among
+//     them); a source in a root in /dev/shm ($TMPDIR there) and a header in /dev/shm in no root, each compiled again
+//     when they change; runs that follow /proc/self/cwd and /dev/fd/3 to a file, not kept; and one that reads
+//     /proc/self/fd/3's link and /dev/stdin and writes /dev/null, kept;
 //   - process groups: what a run leaves running when it ends and when it is killed at its time limit, killed (markers
 //     they would write later aren't); the limit on the monotonic clock, with a pidfd and without one;
 //   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
@@ -777,6 +783,237 @@ static void oracle_test_tracing(OracleTest* test)
     oracle_cache_close(&cache);
 }
 
+// --- Permissions and the kernel's paths ---
+
+// What a run reads of a path besides its bytes, kind and identity, its permissions, with sh as the tool: a directory
+// whose mode changes, which `test -x` reads (whose answer root's doesn't change, so that it is this process's own
+// access(2) that the run must print), and a script in a root whose mode changes from 0755 to 0644, the same bytes,
+// which execve then refuses, each run again; and where this process may chown (as root), a file given another owner.
+static void oracle_test_permissions(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "permissions");
+    const char* directory = test->runs[0];
+    char searched[BUSTER_ORACLE_PATH_BYTES + 16];
+    char script[BUSTER_ORACLE_PATH_BYTES + 16];
+    char owned[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(searched, sizeof(searched), "%s/searched", directory);
+    snprintf(script, sizeof(script), "%s/script.sh", directory);
+    snprintf(owned, sizeof(owned), "%s/owned.txt", directory);
+    static const char search[] = "if test -x \"$1/searched\"; then echo yes; else echo no; fi";
+    bool searches = oracle_test_directory(directory, "searched");
+    for (uint32_t i = 0; searches && i < 4; i += 1)
+    {
+        // 0700 (run, taken), then 0600 (run, taken).
+        searches &= chmod(searched, i < 2 ? 0700 : 0600) == 0;
+        searches &= oracle_test_traced(&cache, search, directory, i == 1 || i == 3, access(searched, X_OK) == 0 ? "yes\n" : "no\n");
+    }
+    chmod(searched, 0700);
+    oracle_test_expect(test, searches, "permissions: a directory whose mode changes, run again");
+    static const char execute[] = "\"$1/script.sh\"; echo $?";
+    bool executes = oracle_test_write_text(directory, "script.sh", "#!/bin/sh\necho ran\n");
+    for (uint32_t i = 0; executes && i < 4; i += 1)
+    {
+        executes &= chmod(script, i < 2 ? 0755 : 0644) == 0;
+        executes &= oracle_test_traced(&cache, execute, directory, i == 1 || i == 3, i < 2 ? "ran\n0\n" : "126\n");
+    }
+    oracle_test_expect(test, executes, "permissions: a script in a root made 0644 from 0755, the same bytes, run again");
+    if (geteuid() == 0)
+    {
+        static const char read_owned[] = "cat \"$1/owned.txt\"";
+        bool owners = oracle_test_write_text(directory, "owned.txt", "owned\n");
+        owners &= oracle_test_traced(&cache, read_owned, directory, false, "owned\n") && oracle_test_traced(&cache, read_owned, directory, true, "owned\n");
+        owners &= chown(owned, 1, 1) == 0 && oracle_test_traced(&cache, read_owned, directory, false, "owned\n");
+        owners &= oracle_test_traced(&cache, read_owned, directory, true, "owned\n");
+        oracle_test_expect(test, owners, "permissions: a file given another owner, run again");
+    }
+    else
+    {
+        printf("oracle cache: permissions: an owner's change not checked (it takes root's chown)\n");
+    }
+    oracle_cache_close(&cache);
+}
+
+// A traced clang run through `cache`, in `directory`, which writes `output` there if it isn't null: whether it ran with
+// status 0 and took its entry as `taken` says, with what it wrote into `bytes` (malloc's, null without an output).
+static bool oracle_test_compile(OracleCache* cache, char* const* arguments, const char* directory, const char* output, bool taken, char** bytes, uint64_t* length)
+{
+    const char* files[1] = { output };
+    OracleRun run = {
+        .cache = cache,
+        .purpose = "oracle test: kernel",
+        .arguments = arguments,
+        .directory = directory,
+        .files = files,
+        .file_count = output != 0 ? 1 : 0,
+        .dependencies = true,
+    };
+    const bool result = oracle_run(&run) && run.status == 0 && run.taken == taken;
+    oracle_run_release(&run);
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "%s/%s", directory, output != 0 ? output : "");
+    *bytes = output != 0 ? oracle_test_read(path, length) : 0;
+    return result && (output == 0 || *bytes != 0);
+}
+
+// What oracle_path_rule makes of paths, followed to their ends and not: the package manager's and the kernel's left
+// out, /dev's kept but for a process's links, which are left out as links and refused when followed to what they lead
+// to (but the standard descriptors and exe), and refused past them; ".." kept, or refused under /proc; and a path in a
+// root kept even where it would be left out (a root under /usr).
+static void oracle_test_path_rules(OracleTest* test)
+{
+    typedef struct OracleTestPath OracleTestPath;
+    struct OracleTestPath
+    {
+        const char* path;
+        OraclePath followed;
+        OraclePath unfollowed;
+    };
+    static const OracleTestPath cases[] = {
+        { "/usr/include/stdio.h", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/usr/local/include/x.h", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/usr/../home/x.h", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/lib64/ld-linux-x86-64.so.2", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/library/x.h", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/etc/clang/clang.cfg", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/proc/cpuinfo", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/exe", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/exe/x", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/proc/self/maps", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fdinfo/3", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd/0", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd/2", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd/3", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd/10", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/fd/3/x", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/proc/self/cwd", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/cwd/main.c", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/proc/1234/root/etc/passwd", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/proc/thread-self/fd/7", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/task/42/fd/9", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/task/42/cwd/x.h", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/proc/self/map_files/1000-2000", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/proc/selfish/fd/3", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/proc/self/../1/fd/3", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/sys/devices/system/cpu/online", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/dev/null", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/dev/shm/x.h", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/dev/hugepages/x", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/dev/fd", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/dev/fd/1", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/dev/fd/3", ORACLE_PATH_REFUSED, ORACLE_PATH_LEFT_OUT },
+        { "/dev/stdin", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/dev/stderr", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+        { "/dev/stdin/x", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/dev/stdinx", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/dev/fd/../shm/x.h", ORACLE_PATH_REFUSED, ORACLE_PATH_REFUSED },
+        { "/usr/buster-root-Ab12Cd/main.c", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/usr/buster-root-Ab12Cd", ORACLE_PATH_KEPT, ORACLE_PATH_KEPT },
+        { "/usr/buster-root-Ab12Cdx/main.c", ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT },
+    };
+    // A run whose root is under /usr, where $TMPDIR could be.
+    static const char root[] = "/usr/buster-root-Ab12Cd";
+    OracleRun run = { .arguments = 0 };
+    run.roots.roots[0] = (OracleRoot){ .name = root, .length = (uint32_t)strlen(root), .random = (uint32_t)strlen(root) - 6 };
+    run.roots.count = 1;
+    bool right = true;
+    for (uint32_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c += 1)
+    {
+        const OraclePath followed = oracle_path_rule(&run, cases[c].path, true);
+        const OraclePath unfollowed = oracle_path_rule(&run, cases[c].path, false);
+        if (followed != cases[c].followed || unfollowed != cases[c].unfollowed)
+        {
+            fprintf(stderr, "oracle cache: %s: %d followed and %d not, not %d and %d\n", cases[c].path, followed, unfollowed, cases[c].followed, cases[c].unfollowed);
+            right = false;
+        }
+    }
+    oracle_test_expect(test, right, "kernel: the path rule's answers, followed and not");
+}
+
+// The kernel's paths and /dev's: a source in a root in /dev/shm, an ordinary tmpfs and a common $TMPDIR, which clang
+// compiles to an object, changed to give another, and a header in /dev/shm in no root ($TMPDIR elsewhere), changed in
+// place, each compiled again; a run that follows a process's links into the file system (cat of /proc/self/cwd/FILE
+// and of /dev/fd/3) isn't kept; and one that reads a descriptor's link (readlink of /proc/self/fd/0, as LLVM reads its
+// files' real paths), its standard input through /dev/stdin and writes /dev/null, a device node, is.
+static void oracle_test_kernel(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "kernel");
+    struct stat shm;
+    if (stat("/dev/shm", &shm) == 0 && S_ISDIR(shm.st_mode) && access("/dev/shm", W_OK | X_OK) == 0)
+    {
+        const char* saved = getenv("TMPDIR");
+        char* kept = saved != 0 ? strdup(saved) : 0;
+        setenv("TMPDIR", "/dev/shm", 1);
+        char root[] = "/dev/shm/buster-oracle-shm-XXXXXX";
+        bool compiled = mkdtemp(root) != 0;
+        char* compile[] = { "clang", "-c", "-O0", "main.c", "-o", "main.o", 0 };
+        char* objects[3] = { 0 };
+        uint64_t lengths[3] = { 0 };
+        for (uint32_t i = 0; compiled && i < 3; i += 1)
+        {
+            // Compiled, taken, and compiled again once the source gives another object.
+            compiled &= i == 1 || oracle_test_write_text(root, "main.c", i == 0 ? "int f(void) { return 1; }\n" : "int f(void) { return 2; }\n");
+            compiled &= oracle_test_compile(&cache, compile, root, "main.o", i == 1, &objects[i], &lengths[i]);
+        }
+        compiled &= lengths[0] == lengths[1] && memcmp(objects[0], objects[1], lengths[0]) == 0 && (lengths[2] != lengths[0] || memcmp(objects[0], objects[2], lengths[0]) != 0);
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            free(objects[i]);
+        }
+        oracle_test_unlink(root, "main.c");
+        oracle_test_unlink(root, "main.o");
+        rmdir(root);
+        if (kept != 0)
+        {
+            setenv("TMPDIR", kept, 1);
+        }
+        else
+        {
+            unsetenv("TMPDIR");
+        }
+        free(kept);
+        oracle_test_expect(test, compiled, "kernel: a source in a root in /dev/shm, $TMPDIR, changed, compiled again");
+        // A header in /dev/shm, in no root, by its identity.
+        char shared[] = "/dev/shm/buster-oracle-header-XXXXXX";
+        char option[sizeof(shared) + 8];
+        bool included = mkdtemp(shared) != 0 && oracle_test_write_text(shared, "shm.h", "int shm = 1;\n") &&
+                        oracle_test_write_text(test->runs[0], "shm.c", "#include \"shm.h\"\nint get(void) { return shm; }\n");
+        snprintf(option, sizeof(option), "-I%s", shared);
+        char* header[] = { "clang", "-fsyntax-only", option, "shm.c", 0 };
+        for (uint32_t i = 0; included && i < 3; i += 1)
+        {
+            char* none = 0;
+            uint64_t length = 0;
+            included &= i != 2 || oracle_test_write_text(shared, "shm.h", "int shm = 22;\n");
+            included &= oracle_test_compile(&cache, header, test->runs[0], 0, i == 1, &none, &length);
+        }
+        oracle_test_unlink(shared, "shm.h");
+        rmdir(shared);
+        oracle_test_expect(test, included, "kernel: a header in /dev/shm in no root, changed, compiled again");
+    }
+    else
+    {
+        printf("oracle cache: kernel: /dev/shm not checked (there is none to write)\n");
+    }
+    const char* directory = test->runs[0];
+    static const char through_cwd[] = "cd \"$1\" && cat /proc/self/cwd/linked.txt";
+    static const char through_descriptor[] = "cat /dev/fd/3 3< \"$1/linked.txt\"";
+    static const char named[] = "readlink /proc/self/fd/3 3< \"$1/linked.txt\" > /dev/null && cat /dev/stdin \"$1/linked.txt\"";
+    const uint64_t unkept = cache.counts->unkept;
+    bool refused = oracle_test_write_text(directory, "linked.txt", "linked\n");
+    for (uint32_t i = 0; refused && i < 2; i += 1)
+    {
+        refused &= oracle_test_traced(&cache, through_cwd, directory, false, "linked\n") && oracle_test_traced(&cache, through_descriptor, directory, false, "linked\n");
+    }
+    oracle_test_expect(test, refused && cache.counts->unkept == unkept + 4, "kernel: a run that follows a process's links into the file system, not kept");
+    const bool links = oracle_test_traced(&cache, named, directory, false, "linked\n") && oracle_test_traced(&cache, named, directory, true, "linked\n");
+    oracle_test_expect(test, links && cache.counts->unkept == unkept + 4, "kernel: a descriptor's link, /dev/stdin and /dev/null, kept");
+    oracle_cache_close(&cache);
+}
+
 // --- Process groups ---
 
 // A run's process group: what a run that ends leaves running in it is killed, and so is what a run killed at its time
@@ -1102,6 +1339,9 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
         oracle_test_tracing(&test);
+        oracle_test_permissions(&test);
+        oracle_test_path_rules(&test);
+        oracle_test_kernel(&test);
         oracle_test_groups(&test);
         oracle_test_check(&test);
         oracle_test_damaged(&test);
@@ -1115,8 +1355,9 @@ static int run_oracle_cache_tests(int argc, char** argv)
         fprintf(stderr, "usage: test-oracle-cache (with sh and clang on PATH, and $TMPDIR or /tmp writable)\n");
     }
     oracle_epoch_end(epoch);
-    static const char* const directories[] = { "runs/oracle",    "dependencies/oracle", "identities/oracle", "tracing/oracle", "groups/oracle", "check/oracle",
-                                               "damaged/oracle", "writers/oracle",      "process/one/two/buster/oracle", "" };
+    static const char* const directories[] = { "runs/oracle",   "dependencies/oracle", "identities/oracle", "tracing/oracle", "permissions/oracle",
+                                               "kernel/oracle", "groups/oracle",       "check/oracle",      "damaged/oracle", "writers/oracle",
+                                               "process/one/two/buster/oracle",        "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);
@@ -1125,6 +1366,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
     {
         oracle_test_remove(test.runs[r], "sub");
         oracle_test_remove(test.runs[r], "other");
+        oracle_test_remove(test.runs[r], "searched");
         oracle_test_remove(test.runs[r], "");
     }
     return runs && tools && test.failures == 0 ? 0 : 1;
