@@ -3026,7 +3026,8 @@ it with `--cross-check`.
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
 [--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]
-[--tls general|local|imported] [--exact] [--after-scalar MS]` (about 4 s)
+[--tls control|general|local|imported] [--exact] [--after-scalar MS]` (about
+6 s)
 reports medians of:
 
 - the patch kernel and the variants it was chosen over (a branch on the kind,
@@ -3048,12 +3049,15 @@ reports medians of:
 - the same sizes as programs that call libc, bound against the system's
   runtime and written as dynamic PIEs the same way, with their dynamic
   symbols, relocations, RELR words and stubs (`--only dynamic` runs these
-  alone); then again with a TLS probe per worker that the writer relaxes
+  alone); then again with a probe per worker: a control of the
+  general-dynamic probe's bytes, atoms and fixups without TLS (a `PC32` to a
+  data object and a direct call), then TLS accesses that the writer relaxes
   (#515): a general-dynamic access to a thread-local of the program's
   (local-exec), a local-dynamic one with its `DTPOFF32`, and a general-dynamic
   access to `libc.so.6`'s `errno` (initial-exec through its GOT slot), each
-  write from binding's bytes, put back outside the time, and every access's
-  relaxed bytes checked (`--tls general|local|imported` runs one mode alone);
+  write from binding's bytes, put back outside the time, and every probe's
+  bytes checked (`--tls control|general|local|imported` runs one mode alone),
+  so that a mode's rows less the control's are what its relaxation costs;
 - bound against its static runtime and written as static executables,
   with their stubs, IRELATIVE relocations and GOT slots (`--only static`);
 - and bound against the static PIE's runtime and written as static PIEs,

@@ -7,7 +7,7 @@
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
 //                                            [--only kernels|hash|links|dynamic|static|static-pie|shared]
-//                                            [--tls general|local|imported (with --only dynamic or shared)] [--exact]
+//                                            [--tls control|general|local|imported (with --only dynamic or shared)] [--exact]
 //                                            [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
@@ -26,9 +26,9 @@
 //     with one lane, executable_patch_range over the program's atoms, with every kind in its mix, and the unwind
 //     tables' passes (executable_benchmark_unwind). Then the same sizes as programs that call
 //     libc, bound against the system's runtime (runtime.c and bind.c) and written as dynamic PIEs, the same way (--only
-//     dynamic for these alone), and again with a general-dynamic, a local-dynamic and an imported general-dynamic TLS
-//     probe per worker, which the writer relaxes (#515: to local-exec, and to initial-exec for libc.so.6's errno; one of
-//     them alone with --tls); bound against its static runtime (runtime_import_static) and written as static
+//     dynamic for these alone), and again with a probe per worker: a control without TLS, then a general-dynamic, a
+//     local-dynamic and an imported general-dynamic TLS access, which the writer relaxes (#515: to local-exec, and to
+//     initial-exec for libc.so.6's errno; one of them alone with --tls); bound against its static runtime (runtime_import_static) and written as static
 //     executables (--only static); bound against the static PIE's runtime (runtime_import_static_pie) and written
 //     as static PIEs (--only static-pie); and generated as shared libraries (LinkProgramOptions.shared), bound against
 //     the shared library's runtime (runtime_import_shared) and written as shared libraries (--only shared). Every
@@ -743,8 +743,10 @@ static const char* const executable_benchmark_phase_names[EXECUTABLE_PHASES] = {
 // present before bind_begin, their bytes before bind_end. Each probe returns its TLS value through a real
 // __tls_get_addr call. Half of GD's definitions are preemptible; LD's are hidden module-relative definitions. The
 // imported probes (a dynamic PIE's alone) reach libc.so.6's errno instead, its symbol after the others (first + 1 + 2 *
-// count); the values are defined all the same.
-static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t count, bool local, bool imported)
+// count); the values are defined all the same. The control's probes (a dynamic PIE's alone) have the general-dynamic
+// probes' bytes, atoms and fixups without TLS: a PC32 to a data object and a call of the first probe, which no write
+// rewrites, so that the general-dynamic rows less the control's are what the relaxation costs.
+static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t count, bool local, bool imported, bool control)
 {
     Link* link = &program->link;
     const SymbolId first = link_program_symbol(link, "__tls_get_addr", 0, false, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_RUNTIME_SHARED);
@@ -752,7 +754,8 @@ static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t 
     {
         link_program_symbol(link, "buster_tls_probe_", i, true, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
         const uint8_t hidden = local || i % 2 == 0 ? BUSTER_LINK_SYMBOL_HIDDEN : 0;
-        link_program_symbol(link, "buster_tls_value_", i, true, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS | hidden, BUSTER_LINK_SOURCE_PROGRAM);
+        const uint8_t type = control ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_TLS;
+        link_program_symbol(link, "buster_tls_value_", i, true, BUSTER_LINK_SYMBOL_GLOBAL | type | hidden, BUSTER_LINK_SOURCE_PROGRAM);
     }
     if (first != 0 && imported)
     {
@@ -761,7 +764,7 @@ static SymbolId executable_benchmark_tls_symbols(LinkProgram* program, uint32_t 
     return link->error == LINK_ERROR_NONE ? first : 0;
 }
 
-static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first, uint32_t count, bool local, bool imported)
+static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first, uint32_t count, bool local, bool imported, bool control)
 {
     // sub rsp,8; TLSGD lea and prefixed PLT call, or TLSLD lea/call and DTPOFF32 lea; load; add rsp,8; ret.
     static const uint8_t gd[] = {
@@ -851,12 +854,12 @@ static bool executable_benchmark_tls_atoms(LinkProgram* program, SymbolId first,
             }
             const AtomId text = link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, size, code, i % program->options.units);
             result = text != 0 && link_define_symbol(link, function, text, 0, size) &&
-                     link_add_fixup(link, text, local ? 7 : 8, local ? BUSTER_LINK_FIXUP_TLSLD : BUSTER_LINK_FIXUP_TLSGD, target, -4) != 0 &&
-                     link_add_fixup(link, text, local ? 12 : 16, BUSTER_LINK_FIXUP_CALL, first, -4) != 0;
+                     link_add_fixup(link, text, local ? 7 : 8, control ? BUSTER_LINK_FIXUP_PC32 : local ? BUSTER_LINK_FIXUP_TLSLD : BUSTER_LINK_FIXUP_TLSGD, target, -4) != 0 &&
+                     link_add_fixup(link, text, local ? 12 : 16, BUSTER_LINK_FIXUP_CALL, control ? first + 1 : first, -4) != 0;
             result = result && (!local || link_add_fixup(link, text, 19, BUSTER_LINK_FIXUP_DTPOFF32, target, 0) != 0);
             if (result && value != 0)
             {
-                data_atoms[i] = link_add_atom(link, BUSTER_LINK_CLASS_TDATA, 3, 8, (uint8_t*)value, i % program->options.units);
+                data_atoms[i] = link_add_atom(link, control ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_TDATA, 3, 8, (uint8_t*)value, i % program->options.units);
             }
             const AtomId data = data_atoms[i % BUSTER_ARRAY_LENGTH(data_atoms)];
             result = result && data != 0 && link_define_symbol(link, value_symbol, data, 0, 8);
@@ -886,9 +889,12 @@ static bool executable_benchmark_tls_runs(const char* path, uint32_t count)
 
 // A dynamic PIE's probes as the last write relaxed them in the link's bytes (#515): each general-dynamic one to
 // local-exec, its offset from the thread pointer below 0, each imported one to initial-exec, every one reaching the
-// same GOT slot (errno's), and each local-dynamic one to its mov %fs:0, its DTPOFF32 below 0.
-static bool executable_benchmark_tls_relaxed(const Link* link, SymbolId first, uint32_t count, bool local, bool imported)
+// same GOT slot (errno's), and each local-dynamic one to its mov %fs:0, its DTPOFF32 below 0; and each control probe
+// as it was, its lea's and call's opcodes in place.
+static bool executable_benchmark_tls_relaxed(const Link* link, SymbolId first, uint32_t count, bool local, bool imported, bool control)
 {
+    static const uint8_t lea[4] = { 0x66, 0x48, 0x8d, 0x3d };
+    static const uint8_t call[4] = { 0x66, 0x66, 0x48, 0xe8 };
     static const uint8_t gd_le[12] = { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x80 };
     static const uint8_t gd_ie[12] = { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x03, 0x05 };
     static const uint8_t ld_le[12] = { 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 };
@@ -903,7 +909,8 @@ static bool executable_benchmark_tls_relaxed(const Link* link, SymbolId first, u
         memcpy(&field, code + (local ? 19 : 16), sizeof(field));
         // An initial-exec field's slot: from the end of the add, at byte 20.
         const uint64_t reached = link->atoms.address[atom] + 20 + (uint64_t)(int64_t)field;
-        result = memcmp(code + 4, expected, sizeof(gd_le)) == 0 && (imported ? (i == 0 || reached == slot) : field < 0);
+        const bool kept = memcmp(code + 4, lea, sizeof(lea)) == 0 && memcmp(code + 12, call, sizeof(call)) == 0;
+        result = control ? kept : memcmp(code + 4, expected, sizeof(gd_le)) == 0 && (imported ? (i == 0 || reached == slot) : field < 0);
         slot = i == 0 ? reached : slot;
     }
     return result;
@@ -943,8 +950,10 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     ExecutableRuntime static_inputs = { 0 };
     const bool local = tls != 0 && strcmp(tls, "local") == 0;
     const bool imported = tls != 0 && strcmp(tls, "imported") == 0;
+    const bool control = tls != 0 && strcmp(tls, "control") == 0;
     // A dynamic PIE relaxes the probes' accesses: binding's bytes from the probes' (tls_bytes into program.bytes) on,
-    // kept in `saved` and put back before each write.
+    // kept in `saved` and put back before each write (the control's too, which no write changes, so that its runs pay
+    // the same copy outside the time).
     const bool relaxes = tls != 0 && runtime != 0 && runtime->kind == RUNTIME_KIND_DYNAMIC;
     SymbolId tls_first = 0;
     uint64_t tls_bytes = 0;
@@ -967,12 +976,12 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
         }
         bind_arena = arena_reserve(BUSTER_EXECUTABLE_BENCHMARK_BIND_BYTES);
         result = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && bind_arena.base != 0;
-        tls_first = result && tls != 0 ? executable_benchmark_tls_symbols(&program, functions, local, imported) : 0;
+        tls_first = result && tls != 0 ? executable_benchmark_tls_symbols(&program, functions, local, imported, control) : 0;
         result = result && (tls == 0 || tls_first != 0);
         result = result && bind_begin(&bind, &program.link, runtime, BIND_PATH_VECTOR, &program.bytes, options.units, &bind_arena);
         result = result && link_program_generate_atoms(&program);
         tls_bytes = program.bytes.length;
-        result = result && (tls == 0 || executable_benchmark_tls_atoms(&program, tls_first, functions, local, imported));
+        result = result && (tls == 0 || executable_benchmark_tls_atoms(&program, tls_first, functions, local, imported, control));
         result = result && bind_end(&bind, &program.link);
         result = result && link_program_generate_end(&program);
         result = result && link_check(&program.link) == LINK_ERROR_NONE &&
@@ -1052,7 +1061,11 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
         printf("%u workers%s, bound and written as a dynamic PIE: %u atoms, %u fixups, %llu bytes of code, %llu dynamic symbols, %llu relocations in .rela.dyn (%llu "
                "relative) and %llu in %llu words of .relr.dyn, %llu stubs, a %llu-byte file in %llu chunks, %u lane%s:\n",
                functions,
-               imported ? " with an imported general-dynamic TLS probe each" : local ? " with a local-dynamic TLS probe each" : tls != 0 ? " with a general-dynamic TLS probe each" : "",
+               control ? " with a control probe each (the general-dynamic one's bytes without TLS)"
+               : imported ? " with an imported general-dynamic TLS probe each"
+               : local    ? " with a local-dynamic TLS probe each"
+               : tls != 0 ? " with a general-dynamic TLS probe each"
+                          : "",
                program.link.atoms.count - 1, program.link.fixups.count - 1, (unsigned long long)program.code_bytes, (unsigned long long)write.result.dynamic_symbols,
                (unsigned long long)write.result.relocations, (unsigned long long)write.result.relative_relocations, (unsigned long long)write.result.relr_relocations,
                (unsigned long long)write.result.relr_words, (unsigned long long)write.result.stubs, (unsigned long long)size, (unsigned long long)write.result.chunks, lanes,
@@ -1087,9 +1100,10 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     }
     if (result && relaxes)
     {
-        result = executable_benchmark_tls_relaxed(&program.link, tls_first, functions, local, imported);
-        printf("  %s TLS: %u accesses relaxed to %s, %s path, %s\n", tls, functions, imported ? "initial-exec through errno's GOT slot" : "local-exec",
-               exact ? "exact" : "vector", result ? "every access's bytes checked" : "failed");
+        result = executable_benchmark_tls_relaxed(&program.link, tls_first, functions, local, imported, control);
+        printf("  %s: %u %s, %s path, %s\n", tls, functions,
+               control ? "probes without TLS, none rewritten" : imported ? "accesses relaxed to initial-exec through errno's GOT slot" : "accesses relaxed to local-exec",
+               exact ? "exact" : "vector", result ? "every probe's bytes checked" : "failed");
     }
     else if (result && tls != 0)
     {
@@ -1209,7 +1223,7 @@ int run_executable_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--tls") == 0 && i + 1 < argc)
         {
             tls = argv[i + 1];
-            valid = valid && (strcmp(tls, "general") == 0 || strcmp(tls, "local") == 0 || strcmp(tls, "imported") == 0);
+            valid = valid && (strcmp(tls, "general") == 0 || strcmp(tls, "local") == 0 || strcmp(tls, "imported") == 0 || strcmp(tls, "control") == 0);
             i += 1;
         }
         else if (strcmp(argv[i], "--exact") == 0)
@@ -1227,8 +1241,9 @@ int run_executable_benchmark(int argc, char** argv)
         }
     }
     // An imported probe reaches libc.so.6's errno, which only a dynamic PIE's probes relax (a shared library's would read
-    // another value than the probe checks).
-    valid = valid && (tls == 0 || (only != 0 && (strcmp(only, "dynamic") == 0 || (strcmp(only, "shared") == 0 && strcmp(tls, "imported") != 0))));
+    // another value than the probe checks), and the control is the dynamic PIEs' rows' alone.
+    const bool shared_tls = tls != 0 && (strcmp(tls, "general") == 0 || strcmp(tls, "local") == 0);
+    valid = valid && (tls == 0 || (only != 0 && (strcmp(only, "dynamic") == 0 || (strcmp(only, "shared") == 0 && shared_tls))));
     const bool writes = only == 0 || (strcmp(only, "kernels") != 0 && strcmp(only, "hash") != 0);
     LaneTeam team = { 0 };
     const bool started = valid && writes && lane_team_start(&team, (uint32_t)lanes, 0);
@@ -1236,8 +1251,8 @@ int run_executable_benchmark(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
-                        "kernels|hash|links|dynamic|static|static-pie|shared] [--tls general|local|imported (with --only dynamic, or general|local with --only "
-                        "shared)] [--exact] [--after-scalar MS]\n");
+                        "kernels|hash|links|dynamic|static|static-pie|shared] [--tls control|general|local|imported (with --only dynamic, or general|local "
+                        "with --only shared)] [--exact] [--after-scalar MS]\n");
     }
     else if (writes && !started)
     {
@@ -1281,7 +1296,7 @@ int run_executable_benchmark(int argc, char** argv)
             passed = false;
         }
         // Then with a TLS probe per worker, which the writer relaxes (#515): each mode, or --tls's alone.
-        static const char* const tls_modes[] = { 0, "general", "local", "imported" };
+        static const char* const tls_modes[] = { 0, "control", "general", "local", "imported" };
         for (uint32_t mode = 0; dynamic && imported == RUNTIME_ERROR_NONE && mode < BUSTER_ARRAY_LENGTH(tls_modes); mode += 1)
         {
             const bool runs = tls == 0 || (tls_modes[mode] != 0 && strcmp(tls_modes[mode], tls) == 0);
