@@ -7,15 +7,19 @@
 //
 // LIST (standard input without one) is a list of commands. Each starts at a heading, a line `== TITLE`, and its script
 // is the lines after it, up to the next heading; before the first heading there may be blank lines and comments (`#`).
-// The runner starts the commands in the list's order, at most --jobs at once (by default as many as the cores of the
-// CPUs this process may run on), each script in a bash of its own as GitHub Actions runs a step's `run` with `shell:
-// bash` (`bash --noprofile --norc -e -o pipefail`), in a process group of its own, with standard input from /dev/null
-// and standard output and error into one capture (a memfd) of its own, no other descriptor, and BUSTER_PARALLEL_JOBS set
-// to --jobs, which a test that starts processes of its own divides its CPUs by (test_process_cpus). Its report gives each
-// command's heading with its outcome and time, then its output, in the list's order, each as soon as it and every
-// command before it have ended; with --github between `::group::` and `::endgroup::`, so that GitHub's log folds each
-// one under its heading, and with an `::error::` annotation for each that failed. Last comes a summary line, and a line
-// naming each command that failed. The exit status is 0 when every command exited with status 0, and 1 otherwise.
+// A title that ends with `[N CPUs]` (N from 2) says that its command keeps N CPUs busy, with lanes or processes of its
+// own; any other runs on 1. The runner starts the commands in the list's order, each once the commands running leave it
+// room: their CPUs come to at most --jobs (by default as many as the cores of the CPUs this process may run on), and a
+// command of more runs alone, on all of them. A command that doesn't fit yet holds back the ones after it. Each script
+// runs in a bash of its own as GitHub Actions runs a step's `run` with `shell: bash` (`bash --noprofile --norc -e -o
+// pipefail`), in a process group of its own, with standard input from /dev/null and standard output and error into one
+// capture (a memfd) of its own, no other descriptor, and BUSTER_PARALLEL_CPUS set to its CPUs, which a test that starts
+// processes of its own runs at most that many of at once (test_process_cpus). Its report gives each command's heading
+// with its outcome, its time and its CPU time (which shows the CPUs it kept busy), then its output, in the list's order,
+// each as soon as it and every command before it have ended; with --github between `::group::` and `::endgroup::`, so
+// that GitHub's log folds each one under its heading, and with an `::error::` annotation for each that failed. Last
+// comes a summary line, and a line naming each command that failed. The exit status is 0 when every command exited with
+// status 0, and 1 otherwise.
 //
 // The report never holds up the run. A command's output is read into memory when it ends and its capture closed, so
 // that only running commands hold one, however many have ended before the report reaches them; and the report goes out
@@ -32,13 +36,15 @@
 // stops the run, and its commands are killed.
 //
 // The commands aren't pinned: tests that run lanes need the CPUs the job may use (test-lanes' syncs on 3 lanes don't
-// end within its watchdog's 60 s on one CPU). The runner is test tooling outside the compile path and has no vector
-// path: a list is a few dozen commands, and the time goes into them.
+// end within its watchdog's 60 s on one CPU), so a command's CPUs are what it says it keeps busy, not a mask. The
+// runner is test tooling outside the compile path and has no vector path: a list is a few dozen commands, and the time
+// goes into them.
 //
 // main.c includes this file after lane.c, for its arenas, and parallel_test.c after it. Layout, in this order: the list
-// (ParallelList, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary, parallel_start, the
-// report's parts: parallel_render, parallel_render_summary and parallel_part, ParallelOutput and parallel_output_write,
-// parallel_reap, parallel_stop, parallel_run), and the command (parallel_core_count, run_parallel_command).
+// (ParallelList, parallel_title_cpus, parallel_list_parse), the run (ParallelOptions, ParallelResult, ParallelSummary,
+// ParallelEnvironment, parallel_start, the report's parts: parallel_render, parallel_render_summary and parallel_part,
+// ParallelOutput and parallel_output_write, parallel_reap, parallel_stop, parallel_run), and the command
+// (parallel_core_count, run_parallel_command).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -54,6 +60,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -81,12 +88,14 @@ extern char** environ;
 typedef struct ParallelCommand ParallelCommand;
 struct ParallelCommand
 {
-    // The heading's title, in the list's text.
+    // The heading's title, in the list's text, with its `[N CPUs]` if it has one.
     String8 title;
     // The script's lines, copied with a NUL after them for bash's -c.
     char* script;
     // The heading's line in the list, from 1.
     uint64_t line;
+    // The CPUs it keeps busy: its title's N, or 1.
+    uint64_t cpus;
 };
 
 typedef struct ParallelList ParallelList;
@@ -145,6 +154,37 @@ static String8 parallel_title(String8 line)
         end -= 1;
     }
     return (String8){ .pointer = line.pointer + start, .length = end - start };
+}
+
+// The CPUs a title declares, into *cpus: N for a title that ends with `[N CPUs]`, N from 2 to the largest --jobs, or 1
+// for a title that doesn't end with "CPUs]". False for any other title that ends so, whose *cpus is 1.
+static bool parallel_title_cpus(String8 title, uint64_t* cpus)
+{
+    static const char word[] = "CPUs]";
+    const uint64_t word_length = sizeof(word) - 1;
+    bool valid = true;
+    uint64_t count = 1;
+    if (title.length >= word_length && memcmp(title.pointer + title.length - word_length, word, word_length) == 0)
+    {
+        // The count's digits, between the '[' and the blank before "CPUs]".
+        const uint64_t end = title.length > word_length && title.pointer[title.length - word_length - 1] == ' ' ? title.length - word_length - 1 : 0;
+        uint64_t start = end;
+        while (start > 0 && title.pointer[start - 1] >= '0' && title.pointer[start - 1] <= '9')
+        {
+            start -= 1;
+        }
+        valid = start != end && start != 0 && title.pointer[start - 1] == '[';
+        count = 0;
+        for (uint64_t i = start; valid && i < end; i += 1)
+        {
+            const uint64_t digit = (uint64_t)(title.pointer[i] - '0');
+            valid = count <= (UINT32_MAX - digit) / 10;
+            count = count * 10 + digit;
+        }
+        valid = valid && count >= 2;
+    }
+    *cpus = valid ? count : 1;
+    return valid;
 }
 
 // The script of the command whose heading ends at `start`: the list's text from there to `end`, copied with a NUL after
@@ -214,6 +254,8 @@ static ParallelList parallel_list_parse(Arena* arena, String8 text)
                 parallel_list_script(arena, &result, text, script_start, line_start, has_content);
             }
             const String8 title = parallel_title(line);
+            uint64_t cpus = 1;
+            const bool counted = parallel_title_cpus(title, &cpus);
             bool repeated = false;
             for (uint64_t i = 0; i < result.count; i += 1)
             {
@@ -229,9 +271,14 @@ static ParallelList parallel_list_parse(Arena* arena, String8 text)
                 result.error = "a title that an earlier command has";
                 result.error_line = line_number;
             }
+            else if (result.error == 0 && !counted)
+            {
+                result.error = "a title whose CPUs aren't [N CPUs] with N from 2";
+                result.error_line = line_number;
+            }
             else if (result.error == 0)
             {
-                result.commands[result.count] = (ParallelCommand){ .title = title, .line = line_number };
+                result.commands[result.count] = (ParallelCommand){ .title = title, .line = line_number, .cpus = cpus };
                 result.count += 1;
                 script_start = position;
                 has_content = false;
@@ -265,7 +312,7 @@ static ParallelList parallel_list_parse(Arena* arena, String8 text)
 typedef struct ParallelOptions ParallelOptions;
 struct ParallelOptions
 {
-    // At most this many commands run at once: at least 1.
+    // The CPUs the commands running at once may keep busy: at least 1.
     uint64_t jobs;
     // A command still running this many nanoseconds after it started is killed, or never when 0.
     uint64_t timeout;
@@ -293,10 +340,16 @@ struct ParallelResult
     uint64_t end;
     // Its shell, the leader of its process group.
     pid_t pid;
+    // The CPUs it holds while it runs, and its BUSTER_PARALLEL_CPUS: its command's, or all of --jobs when those are
+    // fewer.
+    uint64_t cpus;
     // The capture of its output and errors while it runs, or -1.
     int capture;
     // waitpid's status, once it has ended.
     int status;
+    // The CPU time of its shell and of the processes under it that were waited for, in nanoseconds: wait4's user and
+    // system times, once it has ended.
+    uint64_t cpu;
     // Why it couldn't start (an errno), or 0.
     int start_error;
     ParallelState state;
@@ -318,8 +371,9 @@ struct ParallelSummary
     uint64_t not_started;
     // The most commands that ran at once.
     uint64_t peak;
-    // The run's time, in nanoseconds.
+    // The run's time, and its commands' CPU time, in nanoseconds.
     uint64_t elapsed;
+    uint64_t cpu;
     // The signal that stopped the run, or 0.
     int signal;
     // A write of the report failed (EPIPE, when nothing reads it), or a signal dropped the rest of it, or the arena
@@ -406,27 +460,69 @@ static void parallel_outcome(const ParallelResult* result, const ParallelOptions
     {
         snprintf(text, size, "%s", reason);
     }
-    else
+    else if (result->start_error != 0)
     {
         snprintf(text, size, "%s in %.1f s", reason, parallel_seconds(result->end - result->start));
     }
+    else
+    {
+        snprintf(text, size, "%s in %.1f s, %.1f s of CPU", reason, parallel_seconds(result->end - result->start), parallel_seconds(result->cpu));
+    }
 }
 
-// Starts a command at `now`: its capture, then its shell in a process group of its own, with the signal mask the
-// runner's caller had. A command that can't start has ended, and start_error says why.
-static void parallel_start(const ParallelCommand* command, const ParallelOptions* options, const sigset_t* mask, ParallelResult* result, uint64_t now)
+// The commands' environment: this process's but for BUSTER_PARALLEL_CPUS, which each command gets of its own, its CPUs,
+// in the slot after the others (`cpus`, which parallel_start writes). Null variables when the arena can't hold them,
+// and then no command starts.
+typedef struct ParallelEnvironment ParallelEnvironment;
+struct ParallelEnvironment
+{
+    char** variables;
+    uint64_t slot;
+    char cpus[48];
+};
+
+static void parallel_environment(Arena* arena, ParallelEnvironment* environment)
+{
+    static const char name[] = "BUSTER_PARALLEL_CPUS=";
+    uint64_t count = 0;
+    while (environ != 0 && environ[count] != 0)
+    {
+        count += 1;
+    }
+    environment->variables = BUSTER_ARENA_PUSH_ARRAY(arena, char*, count + 2);
+    environment->slot = 0;
+    for (uint64_t i = 0; environment->variables != 0 && i < count; i += 1)
+    {
+        if (strncmp(environ[i], name, sizeof(name) - 1) != 0)
+        {
+            environment->variables[environment->slot] = environ[i];
+            environment->slot += 1;
+        }
+    }
+    if (environment->variables != 0)
+    {
+        environment->variables[environment->slot] = environment->cpus;
+        environment->variables[environment->slot + 1] = 0;
+    }
+}
+
+// Starts a command at `now`, holding result->cpus: its capture, then its shell in a process group of its own, with the
+// signal mask the runner's caller had and BUSTER_PARALLEL_CPUS set to its CPUs. A command that can't start has ended,
+// and start_error says why.
+static void parallel_start(const ParallelCommand* command, const ParallelOptions* options, const sigset_t* mask, ParallelEnvironment* environment, ParallelResult* result,
+                           uint64_t now)
 {
     result->start = now;
     result->end = now;
     // A capture below 3 would be one of the descriptors the child's shell gets, and its dup2 would keep FD_CLOEXEC.
-    int capture = (int)syscall(SYS_memfd_create, "parallel", MFD_CLOEXEC);
+    int capture = environment->variables != 0 ? (int)syscall(SYS_memfd_create, "parallel", MFD_CLOEXEC) : -1;
     if (capture >= 0 && capture < 3)
     {
         const int low = capture;
         capture = fcntl(low, F_DUPFD_CLOEXEC, 3);
         close(low);
     }
-    int error = capture < 0 ? errno : 0;
+    int error = environment->variables == 0 ? ENOMEM : capture < 0 ? errno : 0;
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
     const bool actions_ready = error == 0 && posix_spawn_file_actions_init(&actions) == 0;
@@ -477,7 +573,8 @@ static void parallel_start(const ParallelCommand* command, const ParallelOptions
             command->script,
             0,
         };
-        error = posix_spawnp(&pid, options->shell, &actions, &attributes, arguments, environ);
+        snprintf(environment->cpus, sizeof(environment->cpus), "BUSTER_PARALLEL_CPUS=%llu", (unsigned long long)result->cpus);
+        error = posix_spawnp(&pid, options->shell, &actions, &attributes, arguments, environment->variables);
     }
     if (attributes_ready)
     {
@@ -564,9 +661,9 @@ static String8 parallel_render_summary(Arena* arena, const ParallelList* list, c
 {
     const uint64_t mark = arena->length;
     char line[BUSTER_PARALLEL_OUTCOME_BYTES];
-    int length = snprintf(line, sizeof(line), "parallel: %llu commands in %.1f s, at most %llu at once: %llu passed, %llu failed, %llu not started", (unsigned long long)list->count,
-                          parallel_seconds(summary->elapsed), (unsigned long long)jobs, (unsigned long long)summary->passed, (unsigned long long)summary->failed,
-                          (unsigned long long)summary->not_started);
+    int length = snprintf(line, sizeof(line), "parallel: %llu commands in %.1f s, %.1f s of CPU, at most %llu CPUs at once: %llu passed, %llu failed, %llu not started",
+                          (unsigned long long)list->count, parallel_seconds(summary->elapsed), parallel_seconds(summary->cpu), (unsigned long long)jobs,
+                          (unsigned long long)summary->passed, (unsigned long long)summary->failed, (unsigned long long)summary->not_started);
     bool built = length > 0 && parallel_append(arena, line, (uint64_t)length);
     if (summary->signal != 0)
     {
@@ -652,10 +749,19 @@ static void parallel_output_write(ParallelOutput* output, String8 part, uint64_t
     }
 }
 
+// The user and system time in a process's resource usage, in nanoseconds.
+static uint64_t parallel_cpu_time(const struct rusage* usage)
+{
+    const uint64_t seconds = (uint64_t)usage->ru_utime.tv_sec + (uint64_t)usage->ru_stime.tv_sec;
+    const uint64_t microseconds = (uint64_t)usage->ru_utime.tv_usec + (uint64_t)usage->ru_stime.tv_usec;
+    return seconds * BUSTER_PARALLEL_NANOSECONDS + microseconds * 1000;
+}
+
 // Reaps every running command whose shell has ended, at `now`, after killing whatever it left in its process group (its
 // shell, a zombie until it is reaped, still holds the group's id), and builds its part of the report. Returns how many it
-// reaped; sets *full when the arena can't hold a part.
-static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const ParallelOptions* options, ParallelResult* results, uint64_t count, uint64_t now, bool* full)
+// reaped, whose CPUs it takes from *used; sets *full when the arena can't hold a part.
+static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const ParallelOptions* options, ParallelResult* results, uint64_t count, uint64_t now, uint64_t* used,
+                              bool* full)
 {
     uint64_t reaped = 0;
     for (uint64_t i = 0; i < count; i += 1)
@@ -668,15 +774,19 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
         {
             kill(-result->pid, SIGKILL);
             int status = 0;
+            struct rusage usage;
+            memset(&usage, 0, sizeof(usage));
             pid_t waited = -1;
             do
             {
-                waited = waitpid(result->pid, &status, 0);
+                waited = wait4(result->pid, &status, 0, &usage);
             } while (waited < 0 && errno == EINTR);
             result->status = status;
+            result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
             result->state = PARALLEL_STATE_ENDED;
             result->end = now;
+            *used -= result->cpus;
             *full = !parallel_render(arena, &list->commands[i], options, result) || *full;
             reaped += 1;
         }
@@ -723,6 +833,12 @@ static void parallel_take_signals(int signal_fd, ParallelResult* results, uint64
             }
         }
     }
+}
+
+// The CPUs a command holds while it runs: its own, or all of the `jobs` when it has more.
+static uint64_t parallel_held(const ParallelCommand* command, uint64_t jobs)
+{
+    return command->cpus < jobs ? command->cpus : jobs;
 }
 
 // Runs the list's commands, writes the report into options->output, and returns what became of them, each command's in
@@ -776,9 +892,11 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     };
 
     const uint64_t jobs = options->jobs != 0 ? options->jobs : 1;
+    ParallelEnvironment environment;
+    parallel_environment(arena, &environment);
     const uint64_t origin = parallel_clock();
     char line[BUSTER_PARALLEL_OUTCOME_BYTES];
-    const int line_length = snprintf(line, sizeof(line), "parallel: %llu commands, at most %llu at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
+    const int line_length = snprintf(line, sizeof(line), "parallel: %llu commands, at most %llu CPUs at once\n", (unsigned long long)list->count, (unsigned long long)jobs);
     const uint64_t opening_mark = arena->length;
     const bool opened = line_length > 0 && parallel_append(arena, line, (uint64_t)line_length);
     const String8 opening = opened ? (String8){ .pointer = (char*)arena->base + opening_mark, .length = (uint64_t)line_length }
@@ -787,6 +905,8 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     String8 closing = { 0 };
     uint64_t started = 0;
     uint64_t running = 0;
+    // The CPUs the running commands hold.
+    uint64_t used = 0;
     uint64_t stops = 0;
     // The part of the report being written, and how much of it is.
     uint64_t part = 0;
@@ -798,11 +918,15 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
     bool done = false;
     while (!done)
     {
-        while (stops == 0 && !killed && signal_fd >= 0 && running < jobs && started < list->count)
+        // The next command in the list's order, once the running commands' CPUs leave room for its own (all of --jobs,
+        // for one of more: it runs alone); until then, the commands after it wait too.
+        while (stops == 0 && !killed && signal_fd >= 0 && started < list->count && used + parallel_held(&list->commands[started], jobs) <= jobs)
         {
             ParallelResult* result = &results[started];
-            parallel_start(&list->commands[started], options, &previous_mask, result, parallel_clock() - origin);
+            result->cpus = parallel_held(&list->commands[started], jobs);
+            parallel_start(&list->commands[started], options, &previous_mask, &environment, result, parallel_clock() - origin);
             running += result->state == PARALLEL_STATE_RUNNING;
+            used += result->state == PARALLEL_STATE_RUNNING ? result->cpus : 0;
             summary.peak = running > summary.peak ? running : summary.peak;
             // A command that couldn't start has ended.
             if (result->state == PARALLEL_STATE_ENDED)
@@ -824,6 +948,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
             {
                 summary.passed += results[i].passed;
                 summary.not_started += results[i].state == PARALLEL_STATE_WAITING;
+                summary.cpu += results[i].cpu;
             }
             summary.failed = list->count - summary.passed - summary.not_started;
             closing = parallel_render_summary(arena, list, options, results, &summary, jobs, signal_error, &summary.memory_full);
@@ -873,7 +998,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
                     results[i].timed_out = true;
                 }
             }
-            running -= parallel_reap(arena, list, options, results, started, after, &summary.memory_full);
+            running -= parallel_reap(arena, list, options, results, started, after, &used, &summary.memory_full);
             if (pending && !output.lost && (!polling_output || fds[1].revents != 0))
             {
                 parallel_output_write(&output, next, &offset);
@@ -1072,11 +1197,6 @@ static int run_parallel_command(int argc, char** argv)
             else
             {
                 options.jobs = options.jobs != 0 ? options.jobs : parallel_core_count();
-                // The commands' share of the CPUs (#468's review): a test that starts processes of its own takes
-                // this many at once less (test_process_cpus), so that the commands together start about one per CPU.
-                char jobs[24];
-                snprintf(jobs, sizeof(jobs), "%llu", (unsigned long long)options.jobs);
-                setenv("BUSTER_PARALLEL_JOBS", jobs, 1);
                 fflush(stdout);
                 result = parallel_run(&arena, &list, &options, results).succeeded ? 0 : 1;
             }

@@ -265,7 +265,8 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                 {
                     const CheckOptions check_options = { .scalar = path_index == 0 };
                     CheckStream stream;
-                    const bool checked = check_graph_run(&types.table, &input.graph, &values, &scratch, &check_options, &stream);
+                    const bool checked = check_graph_run(&types.table, &input.graph, &values, &scratch, &check_options, &stream) &&
+                                         check_input_packed_finalize(&input, view, &types.table, &stream, &scratch);
                     check_test_expect(test, checked, "prefix graph is valid");
                     for (uint32_t i = 0; checked && i < stream.report_count; i += 1)
                     {

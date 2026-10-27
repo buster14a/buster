@@ -1478,6 +1478,10 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                {
+                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                }
             }
             if (valid && input->proof_values != 0)
             {
@@ -1553,6 +1557,10 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             {
                 const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
+                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                {
+                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                }
             }
             if (valid && input->proof_values != 0)
             {
@@ -1951,7 +1959,8 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_OPERAND && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             valid = literal.valid;
             input->values[index] = check_literal_value(literal);
             produced = true;
@@ -2581,7 +2590,8 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         }
         if (operand && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             valid = literal.valid;
             ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
             values[value_count++] = check_literal_value(literal);
