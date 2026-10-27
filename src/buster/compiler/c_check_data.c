@@ -659,12 +659,10 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         }
         else if (plan->bytes == 0 && plan->size != 0)
         {
-            plan->bytes = check_data_payload(bytes, scratch, plan->size);
-            if (plan->bytes == 0)
-            {
-                status = CHECK_DATA_RESOURCE;
-            }
-            else
+            // An implicit readonly zero object needs no temporary image to determine its class or demand.
+            // If it does not fit, the batch's final byte-capacity preflight reports the exact count.
+            plan->bytes = arena_push(bytes, plan->size, 1);
+            if (plan->bytes != 0)
             {
                 memset(plan->bytes, 0, plan->size);
             }

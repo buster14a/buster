@@ -919,7 +919,11 @@ static void check_data_test_nonzero(CheckTest* test)
 
 static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
 {
-    enum { SIZE = (1u << 20) + 64, COUNT = 7 };
+    enum
+    {
+        SIZE = (1u << 20) + 64,
+        COUNT = 7,
+    };
     const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, SIZE);
     const TypeId readonly = type_qualify(types, array, BUSTER_TYPE_CONST);
     const TypeId pointer = type_pointer(types, BUSTER_TYPE_UCHAR);
@@ -961,10 +965,26 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
             CheckInitPart last = parts[0];
             last.bit_offset = (SIZE - 1ull) * 8;
             CheckInitializer initializers[4] = {
-                { .type = array, .parts = parts, .count = 1 },
-                { .type = array, .parts = parts + 1, .count = 1 },
-                { .type = pointers, .parts = parts + 2, .count = 1 },
-                { .type = readonly, .parts = &last, .count = 1 },
+                {
+                    .type = array,
+                    .parts = parts,
+                    .count = 1,
+                },
+                {
+                    .type = array,
+                    .parts = parts + 1,
+                    .count = 1,
+                },
+                {
+                    .type = pointers,
+                    .parts = parts + 2,
+                    .count = 1,
+                },
+                {
+                    .type = readonly,
+                    .parts = &last,
+                    .count = 1,
+                },
             };
             SymbolId map[COUNT + 2] = { 0 };
             CheckDataObject objects[COUNT] = { 0 };
@@ -1003,12 +1023,13 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
             uint8_t table_copy[8192];
             const bool fits = fixture.tables.length <= sizeof(table_copy);
             check_test_expect(test, fits, "static-data retained transaction table snapshot fits");
-            for (uint32_t failure = 0; fits && failure < 3; failure += 1)
+            for (uint32_t failure = 0; fits && failure < 4; failure += 1)
             {
                 memcpy(table_copy, fixture.tables.base, fixture.tables.length);
                 const Link before = fixture.link;
                 const uint32_t atoms = fixture.link.atoms.capacity;
-                const uint32_t flags = fixture.link.symbols.flags[map[COUNT + 1]];
+                const uint8_t flags = fixture.link.symbols.flags[map[COUNT + 1]];
+                const uint64_t byte_capacity = fixture.bytes.capacity;
                 if (failure == 0)
                 {
                     fixture.link.atoms.capacity = fixture.link.atoms.count;
@@ -1018,15 +1039,25 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
                     fixture.link.symbols.flags[map[COUNT + 1]] = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL;
                     memcpy(table_copy, fixture.tables.base, fixture.tables.length);
                 }
+                else if (failure == 2)
+                {
+                    fixture.bytes.capacity = byte_start + (COUNT - 2ull) * SIZE;
+                }
                 CheckDataResult result;
                 const bool emitted = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 11,
                                                      &fixture.bytes, &fixture.scratch, &result);
-                check_test_expect(test, emitted == (failure == 2), "static-data large payloads fit metadata-only scratch");
+                check_test_expect(test, emitted == (failure == 3), "static-data large payloads fit metadata-only scratch");
                 check_test_expect(test, fixture.scratch.length == scratch_start && literal[0] == 0x6d && literal[SIZE - 1] == 0x6d &&
                                        parts[0].value.integer == 1 && parts[2].value.offset == INT64_C(4294967296),
                                   "static-data direct construction preserves live input prefixes");
                 if (!emitted)
                 {
+                    if (failure != 1)
+                    {
+                        check_test_expect(test, result.status == CHECK_DATA_RESOURCE && result.atom_count == COUNT &&
+                                               result.byte_count == (COUNT - 1ull) * SIZE && result.fixup_count == 1 && result.wide_addend_count == 1,
+                                          "static-data exact capacity demand needs no implicit-zero scratch image");
+                    }
                     check_test_expect(test, fixture.link.error == before.error && fixture.link.atoms.count == before.atoms.count &&
                                            fixture.link.fixups.count == before.fixups.count && fixture.link.fixups.wide_count == before.fixups.wide_count &&
                                            memcmp(table_copy, fixture.tables.base, fixture.tables.length) == 0 && fixture.bytes.length == byte_start,
@@ -1071,6 +1102,7 @@ static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
                 }
                 fixture.link.atoms.capacity = atoms;
                 fixture.link.symbols.flags[map[COUNT + 1]] = flags;
+                fixture.bytes.capacity = byte_capacity;
             }
         }
         fixture.scratch.capacity = 65536;
