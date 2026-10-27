@@ -28,5 +28,6 @@ jobs:
           set -euo pipefail
           cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o "$RUNNER_TEMP/admission"
           "$RUNNER_TEMP/admission" --self-test
+          bash -n tools/ci/admission-hook.sh
           cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/changes.c -o "$RUNNER_TEMP/changes"
           "$RUNNER_TEMP/changes" --self-test

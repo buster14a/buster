@@ -2278,6 +2278,16 @@ static int ci_guard(bool wait)
     return admitted ? 0 : 1;
 }
 
+static int ci_host_source_guard(void)
+{
+    bool allowed = ci_host_source_allowed(ci_env("GITHUB_REPOSITORY"), ci_env("GITHUB_WORKFLOW_REF"), ci_env("GITHUB_REF"));
+    if (!allowed)
+    {
+        fputs("9700X admission: missing job identity or Buster workflow is not the reviewed main executor; refusing before the host lock and checkout.\n", stderr);
+    }
+    return allowed ? 0 : 1;
+}
+
 #include "admission_fixture.c"
 #include "admission_test.c"
 
@@ -2304,9 +2314,13 @@ int main(int argc, char** argv)
     {
         status = ci_guard(false);
     }
+    else if (argc == 2 && strcmp(argv[1], "--host-source-guard") == 0)
+    {
+        status = ci_host_source_guard();
+    }
     else
     {
-        fputs("usage: admission --self-test | --snapshot | --reconcile | --wait | --verify\n", stderr);
+        fputs("usage: admission --self-test | --snapshot | --reconcile | --wait | --verify | --host-source-guard\n", stderr);
         status = 2;
     }
     return status;

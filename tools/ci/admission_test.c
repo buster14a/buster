@@ -85,6 +85,12 @@ static void ci_test_commands(void)
 
 static void ci_test_policy(void)
 {
+    ci_expect(ci_host_source_allowed("buster14a/buster", BUSTER_CI_EXECUTOR_REF, "refs/heads/main"), "host source gate: reviewed default executor permitted");
+    ci_expect(!ci_host_source_allowed("buster14a/buster", "buster14a/buster/.github/workflows/9700x.yml@refs/pull/546/merge", "refs/pull/546/merge"), "host source gate: untrusted PR workflow cannot bypass admission");
+    ci_expect(!ci_host_source_allowed("buster14a/buster", "buster14a/buster/.github/workflows/other.yml@refs/heads/main", "refs/heads/main"), "host source gate: unrelated Buster workflow cannot enter the pool");
+    ci_expect(!ci_host_source_allowed("buster14a/buster", BUSTER_CI_EXECUTOR_REF, "refs/heads/unreviewed"), "host source gate: non-main dispatch refused");
+    ci_expect(!ci_host_source_allowed("", "", ""), "host source gate: missing job identity fails closed");
+    ci_expect(ci_host_source_allowed("buster14a/buster-legacy", "legacy/any-workflow@refs/pull/1/merge", "refs/pull/1/merge"), "host source gate: legacy workflow access is unchanged");
     CiState state = {0};
     state.pr_count = 1;
     CiPr* pr = &state.prs[0];

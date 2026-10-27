@@ -1239,9 +1239,10 @@ default-branch eligibility/priority controller for #546-#548.
 interface, required-check attribution, recovery and the live rollout gates.
 Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
 ordinary qualification and restricted runner-group access have been verified.
-An organization administrator verifies this repository's exact default-workflow
-entry and the existing single host-lock pool before setting
-`CI_9700X_POOL_CAPACITY=1`; do not broaden access or change other projects' jobs.
+Verify this repository's exact default-workflow entrypoint and the existing
+single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
+with legacy, use the documented root-owned Buster-only job-start source guard;
+do not narrow legacy's group-wide access, broaden access or change other jobs.
 
 When enabled, confirmed conflicting PRs are blocked and their own outstanding
 qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
@@ -1297,6 +1298,8 @@ are original C; the privileged workflow never runs PR code or consumes a PR cach
 or artifact as authority. Guard binaries are compiled on hosted capacity and
 checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
 block new admission; never clear a live lease merely because it expired.
+`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
+backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 

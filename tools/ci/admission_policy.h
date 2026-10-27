@@ -19,6 +19,17 @@
 #define BUSTER_CI_STATE_ID "buster-9700x/state/v1"
 // An immutable existing commit, rather than a moving branch or a fork-controlled artifact/cache.
 #define BUSTER_CI_STATE_SHA "335424b18635fa9ab3ac5eb91e7497aaddd37cab"
+#define BUSTER_CI_EXECUTOR_REF "buster14a/buster/.github/workflows/9700x.yml@refs/heads/main"
+
+static bool ci_host_source_allowed(const char* repository, const char* workflow_ref, const char* ref)
+{
+    bool allowed = *repository != 0;
+    if (strcmp(repository, "buster14a/buster") == 0)
+    {
+        allowed = strcmp(workflow_ref, BUSTER_CI_EXECUTOR_REF) == 0 && strcmp(ref, "refs/heads/main") == 0;
+    }
+    return allowed;
+}
 
 typedef enum CiCommandKind
 {

@@ -13,20 +13,24 @@ The cutover is **off** until repository variable `CI_9700X_ADMISSION_ENABLED` is
 required job remain in use. The hosted policy-fixture workflow tests this change
 before it is installed on `main`.
 
-An organization administrator must first verify the compatible pool really has
-one host-lock slot and restrict **this repository's** runner-group access to:
+First verify the compatible pool really has one host-lock slot and restrict
+**this repository's** physical entrypoint to:
 
 ```text
 buster14a/buster/.github/workflows/9700x.yml@refs/heads/main
 ```
 
-Preserve other repositories' existing access. Do not broaden the group or allow
-PR merge refs or arbitrary workflows. Set `CI_9700X_POOL_CAPACITY=1` only after
-that check. The controller and execution guard refuse admission without this
+Either enforce that exact workflow in a dedicated runner-group policy, or install
+the root-owned Buster-only job-start source guard below. The existing group is
+shared with `buster-legacy`: changing its group-wide all-workflow policy would
+change legacy access. The hook alternative preserves legacy's policy and the
+original lock script exactly. Do not broaden the group, add another runner, or
+allow Buster PR merge refs/arbitrary workflows. Set `CI_9700X_POOL_CAPACITY=1`
+only after verification. The controller/guard refuse admission without that
 attestation; it is not permission to change the host lock or add another slot.
 The repository token intentionally has no organization-runner administration
-permission. A 403 inspecting that setting requires an organization administrator,
-not a broader token in CI. The existing host needs `gh` in addition to its build
+permission; use the existing administrator session to inspect settings instead
+of adding a broader token to CI. The existing host needs `gh` in addition to its build
 tools, Node 24-capable Actions runner, network access to GitHub and artifact access.
 
 `9700x-control.yml` checks out `refs/heads/main` without credentials on a hosted
@@ -44,6 +48,39 @@ hosted job's SHA-256 before each execution. A conflicted/stale admission therefo
 does not compile the guard or the compiler on the 9700X. Public fork revisions
 also require a trusted current-revision approval before admission; a persistent
 priority override alone cannot authorize new fork code.
+
+### Shared-group host source guard
+
+`tools/ci/admission-hook.sh` wraps, rather than reimplements, the existing
+`/usr/local/libexec/buster-9700x/job-started.sh`. During installation save that
+original file as `job-started.before-admission.sh`, with its owner/mode/content
+unchanged. Install the wrapper and a reviewed-main build of `admission` in the
+same root-owned directory. Keep `admission-enabled` absent during staging; no
+runner restart or `.env` change is needed. Do not overwrite an existing backup.
+
+When `admission-enabled` exists, `admission --host-source-guard` checks the
+GitHub-provided job identity before the original hook takes the lock. Buster
+requires the exact reviewed executor workflow/ref above and `refs/heads/main`;
+missing identity fails closed. Legacy and other repositories retain their
+existing workflow policy. Buster also refuses the original hook's permissive
+missing-lock fallback. The original holder, lock, cancellation cleanup and
+completed hook are unchanged. The gate, executable and marker must be root-owned
+and not writable by the runner account; placing the marker in the shared writable
+lock directory would let PR code alter the gate.
+
+Inspect the installed runner's default-context export before activation and
+verify a PR workflow is refused and a reviewed main executor is accepted. The
+guard uses no API/credential and executes no PR code. Create the root-owned marker
+only after the staged PR has qualified and the reviewed controller is on main;
+then enable repository admission. Removing the marker restores the original hook
+behavior; keep admission off during rollback. Repository-scoped source enforcement
+avoids changing either legacy access or the existing physical runner registration.
+Runner 2.338.0, verified on the shared host, exports `workflow_ref`, `ref` and
+`repository` from its server-supplied
+[GitHub context](https://github.com/actions/runner/blob/v2.338.0/src/Runner.Worker/GitHubContext.cs).
+Its [script handler](https://github.com/actions/runner/blob/v2.338.0/src/Runner.Worker/Handlers/ScriptHandler.cs)
+applies these runtime values to the hook environment; PR job-env strings do not
+supply the identity used by this gate. No runner implementation is copied here.
 
 ## Required-check attribution
 
@@ -268,8 +305,9 @@ dispatch recovery. `9700x-policy.yml` runs these on hosted capacity.
 
 Roll out after source review and the ordinary pre-activation 9700X qualification:
 
-1. Merge with admission off. Verify/narrow the Buster runner-group entry and
-   pool capacity with an organization administrator, preserving unrelated access.
+1. Merge with admission off. Verify the exact Buster entrypoint and pool capacity,
+   using the Buster-only host source guard for the shared legacy group (or a
+   dedicated existing workflow restriction). Preserve unrelated access.
 2. Record the old queue's run creation time and physical job `started_at`/
    `completed_at`, the associated review commit/time and the exact source SHA in
    `buster-performance/docs/measurements`. Mark historical approval uncertainty.

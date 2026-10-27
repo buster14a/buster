@@ -4,6 +4,7 @@ run-name: ${{ github.event_name == 'workflow_dispatch' && format('9700X command 
 on:
   # The privileged controller always uses reviewed main code, including for fork/conflicting PRs.
   pull_request_target:
+    branches: [main]
     types: [opened, reopened, synchronize, closed, edited]
   issue_comment:
     types: [created, edited, deleted]
