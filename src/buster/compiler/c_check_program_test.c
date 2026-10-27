@@ -738,6 +738,112 @@ static void check_test_program_refused(CheckTest* test)
     arena_release(&scratch);
 }
 
+// The table of every type's class and facts that the bodies read (check_lower_classify_types) against its twin's, on the
+// types of random worlds of every kind (the type table's tests' world: pointers, arrays, functions, vectors, atomic
+// types, aligned typedefs, complex types of _BitInts, enums and records; and the calling convention's tests' world:
+// complex types of every floating type among them): of the whole world and of every count of its types to 300; then with
+// the kinds' column and both tables ending at a PROT_NONE page, for every count to 200, so that a read or a write past the
+// last type faults. And a function's memory classes from its entries' (check_lower_entry_classes), at the page's end too.
+static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[3] = { 0 };
+    bool guarded = true;
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        mappings[i] = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        guarded = guarded && mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, guarded, "the guarded columns of the types' classes");
+    for (uint32_t round = 0; round < 2; round += 1)
+    {
+        AbiTestWorld world;
+        const bool opened = abi_test_world_open(&world, 8192);
+        check_test_expect(test, opened, "a world of types to classify for the lowering");
+        if (opened)
+        {
+            if (round == 0)
+            {
+                type_test_world_build(&world.types, 531, 1000);
+            }
+            else
+            {
+                abi_test_world_build(&world, 531, 1000);
+            }
+            const TypeTable* table = &world.types.test.table;
+            const uint32_t count = table->types.count;
+            uint8_t* columns = malloc(4 * ((uint64_t)count + 1));
+            check_test_expect(test, columns != 0 && count > 300, "the world's types and their columns");
+            for (uint32_t prefix = 0; columns != 0 && prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+            {
+                uint8_t* scalar_classes = columns;
+                uint8_t* scalar_facts = columns + count + 1;
+                uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
+                uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
+                memset(vector_classes, 0xa5, prefix + 1);
+                memset(vector_facts, 0xa5, prefix + 1);
+                check_lower_classify_types_scalar(table, prefix, scalar_classes, scalar_facts);
+                check_lower_classify_types(table, prefix, vector_classes, vector_facts);
+                const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
+                                  vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
+                char description[160];
+                snprintf(description, sizeof(description), "the first %u of world %u's %u types: their classes and facts by both paths", prefix, round, count);
+                check_test_expect(test, same, description);
+            }
+            for (uint32_t prefix = 0; columns != 0 && guarded && prefix <= 200 && prefix <= count; prefix += 1)
+            {
+                // The kinds copied to end at the guard page, read through a copy of the table that has them.
+                TypeTable copy = *table;
+                uint8_t* kinds = mappings[0] + page - prefix;
+                memcpy(kinds, table->types.kind, prefix);
+                copy.types.kind = kinds;
+                uint8_t* classes = mappings[1] + page - prefix;
+                uint8_t* facts = mappings[2] + page - prefix;
+                check_lower_classify_types_scalar(table, prefix, columns, columns + count + 1);
+                check_lower_classify_types(&copy, prefix, classes, facts);
+                char description[160];
+                snprintf(description, sizeof(description), "world %u's first %u types' classes and facts, at a page's end", round, prefix);
+                check_test_expect(test, memcmp(columns, classes, prefix) == 0 && memcmp(columns + count + 1, facts, prefix) == 0, description);
+            }
+            free(columns);
+            abi_test_world_close(&world);
+        }
+    }
+    // A function's memory classes from its entries' classes (check_lower_entry_classes) against its twin's: columns of
+    // every count to 200 ending at the guard page, of random classes but F80, I128 and U128, with one of those at a random
+    // place in one column of four, and none in the others.
+    for (uint32_t count = 0; guarded && count <= 200; count += 1)
+    {
+        for (uint32_t round = 0; round < 8; round += 1)
+        {
+            uint8_t* classes = mappings[0] + page - count;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                classes[i] = (uint8_t)(check_test_random(test) % BUSTER_TYPED_CLASS_F80);
+            }
+            const uint8_t memory[3] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128 };
+            if (count != 0 && round % 4 != 0)
+            {
+                classes[check_test_random(test) % count] = memory[round % 3];
+            }
+            const uint32_t vector = check_lower_entry_classes(classes, count);
+            const uint32_t scalar = check_lower_entry_classes_scalar(classes, count);
+            const uint32_t expected = count == 0 || round % 4 == 0 ? 0 : round % 3 == 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : BUSTER_CHECK_LOWER_ENTRIES_WIDE;
+            char description[160];
+            snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u by the vector path, %u by the scalar one, for %u", count,
+                     round, vector, scalar, expected);
+            check_test_expect(test, vector == expected && scalar == expected, description);
+        }
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED && mappings[i] != 0)
+        {
+            munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
 // The x87's encodings, from n: zero, negative zero, a denormal, two pseudo-denormals, one, an unnormal, a pseudo-zero,
 // the infinities, a pseudo-infinity, quiet and signaling NaNs, a pseudo-NaN, the largest value and the largest unnormal.
 #define BUSTER_CHECK_TEST_X87_ENCODINGS \
@@ -778,6 +884,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_control_walks(test);
     check_test_program_addressed(test);
     check_test_program_refused(test);
+    check_test_program_type_facts(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
