@@ -5431,14 +5431,13 @@ BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* ma
     const uint32_t first = open + 1;
     const uint8_t kind = first < end ? data->kinds[first] & 0x7F : C_TOKEN_UNKNOWN;
     const bool named = kind == C_TOKEN_RAW_IDENTIFIER;
-    const uint32_t close = first + named;
-    const bool result = (named || kind == C_TOKEN_R_PAREN) && close < end && (data->kinds[close] & 0x7F) == C_TOKEN_R_PAREN;
+    const bool result = kind == C_TOKEN_R_PAREN || (named && first + 1 < end && (data->kinds[first + 1] & 0x7F) == C_TOKEN_R_PAREN);
     if (result)
     {
         macro->flags |= BUSTER_PP_MACRO_FUNCTION;
         macro->parameters_begin = first;
         macro->parameter_count = named;
-        macro->body_begin = close + 1;
+        macro->body_begin = first + 1 + named;
     }
     return result;
 }
