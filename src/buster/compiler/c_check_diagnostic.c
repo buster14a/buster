@@ -229,6 +229,10 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
+    {
+        source = parser->tokens.sources[input->naked_diagnostic->token];
+    }
     if (input->loop_diagnostic != 0 && report->pragma == input->loop_diagnostic->pragma && report->token == input->loop_diagnostic->position)
     {
         source = input->loop_diagnostic->source;

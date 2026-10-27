@@ -3113,8 +3113,9 @@ static bool tier0_records_build(Tier0Tables* tables)
     {
         const char* shape = tier0_record_shapes[r];
         Tier0Record* record = &records->records[r];
+        // A prefix's letter, then its colon: the empty shape has no second byte to read.
         record->is_union = shape[0] == 'u' && shape[1] == ':';
-        record->aligned = shape[1] != ':' ? 0 : shape[0] == 'a' ? 16 : shape[0] == 'A' ? 32 : 0;
+        record->aligned = shape[0] == 'a' && shape[1] == ':' ? 16 : shape[0] == 'A' && shape[1] == ':' ? 32 : 0;
         const char* letters = record->is_union || record->aligned != 0 ? shape + 2 : shape;
         TypeMember members[BUSTER_TIER0_GENERATE_RECORD_MEMBERS];
         uint32_t offset = 0;

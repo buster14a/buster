@@ -138,6 +138,10 @@ struct CheckProgram
     SymbolId* object_symbols;
     uint32_t* symbol_objects;
     uint32_t* object_declarations;
+    // Per object, its first declaration with GNU's naked attribute (not ignored), which any declaration of a function may
+    // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
+    // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
+    uint32_t* object_naked;
     uint32_t control_count;
     uint32_t switch_count;
     uint32_t body_count;
@@ -234,6 +238,17 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
         program->token = token;
         program->diagnostic_position = token;
     }
+}
+
+// Whether a declaration's `attributes` hold GNU's naked attribute (CheckProgram.object_naked).
+static bool check_program_attribute_naked(const CheckInputAttributes* attributes)
+{
+    bool naked = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
+    }
+    return naked;
 }
 
 // Compact builtin descriptors start with their stable graph node and are source ordered in both schedulers.
@@ -1867,6 +1882,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
+        // column comes with the unit's first one.
+        bool naked_room = true;
         for (uint32_t token = 0; token < count; token += 1)
         {
             const uint32_t object = input->objects[token];
@@ -1874,6 +1892,22 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             {
                 program->object_declarations[object] = token;
                 needed[object] |= input->defined[token] || input->tentative[token];
+                if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
+                {
+                    if (program->object_naked == 0 && naked_room)
+                    {
+                        program->object_naked = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
+                        naked_room = program->object_naked != 0;
+                        if (naked_room)
+                        {
+                            memset(program->object_naked, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                        }
+                    }
+                    if (naked_room && program->object_naked[object] == BUSTER_CHECK_NONE)
+                    {
+                        program->object_naked[object] = token;
+                    }
+                }
             }
         }
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
@@ -1896,7 +1930,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
         }
         program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
-        valid = program->symbol_count == 0 || program->symbol_objects != 0;
+        valid = naked_room && (program->symbol_count == 0 || program->symbol_objects != 0);
         for (uint32_t object = 1; valid && object <= count; object += 1)
         {
             const SymbolId symbol = program->object_symbols[object];

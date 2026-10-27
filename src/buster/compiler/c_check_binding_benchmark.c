@@ -190,7 +190,7 @@ static bool check_binding_benchmark_run(CheckBindingBenchmark* benchmark, CheckI
         valid = check_graph_run(&benchmark->table, &input->graph, &benchmark->output, &benchmark->scratch, &options, &benchmark->stream) &&
                 benchmark->stream.status == CHECK_STATUS_OK && benchmark->stream.report_count == 0;
     }
-    benchmark->parser_bytes = parser->scratch.length + parser->vector_arena.length + parser->gnu_arena.length;
+    benchmark->parser_bytes = parser->scratch.length + parser->gnu_arena.length;
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(parser->columns); column += 1)
     {
         benchmark->parser_bytes += parser->columns[column].length;
