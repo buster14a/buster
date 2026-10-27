@@ -981,7 +981,10 @@ struct Tier1ResolvedMoves
     uint32_t count;
 };
 
-static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+#define BUSTER_TIER1_MOVE_SMALL_COUNT 8
+
+// Independent small-set oracle, also used for the bounded argument-register shuffles (at most six moves).
+static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_scalar(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
@@ -1078,5 +1081,235 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Ti
     {
         arena_pop_to(arena, saved);
     }
+    return error;
+}
+
+// Bottom-up merge sort of (opaque destination, original index). No location-sized table, hash collision worst
+// case, callback or input-dependent recursion. Each pass streams both runs and writes each key exactly once.
+static uint64_t* tier1_move_sort(uint64_t* keys, uint64_t* temporary, uint32_t count)
+{
+    for (uint32_t width = 1; width < count; width *= 2)
+    {
+        for (uint32_t begin = 0; begin < count; begin += width * 2)
+        {
+            const uint32_t middle = begin + width < count ? begin + width : count;
+            const uint32_t end = middle + width < count ? middle + width : count;
+            uint32_t left = begin;
+            uint32_t right = middle;
+            for (uint32_t out = begin; out < end; out += 1)
+            {
+                const bool take_left = right == end || (left < middle && keys[left] < keys[right]);
+                temporary[out] = take_left ? keys[left++] : keys[right++];
+            }
+        }
+        uint64_t* swap = keys;
+        keys = temporary;
+        temporary = swap;
+    }
+    return keys;
+}
+
+// Only newly ready moves enter the minimum heap; removing a move updates the count of its one source.
+static void tier1_move_ready_push(uint32_t* ready, uint32_t* count, uint32_t move)
+{
+    uint32_t position = *count;
+    *count += 1;
+    while (position != 0 && ready[(position - 1) / 2] > move)
+    {
+        ready[position] = ready[(position - 1) / 2];
+        position = (position - 1) / 2;
+    }
+    ready[position] = move;
+}
+
+static uint32_t tier1_move_ready_pop(uint32_t* ready, uint32_t* count)
+{
+    const uint32_t result = ready[0];
+    *count -= 1;
+    const uint32_t last = ready[*count];
+    uint32_t position = 0;
+    bool placed = false;
+    while (!placed && position * 2 + 1 < *count)
+    {
+        uint32_t child = position * 2 + 1;
+        if (child + 1 < *count && ready[child + 1] < ready[child])
+        {
+            child += 1;
+        }
+        placed = last <= ready[child];
+        if (!placed)
+        {
+            ready[position] = ready[child];
+            position = child;
+        }
+    }
+    ready[position] = last;
+    return result;
+}
+
+static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result, bool vector)
+{
+    Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
+    const uint64_t saved = arena != 0 ? arena->length : 0;
+    Tier1ResolvedMoves output = { 0 };
+    uint64_t* keys = 0;
+    uint64_t* temporary = 0;
+    uint32_t* dependencies = 0;
+    uint32_t* uses = 0;
+    uint32_t* ready = 0;
+    uint64_t retained = saved;
+    if (input != 0 && arena != 0 && result != 0 && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->count == 0 || (input->sources != 0 && input->destinations != 0)))
+    {
+        error = TIER1_ALLOCATION_OK;
+        output.sources = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
+        output.destinations = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
+        retained = arena->length;
+        keys = arena_push_array(arena, input->count, sizeof(uint64_t), 8);
+        temporary = arena_push_array(arena, input->count, sizeof(uint64_t), 8);
+        dependencies = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
+        uses = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
+        ready = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
+        if (output.sources == 0 || output.destinations == 0 || keys == 0 || temporary == 0 || dependencies == 0 || uses == 0 || ready == 0)
+        {
+            error = TIER1_ALLOCATION_CAPACITY;
+        }
+    }
+    if (error == TIER1_ALLOCATION_OK && vector)
+    {
+        const __m256i scratch = _mm256_set1_epi32((int)input->scratch);
+        const __m512i indices = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 8)
+        {
+            const uint32_t left = input->count - i;
+            const __mmask8 mask = left >= 8 ? 0xff : (__mmask8)((1u << left) - 1);
+            const __m256i sources = _mm256_maskz_loadu_epi32(mask, input->sources + i);
+            const __m256i destinations = _mm256_maskz_loadu_epi32(mask, input->destinations + i);
+            const __mmask8 invalid = _mm256_cmpeq_epi32_mask(sources, scratch) | _mm256_cmpeq_epi32_mask(destinations, scratch);
+            if ((invalid & mask) != 0)
+            {
+                error = TIER1_ALLOCATION_INVALID;
+            }
+            const __m256i pending = _mm256_maskz_set1_epi32(_mm256_cmpeq_epi32_mask(sources, destinations), -1);
+            _mm256_mask_storeu_epi32(uses + i, mask, pending);
+            const __m512i locations = _mm512_slli_epi64(_mm512_cvtepu32_epi64(destinations), 32);
+            const __m512i positions = _mm512_add_epi64(indices, _mm512_set1_epi64(i));
+            _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(locations, positions));
+        }
+    }
+    else if (error == TIER1_ALLOCATION_OK)
+    {
+        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
+        {
+            if (input->sources[i] == input->scratch || input->destinations[i] == input->scratch)
+            {
+                error = TIER1_ALLOCATION_INVALID;
+            }
+            uses[i] = input->sources[i] == input->destinations[i] ? UINT32_MAX : 0;
+            keys[i] = ((uint64_t)input->destinations[i] << 32) | i;
+        }
+    }
+    if (error == TIER1_ALLOCATION_OK)
+    {
+        keys = tier1_move_sort(keys, temporary, input->count);
+        for (uint32_t i = 1; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
+        {
+            if ((keys[i - 1] >> 32) == (keys[i] >> 32))
+            {
+                error = TIER1_ALLOCATION_INVALID;
+            }
+        }
+    }
+    if (error == TIER1_ALLOCATION_OK)
+    {
+        for (uint32_t i = 0; i < input->count; i += 1)
+        {
+            uint32_t begin = 0;
+            uint32_t end = input->count;
+            const uint32_t source = input->sources[i];
+            while (begin < end)
+            {
+                const uint32_t middle = begin + (end - begin) / 2;
+                if ((keys[middle] >> 32) < source)
+                {
+                    begin = middle + 1;
+                }
+                else
+                {
+                    end = middle;
+                }
+            }
+            uint32_t dependency = begin < input->count && (keys[begin] >> 32) == source ? (uint32_t)keys[begin] : UINT32_MAX;
+            dependency = dependency != UINT32_MAX && uses[dependency] != UINT32_MAX ? dependency : UINT32_MAX;
+            dependencies[i] = dependency;
+            if (uses[i] != UINT32_MAX && dependency != UINT32_MAX)
+            {
+                uses[dependency] += 1;
+            }
+        }
+        uint32_t ready_count = 0;
+        uint32_t remaining = 0;
+        for (uint32_t i = 0; i < input->count; i += 1)
+        {
+            remaining += uses[i] != UINT32_MAX;
+            if (uses[i] == 0)
+            {
+                // Increasing input indices already form a minimum heap.
+                ready[ready_count++] = i;
+            }
+        }
+        uint32_t first = 0;
+        uint32_t preserved = UINT32_MAX;
+        while (remaining != 0)
+        {
+            if (ready_count == 0)
+            {
+                while (uses[first] == UINT32_MAX)
+                {
+                    first += 1;
+                }
+                // Every residual destination is used, and each move has one source. Thus every residual use count
+                // is exactly one: disjoint cycles, with fan-out already drained. Only one consumer needs scratch.
+                preserved = first;
+                output.sources[output.count] = input->destinations[first];
+                output.destinations[output.count] = input->scratch;
+                output.count += 1;
+                uses[first] = 0;
+                tier1_move_ready_push(ready, &ready_count, first);
+            }
+            const uint32_t chosen = tier1_move_ready_pop(ready, &ready_count);
+            const uint32_t dependency = dependencies[chosen];
+            const bool from_scratch = dependency != UINT32_MAX && dependency == preserved;
+            output.sources[output.count] = from_scratch ? input->scratch : input->sources[chosen];
+            output.destinations[output.count] = input->destinations[chosen];
+            output.count += 1;
+            uses[chosen] = UINT32_MAX;
+            remaining -= 1;
+            if (from_scratch)
+            {
+                preserved = UINT32_MAX;
+            }
+            else if (dependency != UINT32_MAX)
+            {
+                uses[dependency] -= 1;
+                if (uses[dependency] == 0)
+                {
+                    tier1_move_ready_push(ready, &ready_count, dependency);
+                }
+            }
+        }
+        arena_pop_to(arena, retained);
+        *result = output;
+    }
+    else if (arena != 0)
+    {
+        arena_pop_to(arena, saved);
+    }
+    return error;
+}
+
+static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+{
+    const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
+    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, true);
     return error;
 }

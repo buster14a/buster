@@ -137,6 +137,38 @@ the input. Registers and stack slots may use disjoint id ranges, but a machine
 consumer still needs a legal lowering for a memory-to-memory copy. CFG edge
 placement and critical-edge splitting are not done by this routine.
 
+The deterministic policy is unchanged: emit the lowest input index whose
+destination has no remaining source users; when none is ready, save the lowest
+pending destination to scratch. Up to eight moves use the independent scan
+implementation, `tier1_resolve_moves_scalar`. The only current production caller
+is `tier1_emit_call`, bounded by the six SysV integer argument registers; the
+general API keeps its full 2^20-move limit and opaque location domain.
+
+Larger sets use `tier1_resolve_moves_indexed`. Eight-wide masked initialization
+validates scratch exclusion, marks identities and constructs packed
+`(destination, input index)` keys. A nonrecursive merge sort detects duplicate
+destinations; binary searches map each source to its destination owner. Source
+use counts and a minimum heap replace repeated pending-move scans. Each emitted
+move updates only its source owner's count, and each move enters the ready
+heap once. A monotonically advancing cursor finds the first pending move when
+breaking cycles. Sorting, lookup and heap work are O(N log N), with O(N) storage,
+including adversarial opaque ids and fan-out.
+
+When the ready heap is empty, every remaining destination has at least one
+source user. There are at most as many source edges as remaining moves, so
+every remaining destination has exactly one user: the residual graph is a set
+of disjoint cycles. Saving one destination makes its move ready; its sole
+remaining consumer reads scratch instead. That cycle drains before another
+save can reuse scratch. The algorithm needs neither repeated source rewriting
+nor a scan for that consumer.
+
+Both paths retain at most 16*N bytes for output columns. The indexed path uses
+28*N temporary bytes (two u64 key arrays and three u32 dependency/count/heap
+arrays), plus alignment; the small scan uses 5*N temporary bytes. Inputs remain
+immutable, errors restore the entry arena length and preserve the result, and
+success discards all temporary arrays. Sorting requires temporary capacity, so
+capacity exhaustion can precede duplicate-destination diagnosis.
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,
@@ -191,6 +223,17 @@ oracle compares interval fragments pairwise; another expands them into a
 per-position register occupancy map. A move oracle executes sequential output
 against an independent snapshot of the parallel assignment. Guard-page tests
 end every input column at an inaccessible page through 65 elements.
+
+The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
+reversed chain, independent moves, long and disjoint cycles, fan-out and
+identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512 and
+1024 moves, with sparse ids including UINT32_MAX. A 2^20-move chain checks the
+full accepted limit. Snapshot execution checks meaning, the independent scan
+checks exact ordering on small sets, and the scalar/vector indexed paths agree
+exactly. Read-only guarded columns cover every tail through 33 elements; a
+byte-by-byte capacity sweep checks rollback, prior arena contents and retained
+output length. Scratch collisions, duplicate destinations, excessive counts
+and absent columns fail transactionally.
 
 Original native straight-line reductions execute the assigned register/spill
 plans through the existing encoder with rematerialization enabled and disabled,
