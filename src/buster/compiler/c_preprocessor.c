@@ -1342,6 +1342,9 @@ struct Preprocessor
     uint32_t diagnostic_origin;
     uint32_t diagnostic_include_range;
     uint32_t origin_peak[3];
+    // A test's fault (pp_test_direct_argument_failures): the next growth of a stack's origins fails, as when its arena
+    // can't be reserved.
+    bool fail_origin_growth;
     // Scratch spellings, per kind (raw, as source to be read again, or clean, which are final: pp_scratch_clean): the
     // arena, the range of the chunk being filled (BUSTER_PP_NONE before the first) and how much of it is used. A clean
     // spelling is known by its arena (pp_without_splices).
@@ -9383,9 +9386,78 @@ static void pp_finish_operators(Preprocessor* pp, const PPInvocation* invocation
 }
 
 // Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
+// Whether every enabled macro that tokens [begin, end) of pp->arguments name is a direct object (pp_direct_object): then
+// the argument's expansion is its tokens with each such name replaced by its body, which names no macro.
+static bool pp_direct_argument(const Preprocessor* pp, uint32_t begin, uint32_t end)
+{
+    bool result = true;
+    for (uint32_t i = begin; result && i < end; i += 1)
+    {
+        const IdentId id = pp->arguments.values[i];
+        const bool name = pp->arguments.kinds[i] == C_TOKEN_RAW_IDENTIFIER && !(pp->arguments.flags[i] & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, id) &&
+                          pp->macros[pp->macro_of[id]].disabled == 0;
+        result = !name || pp_direct_object(pp, &pp->macros[pp->macro_of[id]]);
+    }
+    return result;
+}
+
+// An argument that pp_direct_argument takes, expanded as the main loop expands it behind its barrier, at the end of
+// pp->arguments, which the argument's record then names: its runs of other tokens copied (pp_step_buffer's, but for
+// their names of disabled macros, which the main loop paints there and the expansion's rescan or pp_emit_simple paints
+// as surely, as pp_finish_simple leaves the arguments that need no expansion), and each direct object's body in its
+// name's place under an expansion record of its own, its first token with the name's flags (pp_expand_object's direct
+// expansion). With the statistics the main loop counts: a buffer run where the argument starts and after each name it
+// expands, while tokens are left. Returns false, after a fatal error, if there is no room.
+static bool pp_expand_direct_argument(Preprocessor* pp, PPArgument* argument)
+{
+    PPTokens* out = &pp->arguments;
+    const uint32_t begin = out->count;
+    uint64_t runs = 1;
+    uint64_t copied = 0;
+    uint32_t run = argument->raw_begin;
+    bool result = true;
+    for (uint32_t i = argument->raw_begin; result && i < argument->raw_end; i += 1)
+    {
+        const PPToken token = pp_stack_token(out, i);
+        const PPMacroId id = token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) ? pp->macro_of[token.value] : 0;
+        if (id != 0 && pp->macros[id].disabled == 0)
+        {
+            const PPMacro* macro = &pp->macros[id];
+            result = pp_append_stack_tokens(pp, out, out, run, i);
+            copied += i - run;
+            const uint32_t saved_history = pp->history_current;
+            pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
+            const uint32_t at = out->count;
+            result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
+            pp->history_current = saved_history;
+            if (result)
+            {
+                const uint8_t name_flags = (uint8_t)((token.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, token.flags, token.location));
+                uint8_t* flags = &out->flags[at];
+                *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+                pp->statistics.direct_expansions += pp->options.timing;
+            }
+            runs += i + 1 < argument->raw_end;
+            run = i + 1;
+        }
+    }
+    result = result && pp_append_stack_tokens(pp, out, out, run, argument->raw_end);
+    copied += argument->raw_end - run;
+    argument->raw_begin = begin;
+    argument->raw_end = out->count;
+    if (pp->options.timing)
+    {
+        pp->statistics.expanded_arguments += 1;
+        pp->statistics.buffer_runs += runs;
+        pp->statistics.buffer_run_tokens += copied;
+    }
+    return result;
+}
+
 // pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro, or one whose template has ## and #
 // and plans the invocation (pp_plan_operators), given as many arguments as it takes, none of the ones it expands naming
-// an enabled macro (so each is its own expansion), read while no stream or capture with a limit is open. Then it isn't
+// an enabled macro (so each is its own expansion) but, for a simple macro, direct objects, whose bodies take their names'
+// places (pp_expand_direct_argument), read while no stream or capture with a limit is open. Then it isn't
 // pushed on the invocation stack: its expansion is substituted at once (pp_substitute_simple, pp_finish_operators) and
 // pushed as a buffer, or written straight into the output. Returns false, having changed nothing, when the invocation
 // isn't simple. (Copying an expansion that names no macro straight to the target, rather than pushing it, saved 75
@@ -9393,7 +9465,7 @@ static void pp_finish_operators(Preprocessor* pp, const PPInvocation* invocation
 static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
 {
     const PPMacro* macro = &pp->macros[invocation->macro];
-    const PPArgument* records = &pp->argument_records[invocation->arguments];
+    PPArgument* records = &pp->argument_records[invocation->arguments];
     // pp_close_invocation's count: f() has no argument when f has no parameter, and a variadic macro's variadic
     // argument may be omitted altogether (it gets an empty one).
     uint32_t count = pp->argument_record_count - invocation->arguments;
@@ -9405,10 +9477,15 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
     bool result = ((macro->flags & BUSTER_PP_MACRO_SIMPLE) || operators) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal &&
                   count + omitted == macro->parameter_count && pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
     const PPItem* order = pp->items + macro->items_begin + macro->item_count;
+    // The arguments to expand in place, by their places in the order (a macro expands at most 64 so).
+    uint64_t direct = 0;
     for (uint32_t k = 0; result && k < macro->order_count; k += 1)
     {
         const uint32_t parameter = order[k].parameter;
-        result = parameter >= count || !pp_needs_expansion(pp, &pp->arguments, records[parameter].raw_begin, records[parameter].raw_end);
+        const bool needs = parameter < count && pp_needs_expansion(pp, &pp->arguments, records[parameter].raw_begin, records[parameter].raw_end);
+        const bool expands = needs && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && k < 64 && pp_direct_argument(pp, records[parameter].raw_begin, records[parameter].raw_end);
+        result = !needs || expands;
+        direct |= expands ? 1ull << k : 0;
     }
     PPOperators made;
     uint32_t mode = BUSTER_PP_OPERATORS_NONE;
@@ -9430,56 +9507,72 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
             pp->statistics.invocations += 1;
             pp->statistics.arguments += count + omitted;
         }
-        // pp_close_invocation's place for diagnostics while it substitutes (a stack that overflows).
-        const uint32_t saved_origin = pp->diagnostic_origin;
-        pp->diagnostic_origin = invocation->history != 0 ? pp->history[invocation->history - 1].parent : 0;
-        uint32_t begin = 0;
-        uint32_t end = 0;
-        uint8_t trailing;
-        bool emitted;
-        if (operators)
+        // In the order the general path expands them in (pp_continue_invocation's), each record then naming its expansion.
+        for (uint64_t pending = direct; pending != 0 && !pp->fatal; pending &= pending - 1)
         {
-            emitted = mode == BUSTER_PP_OPERATORS_EMIT;
-            begin = pp->expansions.count;
-            pp_finish_operators(pp, invocation, template, mode, 0, 0, &made, &trailing);
+            pp_expand_direct_argument(pp, &records[order[__builtin_ctzll(pending)].parameter]);
+        }
+        if (pp->fatal)
+        {
+            // An argument without room to expand in (pp_room's, or its origins' growth, pp_history_fill's) ends the run,
+            // as the main loop stops before it substitutes: the invocation is consumed and nothing is substituted, which
+            // would read the argument's origins past what was allocated.
+            pp->arguments.count = invocation->arguments_begin;
+            pp->argument_record_count = invocation->arguments;
         }
         else
         {
-            emitted = pp_emit_simple(pp, invocation, &trailing);
-            if (!emitted && !pp_substitute_template(pp, invocation, &begin, &trailing))
+            // pp_close_invocation's place for diagnostics while it substitutes (a stack that overflows).
+            const uint32_t saved_origin = pp->diagnostic_origin;
+            pp->diagnostic_origin = invocation->history != 0 ? pp->history[invocation->history - 1].parent : 0;
+            uint32_t begin = 0;
+            uint32_t end = 0;
+            uint8_t trailing;
+            bool emitted;
+            if (operators)
             {
-                pp_substitute_simple(pp, invocation, &begin, &trailing);
+                emitted = mode == BUSTER_PP_OPERATORS_EMIT;
+                begin = pp->expansions.count;
+                pp_finish_operators(pp, invocation, template, mode, 0, 0, &made, &trailing);
             }
-        }
-        end = emitted ? 0 : pp->expansions.count;
-        const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
-        if (begin < end)
-        {
-            uint8_t* flags = &pp->expansions.flags[begin];
-            *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
-        }
-        pp->arguments.count = invocation->arguments_begin;
-        pp->argument_record_count = invocation->arguments;
-        if (emitted)
-        {
-            // The buffer's pop would pass its trailing space on to the context below it.
-            pp->contexts[pp->context_count - 1].pending_flags |= trailing;
-        }
-        else if (begin < end)
-        {
-            PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation->macro, invocation->expansion_end, false, true);
-            if (context != 0)
+            else
             {
-                context->trailing_flags = trailing;
+                emitted = pp_emit_simple(pp, invocation, &trailing);
+                if (!emitted && !pp_substitute_template(pp, invocation, &begin, &trailing))
+                {
+                    pp_substitute_simple(pp, invocation, &begin, &trailing);
+                }
             }
+            end = emitted ? 0 : pp->expansions.count;
+            const uint8_t name_flags = invocation->name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+            if (begin < end)
+            {
+                uint8_t* flags = &pp->expansions.flags[begin];
+                *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+            }
+            pp->arguments.count = invocation->arguments_begin;
+            pp->argument_record_count = invocation->arguments;
+            if (emitted)
+            {
+                // The buffer's pop would pass its trailing space on to the context below it.
+                pp->contexts[pp->context_count - 1].pending_flags |= trailing;
+            }
+            else if (begin < end)
+            {
+                PPContext* context = pp_push_buffer(pp, &pp->expansions, begin, end, invocation->macro, invocation->expansion_end, false, true);
+                if (context != 0)
+                {
+                    context->trailing_flags = trailing;
+                }
+            }
+            else
+            {
+                // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
+                const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+                pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
+            }
+            pp->diagnostic_origin = saved_origin;
         }
-        else
-        {
-            // An empty expansion: the next token read after the invocation's ')' takes its name's flags.
-            const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
-            pp->contexts[pp->context_count - 1].pending_flags |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
-        }
-        pp->diagnostic_origin = saved_origin;
     }
     return result;
 }
