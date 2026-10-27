@@ -255,9 +255,12 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__(\"\" : \"+r\"(r));return (int)r;}",
                                        "asm-register-variable", true, false, 0, 1, "explicit register variables as inline assembly operands");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\");return;}int tested(int n){return n;}",
-                                       "asm-naked-statement", true, false, 0, 0, "statements other than asm statements in naked functions");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(int n){__asm__(\"ret\" : : \"r\"(n));}int tested(int n){return n;}",
+    // #554 rejects ordinary statements and parameter operands before lowering. An uninitialized named-register VLA
+    // passes that constraint, but evaluating its bound still gives the naked planner a non-asm control to refuse.
+    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(int n){register int x[n] asm(\"rax\");__asm__(\"ret\");}int tested(int n){return n;}",
+                                       "asm-naked-vla-register", true, false, 0, 0, "statements other than asm statements in naked functions");
+    // A constant with a register constraint reaches the planner without a forbidden parameter reference.
+    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\" : : \"r\"(1));}int tested(int n){return n;}",
                                        "asm-naked-operand", true, false, 0, 0, "naked functions' inline assembly operands other than integer constants");
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){}int tested(int n){return n;}",
                                        "asm-naked-empty", true, false, 0, 0, "naked functions of no instructions");
