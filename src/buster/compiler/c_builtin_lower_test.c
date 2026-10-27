@@ -704,6 +704,55 @@ static void cbuiltin_lower_test_guards(CBuiltinLowerTestTally* tally)
     }
 }
 
+// Descriptors with BUSTER_CBUILTIN_LOWER_WIDE beside other bits, as an operand's (its slot a 128-bit operand's object,
+// which the recipe would take) or the destination's, by both publication paths: each refused as unsupported, with
+// nothing appended and no local claimed. The flag alone, signed or not, says 128 bits (#533's review).
+static void cbuiltin_lower_test_wide_refusals(CBuiltinLowerTestTally* tally)
+{
+    const uint32_t malformed[4] =
+    {
+        BUSTER_CBUILTIN_LOWER_WIDE | 1,
+        BUSTER_CBUILTIN_LOWER_WIDE | 64,
+        BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED | 64,
+        BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED | 8,
+    };
+    for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(malformed); m += 1)
+    {
+        for (uint32_t position = 0; position < 3; position += 1)
+        {
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                const CBuiltinLowerCall call =
+                {
+                    .id = CBUILTIN_MUL_OVERFLOW,
+                    .a = 0,
+                    .b = 1,
+                    .destination = 2,
+                    .a_type = position == 0 ? malformed[m] : 64,
+                    .b_type = position == 1 ? malformed[m] : 64 | BUSTER_CBUILTIN_SIGNED,
+                    .result_type = position == 2 ? malformed[m] : 64,
+                };
+                CBuiltinLowerTestStream stream;
+                cbuiltin_lower_test_stream(&stream, &call);
+                if (position < 2)
+                {
+                    stream.local_classes[position] = BUSTER_TYPED_CLASS_VOID;
+                    stream.local_flags[position] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                stream.buffer.count = 2;
+                const CBuiltinLowerTestStream before = stream;
+                const CBuiltinLowerResult lowered = path == 0 ? cbuiltin_lower_scalar(&stream.buffer, &call) : cbuiltin_lower(&stream.buffer, &call);
+                const bool untouched = memcmp(stream.kinds, before.kinds, sizeof(stream.kinds)) == 0 && memcmp(stream.classes, before.classes, sizeof(stream.classes)) == 0 &&
+                                       memcmp(stream.values, before.values, sizeof(stream.values)) == 0 &&
+                                       memcmp(stream.local_classes, before.local_classes, sizeof(stream.local_classes)) == 0 &&
+                                       memcmp(stream.local_flags, before.local_flags, sizeof(stream.local_flags)) == 0;
+                cbuiltin_lower_test_expect(tally, lowered.error == CBUILTIN_LOWER_UNSUPPORTED && stream.buffer.count == 2 && stream.buffer.local_count == 3 && untouched,
+                                           "malformed wide descriptor refused", call.id, m * 6 + position * 2 + path);
+            }
+        }
+    }
+}
+
 static int run_builtin_lower_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -735,6 +784,7 @@ static int run_builtin_lower_tests(int argc, char** argv)
         Arena arena = arena_reserve(UINT64_C(1) << 28);
         uint64_t state = seed != 0 ? seed : 1;
         cbuiltin_lower_test_guards(&tally);
+        cbuiltin_lower_test_wide_refusals(&tally);
         for (uint32_t id = CBUILTIN_BSWAP16; id <= CBUILTIN_FFSLL; id += 1)
         {
             const CBuiltinLowerCall call = { .id = (CBuiltinId)id, .a = 0 };
