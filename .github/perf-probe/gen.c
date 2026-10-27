@@ -836,6 +836,59 @@ static void stringify(unsigned n)
     printf("end);\n}\n");
 }
 
+
+static void declarator_depth(unsigned n)
+{
+    printf("int ");
+    for (unsigned i = 0; i < n; i++)
+        printf("(");
+    printf("x");
+    for (unsigned i = 0; i < n; i++)
+        printf(")");
+    printf(";\nint get(void)\n{\n    return x;\n}\n");
+}
+
+static void typedef_chain(unsigned n)
+{
+    printf("typedef int T0;\n");
+    for (unsigned i = 1; i < n; i++)
+        printf("typedef T%u T%u;\n", i - 1, i);
+    printf("T%u get(T%u a)\n{\n    return a + 1;\n}\n", n - 1, n / 2);
+}
+
+static void diagnostic_pragmas(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wunused-value\"\nint f_%u(int x)\n{\n    x + %u;\n    return x;\n}\n#pragma GCC diagnostic pop\n", i, i);
+}
+
+static void inline_asm(unsigned n)
+{
+    printf("int f(int x)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    __asm__(\"addl $%u, %%0\" : \"+r\"(x));\n", i % 100);
+    printf("    return x;\n}\n");
+}
+
+static void offsetofs(unsigned n)
+{
+    printf("struct S\n{\n");
+    for (unsigned i = 0; i < 512; i++)
+        printf("    int m%u;\n", i);
+    printf("};\nunsigned long f(void)\n{\n    unsigned long s = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    s += __builtin_offsetof(struct S, m%u);\n", (i * 7) % 512);
+    printf("    return s;\n}\n");
+}
+
+static void builtins_heavy(unsigned n)
+{
+    printf("int f(int x)\n{\n    int y = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    if (__builtin_expect(x > %u, 0)) y += __builtin_popcount((unsigned)x + %u) + __builtin_clz((unsigned)x | 1u);\n", i, i);
+    printf("    return y;\n}\n");
+}
+
 int main(int count, char** arguments)
 {
     if (count < 3)
@@ -939,6 +992,12 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "function-pointer-parameters") == 0) function_pointer_parameters(n);
     else if (strcmp(mode, "nested-switches") == 0) nested_switches(n);
     else if (strcmp(mode, "stringify") == 0) stringify(n);
+    else if (strcmp(mode, "declarator-depth") == 0) declarator_depth(n);
+    else if (strcmp(mode, "typedef-chain") == 0) typedef_chain(n);
+    else if (strcmp(mode, "diagnostic-pragmas") == 0) diagnostic_pragmas(n);
+    else if (strcmp(mode, "inline-asm") == 0) inline_asm(n);
+    else if (strcmp(mode, "offsetofs") == 0) offsetofs(n);
+    else if (strcmp(mode, "builtins-heavy") == 0) builtins_heavy(n);
     else
     {
         fprintf(stderr, "gen: unknown mode %s\n", mode);
