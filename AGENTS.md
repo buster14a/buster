@@ -3388,8 +3388,9 @@ by the direct path and by each linker, and reports medians:
   was higher, which Linux carries over at `exec`. The helper's own floor, a
   program that does nothing, is printed first;
 - `link-foreign` (#86, #394), this executable's linker of other compilers'
-  objects, given the same command line as a process of its own, with
-  `--lanes=8` for its threads and `--lanes=1` for one, for every kind.
+  objects, given the same command line as a process of its own, for every
+  kind: by default for its threads (the lanes its objects pay for, #594),
+  with `--lanes=8`, the most its default takes, and with `--lanes=1` for one.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
