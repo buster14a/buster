@@ -4643,6 +4643,55 @@ static bool pp_test_raw_recovery_failures(void)
     return result;
 }
 
+// #595's review: an argument expanded in place (pp_expand_direct_argument) that runs out of room, as the history records
+// it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
+// starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
+// pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing
+// taken away, gives F's whole expansion.
+static bool pp_test_direct_argument_failures(void)
+{
+    enum
+    {
+        PP_TEST_DIRECT_TOKENS = 1100,
+    };
+    static char source[PP_TEST_DIRECT_TOKENS * 2 + 64];
+    uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define F(a) [a]\n#define X");
+    for (uint32_t t = 0; t < PP_TEST_DIRECT_TOKENS; t += 1)
+    {
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, " x");
+    }
+    length += (uint32_t)snprintf(source + length, sizeof(source) - length, "\nF(X)\n");
+    bool result = true;
+    for (uint32_t fault = 0; fault < 3; fault += 1)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint32_t capacity = initialized ? pp.arguments.capacity : 0;
+        pp.fail_origin_growth = initialized && fault == 0;
+        pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
+        const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
+        const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
+                                                       : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
+        if (!passed)
+        {
+            printf("direct argument failure %u: ran %u, fatal %u, errors %u, output %u\n", fault, ran, initialized && pp.fatal, initialized ? pp.errors : 0,
+                   initialized ? pp.output.count : 0);
+        }
+        result = result && passed;
+        pp.arguments.capacity = capacity;
+        pp.fail_origin_growth = false;
+        if (initialized)
+        {
+            pp_release(&pp);
+        }
+        intern_release(&table);
+    }
+    printf("direct argument failures: %s (origins' growth, the arguments' room, control)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 // #361: a part of the prelude that can't be made (its arena push or virtual file, out of memory or past the files table)
 // is fatal, and the run fails without running the parts after it. Each fault is injected after pp_initialize: the arena's
 // capacity cut below a part's push (a -D or -include of a megabyte makes the part's push the one that fails), or the
@@ -7311,6 +7360,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_named_ucn_scaling(directory);
         passed_all &= pp_test_named_ucn_boundaries(directory);
         passed_all &= pp_test_prelude_failures();
+        passed_all &= pp_test_direct_argument_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

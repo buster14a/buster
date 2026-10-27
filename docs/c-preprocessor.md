@@ -651,7 +651,10 @@ macro's expansion, an argument being expanded, or a directive's line):
   argument, its direct expansions, and a buffer run where the argument starts
   and after each name it expands, while tokens are left. An empty object, an
   object whose body names a macro, a function-like name, or one argument of
-  that kind leaves the invocation to the main loop. Only vectorized runs take
+  that kind leaves the invocation to the main loop. An argument without room to
+  expand in (its tokens, or its origins as the history records them) is a fatal
+  error that ends the run before anything is substituted, as the main loop stops
+  before it substitutes. Only vectorized runs take
   this path, with the history deferred or recorded, so the scalar twins' general
   path is its twin. On `sqlite3.c`, 2,125 of the 3,529 invocations that took the
   invocation stack take it.
