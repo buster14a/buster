@@ -1245,7 +1245,7 @@ static void check_constant_source_regions(CheckConstantInput* input)
         if (token < region_end)
         {
             const uint32_t index = token - input->first;
-            if (reader->ignored[token] && check_input_intrinsic_type(reader, token) == 0)
+            if (reader->ignored[token])
             {
                 input->statement_syntax[index] |= 1;
                 input->syntax[index] = true;
