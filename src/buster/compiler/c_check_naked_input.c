@@ -109,6 +109,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     CheckInputNakedDiagnostic diagnostic = { .position = BUSTER_CHECK_NONE };
     CheckInputMessage message = CHECK_INPUT_NAKED_STATEMENT;
+    uint32_t statement = 0;
     for (uint32_t body = 0; reader->naked_functions && !input->resource && body < reader->expression_limit && diagnostic.position == BUSTER_CHECK_NONE; body += 1)
     {
         const uint32_t declaration = input->body_declarations[body];
@@ -136,7 +137,13 @@ static void check_input_naked_finish(CheckInputReader* reader)
                 diagnostic.token = first;
             }
         }
-        for (uint32_t statement = 0; statement < input->asm_count; statement += 1)
+        // The reader and deferred merge both retain asm statements in source order. Advance once through
+        // that list, including ordinary functions and file-scope asm, rather than rescanning it per body.
+        while (statement < input->asm_count && input->asm_statements[statement].token < body)
+        {
+            statement += 1;
+        }
+        for (; statement < input->asm_count && input->asm_statements[statement].token < closing; statement += 1)
         {
             const CheckInputAsm* assembly = input->asm_statements + statement;
             if (assembly->body == body && assembly->closing < reader->expression_limit && assembly->closing < diagnostic.position)

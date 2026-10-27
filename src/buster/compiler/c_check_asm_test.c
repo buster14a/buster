@@ -57,6 +57,10 @@ static const CheckAsmFixture check_asm_fixtures[] =
     { "naked-compound-register", "__attribute__((naked)) void f(void) {\n{ register int x asm(\"eax\"); }\n}\n" },
     { "naked-if-register", "__attribute__((naked)) void f(void) {\nif(1) { register int x asm(\"eax\"); }\n}\n" },
     { "naked-expression-register", "__attribute__((naked)) void f(void) {\n({ register int x asm(\"eax\"); });\n}\n" },
+    { "naked-interleaved-functions", "__asm__(\".text\");\n__attribute__((naked)) void a(void) { __asm__(\"ret\"); }\n"
+      "void b(int n) { __asm__(\"\" : : \"r\"(n)); }\n__asm__(\".text\");\n"
+      "__attribute__((naked)) void c(int n) { __asm__(\"\" : : \"i\"(3)); }\n"
+      "__attribute__((naked)) void d(int n) { __asm__(\"\" : : \"r\"(n)); }\n" },
     {
         "basic-file",
         "__asm__(\".text\\n\" \".p2align 2\");int f(void){return 1;}",

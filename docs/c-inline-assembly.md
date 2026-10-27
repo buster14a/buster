@@ -59,7 +59,8 @@ within a statement precede the body constraint while the displayed location is
 the offending statement or parameter use.
 
 The new function bit shares the existing flag column. Only units declaring
-naked functions run the body scan; only a rejected input allocates the small
+naked functions run the body scan, advancing once through the source-ordered
+asm list rather than rescanning it per body; only a rejected input allocates the small
 diagnostic record. Attribute inheritance copies the small attribute accumulator
 before appending the inherited record. No token column or syntax replay is added.
 The checker and its scalar twin consume the same resolved metadata. Lowering's
