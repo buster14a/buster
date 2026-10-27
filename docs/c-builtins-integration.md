@@ -558,9 +558,11 @@ the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
 `__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
 this checker doesn't give); they take the x86 path, which adds no rule for
-them. Neither path folds a call in a constant context, nor takes one as
-`_Generic`'s controlling expression yet (#488), and a direct range's
-violation is an event nothing reports yet (#487).
+them. `_Generic`'s controlling expression uses the captured intrinsic
+prototype on both checker paths (#488), including in declaration-time bounds
+and type queries. Ordinary argument conversions determine the exact result
+type; the control and its arguments remain unevaluated. These paths do not
+fold the intrinsic call in a constant context.
 The producer attests exact catalogue membership and successful ordinary
 prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
@@ -572,6 +574,62 @@ default error severity. Source constant-evaluated context skips only these
 ranges. Runtime suppression and proven call reachability independently select
 ready, deferred or suppressed events. Unknown reachability cannot silently
 discard one. These checks establish no target-feature or runtime capability.
+
+For #487, `check_program_x86_diagnostics` resolves pending range events after
+the checked program's control columns are complete, before any lowering. Its
+worklist follows each function's entry, jumps, loops, switch dispatch and
+expression evaluation edges. Constant conditions select their executable
+edges; unknown conditions retain both. `sizeof`, `alignof`, short-circuited
+operands and unreachable statements do not make a call executable. Initializer
+parts, assembly operands and statement-expression regions supply their own
+roots. A reached automatic compound-literal value follows its declaration's
+initializer plan and queues its `CHECK_INIT_VALUE` parts; those runtime edges
+are stored outside the leaf's graph operands. Nested compound literals use
+the same bounded worklist, while dead or unevaluated literals supply no roots.
+The driver reports each surviving event at the builtin's source
+location, with the converted immediate and its valid bounds, through
+`-Wargument-outside-range`'s default-error policy. Diagnostic pragmas can
+downgrade or suppress it; `-w` suppresses it too. A failed or incomplete program
+leaves unknown events for conservative reporting rather than dropping them.
+
+Only an actual range event allocates the temporary reachability worklist.
+It uses one visited byte and one 64-bit stack slot per graph node/control,
+each queued at most once, and restores scratch on success and failure. The
+scalar walk handles the dependent edges of this exceptional diagnostic path;
+ordinary valid inputs retain the existing scalar/vector checking kernels.
+`test-checker` compares independent source fixtures with Clang, one translation
+unit per fixture, through both production driver schedules. It checks
+acceptance, severity, complete range messages and source locations, including
+negative immediates, dead control flow, unevaluated operands and pragma state.
+
+For #562, `check_input_x86_contexts` supplies source diagnostic context before
+`check_x86_action` consumes the sparse `CheckX86Call` records. An unselected
+`__builtin_choose_expr` arm (or `_Generic` association) diagnoses its range
+violations eagerly, even inside a dead statement or a short circuit. This is
+separate from the call's executable reachability. Enclosing `sizeof`, `alignof`,
+`typeof` and generic controlling operands still suppress range diagnostics;
+hard immediate constraints and source-point pragma policy keep their existing
+behavior. Selected arms continue through the deferred executable-graph walk.
+
+This source diagnostic policy also covers bounds written inside `sizeof` VLA
+type names: the recorded Clang 23 references accept `sizeof(int[n + BAD])`
+without the range diagnostic, including selected and unselected choose arms
+inside the bound. This does not make the VLA bound unevaluated at runtime;
+the existing explicit VLA captures still execute. Isolated differential
+fixtures pin this distinction, including the review reproducer with an
+unrelated choose expression elsewhere in the same function.
+
+The producer uses the retained selection roots and parser subtree bounds,
+without reparsing or changing executable operands. Only inputs containing both
+selections and x86 calls allocate its scratch: one u32 difference column with
+one sentinel and two byte columns, six bytes per token plus four bytes. The
+two bounded interval scans reuse the packed-member diagnostic's vector prefix
+kernel and its scalar twin. Each x86 record receives `unselected_context` and
+`runtime_diagnostic_suppressed`; these booleans need no token-wide retained
+storage. Allocation failure marks the source input as a resource failure,
+leaves call metadata untouched and restores scratch. Differential fixtures
+exercise both driver schedules, nested selections, dead statements, unevaluated
+contexts and pragma/`-w` policy; storage tests cover every allocation cut.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings. Its exact

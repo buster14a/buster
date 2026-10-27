@@ -317,6 +317,68 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     unlink(plain_output);
 }
 
+// GNU C's inline assembly by the driver (#147): an executable, linked by the direct path from each path into the same
+// bytes, whose naked function has a label another template takes the address of, and whose template calls libc's puts
+// by name, an undefined global that binding takes from libc.so.6; and a label named as one of the unit's functions,
+// which the emission refuses by name, as GNU as and clang refuse a symbol defined twice.
+static void check_test_driver_asm_symbols(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] =
+        "static __attribute__((used)) const char message[] = \"naked\";\n"
+        "static __attribute__((naked, noinline)) long twice(long x)\n"
+        "{\n"
+        "    __asm__(\"leaq (%rdi,%rdi), %rax\\n\\tret\\nthrice:\\n\\tleaq (%rdi,%rdi,2), %rax\\n\\tret\\n\");\n"
+        "}\n"
+        "static long thrice_address(void) { long a; __asm__(\"leaq thrice(%%rip), %0\" : \"=r\"(a)); return a; }\n"
+        "int main(void)\n"
+        "{\n"
+        "    long (*f)(long) = (long (*)(long))thrice_address();\n"
+        "    __asm__ volatile(\"leaq message(%%rip), %%rdi\\n\\tcall puts\" ::: \"rax\", \"rcx\", \"rdx\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"memory\");\n"
+        "    return (int)(twice(5) + f(7)) - 31;\n"
+        "}\n";
+    static const char refused[] = "int tested(int n) { __asm__(\"tested: nop\"); return n; }\n";
+    char source[256];
+    char refused_source[256];
+    char outputs[2][256];
+    char object[256];
+    snprintf(source, sizeof(source), "%s/asm_symbols.c", directory);
+    snprintf(refused_source, sizeof(refused_source), "%s/asm_label_symbol.c", directory);
+    snprintf(outputs[0], sizeof(outputs[0]), "%s/asm_symbols", directory);
+    snprintf(outputs[1], sizeof(outputs[1]), "%s/asm_symbols_scalar", directory);
+    snprintf(object, sizeof(object), "%s/asm_label_symbol.o", directory);
+    const bool written = object_write_file(source, (const uint8_t*)program, sizeof(program) - 1) == OBJECT_ERROR_NONE &&
+                         object_write_file(refused_source, (const uint8_t*)refused, sizeof(refused) - 1) == OBJECT_ERROR_NONE;
+    char* text = NULL;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-o", outputs[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-o", outputs[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "a naked function's label and a template's call of puts link" : "the same, scalar");
+        free(text);
+    }
+    check_test_expect(test, written && check_test_driver_same_files(outputs[0], outputs[1]), "both paths link the same executable of templates' symbols");
+    char captured[64] = { 0 };
+    FILE* output = written ? popen(outputs[0], "r") : NULL;
+    const size_t got = output != NULL ? fread(captured, 1, sizeof(captured) - 1, output) : 0;
+    const int closed = output != NULL ? pclose(output) : -1;
+    check_test_expect(test, closed == 0 && got == 6 && memcmp(captured, "naked\n", 6) == 0, "the program's templates run: puts prints, and the label is a second entry");
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", object, refused_source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", object, refused_source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: inline assembly labels named as the unit's symbols") != NULL,
+                          path == 0 ? "a label named as the unit's function is refused" : "the same, scalar");
+        free(text);
+    }
+    unlink(source);
+    unlink(refused_source);
+    unlink(outputs[0]);
+    unlink(outputs[1]);
+    unlink(object);
+}
+
 // A program whose 128-bit integers' division, remainder and conversions to and from double and long double call
 // libgcc.a's functions (#133's lowering), __fixdfti among them, whose member calls __fixunsdfti, which the program calls
 // too.
@@ -2059,6 +2121,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 }
 
 #include "c_check_packed_test.c"
+#include "c_check_x86_diagnostic_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -2548,6 +2611,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);
+            check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);
             check_test_driver_dependencies(&test, clang, executable, directory);

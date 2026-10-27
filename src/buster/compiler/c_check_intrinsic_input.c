@@ -68,6 +68,24 @@ static bool check_input_intrinsic_call_shape(const Parser* parser, uint32_t keyw
     return call;
 }
 
+// A call's source-position identity survives declaration-query suspension and binding replay. Do not look up
+// its spelling in the current scope when a type-only consumer resumes after that scope has changed.
+static TypeId check_input_intrinsic_type(const CheckInputReader* reader, uint32_t keyword)
+{
+    TypeId type = 0;
+    if (reader->output->intrinsic_ids != 0 && check_input_intrinsic_call_shape(reader->parser, keyword))
+    {
+        const uint32_t close = reader->parser->tree.parents[keyword];
+        const uint32_t id = reader->output->intrinsic_ids[close];
+        if (id != 0)
+        {
+            const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + id - 1;
+            type = reader->output->intrinsic_declarations[call->declaration].types.function_type;
+        }
+    }
+    return type;
+}
+
 // The tokens from `first` of the next 64 (a bit each) that are identifier operands outside the deferred bodies, which
 // the intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token,
 // and the caller tests each.

@@ -23,6 +23,12 @@
 //     at the asm, the operands loaded from the operand block whose address comes in rdi, the records, the register
 //     outputs stored through their addresses (which the block holds), and the epilogue: a frame unwind_tier0_frame
 //     takes. Its symbol follows the builtin helpers', and check_program_emit publishes it as theirs.
+// A naked function's statements are its whole code instead (check_program_asm_plan_naked): their templates, whose
+// operands must be integer constants, assembled together, with no prologue, epilogue or trap of the compiler's, as
+// clang's. Then the names (check_program_asm_names): every label a template defines and every name one refers to, once
+// in the unit, which the emission makes symbols of (check_program_emit_asm_symbols): a label a local symbol at its
+// record, and another name the program's symbol of that link name, or an undefined global, as GNU as and clang make
+// them.
 // The lowering (check_lower_asm, c_check_program_lower.c) fills the block in clang's order: each output's address (with
 // a `+` operand's value, loaded through it), then each input's value or a memory input's address, then the call.
 //
@@ -32,8 +38,9 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): asm goto, flag outputs, the x87, MMX, mask and vector
 // register classes and the other letters it doesn't place (A, p, Y, the floating constants), symbolic immediates and
 // constants outside their letter's range, operands of types no general or XMM register holds by value, bit-fields,
-// explicit register variables, clobbers of an operand's register, APX's registers, and templates whose instructions
-// refer to symbols (the second part of #147's claim) or that the assembler refuses.
+// explicit register variables, clobbers of an operand's register, APX's registers, templates the assembler refuses, a
+// label two templates define, and a `.L` name no template defines; and of naked functions (CheckProgramNaked.reason)
+// statements other than asm statements, operands other than integer constants, and bodies of no instructions.
 // Include after c_check_program_helpers.c, assembler.c, x86_target.c and tier0.c.
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_ASM_INCLUDED
@@ -73,16 +80,56 @@ struct CheckAsmPlace
     bool read;
 };
 
+// A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
+// (the code's count for its end), and its name, an index in CheckProgramAsms.names (check_program_asm_names'), whose
+// symbol the emission defines at the record's offset.
+typedef struct CheckProgramAsmLabel CheckProgramAsmLabel;
+struct CheckProgramAsmLabel
+{
+    String8 spelling;
+    uint32_t record;
+    uint32_t name;
+};
+
+// A name the unit's templates define or refer to, once (CheckProgramAsms.names): its spelling, and whether a template
+// defines it, as a label. Another is the program's symbol of that link name, or else an undefined global symbol of its
+// own (check_program_emit_asm_symbols).
+typedef struct CheckAsmName CheckAsmName;
+struct CheckAsmName
+{
+    String8 spelling;
+    bool label;
+};
+
 // A statement's plan: its operands' places (output_count + input_count of them), its block's bytes (0 for none), its
 // helper's index in CheckProgramHelpers.items (BUSTER_CHECK_NONE for a template of no instructions, which has none),
 // and for a statement the lowering refuses, why (CheckProgramLowered.reason), reported where the statement is lowered.
+// A helper's references refer to names: `names` has each one's spelling, in their order, and check_program_asm_names
+// makes each reference's target its index in CheckProgramAsms.names, which the emission makes its symbol's. `labels`
+// are the labels its template defines, at their records in the helper.
 typedef struct CheckProgramAsm CheckProgramAsm;
 struct CheckProgramAsm
 {
     CheckAsmPlace* places;
     const char* reason;
+    String8* names;
+    CheckProgramAsmLabel* labels;
+    uint32_t label_count;
     uint32_t block;
     uint32_t helper;
+    bool planned;
+};
+
+// A naked function's code (check_program_asm_plan_naked): its asm statements' templates assembled together, the whole
+// function, its references' names and its labels as a helper's plan has them; or why the lowering refuses it.
+typedef struct CheckProgramNaked CheckProgramNaked;
+struct CheckProgramNaked
+{
+    Tier0Code code;
+    const char* reason;
+    String8* names;
+    CheckProgramAsmLabel* labels;
+    uint32_t label_count;
     bool planned;
 };
 
@@ -92,6 +139,11 @@ struct CheckProgramAsms
     // input->asm_count of them, by statement (0 for a program without asm statements); a statement of no selected body
     // isn't planned.
     CheckProgramAsm* plans;
+    // By body, for a program with a naked function (0 otherwise): a naked body's code; another body isn't planned.
+    CheckProgramNaked* naked;
+    // The names the templates define and refer to, each once.
+    CheckAsmName* names;
+    uint32_t name_count;
     CheckProgramStatus status;
     uint32_t token;
 };
@@ -547,13 +599,14 @@ static bool check_asm_stores(const CheckAsmPlace* place)
     return place->written && (place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR);
 }
 
-// The helper's records around the template's (`code`, which refers to no symbol): the pushes of `saved`'s callee-saved
-// registers, the reservation that aligns rsp to 16 and keeps the block's address (`block`: whether the helper has an
-// operand block, in rdi), the loads, the template's records, the stores of the register outputs (through `stores`'
-// two registers) and the epilogue, with the template's branches in the helper's indices: the frame unwind_tier0_frame
-// takes (Tier0Code.frame_saved and frame_size). A failure is TIER0_ERROR_MEMORY.
+// The helper's records around the template's (`code`): the pushes of `saved`'s callee-saved registers, the reservation
+// that aligns rsp to 16 and keeps the block's address (`block`: whether the helper has an operand block, in rdi), the
+// loads, the template's records, the stores of the register outputs (through `stores`' two registers) and the epilogue,
+// with the template's branches and references in the helper's indices (its first record's, `*first`): the frame
+// unwind_tier0_frame takes (Tier0Code.frame_saved and frame_size). Each reference's target is 0, for
+// check_program_asm_names. A failure is TIER0_ERROR_MEMORY.
 static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t saved, const uint8_t stores[2],
-                                       bool block, Arena* output)
+                                       bool block, uint32_t* first, Arena* output)
 {
     Tier0Code result = { .error = TIER0_ERROR_MEMORY };
     uint32_t pushes = 0;
@@ -575,7 +628,8 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
     X86Instruction* written = records <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records) : 0;
     uint32_t* branches = code->branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code->branch_count) : 0;
     uint32_t* targets = code->branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code->branch_count) : 0;
-    if (written != 0 && (code->branch_count == 0 || (branches != 0 && targets != 0)))
+    LinkReference* references = code->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, code->reference_count) : 0;
+    if (written != 0 && (code->branch_count == 0 || (branches != 0 && targets != 0)) && (code->reference_count == 0 || references != 0))
     {
         uint32_t at = 0;
         uint32_t frame_saved = 0;
@@ -637,6 +691,12 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
             branches[b] = base + code->branches[b];
             targets[b] = base + code->targets[b];
         }
+        for (uint32_t r = 0; r < code->reference_count; r += 1)
+        {
+            const AsmCodeReference* reference = code->references + r;
+            references[r] = (LinkReference){ .instruction = base + reference->record, .field = reference->field, .kind = reference->kind, .addend = reference->addend };
+        }
+        *first = base;
         if (stored != 0)
         {
             written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
@@ -669,6 +729,8 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
             .branches = branches,
             .targets = targets,
             .branch_count = code->branch_count,
+            .references = references,
+            .reference_count = code->reference_count,
             .frame_saved = frame_saved,
             .frame_size = frame,
             .error = TIER0_OK,
@@ -693,6 +755,22 @@ static const X86MatchIndex* check_asm_matches(Arena* scratch)
         x86_match_initialize(index, &everything);
     }
     return index;
+}
+
+// Whether input `checked` is an integer constant an immediate takes (the checker's, without side effects, of an integer
+// or a pointer type), and then its value as clang prints it into `*constant`: its type's bits (`*bits` of them),
+// sign-extended.
+static bool check_asm_integer_constant(const TypeTable* types, const CheckAsmCheckedOperand* checked, int64_t* constant, uint32_t* bits)
+{
+    const CheckValue* value = &checked->value;
+    const TypeId type = checked->conversion.type != 0 ? checked->conversion.type : value->type;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = check_action_integer_type(types, type, &width, &is_signed) || check_action_kind(types, type) == BUSTER_TYPE_KIND_POINTER;
+    *bits = width != 0 ? width : 64;
+    const uint64_t raw = (uint64_t)value->integer;
+    *constant = *bits >= 64 ? (int64_t)raw : (int64_t)(raw << (64 - *bits)) >> (64 - *bits);
+    return value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && integer;
 }
 
 // Whether operand expression `node` names an explicit register variable (`register T x asm("reg")`), whose register
@@ -776,13 +854,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             .written = output,
             .read = !output || (statement->operands[k].flags & CHECK_ASM_READ) != 0,
         };
-        const bool constant = !output && value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
-                              (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && integer;
         // An integer constant as clang prints it: its type's bits, sign-extended. One its letters' ranges don't take goes in
         // a register where the constraint allows one too ("rI"(40)), as GCC and clang place it.
-        const uint32_t bits = width != 0 ? width : 64;
-        const uint64_t raw = (uint64_t)value->integer;
-        const int64_t extended = bits >= 64 ? (int64_t)raw : (int64_t)(raw << (64 - bits)) >> (64 - bits);
+        int64_t extended = 0;
+        uint32_t bits = 64;
+        const bool constant = !output && check_asm_integer_constant(types, checked, &extended, &bits);
         const bool fits = constant && constraint->immediate && check_asm_constant_fits(constraint, extended, bits);
         if (constraint->refused != NULL)
         {
@@ -953,13 +1029,29 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !scalar }, output, scratch);
         reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
         valid = code.error == NULL || reason != NULL;
-        reason = reason == NULL && code.reference_count != 0 ? "inline assembly that refers to symbols" : reason;
+        // A label with no instruction to follow in its template would be a place in the statement's function, which its
+        // code (Tier 0's) doesn't mark.
+        reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
     }
     if (valid && reason == NULL && code.count != 0)
     {
         // The callee-saved registers the statement touches: its clobbers', its operands' and the stores'.
-        helper->code = check_asm_helper_code(places, count, &code, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, stores, block != 0, output);
+        uint32_t first = 0;
+        helper->code = check_asm_helper_code(places, count, &code, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, stores, block != 0, &first, output);
         valid = helper->code.error == TIER0_OK;
+        // The references' names, and the labels at the helper's records.
+        plan->names = valid && code.reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, String8, code.reference_count) : 0;
+        plan->labels = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsmLabel, code.label_count) : 0;
+        valid = valid && (code.reference_count == 0 || plan->names != 0) && (code.label_count == 0 || plan->labels != 0);
+        for (uint32_t r = 0; valid && r < code.reference_count; r += 1)
+        {
+            plan->names[r] = code.references[r].name;
+        }
+        for (uint32_t k = 0; valid && k < code.label_count; k += 1)
+        {
+            plan->labels[k] = (CheckProgramAsmLabel){ .spelling = code.labels[k].name, .record = first + code.labels[k].record, .name = BUSTER_CHECK_NONE };
+        }
+        plan->label_count = valid ? code.label_count : 0;
         helper->id = CBUILTIN_NONE;
         helper->assembly = s + 1;
         helper->parameter_count = block != 0 ? 1 : 0;
@@ -983,14 +1075,261 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // A refusal keeps nothing but itself.
         arena_pop_to(output, output_mark);
         plan->places = 0;
+        plan->names = 0;
+        plan->labels = 0;
+        plan->label_count = 0;
     }
     arena_pop_to(scratch, scratch_mark);
     return valid;
 }
 
+// Whether body `b` is a naked function's: some declaration of its function up to its definition has the attribute
+// (CheckProgram.object_naked), as clang takes it; clang ignores one after the definition, with a warning.
+static bool check_program_asm_naked(const CheckProgram* program, uint32_t b)
+{
+    const CheckProgramBody body = program->bodies[b];
+    return program->object_naked != 0 && body.object < program->object_count && program->object_naked[body.object] <= body.declaration;
+}
+
+// Plans naked body `b` (CheckProgramNaked): its statements, each an asm statement whose operands are integer constants
+// (anything else is refused by name, as clang refuses statements other than asm statements), are its whole code: their
+// templates, substituted, assembled together in order, the syntax AT&T's again at each statement's start, as clang's
+// integrated assembler parses each statement afresh; without a prologue, an epilogue or a trap of the compiler's. Their
+// plans have no helper. Its one entry, the lowering's return of a function it doesn't compile, is the code's start. False
+// only for an arena without room or an inconsistent input, with both arenas then as they were.
+static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckProgram* program, uint32_t b, const CheckAsmCheckedOperand* operands,
+                                         const uint32_t* firsts, const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
+{
+    static const char att[] = ".att_syntax prefix\n";
+    const CheckInput* input = program->input;
+    const CheckProgramBody body = program->bodies[b];
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    CheckProgramNaked* naked = result->naked + b;
+    *naked = (CheckProgramNaked){ .planned = true };
+    String8* texts = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)body.count + 1);
+    bool valid = texts != 0;
+    const char* reason = NULL;
+    uint64_t length = 0;
+    uint32_t statements = 0;
+    for (uint32_t i = 0; valid && reason == NULL && i < body.count; i += 1)
+    {
+        const CheckControl control = program->controls[body.first + i];
+        const uint32_t s = control.target;
+        if (control.kind == CHECK_CONTROL_END)
+        {
+            // The body's closing brace.
+        }
+        else if (control.kind != CHECK_CONTROL_ASM)
+        {
+            reason = "statements other than asm statements in naked functions";
+        }
+        else if (s >= input->asm_count || result->plans == 0 || result->plans[s].planned)
+        {
+            result->status = CHECK_PROGRAM_INVALID;
+            result->token = control.token;
+            valid = false;
+        }
+        else
+        {
+            const CheckInputAsm* statement = input->asm_statements + s;
+            const uint32_t count = statement->output_count + statement->input_count;
+            CheckAsmPlace* places = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmPlace, count) : 0;
+            valid = count == 0 || places != 0;
+            result->plans[s] = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
+            reason = statement->is_goto ? "asm goto" : count > BUSTER_CHECK_ASM_OPERANDS ? "inline assembly statements of more than 64 operands" : NULL;
+            for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
+            {
+                const bool output = k < statement->output_count;
+                const CheckAsmConstraint constraint = check_asm_constraint_parse(statement, program->identifiers, statement->operands[k].constraint, output);
+                int64_t constant = 0;
+                uint32_t bits = 64;
+                const bool immediate = !output && constraint.refused == NULL && constraint.immediate &&
+                                       check_asm_integer_constant(program->types, operands + firsts[s] + k, &constant, &bits);
+                places[k] = (CheckAsmPlace){ .constant = constant, .slot = BUSTER_CHECK_NONE, .value = BUSTER_CHECK_NONE, .tied = BUSTER_CHECK_NONE,
+                                             .kind = BUSTER_CHECK_ASM_CONSTANT };
+                reason = !immediate ? "naked functions' inline assembly operands other than integer constants" :
+                         !check_asm_constant_fits(&constraint, constant, bits) ? "inline assembly constants outside their constraint's range" : NULL;
+            }
+            if (valid && reason == NULL)
+            {
+                reason = check_asm_substitute(statement, places, program->identifiers, s, scratch, texts + statements, &valid);
+                length += texts[statements].length + 1 + (statements != 0 ? sizeof(att) - 1 : 0);
+                statements += 1;
+            }
+        }
+    }
+    // The templates as one source, each on lines of its own.
+    char* source = valid && reason == NULL ? arena_push(scratch, length + 1, 1) : 0;
+    valid = valid && (reason != NULL || source != 0);
+    uint64_t at = 0;
+    for (uint32_t i = 0; valid && reason == NULL && i < statements; i += 1)
+    {
+        if (i != 0)
+        {
+            memcpy(source + at, att, sizeof(att) - 1);
+            at += sizeof(att) - 1;
+        }
+        memcpy(source + at, texts[i].pointer, texts[i].length);
+        at += texts[i].length;
+        source[at++] = '\n';
+    }
+    AsmCode code = { 0 };
+    if (valid && reason == NULL)
+    {
+        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !scalar }, output, scratch);
+        reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
+        valid = code.error == NULL || reason != NULL;
+        // clang makes an empty function of none, which would have an unwind entry of no bytes.
+        reason = reason == NULL && valid && code.count == 0 ? "naked functions of no instructions" : reason;
+    }
+    if (valid && reason == NULL)
+    {
+        LinkReference* references = code.reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, code.reference_count) : 0;
+        uint32_t* entries = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2);
+        naked->names = code.reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, String8, code.reference_count) : 0;
+        naked->labels = code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsmLabel, code.label_count) : 0;
+        valid = entries != 0 && (code.reference_count == 0 || (references != 0 && naked->names != 0)) && (code.label_count == 0 || naked->labels != 0);
+        for (uint32_t r = 0; valid && r < code.reference_count; r += 1)
+        {
+            const AsmCodeReference* reference = code.references + r;
+            references[r] = (LinkReference){ .instruction = reference->record, .field = reference->field, .kind = reference->kind, .addend = reference->addend };
+            naked->names[r] = reference->name;
+        }
+        for (uint32_t k = 0; valid && k < code.label_count; k += 1)
+        {
+            naked->labels[k] = (CheckProgramAsmLabel){ .spelling = code.labels[k].name, .record = code.labels[k].record, .name = BUSTER_CHECK_NONE };
+        }
+        if (valid)
+        {
+            // Its one entry's first record, and the epilogue's after it (Tier0Code.entry_records), which a naked function
+            // has none of: its code's end.
+            entries[0] = 0;
+            entries[1] = code.count;
+            naked->label_count = code.label_count;
+            naked->code = (Tier0Code){
+                .records = code.records,
+                .count = code.count,
+                .branches = code.branches,
+                .targets = code.targets,
+                .branch_count = code.branch_count,
+                .references = references,
+                .reference_count = code.reference_count,
+                .entry_records = entries,
+                .entry_count = 1,
+                .error = TIER0_OK,
+            };
+        }
+    }
+    if (!valid)
+    {
+        arena_pop_to(output, output_mark);
+        *naked = (CheckProgramNaked){ 0 };
+    }
+    else if (reason != NULL)
+    {
+        // A refusal keeps nothing but itself.
+        arena_pop_to(output, output_mark);
+        *naked = (CheckProgramNaked){ .reason = reason, .planned = true };
+    }
+    arena_pop_to(scratch, scratch_mark);
+    return valid;
+}
+
+// The entry of `spelling` in the names' table (`table`, `mask` + 1 slots of an index plus one, or 0 for none), added to
+// `names` if it isn't there.
+static uint32_t check_asm_name(CheckAsmName* names, uint32_t* count, uint32_t* table, uint32_t mask, String8 spelling)
+{
+    uint32_t slot = (uint32_t)link_hash((const uint8_t*)spelling.pointer, (uint32_t)spelling.length) & mask;
+    while (table[slot] != 0 && (names[table[slot] - 1].spelling.length != spelling.length ||
+                                memcmp(names[table[slot] - 1].spelling.pointer, spelling.pointer, spelling.length) != 0))
+    {
+        slot = (slot + 1) & mask;
+    }
+    if (table[slot] == 0)
+    {
+        names[*count] = (CheckAsmName){ .spelling = spelling };
+        *count += 1;
+        table[slot] = *count;
+    }
+    return table[slot] - 1;
+}
+
+// Gives every name the planned templates define or refer to its entry in `result->names`, once: each label its index,
+// and each reference's target its index (the emission makes it the name's symbol's). The labels come first, so that a
+// reference finds a label wherever its template is. A label two templates define, and a `.L` name (an assembler-local
+// one) no template defines, refuse the statement or the naked function that names it, as GNU as and clang reject them.
+// The scan is scalar, over a unit's few labels and references: main.c's units have 6. False only for an arena without
+// room.
+static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgramHelpers* helpers, const CheckProgram* program, Arena* output, Arena* scratch)
+{
+    const uint32_t statements = result->plans != 0 ? program->input->asm_count : 0;
+    const uint32_t bodies = result->naked != 0 ? program->body_count : 0;
+    uint64_t total = 0;
+    for (uint32_t s = 0; s < statements; s += 1)
+    {
+        const CheckProgramAsm* plan = result->plans + s;
+        total += plan->planned && plan->reason == NULL && plan->helper != BUSTER_CHECK_NONE ? plan->label_count + (uint64_t)helpers->items[plan->helper].code.reference_count : 0;
+    }
+    for (uint32_t b = 0; b < bodies; b += 1)
+    {
+        const CheckProgramNaked* naked = result->naked + b;
+        total += naked->planned && naked->reason == NULL ? naked->label_count + (uint64_t)naked->code.reference_count : 0;
+    }
+    uint32_t slots = 2;
+    while (slots < 2 * total && slots < (UINT32_C(1) << 31))
+    {
+        slots *= 2;
+    }
+    const uint64_t scratch_mark = scratch->length;
+    uint32_t* table = total != 0 && total < (UINT32_C(1) << 30) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots) : 0;
+    CheckAsmName* names = table != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckAsmName, total) : 0;
+    const bool valid = total == 0 || (table != 0 && names != 0);
+    uint32_t count = 0;
+    if (valid && total != 0)
+    {
+        memset(table, 0, (uint64_t)slots * sizeof(uint32_t));
+        // Each pass over the codes: the statements' helpers', then the naked functions'.
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            for (uint32_t c = 0; c < statements + bodies; c += 1)
+            {
+                CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
+                CheckProgramNaked* naked = c >= statements ? result->naked + (c - statements) : 0;
+                const bool planned = plan != 0 ? plan->planned && plan->reason == NULL && plan->helper != BUSTER_CHECK_NONE : naked->planned && naked->reason == NULL;
+                const Tier0Code* code = !planned ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
+                CheckProgramAsmLabel* labels = plan != 0 ? plan->labels : naked->labels;
+                const uint32_t label_count = !planned ? 0 : plan != 0 ? plan->label_count : naked->label_count;
+                const String8* spellings = plan != 0 ? plan->names : naked->names;
+                const char** reason = plan != 0 ? &plan->reason : &naked->reason;
+                for (uint32_t k = 0; pass == 0 && k < label_count; k += 1)
+                {
+                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, labels[k].spelling);
+                    *reason = names[name].label ? "inline assembly labels another template defines too" : *reason;
+                    names[name].label = true;
+                    labels[k].name = name;
+                }
+                for (uint32_t r = 0; pass == 1 && code != 0 && r < code->reference_count; r += 1)
+                {
+                    const String8 spelling = spellings[r];
+                    const uint32_t name = check_asm_name(names, &count, table, slots - 1, spelling);
+                    const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
+                    *reason = local && !names[name].label ? "inline assembly's local labels that no template defines" : *reason;
+                    code->references[r].target = name;
+                }
+            }
+        }
+    }
+    result->names = names;
+    result->name_count = count;
+    arena_pop_to(scratch, scratch_mark);
+    return valid;
+}
+
 // Plans every asm statement of the program's bodies (CheckProgramAsms), appending a helper for each whose template
-// assembles to instructions to `helpers`, after the builtin ones, with the next symbols. False for an arena without
-// room or an inconsistent input; the refusals are the plans' own, which the lowering reports in its order.
+// assembles to instructions to `helpers`, after the builtin ones, with the next symbols, and every naked function's code
+// (whatever its statements); then the names the templates define and refer to. False for an arena without room or an
+// inconsistent input; the refusals are the plans' own, which the lowering reports in its order.
 static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers* helpers, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
 {
     *result = (CheckProgramAsms){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
@@ -1007,17 +1346,28 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             statements += program->controls[program->bodies[b].first + i].kind == CHECK_CONTROL_ASM;
         }
     }
+    // The naked functions: a pass over the bodies of a unit that declares one, which needs no asm statement to be one.
+    uint32_t naked_count = 0;
+    for (uint32_t b = 0; program->object_naked != 0 && b < program->body_count; b += 1)
+    {
+        naked_count += check_program_asm_naked(program, b);
+    }
     const CheckAsms* asms = program->asms;
     bool valid = statements == 0 || (asms != 0 && asms->status == CHECK_ASM_OK && input->asm_count != 0);
     result->plans = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsm, input->asm_count) : 0;
+    result->naked = valid && naked_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramNaked, program->body_count) : 0;
     uint32_t* firsts = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->asm_count + 1) : 0;
     CheckProgramHelper* added = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, statements) : 0;
-    const X86MatchIndex* index = added != 0 ? check_asm_matches(scratch) : 0;
+    const X86MatchIndex* index = valid && (statements != 0 || naked_count != 0) ? check_asm_matches(scratch) : 0;
     uint32_t count = 0;
-    if (statements != 0 && (result->plans == 0 || firsts == 0 || added == 0 || index == 0))
+    if ((statements != 0 && (result->plans == 0 || firsts == 0 || added == 0 || index == 0)) || (naked_count != 0 && (result->naked == 0 || index == 0)))
     {
         result->status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = false;
+    }
+    if (valid && naked_count != 0)
+    {
+        memset(result->naked, 0, (uint64_t)program->body_count * sizeof(CheckProgramNaked));
     }
     if (valid && statements != 0)
     {
@@ -1031,9 +1381,18 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         valid = first == asms->count;
         result->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     }
+    for (uint32_t b = 0; valid && naked_count != 0 && b < program->body_count; b += 1)
+    {
+        if (check_program_asm_naked(program, b))
+        {
+            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, index, scalar, output, scratch);
+            result->status = valid ? CHECK_PROGRAM_OK : result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
+        }
+    }
     for (uint32_t b = 0; valid && statements != 0 && b < program->body_count; b += 1)
     {
-        for (uint32_t i = 0; valid && i < program->bodies[b].count; i += 1)
+        // A naked body's statements are its code, which its plan has.
+        for (uint32_t i = 0; valid && (result->naked == 0 || !result->naked[b].planned) && i < program->bodies[b].count; i += 1)
         {
             const CheckControl control = program->controls[program->bodies[b].first + i];
             const uint32_t s = control.target;
@@ -1078,6 +1437,11 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             helpers->items = items;
             helpers->count += count;
         }
+    }
+    if (valid && !check_program_asm_names(result, helpers, program, output, scratch))
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
     }
     if (!valid)
     {

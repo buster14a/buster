@@ -38,6 +38,16 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "naked-valid-bodies", "__attribute__((naked)) void f(int n) { ; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
+    { "naked-invalid-statement", "__attribute__((naked)) void f(void) { int x=1; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
+    { "naked-parameter-reference", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(n)); }\nint g(int n) { return n; }\n", true },
+    { "naked-inherited-attribute", "void f(void) __attribute__((naked));\nvoid f(void) { return; }\nint g(int n) { return n; }\n", true },
+    { "naked-vla-type-operand", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(sizeof(int[n]))); }\nint g(int n) { return n; }\n", true },
+    { "naked-vla-type-only-operand", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(sizeof(int[sizeof n]))); }\nint g(int n) { return n; }\n", true },
+    { "naked-inline-register-types", "__attribute__((naked)) void f(void) { register struct { int a; } x asm(\"rax\"); __asm__(\"ret\"); }\n"
+      "__attribute__((naked)) void g(void) { register enum { A=1 } x asm(\"rax\"); __asm__(\"ret\"); }\n", true },
+    { "naked-interleaved-bodies", "__asm__(\".text\");\n__attribute__((naked)) void f(int n) { ; __asm__(\"ret\"); }\n"
+      "void g(int n) { __asm__(\"\" : : \"r\"(n)); }\n__attribute__((naked)) void h(int n) { __asm__(\"\" : : \"i\"(3)); }\n", true },
     { "loop-hints", "int f(int n) {\n#pragma clang loop unroll_count(4)\n while (n--) {} return n; }\nint g(int n) {\n#pragma nounroll\n do n--; while(n); return n; }\n", true },
     { "loop-conflict", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) {} }\n", false },
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },

@@ -307,16 +307,20 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_check_program_asm.c` lowers GNU C's `asm` statements
   (#147). It places each operand by its constraint and substitutes the template
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
-  assembles it, by the checker's path, into records, branch columns and
-  references. The statement's code calls the result, a per-unit helper; a
-  template of no instructions, a barrier's, is no code at all.
+  assembles it, by the checker's path, into records, branch columns,
+  references and labels. The statement's code calls the result, a per-unit
+  helper; a template of no instructions, a barrier's, is no code at all. A
+  naked function's templates are its whole code. Templates' labels are local
+  symbols, and the other names they refer to are the unit's symbols of those
+  link names or undefined globals (`check_program_emit_asm_symbols`).
   `test-checker` runs each shape natively against clang -O0's build on both
-  paths and checks each refusal by name (`c_check_program_asm_test.c`).
-  `test-assembler` checks `asm_assemble_code`, and with `--cross-check` compares
-  the instructions it admits for templates with GNU as.
-  [The inline assembly guide](docs/c-inline-assembly.md) has the placement, the
-  substitution, the helper's frame, the refusals and what is pending: naked
-  functions and templates that refer to symbols.
+  paths and checks each refusal by name (`c_check_program_asm_test.c`);
+  `test-checker-driver` links and runs naked functions' labels and a template's
+  call of `puts` by the direct path. `test-assembler` checks
+  `asm_assemble_code`, and with `--cross-check` compares the instructions it
+  admits for templates with GNU as. [The inline assembly
+  guide](docs/c-inline-assembly.md) has the placement, the substitution, the
+  helper's frame, naked functions, names, the refusals and what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
   [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
@@ -2090,8 +2094,9 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
-  as it was), sizes and counts whose arithmetic overflows, and the page sizes
-  asked for, read back from `/proc/self/smaps`;
+  as it was), sizes and counts whose arithmetic overflows, the page sizes
+  asked for, read back from `/proc/self/smaps`, and a measuring arena's
+  (`arena_measure`) random pushes, which must take what a reserved arena's do;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;
@@ -4370,6 +4375,14 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;
+- a borrowed scratch (`ParseOptions.scratch`, #528), without files: units in
+  turn on one parser for each path, whose arena holds the caller's data below
+  its length and dirty pages above it (each parse's temporaries, and a pattern
+  before each parse): the fixtures' sources, valid code of which the vector
+  path sends some declarations to the scalar parser, an error, an unclosed
+  brace and 64 random streams. Each must parse as on a fresh parser, tokens,
+  tree, postorder, diagnostics and statistics alike, and leave the arena's
+  length and the caller's data as they were;
 - the driver, without files: seventeen cases' exit statuses and exact messages
   (a valid, an empty and an invalid file, the last with `--scalar` too, an
   `#error`, a missing header, a missing file, a directory, a sparse file past
@@ -4532,7 +4545,9 @@ body's), whatever the lane count. The lowering numbers the runtime's
 functions (libgcc's) and the label symbols part by part, and
 `check_lower_finish` puts them in source order. Lane 0 is the calling thread
 with the caller's arenas but for its writer's columns, which take the first
-lane's scratch in base pages (`CheckEmitRun.columns`, #531); each other lane
+lane's scratch in base pages (`CheckEmitRun.columns`, #531), reserved for
+exactly their room (`check_lower_writer_bytes`), or the caller's scratch where
+that address space can't be reserved; each other lane
 has its own (`CheckProgramLanes.arenas`), which the caller keeps until it is
 done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
@@ -4552,7 +4567,14 @@ causes, each emission one lane's: a lane short of room
 so many bytes in one of its arenas, from none up, doubling, until the part
 fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
 code's after it), and lanes that start no thread, in a child that
-`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+`RLIMIT_NPROC` limits (not as root); then in a child whose address space
+`RLIMIT_AS` limits, after an emission whose lane 0's columns must take exactly
+their reservation, emissions with less room than that reservation maps (lane
+0's columns in the caller's scratch) and with it and 1 GB more (in their
+reservation; the 8 lanes' other arenas not reserved), each one lane's; then
+emissions with the least room of the caller's scratch they take, found by
+halving, which must be less than lane 0's columns take, each one lane's; then
+the lane rule, and the driver's
 objects and executables by `--lanes` and by default, each one lane's, the
 executables exiting alike, and with lanes that don't start, and the failing
 programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
