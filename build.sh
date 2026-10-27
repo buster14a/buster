@@ -13,6 +13,11 @@
 # and time beside c_tokenize in one process: each SOURCE is a copy of c_lexer.c (compiled through
 # src/buster/compiler/c_lexer_variant.c into c_lexer_variant_NAME), or that file's assembly (.s), which
 # ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s writes with debug information, and label-spills may label.
+# ./build.sh shifts DIRECTORY SOURCE SHIFT... builds build/compiler, then links the same objects again into
+# DIRECTORY/compiler-SHIFT for each SHIFT, a number of bytes, with that much padding in .text before the objects of
+# SOURCE (a source's file name), a multiple of its .text's alignment: its code and what the linker places after it move
+# by SHIFT, the same instructions at other addresses. The same code ran up to 2% faster or slower so on the 9700X
+# (#509), so time-runs compares builds over several placements.
 set -e
 sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_checker.c src/buster/compiler/main_unit_check_builtins.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c src/buster/compiler/tier1_select_benchmark.c src/buster/compiler/tier1_model_measure.c)
 flags=(-march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror)
@@ -183,6 +188,34 @@ build_compiler()
     done > build/compile_commands.json
     clang -no-pie "${linker_flags[@]}" "${linked[@]}" "$@" -lm -ldl -o build/compiler
 }
+# Links build_compiler's objects into $1 with $3 bytes of padding in .text before the objects of the source of index
+# $2, an object of its own, in the order build_compiler links them. The padding is a section of its own,
+# .text.buster_shift_padding, which the linkers put in .text in the objects' order, with the source's .text's alignment
+# and SHF_GNU_RETAIN: wild collects sections nothing refers to (0.10 even what -u names, which 0.11 keeps), and places
+# .text's by their alignment, the largest first, in the objects' order within each, so only padding of the same
+# alignment goes right before the source's. Fails for a shift that isn't a multiple of that alignment, which would
+# round it up, and if the linker dropped the padding all the same.
+link_shifted()
+{
+    local object="$object_directory/$2.o" padding="$object_directory/padding-$3.o" alignment linked=()
+    alignment="$(readelf -SW "$object" | awk '$0 ~ /\] \.text / { print $NF }')"
+    [[ "$alignment" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh shifts: can't read the alignment of ${sources[$2]}'s .text" >&2; return 1; }
+    [ $(($3 % alignment)) -eq 0 ] || { echo "build.sh shifts: $3 isn't a multiple of ${sources[$2]}'s .text's alignment, $alignment" >&2; return 1; }
+    printf '\t.section .text.buster_shift_padding,"axR",@progbits\n\t.balign %d\n\t.globl buster_shift_padding\nbuster_shift_padding:\n\t.skip %d\n' \
+        "$alignment" "$3" | clang -c -x assembler - -o "$padding"
+    for i in "${!sources[@]}"; do
+        if [ "$i" -eq "$2" ]; then
+            linked+=("$padding")
+        fi
+        linked+=("$object_directory/$i.o")
+    done
+    clang -no-pie "${linker_flags[@]}" "${linked[@]}" -lm -ldl -o "$1"
+    if ! nm "$1" | grep -q ' buster_shift_padding$' || { [ "$3" -ne 0 ] && cmp -s build/compiler "$1"; }; then
+        echo "build.sh shifts: the linker dropped $1's padding" >&2
+        return 1
+    fi
+    echo "build.sh shifts: $1: ${sources[$2]}'s code $3 bytes later (its .text is aligned to $alignment)" >&2
+}
 # Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.
 select_linker()
 {
@@ -263,6 +296,28 @@ elif [ "$1" = lexer-variant ]; then
     build_compiler "${objects[@]}"
     for object in "${objects[@]}"; do
         rm -rf "$(dirname "$object")"
+    done
+elif [ "$1" = shifts ]; then
+    [ $# -ge 4 ] || { echo "usage: ./build.sh shifts DIRECTORY SOURCE SHIFT..." >&2; exit 1; }
+    directory="$2"
+    unit=""
+    for i in "${!sources[@]}"; do
+        if [ "$(basename "${sources[$i]}")" = "$3" ]; then
+            unit="$i"
+        fi
+    done
+    [ -n "$unit" ] || { echo "build.sh shifts: $3 isn't a source's file name" >&2; exit 1; }
+    shift 3
+    for bytes in "$@"; do
+        [[ "$bytes" =~ ^(0|[1-9][0-9]{0,6})$ ]] || { echo "build.sh shifts: $bytes isn't a shift of 0 to 9,999,999 bytes" >&2; exit 1; }
+    done
+    mkdir -p "$directory"
+    select_linker
+    rm -rf build || true
+    mkdir -p build
+    build_compiler
+    for bytes in "$@"; do
+        link_shifted "$directory/compiler-$bytes" "$unit" "$bytes"
     done
 else
     select_linker

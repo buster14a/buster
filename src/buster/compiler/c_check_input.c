@@ -6,6 +6,10 @@
 // bracket depths and are never used as semantic dependency levels. Unsupported declarators and statements fail
 // explicitly; no unresolved name or unrecognized syntax acquires an invented int type.
 
+// Parser token indices are below 1 << 30. The high bit distinguishes a source-only selection retained by a
+// declaration/type-query proof from an evaluated selection that may supply an expression graph operand.
+#define CHECK_INPUT_SOURCE_SELECTION 0x80000000u
+
 typedef enum CheckInputMessage
 {
     CHECK_INPUT_UNSUPPORTED,
@@ -88,6 +92,19 @@ typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
+typedef struct CheckInputPackedMember CheckInputPackedMember;
+struct CheckInputPackedMember
+{
+    uint32_t address;
+    uint32_t token;
+    uint32_t member;
+    uint32_t record;
+    String8 member_name;
+    String8 record_name;
+    uint8_t alignment_log2;
+    bool implicit_conversions;
+    bool suppressed;
+};
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 #define CHECK_INPUT_FUNCTION_INLINE 0x01u
 #define CHECK_INPUT_FUNCTION_EXTERN 0x02u
@@ -158,6 +175,9 @@ struct CheckInput
     uint32_t* initializer_begins;
     uint32_t* initializer_ends;
     uint32_t* token_nodes;
+    // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
+    CheckInputPackedMember* packed_members;
+    uint32_t packed_member_count;
     uint8_t* constant_warnings;
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
@@ -274,7 +294,7 @@ struct CheckInputReader
     uint8_t* designator_valid;
     uint32_t* designator_tokens;
     uint32_t* designator_ranges;
-    uint32_t* selected_tokens;
+    uint32_t* selected_tokens; // NONE, a runtime operand token, or SOURCE_SELECTION | a proof-only operand token.
     uint32_t* selection_type_ends;
     TypeId* selection_types;
     CheckValue* cached_constants;
@@ -1264,39 +1284,39 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
     return result;
 }
 
-static CheckLiteral check_input_literal(CheckInputReader* reader, uint32_t token)
+// A literal token's type and value, into `result`, written into the caller's rather than returned (#510: see
+// check_literal_integer).
+static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckLiteral* result)
 {
     const uint64_t mark = reader->scratch->length;
     const uint8_t* bytes = 0;
     uint32_t length = 0;
-    CheckLiteral result = { 0 };
+    *result = (CheckLiteral){ 0 };
     const uint32_t name = reader->parser->tokens.names[token];
     if (name == C_NAME_TRUE || name == C_NAME_FALSE)
     {
-        result = (CheckLiteral)
-        {
-            .type = BUSTER_TYPE_BOOL,
-            .integer = name == C_NAME_TRUE,
-            .valid = true,
-        };
+        result->type = BUSTER_TYPE_BOOL;
+        result->integer = name == C_NAME_TRUE;
+        result->valid = true;
     }
     else if (name == C_NAME_NULLPTR || name == C_NAME_GNU_NULLPTR)
     {
-        result = (CheckLiteral)
-        {
-            .type = BUSTER_TYPE_NULLPTR,
-            .valid = true,
-        };
+        result->type = BUSTER_TYPE_NULLPTR;
+        result->valid = true;
     }
     else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
     {
-        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ?
-                     check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned) :
-                     check_literal_number(bytes, length, reader->scratch);
+        if (reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER)
+        {
+            *result = check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned);
+        }
+        else
+        {
+            check_literal_number(bytes, length, reader->scratch, result);
+        }
     }
-    reader->output->resource |= result.resource;
+    reader->output->resource |= result->resource;
     arena_pop_to(reader->scratch, mark);
-    return result;
 }
 
 static CheckOp check_input_binary(uint8_t kind);
@@ -3577,7 +3597,7 @@ static void check_input_expressions(CheckInputReader* reader)
                 graph->leaves[node] = reader->cached_constants[reader->constant_present[token] - 1];
             }
         }
-        else if (reader->selected_tokens[token] != BUSTER_CHECK_NONE)
+        else if (reader->selected_tokens[token] < parser->tokens.count)
         {
             const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
             supported = selected != BUSTER_CHECK_NONE;
@@ -3650,7 +3670,8 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         else if (role == PARSE_ROLE_OPERAND && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && !check_input_function_name_token(parser, token))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             if (!literal.valid)
             {
                 check_input_report(reader, token, CHECK_INPUT_LITERAL);
@@ -4203,6 +4224,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 }
 
 #include "c_check_binding.c"
+#include "c_check_packed_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
 // (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
@@ -4839,6 +4861,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (input->report_count == 0 && !input->resource)
                 {
                     check_input_vla_finish(&reader);
+                }
+                if (!input->resource)
+                {
+                    check_input_packed_members(&reader);
                 }
                 input->diagnostic_graph = input->report_count != 0 && !input->resource;
             }

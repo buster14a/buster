@@ -169,8 +169,10 @@ static void check_test_string_literals(CheckTest* test, const char* clang)
     for (uint64_t capacity = 3; capacity < 7; capacity += 1)
     {
         Arena bounded = { .base = buffer, .length = 3, .capacity = capacity };
-        const CheckLiteral real = check_literal_number((const uint8_t*)"1.0", 3, &bounded);
-        const CheckLiteral integer = check_literal_number((const uint8_t*)"17", 2, &bounded);
+        CheckLiteral real = { 0 };
+        check_literal_number((const uint8_t*)"1.0", 3, &bounded, &real);
+        CheckLiteral integer = { 0 };
+        check_literal_number((const uint8_t*)"17", 2, &bounded, &integer);
         check_test_expect(test, !real.valid && real.resource && integer.valid && !integer.resource && bounded.length == 3, "floating spelling allocation failure is a resource result, distinct from invalid literal syntax");
     }
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);

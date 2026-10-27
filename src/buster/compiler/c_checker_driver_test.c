@@ -1422,6 +1422,8 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
     }
 }
 
+#include "c_check_packed_test.c"
+
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
 static void check_test_driver_loop_hints(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
@@ -1900,6 +1902,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
         check_test_driver_loop_hints(&test, clang, executable, directory, lazy);

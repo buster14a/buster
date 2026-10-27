@@ -581,7 +581,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     .scalar = scalar,
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
-                result->resource |= result->stream.status == CHECK_STATUS_RESOURCE;
+                result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
+                result->resource |= result->input.resource || result->stream.status == CHECK_STATUS_RESOURCE;
                 for (uint32_t report = 0; report < result->stream.report_count; report += 1)
                 {
                     const CheckReport* diagnostic = result->stream.reports + report;
@@ -738,7 +739,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .scalar = scalar,
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
-        path->resource |= path->stream.status == CHECK_STATUS_RESOURCE;
+        path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             path->phase = "expression";
@@ -1517,6 +1519,17 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->initializer_warnings.count == b->initializer_warnings.count &&
                  a->program_diagnostic.status == b->program_diagnostic.status && a->program_diagnostic.token == b->program_diagnostic.token &&
                  a->program_diagnostic.position == b->program_diagnostic.position;
+    equal &= a->input.packed_member_count == b->input.packed_member_count;
+    for (uint32_t i = 0; equal && i < a->input.packed_member_count; i += 1)
+    {
+        const CheckInputPackedMember* left = a->input.packed_members + i;
+        const CheckInputPackedMember* right = b->input.packed_members + i;
+        equal = left->address == right->address && left->token == right->token && left->member == right->member && left->record == right->record &&
+                left->alignment_log2 == right->alignment_log2 && left->implicit_conversions == right->implicit_conversions && left->suppressed == right->suppressed &&
+                left->member_name.length == right->member_name.length && left->record_name.length == right->record_name.length &&
+                (left->member_name.length == 0 || memcmp(left->member_name.pointer, right->member_name.pointer, left->member_name.length) == 0) &&
+                (left->record_name.length == 0 || memcmp(left->record_name.pointer, right->record_name.pointer, left->record_name.length) == 0);
+    }
     for (uint32_t warning = 0; equal && warning < a->initializer_warnings.count; warning += 1)
     {
         equal = a->initializer_warnings.tokens[warning] == b->initializer_warnings.tokens[warning];
