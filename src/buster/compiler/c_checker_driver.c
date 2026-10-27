@@ -1084,7 +1084,8 @@ static int run_check_command(int count, char** arguments, bool executable)
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
-        const ParseOptions parser_options = { .scalar = scalar };
+        // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528).
+        const ParseOptions parser_options = { .scalar = scalar, .scratch = &scratch };
         bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
         if (!ready || scratch.base == 0 || output_arena.base == 0)
         {
