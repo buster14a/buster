@@ -299,25 +299,55 @@ and the stream's values. It shares the reader with
 
 ## The checker's graph and program passes (#530)
 
-**Measured, base against head on the 9700X.** Medians of 15 interleaved
-`--time-stages` runs of each build, pinned to CPU 2. Every object is the same
-bytes, by both paths. [The measurement record](https://github.com/buster14a/buster-performance/tree/2f36c27c24ffcea2317721c0337544d025f98fb8/docs/measurements/checker-passes-530-2026-10-27)
-holds every run, the script and the builds' identities.
+**Measured against `main` on the 9700X.** Medians of 15 interleaved
+`--time-stages` runs of each build, pinned to CPU 2: `main` at `a774acd2`
+(#520 merged), its merge into #530's branch (`2163d68a`), and the branch's
+next commit (`1989a51d`, which numbers the static objects' symbols with #442's
+kernels). Each build's object is the same bytes, by both paths.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/53f9e4d89cdf7dcecac40cb9c1753d3888c7dcf9/docs/measurements/checker-passes-530-main-2026-10-27)
+holds every run, the scripts and the builds' identities.
 
-| | base | head | change |
-| --- | ---: | ---: | ---: |
-| `check-expressions` | 20.262 ms | 15.515 ms | -23.4% |
-| `check-program` | 15.936 ms | 12.235 ms | -23.2% |
-| the clock's span | 190.517 ms | 181.889 ms | -4.5% |
-| user instructions (perf stat) | 2,227.3 M | 2,031.6 M | -8.8% |
-| user cycles (perf stat) | 901.3 M | 854.3 M | -5.2% |
+| | `main` | merge | change | `1989a51d` | change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `check-expressions` | 20.396 ms | 15.822 ms | -22.4% | 15.674 ms | -23.2% |
+| `check-declarations` | 5.161 ms | 5.500 ms | +6.6% | 5.541 ms | +7.4% |
+| `check-program` | 15.947 ms | 12.088 ms | -24.2% | 12.196 ms | -23.5% |
+| the clock's span | 158.008 ms | 149.616 ms | -5.3% | 150.160 ms | -5.0% |
+| user instructions (perf stat) | 1,751.0 M | 1,555.3 M | -11.2% | 1,555.4 M | -11.2% |
+| user cycles (perf stat) | 738.2 M | 690.2 M | -6.5% | 689.3 M | -6.6% |
 
-The two stages' ranges don't overlap (20.0 to 21.2 ms against 15.4 to 17.0,
-and 15.6 to 16.3 against 12.1 to 12.4), and every other stage is within 0.2 ms
-of base's median.
+- **Ranges.** The two stages' ranges don't overlap: 20.3 to 20.9 ms against
+  15.3 to 16.5, and 15.5 to 16.4 against 11.9 to 12.3.
+- **The other stages.** Each is within 0.2 ms of `main`'s median, but for
+  `1989a51d`'s `check-input`, 0.50 ms longer. Its code is the merge's, whose
+  took 0.04 ms less: that is [where the code falls](profiling.md#comparing-two-versions).
+
+**Why `check-declarations` took 0.34 ms longer.**
+- **The same work.** Its checks of the initializers and its report of the
+  warnings (`check_initializers_run`, `check_init_value`,
+  `check_init_objects_open`, `check_driver_reports`) ran the same instructions
+  in both builds, in more cycles (perf's samples on a Zen 4 laptop).
+- **What `main`'s scan left in the caches, 0.15 ms.** `main`'s report scan
+  read every node's 96-byte value at the end of the graph run, the whole
+  33 MB column, and these checks read values next. The new scans read the
+  diagnostics' and contexts' bytes, and a value only where a node can report.
+  A build of #530's later head (`d32d593f`) that reads every value again at
+  the end of the graph run when an environment variable is set ran 30 rounds
+  beside `main`, one executable either way. With the reads, `check-expressions`
+  took 1.18 ms more and `check-declarations` 0.15 ms less.
+- **The rest came with the builds.** Without the reads, that build's
+  `check-declarations` was 0.04 ms longer than `main`'s, though its scans are
+  the merge's.
+
+**The first measurement.** Against #520's branch merged into the `main` of
+the time (`373ce21b`), #530's first head (`0b5af444`) took `check-expressions`
+from 20.262 to 15.515 ms (-23.4%), `check-program` from 15.936 to 12.235 ms
+(-23.2%) and the clock's span from 190.517 to 181.889 ms (-4.5%), with 8.8%
+fewer user instructions ([its record](https://github.com/buster14a/buster-performance/tree/2f36c27c24ffcea2317721c0337544d025f98fb8/docs/measurements/checker-passes-530-2026-10-27)).
+`main` has since cut `check-input` (#529) and the lowering (#531).
 
 **The barrier wasn't the cost.** On the frozen `sqlite3.c`'s 343,555 graph nodes
-(the record's laptop counts):
+(the first record's laptop counts):
 - **The barrier's nodes.** 203,218 (59%) took the scalar barrier
   (`check_graph_scalar_node`). By operator:
   - leaves, 70,518 (35%);
@@ -361,8 +391,9 @@ its store.
     declarations, the reached builtins and the static objects, whose symbols
     #442's kernels number (`check_program_needed_number`).
 
-On `sqlite3.c`'s 319,193 body nodes the graph run went from 55.2 to 40.2 ns a
-node on the 9700X (303 to 223 cycles).
+On `sqlite3.c`'s 319,193 body nodes the graph run went from 55.7 to 40.9 ns a
+node on the 9700X (308 to 227 cycles), the means of two runs of `main` and of
+the merge (55.2 to 40.2 ns in the first measurement).
 
 **What is left.**
 - **Validation's reads.** Most of the validation's time is the leaves' records
