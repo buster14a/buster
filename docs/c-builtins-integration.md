@@ -73,9 +73,13 @@ class and a new temporary-local range. It leaves one result on the typed value
 stack and preserves values already below it. Overflow stores the converted
 low result through the supplied pointer before producing the boolean. Runtime
 descriptors currently represent ordinary signed/unsigned 8-, 16-, 32- and
-64-bit integers and unsigned one-bit booleans in byte storage. Boolean stores
-retain the low mathematical bit; they do not use the ordinary nonzero-to-true
-cast. Other bit-precise memory representations return an explicit unsupported
+64-bit integers, unsigned one-bit booleans in byte storage, and 128-bit
+integers (`BUSTER_CBUILTIN_LOWER_WIDE`, signed or not: a width's seven bits
+stop at 127). Boolean stores retain the low mathematical bit; they do not use
+the ordinary nonzero-to-true cast. A 128-bit operand's slot is an address-taken
+frame object (class VOID) holding its 16 bytes, which the recipe reads as two
+64-bit limbs, and a 128-bit destination takes its two limbs in two stores.
+Other bit-precise memory representations return an explicit unsupported
 status.
 
 The caller supplies mutually disjoint kind, class, value, local-class and
@@ -89,7 +93,12 @@ scalar copy twin. No allocations or retained scratch storage are required.
 
 The recipes use the existing target-independent `BUSTER_TYPED_*` operations.
 Byte swaps and counts use fixed shifts, masks and arithmetic. Full overflow
-products use four 32-by-32 products and exact two-limb correction. Generated
+products use four 32-by-32 products and exact two-limb correction. With a
+128-bit operand or destination, the exact result is three limbs of 64 bits for a
+sum or a difference and four for a product, whose columns' 64-by-64 products are
+U128 multiplications of zero-extended limbs, less 2^128 times the other
+operand's pattern for each negative operand; an unsigned product never sets its
+top two limbs all ones, so it can't pass as a negative value. Generated
 programs therefore require baseline x86-64; the host's vector publication does
 not grant AVX-512, POPCNT, LZCNT or TZCNT to output code. Zero arguments to clz
 or ctz remain undefined by the source contract, independently of the sequence's
@@ -291,8 +300,36 @@ its representation. It uses integer masks and comparisons, preserves the
 enclosing stack and leaves I32. Its `fpclassify` result is a category index
 0 NaN, 1 infinity, 2 normal, 3 subnormal, 4 zero; the source producer still
 owns conditional selector evaluation. Certified infinity/NaN constants use
-their exact raw bits. Unknown NaN calls, long double and wider runtime
-formats need another lowering path and remain explicit refusals here.
+their exact raw bits. Unknown NaN calls, long double constants and wider
+runtime formats need another lowering path and remain explicit refusals here.
+
+A long double's (F80) classification and `fabsl` read the argument's frame
+object, which the producer makes for the call: the significand's 64 bits, its
+top bit the explicit integer bit, and the sign and exponent's 16. Clang 23's
+-O0 code classifies an x87 value partly by the x87's compares (`isnan`,
+`fpclassify` and `isinf_sign`'s test), which take the encodings the x87 doesn't
+support (a nonzero exponent without the integer bit: unnormals, pseudo-zeros,
+pseudo-infinities and pseudo-NaNs) as unordered and a pseudo-denormal (a zero
+exponent with it) as the number it is, at least the smallest normal's
+magnitude; and partly by its bits (`isinf`, `isfinite`, `signbit`). The recipes
+give each builtin's results for every encoding with integer tests alone:
+
+| builtin | clang's test | result |
+| --- | --- | --- |
+| `isnan` | `fucomip` of x with x | (e != 0 and no integer bit) or (e = 0x7fff and m > 2^63) |
+| `isnan`, FENV_ACCESS | LLVM's strictfp integer test | (e = 0) = integer bit, or (e = 0x7fff and m > 2^63) |
+| `isinf` | bits | e = 0x7fff and m = 2^63 |
+| `isinf_sign` | `fucomip` of \|x\| with infinity | `isinf`'s, by the sign |
+| `isfinite` | bits | e = 0, or e != 0x7fff with the integer bit |
+| `fpclassify` | `fucomip`s with 0, x, infinity and the smallest normal | zero e = 0 and m = 0; subnormal e = 0, no integer bit, m != 0; normal the integer bit and e != 0x7fff; infinity as `isinf`; NaN the rest |
+| `signbit` | bits | the sign |
+
+(e is the exponent and m the significand.) Under FENV_ACCESS, `fpclassify` and
+`isinf_sign` keep the producer's quiet comparisons, the x87's for a long
+double, which raise invalid as clang's do; the recipe's isnan takes the call's
+FENV_ACCESS (`CBuiltinFloatLowerCall.fenv_access`). `fabsl` clears the object's
+sign bit in place and leaves its value, F80: no x87 operation touches the
+bits, so a signaling NaN keeps its payload, as the x87's `fabs` keeps it.
 
 ## Atomic and terminal helper calls
 

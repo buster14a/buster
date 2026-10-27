@@ -185,12 +185,31 @@ does, each rule checked against clang's answers on probes of it:
   statement they precede, so the first error is the count's when it isn't a
   valid one (`int N`, `4 / 0`, an enumerator of 0), and a later pragma's or
   the place's only when it is (#480's fourth review): such a count leaves the
-  loop's pragmas unsupported. Where both errors would be on its own pragma (a
-  second count of its category, or one that a state before it rules out), and
-  at file scope, where clang reads no count, the answer is the error. An error
-  in the statement comes before the places' and the conflicts' in clang's
-  output, which these reports at the pragma don't follow yet (#503). Tier 0
-  has no loop transformation for the hints to steer, so nothing keeps them.
+  loop's pragmas unsupported, including when a state or count of its category
+  shares its pragma. At file scope, where clang reads no count, the pragma is
+  an error. Placement, duplicate and incompatible hints wait for the whole
+  annotated statement (#503): its exclusive end is the reader's barrier and
+  the ordering position of its report, so the diagnostic graph includes the
+  statement's type errors too. The printed source is separate: conflicts at
+  the later pragma's `loop` or hint name, placement at the statement's first
+  token, with clang's directive names and messages. Nested statements finishing
+  together report the inner hints first. The existing postorder subtree ends
+  supply the boundary; the pragma reader follows parent links to the statement
+  root without scanning its body. Only a rejected unit retains one cold
+  `CheckInput.loop_diagnostic` record; successful loops retain no hint metadata.
+  Dropped pragmas create neither a placement error nor a barrier. Counts not
+  evaluated here remain unsupported rather than guessing which later error
+  clang would report. At the same completion position, an error from the next
+  pragma's handler precedes the current hints (the parser lexes that lookahead
+  before Sema); an error parsing that next pragma's argument follows them.
+  The rejected prefix still runs the scalar/vector control walk: duplicate
+  labels and completed switch constraints inside the statement precede the
+  hint. It collects the function-scoped names of forward labels from the tree,
+  while deferring undefined-label and jump-scope obligations until function
+  completion. Unfinished label references have canonical diagnostic-only
+  identities for typing `&&name`; these can never be published or emitted.
+  The ordinary control walk is specialized without the prefix checks.
+  Tier 0 has no loop transformation for the hints to steer.
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
@@ -205,9 +224,20 @@ does, each rule checked against clang's answers on probes of it:
   before expressions have types, so whether an element initializes a whole
   struct, or starts brace elision, comes from the tree: the element's root's
   type, from an identifier's declaration, a compound literal's type, a `?:`'s
-  third operand, a parenthesized expression or a call of a function by its name.
-  It came from the last typed token in the element, and so a compound literal
-  with a member's value, `(struct L){ .target = n }`, read as `n`'s type.
+  third operand, a parenthesized expression or a call of a function by its name,
+  and a subscript's, a member's and an indirection's of these (`x[1]`,
+  `bind->runtime->libc.soname`, `*p`), each step applied to its base's type from
+  the innermost out. It came from the last typed token in the element, and so a
+  compound literal with a member's value, `(struct L){ .target = n }`, read as
+  `n`'s type, and `{ x[1], x[2] }` of structs as a struct's first two members:
+  one element where clang has two.
+- **Compound literals in a static object's initializer**, in a function too:
+  clang folds a block-scope compound literal's value, an automatic object's, as
+  GNU C does, into a `static` array's element or a `static` struct, where its
+  body's parts are constant (`(S8){ "a", 1 }`, not `(S8){ "a", n }`). The
+  initializer copies the literal's parts, as it did only for a file-scope
+  literal's. A scalar compound literal (`(int){ 1 }`) stays refused there, at
+  file scope too.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -585,7 +615,9 @@ constraints and initializer references. `c_check_program_lower.c` translates
 supported operations into `Tier0Function` records with explicit conversions,
 loads/stores, scaled pointer operations, control flow, locals, calls and ABI
 classes. `c_check_program_emit.c` compiles those functions, resolves shared
-symbols and publishes code/data together. Backend machine classes never
+symbols and publishes code/data together; the functions' lowering, Tier 0
+code and encoding run on lanes, into one lane's link
+([the lanes guide](function-lanes.md), #151). Backend machine classes never
 replace the full semantic `TypeId` in the checked stream. It also gives Tier 0
 the unit's access column (`Tier0Function.symbol_access`, docs/tier0.md): a
 symbol the unit doesn't define is reached through its GOT slot, since it may be
@@ -648,8 +680,10 @@ What the lowering covers past scalars (#145's programs):
   each entry. A temporary of the class (a statement expression's value or the
   operands live around it, `?:` without its middle operand, a postfix one's old
   value) is a frame object of its own (`check_lower_temporary`).
-  The builtins of its operands and the floating classification builtins on it
-  are refused by name.
+  The floating classification builtins on it (`isnan`, `isinf`, `isinf_sign`,
+  `isfinite`, `signbit` and `fpclassify`) and `fabsl` are `c_builtin_float_lower.c`'s
+  recipes over its argument's frame object, with clang 23's -O0 result for every
+  x87 encoding ([the integration guide](c-builtins-integration.md#floating-checking)).
 - **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
   I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
   classes as long double's is (`check_lower_memory_class`): their locals,
@@ -674,7 +708,9 @@ What the lowering covers past scalars (#145's programs):
   runtime joins as GCC's driver links them (`runtime.c`, `bind.c`). A shift
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
-  and a builtin of 128-bit operands are refused by name.
+  is refused by name. The overflow builtins take 128-bit operands and
+  destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
+  in a frame object of its own.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
@@ -894,6 +930,45 @@ or with `--scalar` and for a unit whose runs can't say, by the expansion
 history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
 levels" has both.
 Floating results are compared field by field, never by `long double` padding.
+
+Packed-member addresses warn by default (`-Waddress-of-packed-member`, #507).
+`c_check_packed_input.c` retains sparse source witnesses even in `sizeof` and
+`typeof`: a direct chain of members must start at a declaration, contain a
+packed record or field, and have either an insufficient enclosing alignment
+or an offset incompatible with the final member's type. An explicitly aligned
+object can strengthen a direct `.` access. `#pragma pack` alone does not trigger
+this warning, nor do array decay, an address of an array element, or the complex
+bases Clang currently excludes (a call, subscript or explicit dereference).
+Anonymous members participate in both layout and the choice of packed culprit.
+The reader counts actual layout witnesses before reserving their retained
+storage. It bounds chain scratch by the largest candidate expression, and
+builds conversion context only when a witness exists. An unused packed type
+plus ordinary local addresses needs no diagnostic records or scratch.
+The first anonymous diagnostic builds a temporary tag-to-source/context map;
+later addresses reuse it, so formatting many anonymous locals stays linear in
+the source size plus the emitted names.
+
+`c_check_packed_diagnostic.c` cancels a pending warning when a source conversion
+permits the culprit's reduced alignment, including integer and incomplete-pointer
+casts. It follows conditional arms and a comma expression's right operand in
+their implicit consuming context. Generic/choose selections transparently use
+the chosen operand. A bounded source interval scan preserves pending warnings
+inside unevaluated and unchosen operands, where Clang does not perform its
+implicit-conversion analysis. An explicit cast cancels only a directly
+addressed member; its target does not flow into conditional/comma operands.
+A cast to `void` does not cancel it. Builtin lowering
+conversions are distinguished from source conversions: `__builtin_assume_aligned`
+retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
+can cancel it. The existing diagnostic pragma history controls suppression and
+promotion, and `-w` silences the diagnostic. Source records remain ordered and
+the driver consumes them sparsely without widening its dense warning columns.
+
+The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
+`llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation
+or fixtures were imported. `test-checker-driver` runs the original probes through
+both checker schedules and, with `--executable`, both production command routes;
+it compares warning decisions, complete messages and presumed line/column pairs
+with Clang, and covers guarded classifier/interval tails and allocation failure.
 
 ## Corpus comparison and semantic mutations
 
