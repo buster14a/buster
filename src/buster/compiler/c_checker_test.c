@@ -3695,6 +3695,14 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // A vector's lane, its element type's scalar (#555's fourth review): under a ?: beside a scalar, in a binary
+        // operator's operand, through a member and of an operator's value.
+        {
+            "vector lanes in an inferred array",
+            "typedef int v4si __attribute__((vector_size(16)));\ntypedef struct { v4si v; int k; } H;\nint f(int n, v4si v, H h)\n{\n    v4si a[] = { n ? v[0] : 2, 3 };\n    _Static_assert(sizeof a == sizeof(v4si), \"one\");\n    v4si b[] = { v[0] + 1, 2 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one too\");\n    v4si c[] = { h.v[1], (v + v)[2], n ? 1 : v[3], 4, v };\n    _Static_assert(sizeof c == 2 * sizeof(v4si), \"four lanes, then a vector\");\n    return a[0][1] + b[0][0] + c[1][3];\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",

@@ -1377,9 +1377,10 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 descending = true;
             }
         }
-        // Up from the primary: the steps from the innermost out. A subscript whose operand isn't a pointer or an array
-        // (an integer: `1[p]`'s 1), or has no type here, takes its index instead, once: the walk goes down it again,
-        // with the steps under the subscript dropped.
+        // Up from the primary: the steps from the innermost out. A subscript reads a pointer's or an array's element, or
+        // a vector's lane (`v[0]` is its element type's, #555's fourth review); one whose operand is none of them (an
+        // integer: `1[p]`'s 1), or has no type here, takes its index instead, once: the walk goes down it again, with the
+        // steps under the subscript dropped.
         walking = false;
         uint32_t step = steps;
         while (step > 0 && !walking)
@@ -1388,7 +1389,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             TypeId base = result != 0 ? type_strip_aligned(walker->types, result) : 0;
             uint8_t kind = base != 0 ? type_kind(walker->types, base) : 0;
             const bool indirect = operators[step] != PARSE_KIND_PERIOD;
-            const bool element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind);
+            const bool element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ||
+                                 (operators[step] == PARSE_KIND_L_SQUARE && base != 0 && check_vector_type(walker->types, base));
             const bool conditional = operators[step] == BUSTER_CHECK_INIT_ROOT_CONDITIONAL;
             const bool binary = operators[step] == BUSTER_CHECK_INIT_ROOT_BINARY || conditional;
             if (binary && alternates[step] != BUSTER_CHECK_NONE)
@@ -1417,7 +1419,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             {
                 if (indirect)
                 {
-                    // A subscript, a `*` and a `->` read what a pointer points at, or an array's element.
+                    // A subscript, a `*` and a `->` read what a pointer points at, or an array's element (or a subscript a
+                    // vector's lane).
                     base = element ? type_strip_aligned(walker->types, type_element(walker->types, base)) : 0;
                     kind = base != 0 ? type_kind(walker->types, base) : 0;
                     result = base;
