@@ -6,9 +6,10 @@
 // preprocess, which fails the command, and a run left with no function, which fails it too. The backend's refusals by
 // name are injected, as the lowering benchmark's tests inject them: which constructs it refuses changes as it grows. So
 // are resources that run out (#514's review): the arena the corpus's records are compiled into, the timed runs'
-// scratch, and the corpus's room for functions, full at the second of a file's two and not at its last. Each case's
-// corpus, counts, exit status and report lines are checked, the totals last with the measurement's outcome. Then
-// tier0_benchmark_add at its corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
+// scratch, and the corpus's room for functions, full at the second of a file's two and not at its last; and a file
+// whose one function lowers to no typed entry. Each case's corpus, counts, exit status and report lines are checked,
+// the totals last with the measurement's outcome. Then the command's repeated --only, and tier0_benchmark_add at its
+// corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
 // c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
@@ -25,6 +26,8 @@ struct BackendSourceTestCase
     uint64_t measured;
     uint64_t left_out;
     uint64_t failures;
+    // Whether its corpus's functions lower to no typed entry (fixture 4's).
+    bool no_entries;
     int status;
     // What its report must hold, each once: null where it has fewer.
     const char* report[4];
@@ -68,6 +71,33 @@ static bool backend_source_test_run(char** paths, uint32_t count, BackendSourceF
     }
     *report = text;
     return ran;
+}
+
+// The command itself on `arguments`, its output to /dev/null: its exit status, or -1 if the output couldn't be moved.
+static int backend_source_test_command(char** arguments, uint32_t count)
+{
+    fflush(stdout);
+    fflush(stderr);
+    const int saved[2] = { dup(STDOUT_FILENO), dup(STDERR_FILENO) };
+    const int null = open("/dev/null", O_WRONLY);
+    const bool moved = saved[0] >= 0 && saved[1] >= 0 && null >= 0 && dup2(null, STDOUT_FILENO) >= 0 && dup2(null, STDERR_FILENO) >= 0;
+    const int status = moved ? run_backend_source_benchmark((int)count, arguments) : -1;
+    fflush(stdout);
+    fflush(stderr);
+    bool restored = saved[0] >= 0 && dup2(saved[0], STDOUT_FILENO) >= 0;
+    restored = saved[1] >= 0 && dup2(saved[1], STDERR_FILENO) >= 0 && restored;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (saved[i] >= 0)
+        {
+            close(saved[i]);
+        }
+    }
+    if (null >= 0)
+    {
+        close(null);
+    }
+    return restored ? status : -1;
 }
 
 // tier0_benchmark_add at its corpus's capacity (#514's review): a corpus with room for one function takes the first of a
@@ -130,6 +160,9 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         "double g(double x, int n)\n{\n    double s = 0;\n    for (int i = 0; i < n; i += 1)\n    {\n        s += x * i;\n        if (s > 100)\n        {\n"
         "            break;\n        }\n    }\n    return s;\n}\nint h(int* p, int n)\n{\n    int t = 0;\n    while (n-- > 0)\n    {\n        t += p[n] > 0 ? p[n] : -p[n];\n"
         "    }\n    return t + (int)g(1.5, n);\n}\n",
+        // Its one function lowers to no typed entry (#514's review): falling off an int function's end returns nothing,
+        // and Tier 0 makes only its prologue and epilogue.
+        "int f(void) {}\n",
     };
     enum { FIXTURES = BUSTER_ARRAY_LENGTH(fixtures) };
     static const BackendSourceTestCase cases[] = {
@@ -219,6 +252,17 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .report = { "benchmark-backend-source: a function's vector path's compile failed, so its runs measured less than the corpus: no report\n",
                         " totals files=1 left_out=0 failures=0 measurement=failed\n" },
         },
+        {
+            .label = "a corpus of functions without a typed entry measures nothing, and fails the command",
+            .files = { 4, -1 },
+            .functions = 1,
+            .measured = 1,
+            .no_entries = true,
+            .status = 1,
+            .report = { "/4.c functions=1 entries=0 records=",
+                        "benchmark-backend-source: no typed entry in the corpus's functions (1), so nothing to measure per entry: no report\n",
+                        " totals files=1 left_out=0 failures=0 measurement=none\n" },
+        },
     };
     char directory[] = "/tmp/buster-backend-source-XXXXXX";
     char paths[FIXTURES][256];
@@ -252,8 +296,9 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
         // The totals come last, after the measurement's report or what failed it (#514's review).
         const char* totals = report != 0 ? strstr(report, "backend-source: totals ") : 0;
         const bool last = totals != 0 && strchr(totals, '\n') == report + strlen(report) - 1;
-        // A corpus of functions has their entries and records.
-        const bool corpus = source.corpus.count == item->functions && (source.corpus.count == 0 || (source.corpus.entries != 0 && source.corpus.records != 0));
+        // A corpus of functions has their records, and their entries but where the case says they lower to none.
+        const bool corpus = source.corpus.count == item->functions &&
+                            (source.corpus.count == 0 || (source.corpus.records != 0 && (source.corpus.entries == 0) == item->no_entries));
         const bool expected = ran && corpus && source.files == item->measured && source.left_out == item->left_out && source.failures == item->failures &&
                               status == item->status && reported && last;
         check_test_expect(test, expected, item->label);
@@ -265,6 +310,26 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
                    item->failures, status, item->status, report != 0 ? report : "(none)\n");
         }
         free(report);
+    }
+    // The command's --only (#514's review): each names its variant or is refused, whatever one before it named; of two
+    // that name variants, the last is measured.
+    static const struct
+    {
+        const char* first;
+        const char* second;
+        int status;
+    } onlies[] = {
+        { "vector", "typo", 1 },
+        { "typo", "vector", 1 },
+        { "scalar", "encode", 0 },
+    };
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(onlies); i += 1)
+    {
+        char* arguments[] = { "--only", (char*)onlies[i].first, "--only", (char*)onlies[i].second, "-nostdinc", paths[0] };
+        const int status = backend_source_test_command(arguments, BUSTER_ARRAY_LENGTH(arguments));
+        char description[160];
+        snprintf(description, sizeof(description), "backend-source: --only %s --only %s exits with %d", onlies[i].first, onlies[i].second, onlies[i].status);
+        check_test_expect(test, status == onlies[i].status, description);
     }
     for (uint32_t i = 0; i < FIXTURES; i += 1)
     {

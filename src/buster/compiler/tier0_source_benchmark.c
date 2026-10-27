@@ -52,7 +52,7 @@ struct BackendSource
     uint64_t left_out;
     uint64_t failures;
     // Whether the corpus's measurement reported (tier0_benchmark_measure), every run of it succeeding: false for one
-    // whose runs failed, and for none.
+    // whose runs failed, and for none: no function, or functions without a typed entry.
     bool reported;
 };
 
@@ -204,8 +204,9 @@ static bool backend_source_files(BackendSource* source, char** files, uint32_t f
     source->reported = valid && source->corpus.count != 0 && tier0_benchmark_measure(&source->corpus, &scratch, only, after_scalar, "benchmark-backend-source");
     if (valid)
     {
+        const bool measurable = source->corpus.entries != 0 && source->corpus.records != 0;
         printf("backend-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failures=%" PRIu64 " measurement=%s\n", source->files, source->left_out,
-               source->failures, source->corpus.count == 0 ? "none" : source->reported ? "reported" : "failed");
+               source->failures, !measurable ? "none" : source->reported ? "reported" : "failed");
     }
     fflush(stdout);
     arena_release(&source->code);
@@ -234,11 +235,14 @@ static int run_backend_source_benchmark(int count, char** arguments)
     {
         if (strcmp(arguments[i], "--only") == 0)
         {
+            // Each --only names its variant or is refused, whatever one before it named (#514's review).
+            uint32_t named = BUSTER_TIER0_BENCHMARK_VARIANTS;
             valid = i + 1 < count;
             for (uint32_t v = 0; valid && v < BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
             {
-                only = strcmp(arguments[i + 1], tier0_benchmark_names[v]) == 0 ? v : only;
+                named = strcmp(arguments[i + 1], tier0_benchmark_names[v]) == 0 ? v : named;
             }
+            only = named;
             valid = valid && only != BUSTER_TIER0_BENCHMARK_VARIANTS;
             i += 1;
         }

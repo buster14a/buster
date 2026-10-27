@@ -260,7 +260,8 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
 // BUSTER_TIER0_BENCHMARK_VARIANTS, times one variant alone (encoding's sizing untimed), back to back; `after_scalar`
 // runs the scalar path, untimed, for that many ms before each pass of the vector path. A run in which a function's
 // compile, sizing or encoding failed (`scratch` out of room, for one) measured less than the corpus: the first one,
-// warm-up or timed, ends the measurement, which then prints that instead of a report and returns false.
+// warm-up or timed, ends the measurement, which then prints that instead of a report and returns false. So does a
+// corpus without a typed entry or a record, which has nothing to measure per entry: no run times it.
 static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch, uint32_t only, uint64_t after_scalar, const char* name)
 {
     const Tier0BenchmarkCounters counters = {
@@ -268,16 +269,19 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
         .instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
         .throttle = tier0_benchmark_counter(PERF_TYPE_RAW, BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT),
     };
+    // A definition that lowers to no entry (`int f(void) {}`, #514's review) has only its prologue and epilogue: a
+    // corpus of them has records but no entry to divide them by.
+    const bool measurable = corpus->entries != 0 && corpus->records != 0;
     // A warm-up of each variant (sizing before encoding, which takes the sized records), and the variant of the first run
     // that failed, BUSTER_TIER0_BENCHMARK_VARIANTS while none has.
     uint32_t failed = BUSTER_TIER0_BENCHMARK_VARIANTS;
-    for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
+    for (uint32_t v = 0; measurable && v < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
     {
         failed = tier0_benchmark_run(v, corpus, scratch, counters).failures != 0 ? v : failed;
     }
     double values[BUSTER_TIER0_BENCHMARK_VARIANTS][4][BUSTER_TIER0_BENCHMARK_PASSES];
     memset(values, 0, sizeof(values));
-    for (uint32_t pass = 0; pass < BUSTER_TIER0_BENCHMARK_PASSES && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; pass += 1)
+    for (uint32_t pass = 0; measurable && pass < BUSTER_TIER0_BENCHMARK_PASSES && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; pass += 1)
     {
         for (uint32_t k = 0; k < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; k += 1)
         {
@@ -303,7 +307,11 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
             values[v][3][pass] = (double)taken.throttle;
         }
     }
-    if (failed != BUSTER_TIER0_BENCHMARK_VARIANTS)
+    if (!measurable)
+    {
+        printf("%s: no typed entry in the corpus's functions (%u), so nothing to measure per entry: no report\n", name, corpus->count);
+    }
+    else if (failed != BUSTER_TIER0_BENCHMARK_VARIANTS)
     {
         printf("%s: a function's %s failed, so its runs measured less than the corpus: no report\n", name,
                failed == BUSTER_TIER0_BENCHMARK_SIZING ? "sizing" : failed == BUSTER_TIER0_BENCHMARK_ENCODE ? "encoding" :
@@ -339,7 +347,7 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
             close(descriptors[i]);
         }
     }
-    return failed == BUSTER_TIER0_BENCHMARK_VARIANTS;
+    return measurable && failed == BUSTER_TIER0_BENCHMARK_VARIANTS;
 }
 
 #endif

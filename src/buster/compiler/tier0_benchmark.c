@@ -124,10 +124,13 @@ int run_backend_benchmark(int argc, char** argv)
         }
         else if (strcmp(argv[a], "--only") == 0 && a + 1 < argc)
         {
+            // Each --only names its variant or is refused, whatever one before it named.
+            uint32_t named = BUSTER_TIER0_BENCHMARK_VARIANTS;
             for (uint32_t v = 0; v < BUSTER_TIER0_BENCHMARK_VARIANTS; v += 1)
             {
-                only = strcmp(argv[a + 1], tier0_benchmark_names[v]) == 0 ? v : only;
+                named = strcmp(argv[a + 1], tier0_benchmark_names[v]) == 0 ? v : named;
             }
+            only = named;
             valid = only != BUSTER_TIER0_BENCHMARK_VARIANTS;
             a += 1;
         }
