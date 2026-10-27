@@ -84,6 +84,7 @@ static Buffer ci_read(FILE* file)
 }
 
 #include "admission_git.c"
+#include "admission_preflight.c"
 
 // gh handles authentication/TLS. No shell, PR-controlled executable, jq program or argument interpolation is used.
 static Http ci_transport(const char* method, const char* path, const char* body)
@@ -233,6 +234,9 @@ static Buffer ci_state_json(const CiState* state)
         ci_json_string(&out, "audit", pr->audit);
         buffer_printf(&out, ",\"active_seconds\":%" PRIu64, pr->active_seconds);
         buffer_printf(&out, ",\"head_repo\":%" PRIu64, pr->head_repo);
+        buffer_printf(&out, ",\"frozen_state\":%u,\"frozen_retry_at\":%" PRIu64 ",\"frozen_merge\":", pr->frozen_state, pr->frozen_retry_at);
+        json_quote(&out, pr->frozen_merge);
+        buffer_printf(&out, ",\"frozen_engine\":"); json_quote(&out, pr->frozen_engine);
         buffer_printf(&out, ",\"command_hash\":%" PRIu64, pr->command_hash);
         buffer_printf(&out, ",\"executor_run\":%" PRIu64, pr->executor_run);
         buffer_printf(&out, ",\"signals_at\":%" PRIu64 ",\"cached_approved\":%s,\"signal_approval_at\":%" PRIu64 ",\"cached_code\":%s,", pr->signals_at, pr->cached_approved ? "true" : "false", pr->signal_approval_at, pr->cached_code ? "true" : "false");
@@ -325,6 +329,13 @@ static CiState ci_state_parse(const char* text)
         CiPr* pr = &state.prs[state.pr_count++];
         pr->number = json_number(&json, row, "number");
         pr->head_repo = json_number(&json, row, "head_repo");
+        uint64_t frozen = json_number(&json, row, "frozen_state");
+        if (frozen > 3) ci_die("invalid frozen merge cache state");
+        pr->frozen_state = (unsigned)frozen;
+        pr->frozen_retry_at = json_number(&json, row, "frozen_retry_at");
+        ci_copy(pr->frozen_merge, sizeof(pr->frozen_merge), json_field(&json, row, "frozen_merge"));
+        ci_copy(pr->frozen_engine, sizeof(pr->frozen_engine), json_field(&json, row, "frozen_engine"));
+        if ((frozen == 1 && !ci_sha(pr->frozen_merge)) || (frozen != 1 && *pr->frozen_merge != 0)) ci_die("invalid frozen merge cache identity");
         pr->seen_at = json_number(&json, row, "seen_at");
         pr->queued_at = json_number(&json, row, "queued_at");
         pr->manual = ci_state_priority(&json, row);
@@ -700,7 +711,24 @@ static void ci_resolve_merge(CiIdentity* identity, const CiLease* proof)
                 ci_copy(identity->merge, sizeof(identity->merge), proof->merge);
             }
         }
-        else identity->mergeable = ci_git_merge(identity->base, identity->head, identity->merge);
+        else if (ci_current_state != NULL)
+        {
+            for (size_t i = 0; i < ci_current_state->pr_count; ++i)
+            {
+                CiPr* pr = &ci_current_state->prs[i];
+                if (pr->number == identity->number && strcmp(pr->head, identity->head) == 0 && strcmp(pr->base, identity->base) == 0)
+                {
+                    ci_preflight_identity(pr, identity, ci_now());
+                    break;
+                }
+            }
+        }
+        else
+        {
+            CiPr pr = {.number = identity->number};
+            ci_copy(pr.head, sizeof(pr.head), identity->head); ci_copy(pr.base, sizeof(pr.base), identity->base);
+            ci_preflight_identity(&pr, identity, ci_now());
+        }
     }
 }
 
@@ -953,6 +981,8 @@ static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, 
     {
         if (pr != NULL && (state->lease.pr != pr->number || *state->lease.nonce == 0))
         {
+            if (pr->frozen_state == 3) pr->frozen_state = 0;
+            pr->frozen_retry_at = 0;
             pr->outcome = 0;
             pr->queued_at = now;
             pr->admitted_at = 0;
@@ -1207,7 +1237,6 @@ static size_t ci_list_prs(CiIdentity* identities)
         {
             identities[i] = ci_get_pr(identities[i].number, true);
         }
-        else ci_resolve_merge(&identities[i], NULL);
     }
     return count;
 }
@@ -1989,7 +2018,7 @@ static void ci_select(CiState* state, CiIdentity* identities, size_t identity_co
             }
             // Recompute approval/hold immediately before admission. A queued promotion never interrupts a lease.
             CiPr* pr = ci_find_pr(state, candidate->pr);
-            final.code = ci_pr_code(&final);
+            final.code = strcmp(pr->code_merge, final.merge) == 0 ? pr->cached_code : ci_pr_code(&final);
             ci_comments(state, pr, &final, now);
             ci_reviews(&final);
             pr->cached_approved = final.approved;
@@ -2116,6 +2145,9 @@ static void ci_reconcile(bool inspect)
         ci_die("the restricted default-workflow runner pool must be verified with capacity one before activation");
     }
     CiState state = ci_load_state();
+    ci_current_state = &state;
+    ci_git_used_ms = 0;
+    ci_git_computed = ci_git_cached = ci_git_deferred = 0;
     uint64_t now = ci_now();
     uint64_t target_pr = inspect ? 0 : ci_event_target();
     uint64_t workflow = ci_workflow();
@@ -2143,6 +2175,8 @@ static void ci_reconcile(bool inspect)
             pr->command_id = pr->command_at != 0 ? UINT64_MAX : 0;
         }
         ci_observe(pr, current, now);
+        ci_resolve_merge(current, NULL);
+        if (!inspect) ci_save_state(&state); // Retain completed immutable work even if a later pair fails or times out.
     }
     ci_refresh_requests(&state, workflow);
     CiRun active[BUSTER_CI_CANDIDATES];
@@ -2275,6 +2309,8 @@ static void ci_reconcile(bool inspect)
         }
         ci_save_state(&state);
     }
+    printf("Git preflight: computed=%u cached=%u deferred/errors=%u work_ms=%" PRIu64 "; limits: 30s/pair, 120s/reconcile, 16MiB/file, 64MiB/store.\n", ci_git_computed, ci_git_cached, ci_git_deferred, ci_git_used_ms);
+    ci_current_state = NULL;
     free(state.saved_json);
 }
 
@@ -2381,7 +2417,13 @@ static int ci_guard_transfer(const char* path, bool checkout)
 {
     if (ci_guard(false) != 0) return 1;
     if (checkout) ci_git_materialize(&ci_guard_admitted, path);
-    else ci_git_pack(&ci_guard_admitted, path);
+    else if (ci_guard_admitted.pr == 0) ci_git_pack(&ci_guard_admitted, path);
+    else
+    {
+        CiGitComputed computed = {0};
+        if (!ci_git_bounded(ci_guard_admitted.base, ci_guard_admitted.head, &computed, BUSTER_CI_GIT_PAIR_MS, path) || !computed.clean || strcmp(computed.merge, ci_guard_admitted.merge) != 0)
+            ci_die("frozen object transfer exceeded its budget or changed merge identity");
+    }
     return 0;
 }
 

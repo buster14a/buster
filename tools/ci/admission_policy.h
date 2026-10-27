@@ -204,6 +204,10 @@ struct CiPr
 {
     uint64_t number;
     uint64_t head_repo;
+    unsigned frozen_state;
+    char frozen_merge[BUSTER_CI_SHA];
+    char frozen_engine[96];
+    uint64_t frozen_retry_at;
     char head[BUSTER_CI_SHA];
     char base[BUSTER_CI_SHA];
     uint64_t seen_at;
@@ -295,6 +299,8 @@ struct CiIdentity
     bool fork;
     bool code;
     bool approved;
+    bool frozen;
+    bool preflight_blocked;
     uint64_t approval_at;
 };
 
@@ -331,6 +337,10 @@ static void ci_observe(CiPr* state, const CiIdentity* current, uint64_t now)
     }
     if (head_changed || base_changed)
     {
+        state->frozen_state = 0;
+        state->frozen_merge[0] = 0;
+        state->frozen_engine[0] = 0;
+        state->frozen_retry_at = 0;
         ci_copy(state->base, sizeof(state->base), current->base);
         state->outcome = 0;
         state->admitted_at = 0;
@@ -393,7 +403,7 @@ static CiCandidate ci_pr_candidate(const CiPr* pr, const CiIdentity* current, co
     }
     else if (current->mergeable < 0)
     {
-        result.reason = "mergeability UNKNOWN; awaiting a stable head/base pair";
+        result.reason = current->preflight_blocked ? "merge preflight budget/error; awaiting retry or /ci retry" : "mergeability UNKNOWN; awaiting a stable head/base pair";
     }
     else if (!current->code)
     {

@@ -3,11 +3,14 @@
 // Metadata-only merge preflight. Git reads objects in a private bare repository; it never checks out PR code,
 // runs hooks/filters/PR programs or writes a GitHub ref. Live branch tips, not GitHub's deferred test merge, bind it.
 
+#include <sys/resource.h>
+
 typedef struct CiGitResult CiGitResult;
 struct CiGitResult { Buffer output; int status; };
 typedef struct CiGit CiGit;
 struct CiGit { char directory[256]; };
 static CiGit ci_git;
+static bool ci_git_is_worker;
 
 static CiGitResult ci_git_exec(const char* directory, const char* const* command, const void* input, size_t length)
 {
@@ -39,6 +42,8 @@ static CiGitResult ci_git_exec(const char* directory, const char* const* command
             arguments[at++] = (char*)command[i];
         }
         arguments[at] = NULL;
+        struct rlimit memory = {UINT64_C(512) * 1024 * 1024, UINT64_C(512) * 1024 * 1024};
+        if (setrlimit(RLIMIT_AS, &memory) != 0) _exit(127);
         execv(arguments[0], arguments);
         _exit(127);
     }
@@ -75,7 +80,7 @@ static void ci_git_dispose(CiGit* git)
     }
 }
 
-static void ci_git_cleanup(void) { ci_git_dispose(&ci_git); }
+static void ci_git_cleanup(void) { if (!ci_git_is_worker) ci_git_dispose(&ci_git); }
 
 static void ci_git_init(CiGit* git, bool network)
 {

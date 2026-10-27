@@ -87,5 +87,49 @@ static void ci_test_git(void)
     ci_expect(ci_git_merge_in(&fixture, conflict, head, repeated) == 0 && *repeated == 0, "Git: a new base conflict is detected even if GitHub's cached test merge was clean");
     ci_expect(access(marker, F_OK) != 0, "Git: attributes cannot invoke an inherited external merge driver");
     unsetenv("GIT_CONFIG_COUNT"); unsetenv("GIT_CONFIG_KEY_0"); unsetenv("GIT_CONFIG_VALUE_0");
+
+    CiGit previous = ci_git;
+    ci_git = fixture; // All fixture commits are local; the production bounded worker makes no network request.
+    CiPr cached = {.number = 546, .manual = -1};
+    CiIdentity live = {.number = 546, .open = true, .mergeable = 1};
+    ci_copy(live.head, sizeof(live.head), head); ci_copy(live.base, sizeof(live.base), base);
+    ci_observe(&cached, &live, 1000);
+    ci_preflight_identity(&cached, &live, 1000);
+    ci_expect(cached.frozen_state == 1 && live.mergeable == 1 && strcmp(live.merge, lease.merge) == 0, "cache: bounded object preflight records the exact live head/base result");
+    unsigned computed = ci_git_computed;
+    live.mergeable = 0; // GitHub's older snapshot is not authority over a cached immutable Git result.
+    ci_preflight_identity(&cached, &live, 1001);
+    ci_expect(live.mergeable == 1 && ci_git_computed == computed, "cache: unchanged live tips reuse the immutable result without another fetch or merge");
+    CiState stored = {.pr_count = 1}; stored.prs[0] = cached;
+    Buffer serialized = ci_state_json(&stored);
+    CiState restored = ci_state_parse(serialized.data); free(serialized.data);
+    ci_expect(restored.prs[0].frozen_state == 1 && strcmp(restored.prs[0].frozen_merge, lease.merge) == 0 && strcmp(restored.prs[0].frozen_engine, cached.frozen_engine) == 0, "cache: the head/base proof, classification and engine survive a controller restart");
+    CiPr clean = cached;
+    ci_copy(live.base, sizeof(live.base), conflict); live.mergeable = 1;
+    ci_observe(&cached, &live, 1002);
+    ci_preflight_identity(&cached, &live, 1002);
+    ci_expect(cached.frozen_state == 2 && live.mergeable == 0 && ci_git_computed == computed + 1, "cache: advancing the base invalidates the old proof and recomputes a real conflict");
+
+    CiGitComputed limited = {0};
+    ci_git_test_stall = true;
+    uint64_t began = ci_monotonic_ms();
+    bool timed = ci_git_bounded(base, head, &limited, 50, NULL);
+    ci_git_test_stall = false;
+    ci_expect(!timed && ci_monotonic_ms() - began < 1000, "budget: a stalled preflight process group is killed at its actual wall deadline");
+    ci_git_test_large_pack = true;
+    bool oversized = ci_git_bounded(base, head, &limited, 1000, NULL);
+    ci_git_test_large_pack = false;
+    ci_expect(!oversized && *ci_git.directory == 0, "budget: the OS file-size limit rejects an oversized transport pack and discards its partial store");
+    live.mergeable = 1; ci_copy(live.base, sizeof(live.base), base);
+    computed = ci_git_computed;
+    ci_preflight_identity(&clean, &live, 1003);
+    ci_expect(live.mergeable == 1 && ci_git_computed == computed, "budget: one failed preflight does not block another already-cached eligible pair");
+    ci_git_used_ms = BUSTER_CI_GIT_TOTAL_MS;
+    cached = (CiPr){.number = 546};
+    ci_copy(cached.head, sizeof(cached.head), head); ci_copy(cached.base, sizeof(cached.base), base);
+    live.mergeable = 1;
+    ci_preflight_identity(&cached, &live, 1004);
+    ci_expect(live.mergeable == -1 && live.preflight_blocked && ci_git_computed == computed, "budget: the aggregate reconcile limit defers only uncached work and never starts another transfer");
+    ci_git = previous;
     ci_git_dispose(&fixture); ci_git_dispose(&receiver);
 }

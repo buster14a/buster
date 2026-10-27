@@ -12,6 +12,9 @@ The cutover is **off** until repository variable `CI_9700X_ADMISSION_ENABLED` is
 `true`. With it off, the existing PR/push/daily/manual qualification path and
 required job remain in use. The hosted policy-fixture workflow tests this change
 before it is installed on `main`.
+Targeted dispatch inputs are rejected on hosted capacity while admission is off;
+they cannot fall back to a legacy physical run or download a nonexistent guard.
+An ordinary maintenance dispatch with no PR target retains the original path.
 
 First verify the compatible pool really has one host-lock slot and restrict
 **this repository's** physical entrypoint to:
@@ -89,7 +92,9 @@ GitHub Actions integration (15368). Do not change branch protection or require a
 rebase merely because a PR is behind its base.
 
 In active mode, a native PR workflow supplies the independent hosted `changes`
-preview; its skipped physical job is named `9700X queue request`. Native PRs
+preview; its skipped physical job uses a separate queue-request name. GitHub may
+display the literal name expression for a skipped job rather than its evaluated
+`9700X queue request` label; neither form is the required result. Native PRs
 from public forks always take that hosted-only preview path, even if repository
 variables are absent from its event context. The host source gate also enforces
 the boundary when a fork changes its own workflow. A selected PR
@@ -160,6 +165,34 @@ resulting checkout SHA before reading/building PR source. A changed pair,
 different merge result, missing/corrupt pack or failed guard remains blocking.
 The physical guard rechecks live refs against the authenticated lease; it does
 not calculate mergeability or build the guard while holding the host lock.
+
+### Preflight cache and resource limits
+
+The durable PR row caches the immutable conflict result, canonical merge SHA,
+complete changed-path classification and Git-engine/method identity against both
+live input SHAs. An unchanged pair does not fetch or merge again during later
+reconciliations. A new head/base or engine invalidates the proof; a base advance
+never reuses an older result. The selected PR's pinned pair and cached proof are
+revalidated before grant. Each completed cache entry is saved independently so
+one later failure cannot erase work already done by this controller invocation.
+
+Uncached preflight runs in a separate process group. Its watchdog allows 30
+seconds per pair and 120 seconds total per reconcile. Actual Git workers inherit
+a 16 MiB OS file-size limit for fetched packs, a 15-second CPU limit per process,
+and a 512 MiB address-space limit. The parent monitors the private object store
+against 64 MiB and 8,192 entries every 20 ms, and kills the entire worker/helper
+group on a wall/storage limit. Core dumps are disabled. These limits constrain
+the fetch itself; the JSON/output-buffer limit alone does not bound transport.
+The monitored store may overshoot its threshold by in-flight writes before the
+watchdog kills the group; the per-file and process limits still apply.
+
+A fetch/resource failure discards the partial store and blocks only that PR's
+pair with a five-minute retry backoff. Cached eligible PRs remain usable, and
+other pairs can use the remaining reconcile budget. Exhausting the total budget
+defers uncached work to a later pass; it cannot become a conflict or green skip.
+`/ci retry` clears the failed-pair backoff. Frozen-pack construction has the same
+30-second worker/file/store limits before any physical job is admitted. The
+controller summary exposes computed/cache/deferred counts and Git work time.
 
 ## Priority and commands
 

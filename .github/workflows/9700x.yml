@@ -48,6 +48,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  invalid-target:
+    if: github.event_name == 'workflow_dispatch' && inputs.target_pr && vars.CI_9700X_ADMISSION_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Reject a targeted dispatch while admission is disabled
+        run: |
+          echo 'Targeted PR qualification requires enabled admission and a current controller lease.' >&2
+          exit 1
+
   # Only reviewed main workflows reach the physical pool once admission is enabled. Native PR workflows retain
   # independent hosted change detection. The controller publishes the existing required check on the PR head after
   # a pinned merge succeeds; a workflow_dispatch's native default-branch check is never the PR's merge evidence.
@@ -134,7 +144,7 @@ jobs:
   # it decides.
   changes:
     needs: admission
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'push' || inputs.target_pr) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || github.event_name == 'pull_request' || needs.admission.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'push' || (vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr)) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || github.event_name == 'pull_request' || needs.admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -170,14 +180,14 @@ jobs:
           persist-credentials: false
 
       - name: Download only this admitted workflow attempt's frozen merge
-        if: inputs.target_pr
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/9700x-admission
 
       - name: Reconstruct the exact frozen merge before reading its selector
-        if: inputs.target_pr
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
         env:
           GH_TOKEN: ${{ github.token }}
           CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
@@ -225,7 +235,7 @@ jobs:
     needs: [changes, admission]
     # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (the daily and
     # dispatched runs) or failed.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (!inputs.target_pr || vars.CI_9700X_ADMISSION_ENABLED == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
@@ -278,7 +288,7 @@ jobs:
           persist-credentials: false
 
       - name: Reconstruct the exact frozen merge before qualification
-        if: inputs.target_pr
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
         env:
           GH_TOKEN: ${{ github.token }}
           GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
