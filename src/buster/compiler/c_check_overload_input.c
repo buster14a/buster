@@ -21,21 +21,12 @@ static uint32_t check_input_overload_flags(const CheckInputAttributes* attribute
     return flags;
 }
 
-static bool check_input_overload_initialize(CheckInputReader* reader)
+// The unit's tables of overloads, where `present`, a token named overloadable or __overloadable__, says it may have
+// some: room for `capacity` candidates, its operands, and `calls` calls, its calls' and function declarators' closing
+// parentheses. check_input_run counts them in its pass over the tokens (check_input_count_tokens).
+static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls)
 {
     const Parser* parser = reader->parser;
-    const uint32_t plain = intern_find(reader->pp->table, (const uint8_t*)"overloadable", 12);
-    const uint32_t underscored = intern_find(reader->pp->table, (const uint8_t*)"__overloadable__", 16);
-    bool present = false;
-    uint32_t capacity = 0;
-    uint32_t calls = 0;
-    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
-    {
-        const uint32_t name = parser->tokens.names[token];
-        present |= name != 0 && (name == plain || name == underscored);
-        capacity += parser->tree.roles[token] == PARSE_ROLE_OPERAND;
-        calls += parser->tree.roles[token] == PARSE_ROLE_CLOSE_CALL || parser->tree.roles[token] == PARSE_ROLE_CLOSE_FUNCTION;
-    }
     bool valid = true;
     if (present)
     {
