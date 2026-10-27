@@ -36,13 +36,14 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_DIVSC3,
     CHECK_LOWER_RUNTIME_DIVDC3,
     CHECK_LOWER_RUNTIME_DIVXC3,
+    CHECK_LOWER_RUNTIME_MEMMOVE,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
     "__floatuntidf",    "__floatuntixf", "__fixsfti", "__fixdfti",   "__fixxfti",  "__fixunssfti", "__fixunsdfti", "__fixunsxfti", "__mulsc3",
-    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3",
+    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -1246,10 +1247,14 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
     }
 }
 
+static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
+
 // `size` bytes copied from the source's address on top of the stack to the destination's under it, which stays when
-// `keep` (an assignment's value): one COPY, or COPYs of up to BUSTER_TIER0_MAX_COPY_BYTES each, the source's address
-// in a temporary between them. A kept destination's address goes in a temporary too, pushed again after the last COPY:
-// its consumer's class is read from the entry before it (tier0_validate), which a COPY, of class VOID, can't give.
+// `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger ones call memmove through the ordinary
+// runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
+// the same source and destination, which C aggregate assignment does too. No emitted stream grows with the object size.
+// A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
+// which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
 {
@@ -1265,32 +1270,29 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     {
         check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
     }
+    else if (size > BUSTER_TIER0_MAX_COPY_BYTES)
+    {
+        // Pointers and size_t use the same U64 INTEGER ABI as unsigned long on the generated SysV x86-64 target.
+        // Reuse that builtin type so lowering creates no type after the shared ABI classifications are published.
+        const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
+        const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMMOVE, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, size);
+        check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+        if (!keep)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
     else
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-        const uint32_t destination = keep ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
+        const uint32_t destination = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
-        if (keep)
-        {
-            // The destination's address, left under the SET_LOCAL of its class, stays the first COPY's operand.
-            check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-        }
-        for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += BUSTER_TIER0_MAX_COPY_BYTES)
-        {
-            const uint64_t piece = size - offset < BUSTER_TIER0_MAX_COPY_BYTES ? size - offset : BUSTER_TIER0_MAX_COPY_BYTES;
-            if (offset + piece != size)
-            {
-                check_lower_emit(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
-            }
-            check_lower_offset(writer, offset);
-            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
-            check_lower_offset(writer, offset);
-            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece);
-        }
-        if (keep)
-        {
-            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-        }
+        // Here keep is true and the entire copy fits one bounded COPY.
+        check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
+        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     }
 }
 
@@ -1641,8 +1643,6 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
     }
 }
-
-static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
 
 // A conversion of the value on top of the stack from `from` to `to`, neither of them complex (but to void): a complex
 // one's are check_lower_complex_conversion's, which converts its parts here. Always inlined into both copies of the
@@ -5134,7 +5134,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;
     shared->builtin_count = builtin_count;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
-    // or from a floating type, an update's two), each of up to two arguments. The runtime functions' provisional symbols
+    // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
+    // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
     // (check_lower_runtime) follow the helpers'.
     const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements + 1 : 0;

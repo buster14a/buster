@@ -17,6 +17,12 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
+`c_check_program_copy_test.c` fixtures (#597) are original project material under
+the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream
+interfaces. System libc and Clang run externally; no external implementation,
+generated instruction data or corpus fixtures are incorporated.
+
 The text IR parser and validation consumer (`ir_parse.c`, `ir_validate.c`), interpreter family (`interpreter*.c`,
 `ir_interpreter*.c`), their test fixtures under `tests/ir/`, and
 `docs/ir-tools.md` are original project material under the default terms.

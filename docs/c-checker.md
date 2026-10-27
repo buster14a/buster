@@ -665,13 +665,18 @@ What the lowering covers past scalars (#145's programs):
   register as a struct of it would, or from its 8-byte stack slot, which
   Tier 0's prologue copies into the object (an aligned typedef passes as its
   base, so the slot is aligned to 8 alone).
-- **Copies.** Struct and union assignment and initialization are `COPY`s of
-  at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard, and neither
-  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
-  value is used keeps its destination's address in a temporary too, pushed
-  again after the last `COPY`: whatever reads it takes its class from the entry
-  before it, which a `COPY`, of class `VOID`, can't give (#440).
+- **Copies.** Struct and union assignment and initialization up to 256 bytes
+  use one bounded `COPY`. Larger copies use one `memmove` runtime call (#597),
+  through the same symbol publication, ABI assignment and live-value preservation
+  as other runtime calls. The pointers and `size_t` have unsigned long's U64
+  INTEGER ABI on the generated SysV x86-64 target; no new type is created after
+  shared type classification. The call returns the destination when the
+  assignment's value is used, and its return is discarded otherwise. `memmove`
+  permits self-assignment. The number of typed entries and machine records is
+  bounded independently of the object size, so syntax-sized lowering capacities
+  cover this producer's actual demand. Small kept assignments retain the
+  destination in a temporary (#440), because `COPY` itself has class `VOID`.
+  Zero-size copies still evaluate their operands without touching memory.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,

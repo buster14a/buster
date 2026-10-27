@@ -1233,6 +1233,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
+#include "c_check_program_copy_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -1394,6 +1395,7 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_copies(test, clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
