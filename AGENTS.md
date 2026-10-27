@@ -988,7 +988,12 @@ designs and the compilers already built this way.
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
-  twin.
+  twin. `tier0_validate`, the stream's rules (the compile paths'
+  precondition, which the lowering checks on every function it lowers), runs a
+  vector path 64 entries at a time (`tier0_validate_accepts`, #569) and leaves
+  every stream it doesn't take to the scalar validator (`tier0_validate_scalar`,
+  its twin, which `--scalar` runs alone), so that a refusal and its rule are
+  always the scalar validator's.
   `tier0_generate.c` makes random programs as typed streams and as C,
   `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
   `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
@@ -5042,7 +5047,25 @@ results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
 operands, a row of no records), constants, frame objects of each width, DUP,
 STORE's kept value and `?:`, under live values on both stacks, every output
 byte against the check's stack machine. Its coverage must reach every VECTOR
-kind at each width it has, every row and both arms.
+kind at each width it has, every row and both arms. Then the `validation`
+check (`tier0_validate_test.c`, #569): the validation's vector path
+(`tier0_validate_accepts`) against the scalar validator, which must agree on
+every stream but where the vector path leaves one to the scalar validator by
+design (a backward arrival with values, the arrivals of `x ?: y`, its limits).
+Every kind (NONE, X86 and one past the kinds among them) of every class after
+no operand, one or two of every class, with values at its kind's bounds and
+past them, in a function of every kind of local, direct and indirect calls,
+a result object, a long double result, the access column and a label, with
+and without the memory classes (559,200 streams); joins of `?:` and `&&` at
+depths and across blocks, loops, values at the end; values carried across
+64-entry blocks at every depth to 40, calls spanning blocks, the limits, and
+more than 128 locals and calls (the gathers); each stream with its columns
+ending at a `PROT_NONE` page; each field of the locals', the calls', the
+arguments', the parameters' and the result's tables at its edges, on a plain
+function and one with a result object; and in every program above, the
+vector path must take each function, and one change of each in every fourth
+program (a kind, a class or a value, two entries swapped, one removed or
+repeated) only where the scalar validator takes it.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
@@ -5065,19 +5088,23 @@ files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|scalar|sizing|encode] [--after-scalar MS]` (about 4 s) generates programs
+vector|scalar|sizing|encode|validate|validate-scalar] [--after-scalar MS]`
+(about 4 s) generates programs
 until their functions hold `--entries` typed entries (262,144), checks that both
 of Tier 0's paths give every function the same code, then reports 21-pass
 medians, per typed entry and per record, of `tier0_compile`,
-`tier0_compile_scalar`, `size_branches` on their records and `x86_encode` of the
-sized records: nanoseconds, cycles, instructions, IPC and the throttle
-(PMCx1A0's umask 0x08, #199), with the share of entries deferred. `--only` runs
-one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
-each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
+`tier0_compile_scalar`, `size_branches` on their records, `x86_encode` of the
+sized records, and `tier0_validate` and `tier0_validate_scalar` (#569):
+nanoseconds, cycles, instructions, IPC and the throttle
+(PMCx1A0's umask 0x08, #199), with the share of entries deferred and the
+functions the validation's vector path takes alone. `--only` runs
+one variant alone, and `--after-scalar MS` runs the scalar twin for MS ms before
+each pass of the vector path and of the validation. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
-`./build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode]
+`./build/compiler benchmark-backend-source [--only
+vector|scalar|sizing|encode|validate|validate-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted, outside the time;
