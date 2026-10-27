@@ -1572,7 +1572,14 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
             (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL) &&
-            (left->loop_diagnostic == NULL) == (right->loop_diagnostic == NULL);
+            (left->loop_diagnostic == NULL) == (right->loop_diagnostic == NULL) &&
+            (left->naked_diagnostic == NULL) == (right->naked_diagnostic == NULL);
+    if (equal && left->naked_diagnostic != NULL)
+    {
+        const CheckInputNakedDiagnostic* l = left->naked_diagnostic;
+        const CheckInputNakedDiagnostic* r = right->naked_diagnostic;
+        equal = l->position == r->position && l->token == r->token && l->attribute == r->attribute;
+    }
     if (equal && left->loop_diagnostic != NULL)
     {
         const CheckInputLoopDiagnostic* l = left->loop_diagnostic;

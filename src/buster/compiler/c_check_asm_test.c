@@ -16,6 +16,47 @@ struct CheckAsmFixture
 
 static const CheckAsmFixture check_asm_fixtures[] =
 {
+    { "naked-local", "__attribute__((naked)) void a(void) {\nint x = 1; (void)x; __asm__(\"ret\");\n}\n" },
+    { "naked-parameter-input", "__attribute__((naked)) void b(int n) {\n__asm__(\"ret\" : : \"r\"(n));\n}\n" },
+    { "naked-return", "__attribute__((naked)) int c(void) {\nreturn 3;\n}\n" },
+    { "naked-parameter-output", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : \"=r\"(n));\n}\n" },
+    { "naked-parameter-read-write", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : \"+r\"(n));\n}\n" },
+    { "naked-parameter-sizeof", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : : \"i\"(sizeof n));\n}\n" },
+    { "naked-parameter-discarded", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : : \"i\"(1 ? 0 : n));\n}\n" },
+    { "naked-parameter-generic", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : : \"i\"(_Generic(n,int:0)));\n}\n" },
+    { "naked-empty", "__attribute__((naked)) void f(void) {}\n" },
+    { "naked-null-statements", "__attribute__((naked)) void f(void) { ; __asm__(\"nop\"); ; __asm__(\"ret\"); ; }\n" },
+    { "naked-constant-input", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(3)); }\n" },
+    { "naked-global-input", "int n; __attribute__((naked)) void f(void) { __asm__(\"\" : : \"r\"(n)); }\n" },
+    { "naked-shadow-in-expression", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(({ int n=2; n; }))); }\n" },
+    { "naked-statement-expression", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(({ n; }))); }\n" },
+    { "naked-named-register", "__attribute__((naked)) void f(void) { register int x asm(\"eax\"); __asm__(\"\" : \"=r\"(x)); }\n" },
+    { "naked-named-registers", "__attribute__((naked)) void f(void) { register int x asm(\"eax\"), y asm(\"ebx\"); __asm__(\"\" : \"=r\"(x), \"=r\"(y)); }\n" },
+    { "naked-initialized-register", "__attribute__((naked)) void f(void) {\nregister int x asm(\"eax\")=1;\n__asm__(\"ret\");\n}\n" },
+    { "naked-mixed-registers", "__attribute__((naked)) void f(void) {\nregister int x asm(\"eax\"), y;\n__asm__(\"ret\");\n}\n" },
+    { "naked-typedef", "__attribute__((naked)) void f(void) {\ntypedef int T;\n__asm__(\"ret\");\n}\n" },
+    { "naked-static-assert", "__attribute__((naked)) void f(void) {\n_Static_assert(1,\"\");\n__asm__(\"ret\");\n}\n" },
+    { "naked-expression", "int x; __attribute__((naked)) void f(void) {\nx=1;\n__asm__(\"ret\");\n}\n" },
+    { "naked-if", "__attribute__((naked)) void f(int n) {\nif(n) __asm__(\"ret\");\n}\n" },
+    { "naked-compound", "__attribute__((naked)) void f(void) {\n{ __asm__(\"ret\"); }\n}\n" },
+    { "naked-label", "__attribute__((naked)) void f(void) {\nL: __asm__(\"ret\");\n}\n" },
+    { "naked-inherited", "void f(void) __attribute__((naked));\nvoid f(void);\nvoid f(void) {\nreturn;\n}\n" },
+    { "naked-inherited-parameter", "void f(int n) __attribute__((naked));\nvoid f(int n) {\n__asm__(\"\" : : \"r\"(n));\n}\n" },
+    { "naked-later-attribute", "void f(void) {}\nvoid f(void) __attribute__((naked));\n" },
+    { "naked-ordinary-function-after", "__attribute__((naked)) void f(void) { __asm__(\"ret\"); }\nint g(int n) { return n+1; }\n" },
+    { "naked-parameter-before-statement", "__attribute__((naked)) void f(int n) {\nint x;\n__asm__(\"\" : : \"r\"(n));\n}\n" },
+    { "naked-undeclared-before-statement", "__attribute__((naked)) void f(void) {\nreturn missing;\n}\n" },
+    { "naked-type-error-before-statement", "__attribute__((naked)) void f(void) {\nint *x;\nx=1.5;\n}\n" },
+    { "naked-typeof", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(sizeof(__typeof__(n)))); }\n" },
+    { "naked-alignof", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(__alignof__(n))); }\n" },
+    { "naked-constant-query", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(__builtin_constant_p(n))); }\n" },
+    { "naked-choose-expression", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"i\"(__builtin_choose_expr(1,0,n))); }\n" },
+    { "naked-parameter-before-binding-error", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : : \"r\"(n));\nmissing;\n}\n" },
+    { "naked-parameter-before-syntax-error", "__attribute__((naked)) void f(int n) {\n__asm__(\"\" : : \"r\"(n));\nint broken=;\n}\n" },
+    { "naked-rightmost-parameter", "__attribute__((naked)) void f(int n, int m) {\n__asm__(\"\" : : \"r\"(n+m));\n}\n" },
+    { "naked-compound-register", "__attribute__((naked)) void f(void) {\n{ register int x asm(\"eax\"); }\n}\n" },
+    { "naked-if-register", "__attribute__((naked)) void f(void) {\nif(1) { register int x asm(\"eax\"); }\n}\n" },
+    { "naked-expression-register", "__attribute__((naked)) void f(void) {\n({ register int x asm(\"eax\"); });\n}\n" },
     {
         "basic-file",
         "__asm__(\".text\\n\" \".p2align 2\");int f(void){return 1;}",
@@ -571,6 +612,28 @@ static bool check_test_asm_fixture(CheckTest* test, CheckCorpusTally* tally, con
         if (different)
         {
             fprintf(stderr, "%s: Clang: %s\n", source->name, oracle.message);
+        }
+        for (uint32_t variant = 0; strncmp(source->name, "naked-", 6) == 0 && strstr(oracle.message, "naked") != NULL && variant < 2; variant += 1)
+        {
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static Parser parser;
+            CheckCorpusPath result = { 0 };
+            const bool prepared = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                                  pp_run_source(&pp, path, (const uint8_t*)source->source, strlen(source->source));
+            const bool accepted = prepared && check_corpus_check(&result, &parser, &pp, variant == 0);
+            const bool exact = prepared && !accepted && !result.resource && result.line == oracle.line && result.column == oracle.column &&
+                               strcmp(result.message, oracle.message) == 0;
+            check_test_expect(test, exact, source->name);
+            if (!exact)
+            {
+                fprintf(stderr, "%s: exact naked diagnostic: ours=%u:%u %s; clang=%u:%u %s\n", source->name,
+                        result.line, result.column, result.message, oracle.line, oracle.column, oracle.message);
+            }
+            check_corpus_close(&result);
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
         }
         ready = unlink(path) == 0;
     }

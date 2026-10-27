@@ -362,6 +362,12 @@ no Clang or corpus implementation is copied.
 
 ## C semantic compatibility references
 
+Naked-function constraints in `c_check_naked_input.c` and their original
+fixtures use Clang/LLVM `llvmorg-23.1.1`'s `SemaDecl.cpp` and
+`SemaStmtAsm.cpp` as behavior references, checked with Clang 23.1.4 probes.
+No LLVM implementation or fixtures were copied; the new code and fixtures
+use the project default terms.
+
 The original GNU integer folding helper in `c_check_integer_extension.c`
 and its independent generated fixtures use observed Clang 23.1.1 and
 23.1.3 behavior. The rules were checked against

@@ -28,6 +28,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOOP_MISSING,
     CHECK_INPUT_LOOP_EXPRESSION,
     CHECK_INPUT_LOOP_PARENTHESIS,
+    CHECK_INPUT_NAKED_STATEMENT,
+    CHECK_INPUT_NAKED_PARAMETER,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -47,6 +49,8 @@ static const char* const check_input_messages[] =
     "unroll pragma's count missing",
     "unroll pragma's count not an expression",
     "unroll pragma's count unclosed",
+    "non-ASM statement in naked function is not supported",
+    "parameter references not allowed in naked functions",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -106,8 +110,16 @@ struct CheckInputPackedMember
     bool suppressed;
 };
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
+typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
+struct CheckInputNakedDiagnostic
+{
+    uint32_t position;
+    uint32_t token;
+    uint32_t attribute;
+};
 #define CHECK_INPUT_FUNCTION_INLINE 0x01u
 #define CHECK_INPUT_FUNCTION_EXTERN 0x02u
+#define CHECK_INPUT_FUNCTION_NAKED 0x04u
 struct CheckInputVla
 {
     uint32_t declaration;
@@ -140,6 +152,7 @@ struct CheckInput
     CheckInputPackPragmas* pack_pragmas;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
     CheckInputLoopDiagnostic* loop_diagnostic;
+    CheckInputNakedDiagnostic* naked_diagnostic;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -377,6 +390,7 @@ struct CheckInputReader
     TypeId function_result;
     uint32_t function_end;
     uint32_t function_body;
+    bool naked_functions;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -452,6 +466,8 @@ static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
 }
 
 #include "c_check_attribute.c"
+static const CheckInputAttribute* check_input_naked_attribute(const CheckInputAttributes* attributes);
+static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous);
 
 static TypeId check_input_declarator_abi(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type, uint8_t* origin)
 {
@@ -2720,6 +2736,11 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 reader->output->attributes[name] = attributes;
                 reader->output->function_flags[name] = function ? (is_inline ? CHECK_INPUT_FUNCTION_INLINE : 0) |
                                                       (storage == C_NAME_EXTERN ? CHECK_INPUT_FUNCTION_EXTERN : 0) : 0;
+                if (function && !is_typedef && check_input_naked_attribute(attributes) != NULL)
+                {
+                    reader->output->function_flags[name] |= CHECK_INPUT_FUNCTION_NAKED;
+                    reader->naked_functions = true;
+                }
                 reader->linkage[name] = is_typedef || (!file && !function && storage != C_NAME_EXTERN) ? 0 : is_static ? 1 : 2;
                 if ((storage == C_NAME_EXTERN || (function && storage == 0)) && reader->linkage[name] != 0)
                 {
@@ -2879,6 +2900,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         else
         {
             reader->objects[token] = reader->objects[previous];
+            check_input_naked_inherit(reader, token, previous);
             const TypeId composite = check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
             if (composite == 0)
             {
@@ -2922,6 +2944,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             {
                 reader->definition_seen[token] |= reader->definition_seen[previous];
                 reader->objects[token] = reader->objects[previous];
+                check_input_naked_inherit(reader, token, previous);
                 composite = check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
                 if (composite == 0)
                 {
@@ -4225,6 +4248,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
+#include "c_check_naked_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
 // (BUSTER_CHECK_EXTENSION_SYSTEM_HEADER): the system level of each output token's expansion location, its file and the
@@ -4886,6 +4910,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (!input->resource)
                 {
                     check_input_asm_finish(&reader);
+                    check_input_naked_finish(&reader);
                 }
                 if (input->report_count == 0 && !input->resource)
                 {

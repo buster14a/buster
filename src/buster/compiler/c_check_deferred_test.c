@@ -38,6 +38,10 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "naked-valid-bodies", "__attribute__((naked)) void f(int n) { ; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
+    { "naked-invalid-statement", "__attribute__((naked)) void f(void) { int x=1; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
+    { "naked-parameter-reference", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(n)); }\nint g(int n) { return n; }\n", true },
+    { "naked-inherited-attribute", "void f(void) __attribute__((naked));\nvoid f(void) { return; }\nint g(int n) { return n; }\n", true },
     { "loop-hints", "int f(int n) {\n#pragma clang loop unroll_count(4)\n while (n--) {} return n; }\nint g(int n) {\n#pragma nounroll\n do n--; while(n); return n; }\n", true },
     { "loop-conflict", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) {} }\n", false },
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },
