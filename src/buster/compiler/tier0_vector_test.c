@@ -2121,6 +2121,7 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         { "a row's operation at the stack's depth", UINT32_MAX },
         { "CONVERT of a vector", 1 },
         { "EQ of two vectors", 2 },
+        { "a call's argument class of a vector's stack byte", 0 },
     };
     static const uint8_t local_classes[6] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_VOID,
                                               BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VECTOR };
@@ -2215,6 +2216,11 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
             tier0_test_vector_put(&written, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
             tier0_test_vector_put(&written, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
             break;
+        case 22:
+            // A 16-byte vector passed to a direct call whose argument's class is that vector's stack byte, in rdi.
+            tier0_test_vector_put(&written, BUSTER_TYPED_CONST, v, 2);
+            tier0_test_vector_put(&written, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0);
+            break;
         case 19:
         {
             // X86 entries of vectors to vectors, a float to a vector and a vector to a float: taken.
@@ -2270,15 +2276,20 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
         function.operations = rows;
         function.operation_count = operations;
         function.vectors = vectors;
-        // A call's argument of class VECTOR: a call table of one, which no entry calls.
+        // A call table of one: an argument of class VECTOR, which no entry calls (break 17), or of a vector's stack byte
+        // in rdi, which break 22's entry calls with a vector.
         SymbolId target = 1;
         uint32_t first = 0;
         uint32_t argument_count = 1;
         uint8_t variadic = 0;
         AbiCall call = { 0 };
-        uint8_t argument_class = BUSTER_TYPED_CLASS_VECTOR;
+        uint8_t argument_class = b == 22 ? (uint8_t)(BUSTER_TYPED_CLASS_LIMIT | 1) : BUSTER_TYPED_CLASS_VECTOR;
         AbiLocation location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_REGISTER_VECTOR | 0, BUSTER_ABI_REGISTER_NONE } };
-        if (b == 17)
+        if (b == 22)
+        {
+            location = (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE } };
+        }
+        if (b == 17 || b == 22)
         {
             function.call_targets = &target;
             function.call_first = &first;
