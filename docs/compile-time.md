@@ -158,9 +158,9 @@ Each upper bound is the time the item would save if its cost went to zero.
      kernel clearing pages.
    - Upper bound: about 30 ms, with the cache misses of sparse columns besides.
    - Follow-up: [#528](https://github.com/buster14a/buster/issues/528), which
-     took 115 MB of it and 17% of the kernel's cycles, and #570 46 MB more
-     ("Memory first touched", below); [#572](https://github.com/buster14a/buster/issues/572)
-     has the rest.
+     took 115 MB of it and 17% of the kernel's cycles, #570 46 MB more and
+     [#572](https://github.com/buster14a/buster/issues/572) 121 MB more
+     ("Memory first touched", below).
 3. **The checker's graph and program passes**, 35.7 ms (18.9%):
    `check-expressions` 20.0 ms and `check-program` 15.7 ms, with no system
    time.
@@ -189,7 +189,7 @@ The rest are small: preprocessing (9.8 ms) and parsing (9.6 ms) have their own
 issues (#117, #126, #451); Tier 0 takes 5.0 ms; the object's build and write
 take 0.6 ms.
 
-## Memory first touched (#528)
+## Memory first touched (#528, #572)
 
 Three allocations touched far more memory than they used.
 - [#528](https://github.com/buster14a/buster/issues/528)'s two changes took
@@ -198,7 +198,8 @@ Three allocations touched far more memory than they used.
   takes 46 MB more with the third. #528's branch had made that change first,
   and left it to #570.
 
-The objects are the same bytes.
+[#572](https://github.com/buster14a/buster/issues/572) then took 121 MB more off
+the checker ("The checker's columns", below). The objects are the same bytes.
 
 ### Before and after
 
@@ -268,34 +269,104 @@ The stages that changed, from each compile's `--time-stages` medians:
     0's arrays fault page by page, 0.6 ms slower; the writer's columns alone
     don't.
 
+### The checker's columns (#572)
+
+Four of the checker's allocations held memory that few entries used, or that
+nothing read:
+- **The reader's rarely written columns.** `check_input_run` kept all of its
+  token columns in the checker's scratch, whose pages the later stages take
+  again. On `sqlite3.c` the reader touched 186 MB of it, where no later stage
+  touches more than 72 MB, so the scratch stayed at the reader's size to the
+  end of the compile.
+  - The 30 columns that few tokens have an entry in, the scope stacks and the
+    binding table (room for four events a token, of which `sqlite3.c` fills
+    the first 167,456) are now in an arena of the reader's own, which it unmaps
+    when it returns.
+  - Its pages are new and zero: the columns need no clearing, and take memory
+    only where the walk writes them. The walk reads most of them at every
+    token, which maps the kernel's huge zero page, so the arena's pages are
+    huge ones but for the scope stacks' and the enumeration constants', which
+    only their own tokens read.
+  - The reader's scratch is 70 MB, under the parse's and `check_program`'s.
+- **The graph's values.** The expression graph had a 96-byte `CheckValue` for
+  each of `sqlite3.c`'s 343,555 nodes, which only `VALUE` nodes read: 33 MB.
+  The values are now the `VALUE` nodes' alone, in node order, which a 4-byte
+  slot per node finds ([the checker guide](c-checker.md)).
+- **The program pass's controls.** `check_program`'s labels, task worklist and
+  controls had room for 8 entries a token in the scratch, 300 MB, of which
+  each body takes a few at the start. Their starts, and the columns pushed
+  after them, took pages past the reader's, which the scratch kept. They are
+  now in an arena of `check_program`'s own.
+- **#113's environment.** The C driver no longer publishes it
+  (`check_input_compile`): only the deferred reader's tests and the corpus's
+  comparisons read it.
+
+These are the 9700X's medians, pinned to CPU 2 under the host's lock, of
+`main` at `d8805cb7` and #572's head `f74414b9`: `measure-compile` in both
+orders, each compiler the other's reference (21 rotated rounds each), and
+`perf stat -r 11` of each, twice.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/32fdc4db4da6807cca13904a9022f1fc0147e992/docs/measurements/memory-572-2026-10-27) holds the logs, the scripts and the trees'
+identities.
+
+| | `main` | #572 | change |
+| --- | ---: | ---: | ---: |
+| wall time | 147.06 ms (145.98 to 147.92) | 140.26 ms (139.74 to 141.33) | −6.80 ms (−4.6%) |
+| peak RSS | 514,000 KB | 393,140 KB | −120,860 KB (−23.5%) |
+| minor faults | 2,251 | 2,265 | +14 |
+| task-clock (perf) | 147.24 ms | 139.93 ms | −5.0% |
+| cycles, kernel | 120.3 M | 108.5 M | −9.8% |
+| cycles, user | 695.9 M | 667.3 M | −4.1% |
+| instructions, user | 1,556.3 M | 1,558.0 M | +0.1% |
+
+- **Reverse order:** `main` against #572 measured 146.83 ms against 140.33 ms.
+- **Second `perf stat` pair:** 146.7 ms against 139.5 ms, kernel cycles −9.9%.
+- **Instructions.** The memsets the reader no longer makes took 6.8 M off the
+  user instructions (round 1). The leaves' slots added 8.5 M, nearly all where
+  clang's code around the graph's accesses moved, by an instruction-sampled
+  profile on the laptop: `check_graph_add` is no longer inlined into
+  `check_input_add`, and the reader's expression walk and the barrier's node
+  step grew. The cycles fell all the same: the leaves no longer write 33 MB.
+
+The stages that changed, from each compile's `--time-stages` medians:
+
+| stage | ms before | ms after | peak KB added before | peak KB added after |
+| --- | ---: | ---: | ---: | ---: |
+| check-input | 63.96 | 58.20 | 259,488 | 204,248 |
+| check-expressions | 15.56 | 14.72 | 53,508 | 0 |
+| check-declarations | 5.33 | 5.53 | 10,240 | 2,252 |
+| check-program | 12.31 | 12.18 | 12,288 | 14,340 |
+| the clock's span | 146.49 | 139.77 | | |
+
+- **The reader's arena.** It is gone before the compile's peak. On
+  `sqlite3.c` it holds 61 MB when the reader returns, most of them huge pages
+  of the columns it wrote, and their clearing is most of `check-input`'s
+  system time. The expressions' output then takes their place in the RSS, so
+  `check-expressions` adds nothing to the peak.
+- **`check-declarations`.** Its 0.2 ms more is of the order of its spread
+  between builds in #530's measurements (5.25 to 5.56 ms).
+- **The reader alone** (round 1 of the record, the first commit): 142.1 ms
+  against 147.3 ms, a peak RSS of 420,904 KB against 513,052 KB, kernel
+  cycles −6.2% and user cycles −2.6%.
+- **Profile.** `clear_page_erms` fell from 14.1% of the samples to 13.0%,
+  and libc's, its `memset` mostly, from 4.6% to 3.6%.
+- **The graph run.** `benchmark-checker-source`'s vector path took 36.42 ns a
+  body node against 39.98 ns, its leaves now read one after another.
+
 ### What's left
 
-At about 512 MB, with the three, by arena (smaps at the compile's first large
-release, on the laptop):
-- **The checker's scratch, 184 MB.** Its high-water is mostly the reader's:
-  some 55 token columns, many of them sparse but cleared whole, and the binding
-  table. The parse's temporaries fit under it.
-- **The driver's arena, 142 MB.** It holds:
-  - the reader's token columns that the later stages read, 61 MB, many filled
-    with `NONE` where few tokens have an entry;
-  - the expression graph, with a 96-byte `CheckValue` leaf for each of its
-    343,946 nodes (33 MB);
-  - the binding environment that #113's deferred reader takes, which a
-    source-order compile doesn't read.
+At about 393 MB, by arena (smaps at the compile's end, on the laptop):
+- **The driver's arena, 120 MB.** It holds:
+  - the reader's output columns, which the later stages read, about 58 MB.
+    Most are filled with `NONE` or zero for every token, though few tokens
+    have an entry;
+  - the expression graph, about 29 MB, 15 MB of it the `VALUE` nodes' values.
+- **The checker's scratch, 88 MB.** The reader's 70 MB, and 18 MB of the
+  parse's temporaries that lie past it.
 - **The checker's output arena, 72 MB.** Most of it is the expressions'
-  stream, with a 96-byte value per node; the declarations' and the program's
-  outputs are the rest.
+  stream, with a 96-byte value per node (33 MB), which every later stage
+  reads (some 520 places in the sources).
 - **The front end:** the preprocessor's 47 MB, and the parser's 13 columns,
   each in an arena of its own: about 31 MB by their sizes.
-
-These were measured on #520's head with the three changes, before main took
-#568 (the reader, #529) and #517. `abi_initialize` cleared ABI rows for every type the table could hold, about
-37 MB of the checker's scratch, inside what the reader touched: user time
-rather than new pages, which #517 sizes by the types.
-[#572](https://github.com/buster14a/buster/issues/572) follows up on the rest:
-sizing the reader's columns by their records, as #528 proposed, and the graph's
-and the stream's values. It shares the reader with
-[#529](https://github.com/buster14a/buster/issues/529).
 
 ## The checker's graph and program passes (#530)
 
@@ -403,10 +474,9 @@ the merge (55.2 to 40.2 ns in the first measurement).
 
 **What is left.**
 - **Validation's reads.** Most of the validation's time is the leaves' records
-  it reads, two cache lines of each 96-byte record. The `leaves` column holds
-  a record for every node, 33 MB on `sqlite3.c`, which only the leaves use.
-  Its layout is the reader's ([#529](https://github.com/buster14a/buster/issues/529))
-  to change.
+  it reads, two cache lines of each 96-byte record. Since #572 they are the
+  `VALUE` nodes' alone, one after another, where the column had a record for
+  every node.
 - **The actions.** The rest of the graph run is the actions and their
   per-node structures, on either path.
 - **The program pass.** Most of what remains of it is the bodies' builds and
