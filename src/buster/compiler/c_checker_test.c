@@ -4119,6 +4119,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_program_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
+#include "c_check_input_scan_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -4250,6 +4251,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_bindings(&test);
             check_test_builtin_graph(&test, &types.table, clang);
             check_test_builtin_capacity(&test);
+            check_test_input_scans(&test);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_builtin_vector_graph(&test, &types.table, clang);

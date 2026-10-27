@@ -1195,6 +1195,72 @@ What the mutants and the bases found, each fixed with its fixture:
 The 9700X job's test step checks 8 mutants of the frozen SQLite source and 96
 of the oracle's four musl sources with seed 133, on the frozen headers.
 
+## The source reader's passes over the tokens
+
+`check_input` reads the parser's tree in several passes over every token: the
+counts that size its tables, the walk in source order
+(`check_input_resolve_range`), the expression graph's walk in postorder
+(`check_input_expressions`), and the passes after them. #529 cut the work
+they do per token where little of it was per declaration or expression:
+
+- **Value chains.** The graph's walk gives each token the chain of its
+  values, its children's chains joined, and counted the chain by walking each
+  child's again. An initializer's separators are each a child of the next, so
+  a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
+  of the whole `-c`'s cycles. Each token now keeps its chain's length beside
+  its first and last values (`CheckInputReader.value_counts`), and a parent
+  adds its children's. The scalar path, `--scalar`, walks the chains: the
+  tests that compare the two paths compare the counts with the walks.
+- **One pass before reading.** `check_input_count_tokens` makes every count
+  `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
+  operators, operands and calls, and the names of the builtin constants, the
+  varargs, `transparent_union`, `overloadable`, `_Generic` and
+  `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
+  tokens' names at a time. The same pass writes each token's syntax bits
+  (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
+  builtins the walk prepares, an attribute's start, and a string or
+  `__func__`. The walk in source order tests a bit where it compared the
+  token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
+  instructions fewer, about 70 a token. The scalar path computes each bit with
+  the walk's own tests (`check_input_syntax_of`).
+- **Scans for few tokens.** The passes that act on few tokens test 64 of them
+  at once (16 or 8, by the column's width) and visit only those
+  (`check_input_scan_*`): the constant contexts (static objects, static
+  assertions, case labels), the attribute items, the complete uses (tentative
+  definitions), the asm labels (tokens with attributes, then with
+  declarations) and the intrinsics' operands. Each scalar path visits every
+  token through the same body. The selections are skipped in a unit without
+  a `_Generic` or `__builtin_choose_expr` token, and the VLA finish's scans in
+  one without a variably modified declaration's lifetime.
+- **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
+  distinct identifier, refuses a name that doesn't start with `__` before it
+  scans its catalog, whose names all do (`test-preprocessor` checks it).
+
+`test-checker` checks every scan, count and syntax bit, by both paths,
+against its own reading of columns of every length to 200 that end at a
+`PROT_NONE` page (`c_check_input_scan_test.c`).
+
+On the 9700X (CPU 2, `-c` of the frozen `sqlite3.c` with #520's options, eight
+rounds of `perf stat -r 3` with main's and this change's executables in
+alternating order), the whole compile went from main's 903.3 million user
+cycles and 2,227.2 million user instructions to 820.9 million and 2,014.0
+million (−9.1% and −9.6%), and its task clock from 190.9 ms to 176.1 ms; every
+round's cycles were apart. #520's stage clock (`measure-compile`, 11 runs of
+each in rotating order, both executables with the clock merged in) puts the
+reader's stage, `check-input`, at 64.8 ms (64.3 to 65.3) against main's 80.3 ms
+(79.7 to 80.8), and the whole compile at 175.5 ms against 190.2 ms. The reader
+alone (`benchmark-checker-bindings --only direct`, 11 passes on warm pages)
+went from 67.3 ms to 54.4 ms (−19%). The object is main's, byte for byte, by
+both paths. The scratch the reader writes grew by 3.5 MB (`value_counts` and
+`syntax`), and the compile's peak RSS by 4.3 MB. [The measurement
+record](https://github.com/buster14a/buster-performance/tree/6929480812d31868d77a515f88ddca3bad408429/docs/measurements/check-input-529-2026-10-27)
+has the scripts, the raw outputs and the trees' manifests.
+
+What is left of the reader's per-token work is in its two walks, each of
+which still reads about ten sparse columns at every token, and in
+`check_input_run`'s fill of 22 columns with `NONE` (#528). Building the
+expression graph data-parallel is the next step for the walks.
+
 ## Benchmark and validation limits
 
 ```sh
