@@ -1218,6 +1218,24 @@ struct PPHistoryRun
 };
 _Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
+// The most invocations in one invocation's arguments that pp_finish_simple expands in place (Preprocessor.nested).
+#define BUSTER_PP_NESTED_PLANS 8
+
+// An invocation in an argument that pp_argument_in_place takes (pp_nested_invocation): its macro and template, its ')'
+// in pp->arguments, its arguments' records (into the argument's tokens), how many arguments it was given and whether its
+// variadic one was left out, and what its ## and # make.
+typedef struct PPNested PPNested;
+struct PPNested
+{
+    PPMacroId macro;
+    PPTemplate* template;
+    uint32_t close;
+    uint32_t count;
+    bool omitted;
+    PPArgument records[BUSTER_PP_TEMPLATE_TOKENS];
+    PPOperators made;
+};
+
 struct Preprocessor
 {
     PPOptions options;
@@ -1342,6 +1360,11 @@ struct Preprocessor
     uint32_t diagnostic_origin;
     uint32_t diagnostic_include_range;
     uint32_t origin_peak[3];
+    // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
+    // planned them, in the order pp_expand_argument_in_place takes them (nested_taken).
+    PPNested nested[BUSTER_PP_NESTED_PLANS];
+    uint32_t nested_count;
+    uint32_t nested_taken;
     // A test's fault (pp_test_direct_argument_failures): the next growth of a stack's origins fails, as when its arena
     // can't be reserved.
     bool fail_origin_growth;
@@ -9385,10 +9408,170 @@ static void pp_finish_operators(Preprocessor* pp, const PPInvocation* invocation
     }
 }
 
-// Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
-// Whether every enabled macro that tokens [begin, end) of pp->arguments name is a direct object (pp_direct_object): then
-// the argument's expansion is its tokens with each such name replaced by its body, which names no macro.
-static bool pp_direct_argument(const Preprocessor* pp, uint32_t begin, uint32_t end)
+
+// Whether the name of a function-like macro at token `name` of pp->arguments, in an argument that ends at `end`, opens an
+// invocation that pp_expand_argument_in_place can expand, as the main loop would behind the argument's barrier (pp_invoke
+// and pp_finish_simple, which substitutes it into the expansions there, since a capture keeps it from going straight
+// out), then read back: its macro has a template (a vectorized run with its history deferred), its '(' follows its name
+// and its ')' is in the argument, it is given as many arguments as it takes, none naming an enabled macro, and its
+// expansion has 1 to BUSTER_PP_TEMPLATE_TOKENS tokens (a template with ## and # may make none) and names no macro its
+// rescan would expand: its body's names (found again by pp_template_names where the expansions under way changed them)
+// and its pastes' (pp_template_operators) are of the invoked macro or of disabled macros, which that rescan paints, or no
+// macro's. Fills `nested` for the expansion, compiling the macro as pp_invoke does, and changes nothing else.
+static bool pp_nested_invocation(Preprocessor* pp, uint32_t name, uint32_t end, PPNested* nested)
+{
+    const PPMacroId id = pp->macro_of[pp->arguments.values[name]];
+    PPMacro* macro = &pp->macros[id];
+    bool result = pp->templates != 0 && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN)) == BUSTER_PP_MACRO_FUNCTION &&
+                  name + 1 < end && pp->arguments.kinds[name + 1] == C_TOKEN_L_PAREN &&
+                  pp->argument_record_count + BUSTER_PP_TEMPLATE_TOKENS < BUSTER_PP_MAX_STACK_TOKENS;
+    if (result && !(macro->flags & BUSTER_PP_MACRO_COMPILED))
+    {
+        result = pp_compile_macro(pp, id);
+    }
+    PPTemplate* template = result ? pp_template_of(pp, macro) : 0;
+    PPScan scan;
+    result = template != 0 && macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS;
+    if (result)
+    {
+        pp_scan_arguments(pp->arguments.kinds, name + 1, end, (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0, macro->parameter_count, &scan);
+        result = scan.close != BUSTER_PP_NONE && scan.separator_count < BUSTER_PP_TEMPLATE_TOKENS;
+    }
+    if (result)
+    {
+        // pp_collect_arguments' records, but into the argument's tokens, and pp_finish_simple's count of them.
+        uint32_t begin = name + 2;
+        for (uint32_t s = 0; s < scan.separator_count; s += 1)
+        {
+            nested->records[s] = (PPArgument){ .raw_begin = begin, .raw_end = scan.separators[s] };
+            begin = scan.separators[s] + 1;
+        }
+        nested->records[scan.separator_count] = (PPArgument){ .raw_begin = begin, .raw_end = scan.close };
+        uint32_t count = scan.separator_count + 1;
+        count = macro->parameter_count == 0 && count == 1 && begin == scan.close ? 0 : count;
+        const bool omitted = (macro->flags & BUSTER_PP_MACRO_VARIADIC) && count + 1 == macro->parameter_count;
+        if (omitted)
+        {
+            nested->records[count] = (PPArgument){ .raw_begin = scan.close, .raw_end = scan.close };
+        }
+        result = count + omitted == macro->parameter_count;
+        for (uint32_t a = 0; result && a < count; a += 1)
+        {
+            result = !pp_needs_expansion(pp, &pp->arguments, nested->records[a].raw_begin, nested->records[a].raw_end);
+        }
+        pp_template_names(pp, id, template);
+        result = result && template->expanding == 0;
+        if (result && (template->pastes | template->strings) != 0)
+        {
+            result = pp_template_operators(pp, id, template, nested->records, count, 0, 0, &nested->made) && !nested->made.rescan &&
+                     nested->made.size <= BUSTER_PP_TEMPLATE_TOKENS;
+        }
+        else if (result)
+        {
+            // pp_template_size's, from these records.
+            uint32_t size = (uint32_t)template->count - (uint32_t)__builtin_popcount(template->parameter_mask);
+            for (uint32_t bits = template->parameter_mask; bits != 0; bits &= bits - 1)
+            {
+                const PPArgument* argument = &nested->records[template->parameters[__builtin_ctz(bits)]];
+                size += argument->raw_end - argument->raw_begin;
+            }
+            result = size != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS;
+        }
+        nested->macro = id;
+        nested->template = template;
+        nested->close = scan.close;
+        nested->count = count;
+        nested->omitted = omitted;
+    }
+    return result;
+}
+
+// Expands an invocation that pp_nested_invocation took, at the end of pp->arguments (`name` its name, with the flags
+// pending before it), as the main loop's path leaves it in the argument's capture: pp_invoke's history record, then
+// pp_finish_simple's statistics and substitution into the expansions there (pp_finish_operators' pastes and strings,
+// pp_template_write), the expansion's first token with the name's flags; then the buffer it pushes read back by a run of
+// pp_step_buffer's, which paints the names of the invoked macro and of disabled ones, and its trailing flags left pending
+// for the next token, as the buffer's pop leaves them (pp_pop_context); or for an empty expansion, the name's flags left
+// pending as pp_finish_simple leaves them. Returns false, after a fatal error, if there is no room.
+static bool pp_expand_nested(Preprocessor* pp, PPNested* nested, PPToken name, uint8_t* pending)
+{
+    PPTokens* out = &pp->arguments;
+    const PPTemplate* template = nested->template;
+    const uint32_t given = nested->count + nested->omitted;
+    const uint32_t base = pp->argument_record_count;
+    const bool result = pp_room(pp, out, BUSTER_PP_TEMPLATE_TOKENS);
+    if (result)
+    {
+        memcpy(&pp->argument_records[base], nested->records, (uint64_t)given * sizeof(PPArgument));
+        pp->argument_record_count = base + given;
+        const PPInvocation invocation = {
+            .macro = nested->macro,
+            .history = pp_history_expansion(pp, nested->macro, name.location, name.origin),
+            .arguments = base,
+            .argument_count = given,
+            .name_location = name.location,
+            .name_flags = (uint8_t)(name.flags | pp_name_line(pp, name.flags, name.location)),
+        };
+        if (pp->options.timing)
+        {
+            pp->statistics.invocations += 1;
+            pp->statistics.arguments += given;
+        }
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = invocation.history != 0 ? pp->history[invocation.history - 1].parent : 0;
+        const uint32_t at = out->count;
+        uint8_t trailing;
+        if ((template->pastes | template->strings) != 0)
+        {
+            pp_template_make(pp, template, &pp->argument_records[base], given, &nested->made);
+            if (nested->made.size != 0)
+            {
+                pp_template_write(pp, &invocation, template, 0, 0, out, 0, 0, false, &nested->made, &trailing);
+            }
+            else
+            {
+                trailing = (template->spaces & ~template->pastes) != 0 ? BUSTER_PP_SPACE : 0;
+                pp->history_anchor = template->locations[template->anchor];
+                pp->history_spelling = template->locations[template->spelling];
+            }
+        }
+        else
+        {
+            pp_template_write(pp, &invocation, template, 0, 0, out, 0, 0, false, 0, &trailing);
+        }
+        pp->diagnostic_origin = saved_origin;
+        const uint8_t name_flags = invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+        if (at < out->count)
+        {
+            out->flags[at] = (uint8_t)((out->flags[at] & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags |
+                                       BUSTER_PP_NAME_SPACE);
+            for (uint32_t t = at; t < out->count; t += 1)
+            {
+                const PPMacroId named = out->kinds[t] == C_TOKEN_RAW_IDENTIFIER && !(out->flags[t] & BUSTER_PP_NO_EXPAND) ? pp->macro_of[out->values[t]] : 0;
+                out->flags[t] |= named != 0 && (named == nested->macro || pp->macros[named].disabled != 0) ? BUSTER_PP_NO_EXPAND : 0;
+            }
+            if (pp->options.timing)
+            {
+                pp->statistics.buffer_runs += 1;
+                pp->statistics.buffer_run_tokens += out->count - at;
+            }
+            *pending = (uint8_t)(trailing & ~((trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE : 0));
+        }
+        else
+        {
+            const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+            *pending |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
+        }
+        pp->argument_record_count = base;
+    }
+    return result;
+}
+
+// Whether every enabled macro that tokens [begin, end) of pp->arguments name is a direct object (pp_direct_object) or opens
+// an invocation pp_nested_invocation takes: then the argument's expansion is its tokens with each such name replaced by
+// its body, or with each invocation replaced by its expansion, which names no macro that expands. Each invocation's plan
+// is kept in pp->nested (BUSTER_PP_NESTED_PLANS of them for one invocation's arguments).
+static bool pp_argument_in_place(Preprocessor* pp, uint32_t begin, uint32_t end)
 {
     bool result = true;
     for (uint32_t i = begin; result && i < end; i += 1)
@@ -9396,52 +9579,90 @@ static bool pp_direct_argument(const Preprocessor* pp, uint32_t begin, uint32_t 
         const IdentId id = pp->arguments.values[i];
         const bool name = pp->arguments.kinds[i] == C_TOKEN_RAW_IDENTIFIER && !(pp->arguments.flags[i] & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, id) &&
                           pp->macros[pp->macro_of[id]].disabled == 0;
-        result = !name || pp_direct_object(pp, &pp->macros[pp->macro_of[id]]);
+        if (name && (pp->macros[pp->macro_of[id]].flags & BUSTER_PP_MACRO_FUNCTION))
+        {
+            result = pp->nested_count < BUSTER_PP_NESTED_PLANS && pp_nested_invocation(pp, i, end, &pp->nested[pp->nested_count]);
+            i = result ? pp->nested[pp->nested_count].close : i;
+            pp->nested_count += result;
+        }
+        else
+        {
+            result = !name || pp_direct_object(pp, &pp->macros[pp->macro_of[id]]);
+        }
     }
     return result;
 }
 
-// An argument that pp_direct_argument takes, expanded as the main loop expands it behind its barrier, at the end of
+// An argument that pp_argument_in_place takes, expanded as the main loop expands it behind its barrier, at the end of
 // pp->arguments, which the argument's record then names: its runs of other tokens copied (pp_step_buffer's, but for
 // their names of disabled macros, which the main loop paints there and the expansion's rescan or pp_emit_simple paints
-// as surely, as pp_finish_simple leaves the arguments that need no expansion), and each direct object's body in its
-// name's place under an expansion record of its own, its first token with the name's flags (pp_expand_object's direct
-// expansion). With the statistics the main loop counts: a buffer run where the argument starts and after each name it
-// expands, while tokens are left. Returns false, after a fatal error, if there is no room.
-static bool pp_expand_direct_argument(Preprocessor* pp, PPArgument* argument)
+// as surely, as pp_finish_simple leaves the arguments that need no expansion), each with the flags pending before it on
+// its first token (pp_take_pending_flags), each direct object's body in its name's place under an expansion record of its
+// own, its first token with the name's flags (pp_expand_object's direct expansion), and each invocation's expansion in
+// its place (pp_expand_nested). With the statistics the main loop counts: a buffer run where the argument starts and
+// after each name it expands and each invocation, while tokens are left. Returns false, after a fatal error, if there is
+// no room.
+static bool pp_expand_argument_in_place(Preprocessor* pp, PPArgument* argument)
 {
     PPTokens* out = &pp->arguments;
     const uint32_t begin = out->count;
     uint64_t runs = 1;
     uint64_t copied = 0;
     uint32_t run = argument->raw_begin;
+    uint8_t pending = 0;
     bool result = true;
     for (uint32_t i = argument->raw_begin; result && i < argument->raw_end; i += 1)
     {
-        const PPToken token = pp_stack_token(out, i);
+        PPToken token = pp_stack_token(out, i);
         const PPMacroId id = token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) ? pp->macro_of[token.value] : 0;
         if (id != 0 && pp->macros[id].disabled == 0)
         {
             const PPMacro* macro = &pp->macros[id];
+            const uint32_t first = out->count;
             result = pp_append_stack_tokens(pp, out, out, run, i);
-            copied += i - run;
-            const uint32_t saved_history = pp->history_current;
-            pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
-            const uint32_t at = out->count;
-            result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
-            pp->history_current = saved_history;
-            if (result)
+            if (result && pending != 0 && run < i)
             {
-                const uint8_t name_flags = (uint8_t)((token.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, token.flags, token.location));
-                uint8_t* flags = &out->flags[at];
-                *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
-                pp->statistics.direct_expansions += pp->options.timing;
+                out->flags[first] = pp_with_pending(out->flags[first], pending, false);
+                pending = 0;
             }
-            runs += i + 1 < argument->raw_end;
-            run = i + 1;
+            copied += i - run;
+            token.flags = pending != 0 ? pp_with_pending(token.flags, pending, false) : token.flags;
+            pending = 0;
+            if (macro->flags & BUSTER_PP_MACRO_FUNCTION)
+            {
+                // pp_argument_in_place planned it, and nothing its plan reads has changed since.
+                PPNested* nested = &pp->nested[pp->nested_taken];
+                pp->nested_taken += 1;
+                result = result && pp_expand_nested(pp, nested, token, &pending);
+                runs += nested->close + 1 < argument->raw_end;
+                run = nested->close + 1;
+                i = nested->close;
+            }
+            else
+            {
+                const uint32_t saved_history = pp->history_current;
+                pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
+                const uint32_t at = out->count;
+                result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
+                pp->history_current = saved_history;
+                if (result)
+                {
+                    const uint8_t name_flags = (uint8_t)((token.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, token.flags, token.location));
+                    uint8_t* flags = &out->flags[at];
+                    *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+                    pp->statistics.direct_expansions += pp->options.timing;
+                }
+                runs += i + 1 < argument->raw_end;
+                run = i + 1;
+            }
         }
     }
+    const uint32_t first = out->count;
     result = result && pp_append_stack_tokens(pp, out, out, run, argument->raw_end);
+    if (result && pending != 0 && run < argument->raw_end)
+    {
+        out->flags[first] = pp_with_pending(out->flags[first], pending, false);
+    }
     copied += argument->raw_end - run;
     argument->raw_begin = begin;
     argument->raw_end = out->count;
@@ -9454,10 +9675,12 @@ static bool pp_expand_direct_argument(Preprocessor* pp, PPArgument* argument)
     return result;
 }
 
+// Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
 // pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro, or one whose template has ## and #
 // and plans the invocation (pp_plan_operators), given as many arguments as it takes, none of the ones it expands naming
-// an enabled macro (so each is its own expansion) but, for a simple macro, direct objects, whose bodies take their names'
-// places (pp_expand_direct_argument), read while no stream or capture with a limit is open. Then it isn't
+// an enabled macro (so each is its own expansion) but, for a simple macro, direct objects and invocations of templates
+// whose expansions name no macro that expands, which take their places (pp_expand_argument_in_place), read while no
+// stream or capture with a limit is open. Then it isn't
 // pushed on the invocation stack: its expansion is substituted at once (pp_substitute_simple, pp_finish_operators) and
 // pushed as a buffer, or written straight into the output. Returns false, having changed nothing, when the invocation
 // isn't simple. (Copying an expansion that names no macro straight to the target, rather than pushing it, saved 75
@@ -9477,13 +9700,16 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
     bool result = ((macro->flags & BUSTER_PP_MACRO_SIMPLE) || operators) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal &&
                   count + omitted == macro->parameter_count && pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
     const PPItem* order = pp->items + macro->items_begin + macro->item_count;
-    // The arguments to expand in place, by their places in the order (a macro expands at most 64 so).
+    // The arguments to expand in place, by their places in the order (a macro expands at most 64 so), and the plans of
+    // the invocations in them.
     uint64_t direct = 0;
+    pp->nested_count = 0;
+    pp->nested_taken = 0;
     for (uint32_t k = 0; result && k < macro->order_count; k += 1)
     {
         const uint32_t parameter = order[k].parameter;
         const bool needs = parameter < count && pp_needs_expansion(pp, &pp->arguments, records[parameter].raw_begin, records[parameter].raw_end);
-        const bool expands = needs && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && k < 64 && pp_direct_argument(pp, records[parameter].raw_begin, records[parameter].raw_end);
+        const bool expands = needs && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && k < 64 && pp_argument_in_place(pp, records[parameter].raw_begin, records[parameter].raw_end);
         result = !needs || expands;
         direct |= expands ? 1ull << k : 0;
     }
@@ -9510,7 +9736,7 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         // In the order the general path expands them in (pp_continue_invocation's), each record then naming its expansion.
         for (uint64_t pending = direct; pending != 0 && !pp->fatal; pending &= pending - 1)
         {
-            pp_expand_direct_argument(pp, &records[order[__builtin_ctzll(pending)].parameter]);
+            pp_expand_argument_in_place(pp, &records[order[__builtin_ctzll(pending)].parameter]);
         }
         if (pp->fatal)
         {
