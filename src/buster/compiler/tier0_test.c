@@ -29,9 +29,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
-// The calling convention's compiled worlds keep their calls within Tier 0's depths (calling_convention_test.c).
+// The calling convention's compiled worlds keep their calls within Tier 0's depths, and their types within its objects'
+// alignments (calling_convention_test.c).
 _Static_assert(BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS == BUSTER_TIER0_INTEGER_DEPTHS && BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS == BUSTER_TIER0_FLOATING_DEPTHS,
                "the compiled worlds' depths must be Tier 0's");
+_Static_assert(BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 == BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2, "the compiled worlds' alignments must be Tier 0's");
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
@@ -386,9 +388,11 @@ struct Tier0TestFrame
 #define BUSTER_TIER0_TEST_FRAMES 256
 #define BUSTER_TIER0_TEST_STACK 4096
 #define BUSTER_TIER0_TEST_SLOTS (BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_GENERATE_MAX_LOCALS)
-// A frame's objects' bytes, each object at a multiple of 16 (the generator's take a few hundred at most, and its records'
-// objects up to 136 each).
-#define BUSTER_TIER0_TEST_OBJECT_BYTES 8192
+// A frame's objects' bytes, each object at a multiple of its alignment and of 16, the frame's at a multiple of 4096, the
+// most the generator aligns one to (its objects take a few hundred bytes at most but those aligned to 4096, a few
+// thousand, and its records' objects up to 136 each).
+#define BUSTER_TIER0_TEST_OBJECT_BYTES 65536
+#define BUSTER_TIER0_TEST_OBJECT_ALIGNMENT 4096
 // A function's address in the interpreter: its index under this tag.
 #define BUSTER_TIER0_TEST_FUNCTION_TAG 0xf0f0000000000000ull
 #define BUSTER_TIER0_TEST_STEPS 200000000ull
@@ -405,7 +409,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
     static Tier0TestFrame frames[BUSTER_TIER0_TEST_FRAMES];
     static uint64_t stack[BUSTER_TIER0_TEST_STACK];
     static uint64_t slots[BUSTER_TIER0_TEST_SLOTS];
-    static uint8_t objects[BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_TEST_OBJECT_BYTES] __attribute__((aligned(64)));
+    static uint8_t objects[BUSTER_TIER0_TEST_FRAMES * BUSTER_TIER0_TEST_OBJECT_BYTES] __attribute__((aligned(BUSTER_TIER0_TEST_OBJECT_ALIGNMENT)));
     static uint8_t allocations[BUSTER_TIER0_TEST_ALLOCATION_BYTES] __attribute__((aligned(64)));
     uint32_t allocated = 0;
     // Each object's offset in its frame's memory, by the program's local index.
@@ -416,6 +420,8 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
     uint64_t steps = 0;
     const uint32_t entry = program->function_count - 1;
     *fault = false;
+    // The most bytes a frame's objects take, which a call clears.
+    uint32_t extent = 0;
     for (uint32_t f = 0; f < program->function_count; f += 1)
     {
         const Tier0GeneratedFunction* function = &program->functions[f];
@@ -423,14 +429,18 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
         for (uint32_t l = 0; l < function->local_count; l += 1)
         {
             const uint32_t size = program->local_sizes != 0 ? program->local_sizes[function->first_local + l] : 0;
+            const uint32_t alignment = size != 0 ? 1u << program->local_alignments[function->first_local + l] : 16;
+            offset = (offset + (alignment > 16 ? alignment : 16) - 1) & ~((alignment > 16 ? alignment : 16) - 1);
             object_offsets[function->first_local + l] = offset;
             offset += (size + 15) & ~15u;
         }
         *fault |= offset > BUSTER_TIER0_TEST_OBJECT_BYTES;
+        extent = offset > extent ? offset : extent;
     }
+    extent = extent < BUSTER_TIER0_TEST_OBJECT_BYTES ? extent : BUSTER_TIER0_TEST_OBJECT_BYTES;
     frames[0] = (Tier0TestFrame){ entry, 0, slots, objects, 0, 0, false, 0, 0 };
     memset(slots, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
-    memset(objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
+    memset(objects, 0, extent);
     for (uint32_t p = 0; p < 3 && p < functions->functions[entry].parameter_count; p += 1)
     {
         slots[p] = inputs[p];
@@ -536,7 +546,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             uint64_t* locals = frame->locals + BUSTER_TIER0_GENERATE_MAX_LOCALS;
             uint8_t* callee_objects = frame->objects + BUSTER_TIER0_TEST_OBJECT_BYTES;
             memset(locals, 0, sizeof(uint64_t) * BUSTER_TIER0_GENERATE_MAX_LOCALS);
-            memset(callee_objects, 0, BUSTER_TIER0_TEST_OBJECT_BYTES);
+            memset(callee_objects, 0, extent);
             top -= arguments;
             const uint32_t base = top;
             if (f->call_targets[value] == 0)
@@ -692,6 +702,9 @@ struct Tier0TestCode
     uint64_t entries;
     uint64_t deferred;
     uint64_t deep;
+    // The functions whose frames are realigned (Tier0Code.frame_alignment_log2), and those among them with a base.
+    uint64_t realigned;
+    uint64_t based;
 };
 
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
@@ -701,7 +714,7 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     bool same = a->error == b->error && a->count == b->count && a->branch_count == b->branch_count && a->reference_count == b->reference_count &&
                 a->deferred == b->deferred && a->label_count == b->label_count && a->deep == b->deep && a->entry_count == b->entry_count &&
                 (a->entry_records == 0) == (b->entry_records == 0) && a->frame_saved == b->frame_saved && a->frame_size == b->frame_size &&
-                a->frame_pointer == b->frame_pointer;
+                a->frame_pointer == b->frame_pointer && a->frame_alignment_log2 == b->frame_alignment_log2 && a->frame_base == b->frame_base;
     same = same && (a->error != TIER0_OK || a->entry_records == 0 || memcmp(a->entry_records, b->entry_records, ((uint64_t)a->entry_count + 1) * sizeof(uint32_t)) == 0);
     same = same && memcmp(a->records, b->records, a->count * sizeof(X86Instruction)) == 0;
     same = same && memcmp(a->branches, b->branches, a->branch_count * sizeof(uint32_t)) == 0;
@@ -747,6 +760,8 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         code->entries += function->count;
         code->deferred += scalar.deferred;
         code->deep += scalar.deep;
+        code->realigned += scalar.frame_alignment_log2 != 0 ? 1 : 0;
+        code->based += scalar.frame_base ? 1 : 0;
         if (result)
         {
             const uint64_t valid = x86_validate(scalar.records, scalar.count);
@@ -1023,7 +1038,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* coverage)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1046,6 +1061,8 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             code->entries = 0;
             code->deferred = 0;
             code->deep = 0;
+            code->realigned = 0;
+            code->based = 0;
             if (ok)
             {
                 tier0_test_coverage(functions, coverage);
@@ -1061,6 +1078,8 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             *entries += code->entries;
             *deferred += code->deferred;
             *deep += code->deep;
+            frames[0] += code->realigned;
+            frames[1] += code->based;
             if (ok)
             {
                 const Tier0TestData data = tier0_test_layout(program);
@@ -1811,7 +1830,8 @@ static void tier0_test_errors(Tier0TestTally* tally)
 // random frames of objects and value locals, compiled by both paths, which must agree: each LOCAL_ADDRESS's lea gives
 // its local's place, which must be a multiple of the object's alignment, inside the frame, and overlap no other local's
 // bytes, and a frame with an object aligned to 16 must leave rsp a multiple of 16 below the pushes and the return
-// address.
+// address. A frame with an object aligned past 16 is realigned: rbp pushed and pointed at the push, the frame reserved
+// and rsp rounded down to the most an object needs, which the frame publishes, so that its places are rsp's.
 static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
 {
     enum
@@ -1829,7 +1849,7 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
     const AbiLocation in_rdi = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { X86_REGISTER_RDI } };
     Arena arena = arena_reserve(1ull << 28);
     // The rules: an object of 24 bytes aligned to 8, its address stored through, then each way to break them.
-    for (uint32_t way = 0; way < 9; way += 1)
+    for (uint32_t way = 0; way < 11; way += 1)
     {
         local_classes[0] = BUSTER_TYPED_CLASS_VOID;
         local_flags[0] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
@@ -1862,16 +1882,18 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         function.local_sizes = local_sizes;
         function.local_alignments = local_alignments;
         function.local_count = 2;
-        static const char* const ways[9] = {
+        static const char* const ways[11] = {
             "kept",
             "a class",
             "not address-taken",
             "a parameter",
-            "aligned to 32",
+            "aligned past 2^30",
             "sizes without alignments",
             "read as a value",
             "past BUSTER_TIER0_MAX_OBJECT_BYTES",
             "BUSTER_TIER0_MAX_OBJECT_BYTES exactly",
+            "aligned to 2^30",
+            "past BUSTER_TIER0_MAX_OBJECT_BYTES by its alignment",
         };
         switch (way)
         {
@@ -1888,7 +1910,7 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             function.parameters = &in_rdi;
             break;
         case 4:
-            local_alignments[0] = 5;
+            local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1;
             break;
         case 5:
             function.local_alignments = 0;
@@ -1911,14 +1933,27 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             local_sizes[0] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
             local_sizes[1] = BUSTER_TIER0_MAX_OBJECT_BYTES / 2;
             break;
+        case 9:
+            // Its size rounded up to 16, and its alignment less 16: the limit, exactly. (Not compiled: its frame is 1 GB.)
+            local_sizes[0] = 16;
+            local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+            local_sizes[1] = 0;
+            function.local_count = 1;
+            break;
+        case 10:
+            local_sizes[0] = 17;
+            local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+            local_sizes[1] = 0;
+            function.local_count = 1;
+            break;
         default:
             break;
         }
-        const bool valid = way == 0 || way == 8;
+        const bool valid = way == 0 || way == 8 || way == 9;
         const Tier0Check check = tier0_validate(&function);
         tier0_test_expect(tally, (check.error == TIER0_OK) == valid && (valid || check.node == 0), "objects", "an object %s: tier0_validate says %s at %u (%s)",
                           ways[way], check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
-        if (valid)
+        if (valid && way != 9)
         {
             const uint64_t mark = arena.length;
             const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
@@ -1984,19 +2019,28 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
     }
     // Random frames: up to 24 locals, objects of 1 to 300 bytes at every alignment to 16, 8-byte values, some
     // address-taken, and VA_LISTs of 24 bytes, all of them address-taken ones read by a LOCAL_ADDRESS each, its lea's
-    // displacement its place.
+    // displacement its place. In every other round, a quarter of the objects are aligned past 16 instead, to 32, 64, 128
+    // or 4096 (from a sequence of their own, so that the other rounds' frames are the ones they were).
     uint64_t random = seed ^ 0x6f626a656374ull;
+    uint64_t past = seed ^ 0x7265616c69676eull;
+    static const uint8_t past_alignments[4] = { 5, 6, 7, 12 };
     for (uint32_t round = 0; round < 2000; round += 1)
     {
         const uint32_t locals = 1 + tier0_generate_below(&random, locals_capacity);
         uint32_t count = 0;
         bool sixteen = false;
+        uint32_t realigned = 0;
         for (uint32_t l = 0; l < locals; l += 1)
         {
             const bool object = tier0_generate_chance(&random, 60);
             const bool va_list = !object && tier0_generate_chance(&random, 20);
             local_sizes[l] = object ? 1 + tier0_generate_below(&random, 300) : 0;
-            local_alignments[l] = object ? (uint8_t)tier0_generate_below(&random, BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1) : 0;
+            local_alignments[l] = object ? (uint8_t)tier0_generate_below(&random, 5) : 0;
+            if (object && round % 2 == 1 && tier0_generate_chance(&past, 25))
+            {
+                local_alignments[l] = past_alignments[tier0_generate_below(&past, 4)];
+                realigned = local_alignments[l] > realigned ? local_alignments[l] : realigned;
+            }
             local_classes[l] = object ? BUSTER_TYPED_CLASS_VOID : va_list ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_I64;
             local_flags[l] = object || tier0_generate_chance(&random, 50) ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
             local_flags[l] = va_list ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_VA_LIST : local_flags[l];
@@ -2032,9 +2076,17 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
         bool laid = check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
-        // The prologue is the frame's sub alone (nothing is pushed), then a lea per address-taken local, in order.
-        const uint32_t size = laid && scalar.count != 0 && (scalar.records[0].form & ~BUSTER_X86_FORM_FIXUP) != X86_FORM_RET ? (uint32_t)scalar.records[0].immediate : 0;
-        const uint32_t first = size != 0 ? 1 : 0;
+        // The prologue is the frame's sub alone (nothing is pushed), or in a realigned frame rbp's push and mov, the sub
+        // and the and of rsp, then a lea per address-taken local, in order.
+        const uint32_t reserve = realigned != 0 ? 2 : 0;
+        laid = laid && (realigned == 0 || (scalar.frame_pointer && scalar.frame_alignment_log2 == realigned && !scalar.frame_base && scalar.count > 4 &&
+                                           scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
+                                           scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP &&
+                                           (scalar.records[3].form == X86_FORM_AND_RM64_IMM8 || scalar.records[3].form == X86_FORM_AND_RM64_IMM32) &&
+                                           scalar.records[3].rm == X86_REGISTER_RSP && (int64_t)scalar.records[3].immediate == -(int64_t)(UINT64_C(1) << realigned)));
+        laid = laid && (realigned != 0 || (!scalar.frame_pointer && scalar.frame_alignment_log2 == 0));
+        const uint32_t size = laid && scalar.count > reserve && (scalar.records[reserve].form & ~BUSTER_X86_FORM_FIXUP) != X86_FORM_RET ? (uint32_t)scalar.records[reserve].immediate : 0;
+        const uint32_t first = reserve + (size != 0 ? 1 : 0) + (realigned != 0 ? 1 : 0);
         uint32_t places[locals_capacity];
         uint32_t lea = first;
         for (uint32_t l = 0; l < locals && laid; l += 1)
@@ -2067,11 +2119,76 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
                 }
             }
         }
-        laid &= !sixteen || (size + 8) % 16 == 0;
-        tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes: the paths disagree, or a local is misplaced", round, locals, size);
+        laid &= !sixteen || realigned != 0 || (size + 8) % 16 == 0;
+        tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes (realigned to 2^%u): the paths disagree, or a local is misplaced", round, locals,
+                          size, realigned);
         arena_pop_to(&arena, mark);
     }
     arena_release(&arena);
+}
+
+// The frame's alignment, tier0_frame_alignment and its vector twin, against the test's own most: for every count of
+// locals to 40 and of calls to 12, random columns that each end at a PROT_NONE page, so that a read past one faults.
+// Sizes of 0 among the locals (not objects, whatever their alignment byte), alignments past 16 now and then (any byte,
+// up to 255), and calls whose every other byte is random too; then the same without local_sizes, the calls' alone.
+static void tier0_test_frame_alignment(Tier0TestTally* tally, uint64_t seed)
+{
+    uint8_t* pages = mmap(0, 6 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED;
+    for (uint32_t g = 1; g < 6 && guarded; g += 2)
+    {
+        guarded = mprotect(pages + g * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    }
+    tier0_test_expect(tally, guarded, "frame alignment", "no pages between PROT_NONE ones");
+    uint64_t random = seed ^ 0x616c69676e6d656eull;
+    for (uint32_t locals = 0; locals <= 40 && guarded; locals += 1)
+    {
+        for (uint32_t calls = 0; calls <= 12; calls += 1)
+        {
+            uint32_t* sizes = (uint32_t*)(pages + BUSTER_TIER0_TEST_PAGE) - locals;
+            uint8_t* alignments = pages + 3 * BUSTER_TIER0_TEST_PAGE - locals;
+            AbiCall* call_column = (AbiCall*)(pages + 5 * BUSTER_TIER0_TEST_PAGE) - calls;
+            uint32_t objects_most = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+            uint32_t calls_most = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+            for (uint32_t l = 0; l < locals; l += 1)
+            {
+                sizes[l] = tier0_generate_chance(&random, 30) ? 0 : 1 + tier0_generate_below(&random, 1000);
+                alignments[l] = (uint8_t)(tier0_generate_chance(&random, 90) ? tier0_generate_below(&random, 5) : tier0_generate_below(&random, 256));
+                objects_most = sizes[l] != 0 && alignments[l] > objects_most ? alignments[l] : objects_most;
+            }
+            for (uint32_t c = 0; c < calls; c += 1)
+            {
+                uint8_t bytes[sizeof(AbiCall)];
+                for (uint32_t b = 0; b < sizeof(AbiCall); b += 1)
+                {
+                    bytes[b] = (uint8_t)tier0_generate_below(&random, 256);
+                }
+                memcpy(&call_column[c], bytes, sizeof(AbiCall));
+                call_column[c].stack_alignment_log2 = tier0_generate_chance(&random, 90) ? (uint8_t)tier0_generate_below(&random, 5) : call_column[c].stack_alignment_log2;
+                calls_most = call_column[c].stack_alignment_log2 > calls_most ? call_column[c].stack_alignment_log2 : calls_most;
+            }
+            for (uint32_t with_sizes = 0; with_sizes < 2; with_sizes += 1)
+            {
+                Tier0Function function;
+                memset(&function, 0, sizeof(function));
+                function.local_count = locals;
+                function.local_sizes = with_sizes != 0 ? sizes : 0;
+                function.local_alignments = alignments;
+                function.calls = call_column;
+                function.call_count = calls;
+                const uint32_t most = with_sizes != 0 && objects_most > calls_most ? objects_most : calls_most;
+                const uint32_t expected = most > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? most : 0;
+                const uint32_t scalar = tier0_frame_alignment(&function);
+                const uint32_t vector = tier0_frame_alignment_vector(&function);
+                tier0_test_expect(tally, scalar == expected && vector == expected, "frame alignment", "%u locals (%s), %u calls: 2^%u expected, the paths give %u and %u",
+                                  locals, with_sizes != 0 ? "with sizes" : "no sizes", calls, expected, scalar, vector);
+            }
+        }
+    }
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, 6 * BUSTER_TIER0_TEST_PAGE);
+    }
 }
 
 // A copy's scratch register, its stacks' first free one (an XMM one from 16 bytes, a general one below), must be in
@@ -4381,7 +4498,7 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "rsp as a part's register", 2, false, BUSTER_TIER0_TEST_METADATA },
     { "xmm16 as a part's register", 2, false, BUSTER_TIER0_TEST_METADATA },
     { "an aggregate whole past the call's area", 0, false, BUSTER_TIER0_TEST_METADATA },
-    { "a call's area aligned to 32", 0, false, BUSTER_TIER0_TEST_METADATA },
+    { "a call's area aligned past 2^30", 0, false, BUSTER_TIER0_TEST_METADATA },
     { "an aggregate's address of class I64", 2, false, "a call's argument whose class doesn't fit its location" },
     { "a value's class unlike its register", 2, false, "a call's argument whose class doesn't fit its location" },
     { "a result object that is a value", 3, false, BUSTER_TIER0_TEST_METADATA },
@@ -4396,7 +4513,7 @@ static const Tier0TestBreak tier0_test_breaks[] = {
     { "a result size of 17 bytes", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "a return of I64 with a result size", 3, true, "a return of an aggregate that isn't an address (U64)" },
     { "a function with a result size that reaches its end", 3, true, "a function returning an aggregate that reaches its end" },
-    { "an object parameter aligned to 32", 3, true, BUSTER_TIER0_TEST_METADATA },
+    { "an object parameter aligned past 2^30", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "an object parameter of 17 bytes in registers", 3, true, BUSTER_TIER0_TEST_METADATA },
     { "an object parameter of class I64", 3, true, "an object that isn't an address-taken local of class VOID" },
     { "a hidden result without its pointer in rdi", 12, true, BUSTER_TIER0_TEST_METADATA },
@@ -4491,7 +4608,7 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             locations[6].stack_offset = 80;
             break;
         case 21:
-            caller->call.stack_alignment_log2 = 5;
+            caller->call.stack_alignment_log2 = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1;
             break;
         case 22:
             caller->argument_classes[0] = BUSTER_TYPED_CLASS_I64;
@@ -4540,7 +4657,7 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
             callee->kinds[callee->function.count - 1] = BUSTER_TYPED_DISCARD;
             break;
         case 36:
-            callee->local_alignments[0] = 5;
+            callee->local_alignments[0] = BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 + 1;
             break;
         case 37:
             callee->local_sizes[0] = 17;
@@ -5025,6 +5142,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 
 #include "buster/compiler/tier0_x87_test.c"
 #include "buster/compiler/tier0_int128_test.c"
+#include "buster/compiler/tier0_vector_test.c"
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
 
@@ -5098,11 +5216,14 @@ static int run_tier0_tests(int argc, char** argv)
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             // The larger shape with records passed and returned by value (#137): a program of its own seed for seed. And
-            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions.
+            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions. And with
+            // objects aligned past 16 bytes too, in realigned frames, with and without variable-length arrays.
             Tier0ProgramOptions records = shapes[3];
             records.records = &tables.records;
             Tier0ProgramOptions deep = shapes[3];
             deep.deep = true;
+            Tier0ProgramOptions aligned = deep;
+            aligned.over_aligned = true;
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_moves(&tally);
@@ -5149,6 +5270,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_frame_alignment(&tally, seed);
+                tier0_test_report("frame alignment", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -5222,16 +5350,17 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
-            for (uint32_t s = 0; s < 6; s += 1)
+            for (uint32_t s = 0; s < 7; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
                 uint64_t instructions = 0;
                 uint64_t entries = 0;
                 uint64_t deferred = 0;
                 uint64_t deep_entries = 0;
+                uint64_t frames[2] = { 0, 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
-                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : deep, &instructions, &entries, &deferred,
-                                    &deep_entries, coverage);
+                tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : aligned, &instructions, &entries,
+                                    &deferred, &deep_entries, frames, coverage);
                 if (s == 4)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -5247,8 +5376,13 @@ static int run_tier0_tests(int argc, char** argv)
                 // The deep shape's programs must reach the deep slots: with the default count, many of their entries do.
                 tier0_test_expect(&tally, s < 5 ? deep_entries == 0 : count < 300 || deep_entries >= entries / 100, "deep values",
                                   "%" PRIu64 " deep entries among %" PRIu64, deep_entries, entries);
-                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : "programs: deep values", tally);
-                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep\n", entries, instructions, deferred, deep_entries);
+                // Frames are realigned for objects aligned past 16 alone, and for the records' aligned to 32: with the default
+                // count, the last shape has many, a base among them (with variable-length arrays).
+                tier0_test_expect(&tally, s < 4 || s == 5 ? frames[0] == 0 : s == 4 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
+                                  "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
+                tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : "programs: aligned past 16 bytes", tally);
+                printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
+                       entries, instructions, deferred, deep_entries, frames[0], frames[1]);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -5269,6 +5403,16 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t entries = 0;
                 tier0_test_int128(&tally, &tables, seed, count, &too_deep, &entries);
                 tier0_test_report("int128", tally);
+                printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                uint32_t too_deep = 0;
+                uint64_t entries = 0;
+                tier0_test_vectors(&tally, &tables, seed, count, &too_deep, &entries);
+                tier0_test_report("vectors", tally);
                 printf("    %" PRIu64 " entries, %u programs past the depths\n", entries, too_deep);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
@@ -5295,6 +5439,13 @@ static int run_tier0_tests(int argc, char** argv)
                 tier0_test_report("cross-check: deep values", deep_cross);
                 total.checks += deep_cross.checks;
                 total.failures += deep_cross.failures;
+                Tier0TestTally aligned_cross = { 0, 0 };
+                Tier0ProgramOptions aligned_defined = aligned;
+                aligned_defined.defined = true;
+                tier0_test_cross(&aligned_cross, &tables, seed + 3000009ull, cross_count, aligned_defined, clang, keep);
+                tier0_test_report("cross-check: aligned past 16 bytes", aligned_cross);
+                total.checks += aligned_cross.checks;
+                total.failures += aligned_cross.failures;
             }
             tier0_tables_close(&tables);
         }

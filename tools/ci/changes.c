@@ -14,8 +14,9 @@
 // `changes_output_names`' order, and prints what it found. The outputs:
 //
 // - code: whether the merge changes anything but documentation (docs/**, *.md), docs/performance aside;
-// - baselines, foreign, branch_sizing, performance, and one per module of `changes_modules`: whether the steps gated
-//   on it (`needs.changes.outputs.NAME != 'false'`) run, from the sources they measure or a change to such a step;
+// - baselines, foreign, branch_sizing, performance, preprocessor_clang, and one per module of `changes_modules`:
+//   whether the steps gated on it (`needs.changes.outputs.NAME != 'false'`) run, from the sources they measure or a
+//   change to such a step;
 // - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
 //
 // A push sets code alone and measure to all: its pull request's run measured what it changes. `changes_decide` is the
@@ -261,6 +262,7 @@ typedef enum ChangesFixed
     CHANGES_FOREIGN,
     CHANGES_BRANCH_SIZING,
     CHANGES_PERFORMANCE,
+    CHANGES_PREPROCESSOR_CLANG,
     CHANGES_FIXED_COUNT,
 } ChangesFixed;
 
@@ -269,6 +271,7 @@ static const char* const changes_fixed_names[CHANGES_FIXED_COUNT] = {
     [CHANGES_FOREIGN] = "foreign",
     [CHANGES_BRANCH_SIZING] = "branch_sizing",
     [CHANGES_PERFORMANCE] = "performance",
+    [CHANGES_PREPROCESSOR_CLANG] = "preprocessor_clang",
 };
 
 typedef struct ChangesModule ChangesModule;
@@ -362,6 +365,13 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .unit = "tier0_benchmark.c",
     },
     {
+        .name = "backend-source",
+        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
+                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
+                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|lane|"
+                   "x86_64_encoder|x86_semantics|x86_target",
+    },
+    {
         .name = "bind",
         .unit = "bind_benchmark.c",
     },
@@ -379,6 +389,13 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|branch_sizing|"
                    "calling_convention|debug|foreign_test|lane|link|object_writer|tier0|x86_64_encoder|x86_semantics|"
                    "x86_target",
+    },
+    {
+        .name = "check-lanes",
+        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
+                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
+                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|"
+                   "object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target",
     },
     {
         .name = "checker",
@@ -1126,6 +1143,8 @@ static ChangesResult changes_decide(const ChangesInput* input)
         // The qualification's inputs: the readers and tools, the schema, and the pages the publisher reads at the
         // pull request's commit (tools/performance/publish.c).
         result.fixed[CHANGES_PERFORMANCE] = changes_files_match("", "tools/performance|docs/performance|web/perf", "/.*", files);
+        // benchmark-preprocessor's `clang -E` (--clang): clang's times, which only its harness changes.
+        result.fixed[CHANGES_PREPROCESSOR_CLANG] = changes_files_match("src/buster/compiler/", "c_preprocessor_benchmark", "\\.c", files);
         TextList measured = { 0 };
         for (uint32_t i = 0; i < files->count; i += 1)
         {
@@ -1261,6 +1280,7 @@ static void changes_print(FILE* output, const ChangesResult* result)
     fprintf(output, "Changes the foreign inputs' benchmark: %s\n", changes_bool(result->fixed[CHANGES_FOREIGN]));
     fprintf(output, "Changes the branch-sizing implementation or its qualification's steps: %s\n", changes_bool(result->fixed[CHANGES_BRANCH_SIZING]));
     fprintf(output, "Changes the performance readers, their harnesses' pin or their qualification's steps: %s\n", changes_bool(result->fixed[CHANGES_PERFORMANCE]));
+    fprintf(output, "Changes the preprocessor benchmark's clang -E or its step: %s\n", changes_bool(result->fixed[CHANGES_PREPROCESSOR_CLANG]));
     for (uint32_t i = 0; i < BUSTER_CHANGES_MODULE_COUNT; i += 1)
     {
         fprintf(output, "Changes what %s's conditioned benchmark samples measure: %s\n", changes_modules[i].name, changes_bool(result->modules[i]));
@@ -1469,8 +1489,23 @@ static const ChangesFixture changes_fixtures[] = {
     {
         .name = "a unit's closure through its includes",
         .files = "src/buster/compiler/c_lexer.c",
+        .outputs_false = "preprocessor_clang",
         .measured = "lexer preprocessor",
         .unmeasured = "x86-encoder backend",
+    },
+    {
+        .name = "the preprocessor's times without clang's",
+        .files = "src/buster/compiler/c_preprocessor.c",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor",
+    },
+    {
+        .name = "the preprocessor benchmark's harness, which times clang -E",
+        .files = "src/buster/compiler/c_preprocessor_benchmark.c",
+        .outputs_true = "preprocessor_clang",
+        .outputs_false = "baselines foreign",
+        .measured = "preprocessor",
+        .unmeasured = "lexer",
     },
     {
         .name = "the linkers' harnesses",
@@ -1509,7 +1544,13 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
         .outputs_false = "checker",
-        .measured = "backend check-debug",
+        .measured = "backend backend-source check-debug",
+    },
+    {
+        .name = "the backend's shared measurement measures both of its benchmarks",
+        .files = "src/buster/compiler/tier0_benchmark_measure.c",
+        .measured = "backend backend-source",
+        .unmeasured = "checker checker-source",
     },
 };
 

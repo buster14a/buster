@@ -6,11 +6,14 @@
 //   build/compiler test-parallel
 //
 // main.c includes this file after parallel.c and calls run_parallel_tests for the command. Every report must be exactly
-// the expected one, with each time written as `*`:
+// the expected one, with each time and CPU time written as `*`:
 //   - lists: headings, scripts, blank lines and comments before the first heading, a heading without its space, a last
-//     line without a newline, `==` inside a line; then each error, at its line: a line before the first heading, a
-//     heading without a title, a command without a script (before another heading and at the end), a title that
-//     repeats, a NUL byte, and no commands (an empty list, and one of a comment alone);
+//     line without a newline, `==` inside a line, and titles' `[N CPUs]` (after blanks they lose, from a title alone,
+//     with leading zeros, at the largest --jobs, and not at a title's end, nor without "CPUs]" there); then each error,
+//     at its line: a line before the first heading, a heading without a title, a command without a script (before
+//     another heading and at the end), a title that repeats, a title ending in "CPUs]" without a count from 2 (1, 0,
+//     past the largest --jobs, letters, no blank before "CPUs]", no '[' or a blank after it, and "CPUs]" alone), a NUL
+//     byte, and no commands (an empty list, and one of a comment alone);
 //   - order: commands that end out of order, printed in the list's order, with what each wrote to its standard output
 //     and errors in the order it wrote it, output that doesn't end in a newline and none at all, an exit status and a
 //     signal; then --github's groups and annotations, with a title GitHub must read escaped; and a command's
@@ -19,6 +22,12 @@
 //   - at once: three commands that each wait for the other two (files in the test's directory) pass with 3 jobs; with
 //     one job, four commands write their starts and ends into a log in turn; and eight with 3 jobs are never more than
 //     3 at once, by the times the runner took;
+//   - CPUs: with 4 jobs, commands of 2, 2, 3, 1, 1, 8, 1 and 1 CPUs start in the list's order and never hold more than
+//     4 CPUs at once, each waiting for the room it needs, and the one of 8 runs alone, holding the 4; a command that
+//     doesn't fit holds back the next, which would; each command's BUSTER_PARALLEL_CPUS, once in its environment, is
+//     its own CPUs (all 4 jobs for the one of 8), though the runner's environment has another value; and the CPU time
+//     of a shell's loop and of a process it waits for counts, a sleep's comes to next to none, and the summary's is
+//     their sum;
 //   - output: 1 MB from one command, past a pipe's 64 KB, all of it;
 //   - processes: a command past its timeout killed, with the process it started; what a command left running killed
 //     when its shell ends; and a shell that can't start;
@@ -81,26 +90,41 @@ static String8 parallel_test_string(const char* text)
     return (String8){ .pointer = (char*)text, .length = strlen(text) };
 }
 
-// The report with each time (" in 1.2 s") written as " in * s".
+// The report with each time (" in 1.2 s") and CPU time (", 0.3 s of CPU") written as " in * s" and ", * s of CPU".
 static String8 parallel_test_normalize(Arena* arena, String8 text)
 {
+    // A time's text before and after its number, which is digits, a '.' and a digit, and what takes its place.
+    static const char* const befores[] = { " in ", ", " };
+    static const char* const afters[] = { " s", " s of CPU" };
+    static const char* const normals[] = { " in * s", ", * s of CPU" };
     char* bytes = arena_push(arena, text.length, 1);
     uint64_t length = 0;
     uint64_t i = 0;
     while (bytes != 0 && i < text.length)
     {
-        uint64_t digits = i + 4;
-        while (digits < text.length && text.pointer[digits] >= '0' && text.pointer[digits] <= '9')
+        // The bytes of the time at i, of the form `form`, or 0.
+        uint64_t matched = 0;
+        uint64_t form = 0;
+        for (uint64_t f = 0; matched == 0 && f < sizeof(befores) / sizeof(befores[0]); f += 1)
         {
-            digits += 1;
+            const uint64_t before = strlen(befores[f]);
+            const uint64_t after = strlen(afters[f]);
+            uint64_t digits = i + before;
+            while (digits < text.length && text.pointer[digits] >= '0' && text.pointer[digits] <= '9')
+            {
+                digits += 1;
+            }
+            const bool time = i + before <= text.length && memcmp(text.pointer + i, befores[f], before) == 0 && digits > i + before && digits + 2 + after <= text.length &&
+                              text.pointer[digits] == '.' && text.pointer[digits + 1] >= '0' && text.pointer[digits + 1] <= '9' &&
+                              memcmp(text.pointer + digits + 2, afters[f], after) == 0;
+            matched = time ? digits + 2 + after - i : 0;
+            form = f;
         }
-        const bool time = i + 4 <= text.length && memcmp(text.pointer + i, " in ", 4) == 0 && digits > i + 4 && digits + 4 <= text.length && text.pointer[digits] == '.' &&
-                          text.pointer[digits + 1] >= '0' && text.pointer[digits + 1] <= '9' && memcmp(text.pointer + digits + 2, " s", 2) == 0;
-        if (time)
+        if (matched != 0)
         {
-            memcpy(bytes + length, " in * s", 7);
-            length += 7;
-            i = digits + 4;
+            memcpy(bytes + length, normals[form], strlen(normals[form]));
+            length += strlen(normals[form]);
+            i += matched;
         }
         else
         {
@@ -233,7 +257,7 @@ static void parallel_test_lists(ParallelTest* test)
         const char* name;
         const char* text;
         uint64_t length;
-        // Each command as "LINE TITLE\n", its script and "|\n", or "error LINE: MESSAGE\n".
+        // Each command as "LINE CPUS TITLE\n", its script and "|\n", or "error LINE: MESSAGE\n".
         const char* expected;
     };
     static const char nul_list[] = "== a\ntr\0ue\n";
@@ -241,17 +265,64 @@ static void parallel_test_lists(ParallelTest* test)
         {
             .name = "two commands",
             .text = "== a\necho a\n== b\necho b\n",
-            .expected = "1 a\necho a\n|\n3 b\necho b\n|\n",
+            .expected = "1 1 a\necho a\n|\n3 1 b\necho b\n|\n",
         },
         {
             .name = "blank lines and comments first, and no last newline",
             .text = "\n# a comment\n  \t\n== spaced title  \necho one\n\n  # a comment of the script\necho two",
-            .expected = "4 spaced title\necho one\n\n  # a comment of the script\necho two|\n",
+            .expected = "4 1 spaced title\necho one\n\n  # a comment of the script\necho two|\n",
         },
         {
             .name = "a heading without its space, and == inside a line",
             .text = "==title\nx == y\n[ 1 == 1 ]\n\n== next\ntrue\n",
-            .expected = "1 title\nx == y\n[ 1 == 1 ]\n\n|\n5 next\ntrue\n|\n",
+            .expected = "1 1 title\nx == y\n[ 1 == 1 ]\n\n|\n5 1 next\ntrue\n|\n",
+        },
+        {
+            .name = "CPUs",
+            .text = "== builds [8 CPUs]\nmake\n== links [2 CPUs]  \nld\n==[3 CPUs]\ntrue\n== leading zeros [008 CPUs]\ntrue\n== the most [4294967295 CPUs]\ntrue\n"
+                    "== [5 CPUs] first\ntrue\n== spaced [4 CPUs ]\ntrue\n== CPUs\ntrue\n",
+            .expected = "1 8 builds [8 CPUs]\nmake\n|\n3 2 links [2 CPUs]\nld\n|\n5 3 [3 CPUs]\ntrue\n|\n7 8 leading zeros [008 CPUs]\ntrue\n|\n"
+                        "9 4294967295 the most [4294967295 CPUs]\ntrue\n|\n11 1 [5 CPUs] first\ntrue\n|\n13 1 spaced [4 CPUs ]\ntrue\n|\n15 1 CPUs\ntrue\n|\n",
+        },
+        {
+            .name = "one CPU declared",
+            .text = "== a\ntrue\n== b [1 CPUs]\ntrue\n",
+            .expected = "error 3: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "no CPUs declared",
+            .text = "== b [0 CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "more CPUs than --jobs takes",
+            .text = "== b [4294967296 CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "CPUs without a count",
+            .text = "== b [x CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "CPUs without their blank",
+            .text = "== b [8CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "CPUs without their bracket",
+            .text = "== b 8 CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "CPUs with a blank in their bracket",
+            .text = "== b [ 8 CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
+        },
+        {
+            .name = "a title of CPUs] alone",
+            .text = "==CPUs]\ntrue\n",
+            .expected = "error 1: a title whose CPUs aren't [N CPUs] with N from 2\n",
         },
         {
             .name = "a line before the first heading",
@@ -308,8 +379,8 @@ static void parallel_test_lists(ParallelTest* test)
         for (uint64_t i = 0; list.error == 0 && i < list.count && length < sizeof(dump); i += 1)
         {
             const ParallelCommand* command = &list.commands[i];
-            length += (uint64_t)snprintf(dump + length, sizeof(dump) - length, "%llu %.*s\n%s|\n", (unsigned long long)command->line, (int)command->title.length,
-                                         command->title.pointer, command->script);
+            length += (uint64_t)snprintf(dump + length, sizeof(dump) - length, "%llu %llu %.*s\n%s|\n", (unsigned long long)command->line, (unsigned long long)command->cpus,
+                                         (int)command->title.length, command->title.pointer, command->script);
         }
         char name[256];
         snprintf(name, sizeof(name), "list: %s", cases[c].name);
@@ -341,21 +412,21 @@ static void parallel_test_order(ParallelTest* test)
                                                             "kill -KILL $$\n"),
                                        options, &summary, &results);
     parallel_test_check(test, "order", !summary.succeeded && summary.passed == 3 && summary.failed == 2 && summary.peak == 5, report,
-                        "parallel: 5 commands, at most 5 at once\n"
-                        "== slow: passed in * s\n"
+                        "parallel: 5 commands, at most 5 CPUs at once\n"
+                        "== slow: passed in * s, * s of CPU\n"
                         "slow\n"
-                        "== mixed: passed in * s\n"
+                        "== mixed: passed in * s, * s of CPU\n"
                         "out\n"
                         "err\n"
                         "out again\n"
                         "no newline\n"
-                        "== silent: passed in * s\n"
-                        "== three: failed (exit status 3) in * s\n"
+                        "== silent: passed in * s, * s of CPU\n"
+                        "== three: failed (exit status 3) in * s, * s of CPU\n"
                         "three\n"
-                        "== killed: failed (killed by signal 9: Killed) in * s\n"
-                        "parallel: 5 commands in * s, at most 5 at once: 3 passed, 2 failed, 0 not started\n"
-                        "parallel: three failed (exit status 3) in * s\n"
-                        "parallel: killed failed (killed by signal 9: Killed) in * s\n");
+                        "== killed: failed (killed by signal 9: Killed) in * s, * s of CPU\n"
+                        "parallel: 5 commands in * s, * s of CPU, at most 5 CPUs at once: 3 passed, 2 failed, 0 not started\n"
+                        "parallel: three failed (exit status 3) in * s, * s of CPU\n"
+                        "parallel: killed failed (killed by signal 9: Killed) in * s, * s of CPU\n");
     test->arena.length = 0;
 
     const ParallelOptions github = { .jobs = 2, .github = true };
@@ -367,15 +438,15 @@ static void parallel_test_order(ParallelTest* test)
                                                     "false\n"),
                                github, &summary, &results);
     parallel_test_check(test, "order with --github", !summary.succeeded && summary.passed == 1 && summary.failed == 1, report,
-                        "parallel: 2 commands, at most 2 at once\n"
-                        "::group::ok: passed in * s\n"
+                        "parallel: 2 commands, at most 2 CPUs at once\n"
+                        "::group::ok: passed in * s, * s of CPU\n"
                         "fine\n"
                         "::endgroup::\n"
-                        "::group::50%25 done, step: 1: failed (exit status 1) in * s\n"
+                        "::group::50%25 done, step: 1: failed (exit status 1) in * s, * s of CPU\n"
                         "100%\n"
                         "::endgroup::\n"
-                        "parallel: 2 commands in * s, at most 2 at once: 1 passed, 1 failed, 0 not started\n"
-                        "::error title=50%25 done%2C step%3A 1::failed (exit status 1) in * s\n");
+                        "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 not started\n"
+                        "::error title=50%25 done%2C step%3A 1::failed (exit status 1) in * s, * s of CPU\n");
     test->arena.length = 0;
 
     // A command's standard input is /dev/null (it reads nothing, though this process's is a file with a line in it for
@@ -406,10 +477,10 @@ static void parallel_test_order(ParallelTest* test)
     }
     unlink(input_path);
     parallel_test_check(test, "descriptors", redirected && restored && summary.succeeded, report,
-                        "parallel: 1 commands, at most 5 at once\n"
-                        "== descriptors: passed in * s\n"
+                        "parallel: 1 commands, at most 5 CPUs at once\n"
+                        "== descriptors: passed in * s, * s of CPU\n"
                         "checked\n"
-                        "parallel: 1 commands in * s, at most 5 at once: 1 passed, 0 failed, 0 not started\n");
+                        "parallel: 1 commands in * s, * s of CPU, at most 5 CPUs at once: 1 passed, 0 failed, 0 not started\n");
     test->arena.length = 0;
 }
 
@@ -429,11 +500,11 @@ static void parallel_test_at_once(ParallelTest* test)
     const ParallelOptions barrier = { .jobs = 3, .timeout = 20 * BUSTER_PARALLEL_NANOSECONDS };
     String8 report = parallel_test_run(test, (String8){ .pointer = text, .length = length }, barrier, &summary, &results);
     parallel_test_check(test, "three at once", summary.succeeded && summary.peak == 3, report,
-                        "parallel: 3 commands, at most 3 at once\n"
-                        "== waits 1: passed in * s\n"
-                        "== waits 2: passed in * s\n"
-                        "== waits 3: passed in * s\n"
-                        "parallel: 3 commands in * s, at most 3 at once: 3 passed, 0 failed, 0 not started\n");
+                        "parallel: 3 commands, at most 3 CPUs at once\n"
+                        "== waits 1: passed in * s, * s of CPU\n"
+                        "== waits 2: passed in * s, * s of CPU\n"
+                        "== waits 3: passed in * s, * s of CPU\n"
+                        "parallel: 3 commands in * s, * s of CPU, at most 3 CPUs at once: 3 passed, 0 failed, 0 not started\n");
     test->arena.length = 0;
 
     // One job: each command's start and end in the log, in turn.
@@ -474,14 +545,130 @@ static void parallel_test_at_once(ParallelTest* test)
     test->arena.length = 0;
 }
 
+// The most CPUs the commands held at once, by the runner's times: at each command's start, the CPUs of those between
+// their starts and ends, which hold their processes' lives.
+static uint64_t parallel_test_most_cpus(const ParallelResult* results, uint64_t count)
+{
+    uint64_t most = 0;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        uint64_t held = 0;
+        for (uint64_t j = 0; j < count; j += 1)
+        {
+            held += results[j].start <= results[i].start && results[i].start < results[j].end ? results[j].cpus : 0;
+        }
+        most = held > most ? held : most;
+    }
+    return most;
+}
+
+static void parallel_test_cpus(ParallelTest* test)
+{
+    // Commands of 2, 2, 3, 1, 1, 8 (all four of the jobs), 1 and 1 CPUs with 4 jobs: never more than 4 CPUs at once, the
+    // 3-CPU command only once both 2-CPU ones have ended, the 1-CPU one after it beside it, the next after one of them,
+    // and the 8-CPU one alone, with all 4.
+    ParallelSummary summary;
+    ParallelResult* results = 0;
+    const ParallelOptions four = { .jobs = 4 };
+    String8 report = parallel_test_run(test,
+                                       parallel_test_string("== a [2 CPUs]\n"
+                                                            "sleep 0.2\n"
+                                                            "== b [2 CPUs]\n"
+                                                            "sleep 0.1\n"
+                                                            "== c [3 CPUs]\n"
+                                                            "sleep 0.2\n"
+                                                            "== d\n"
+                                                            "sleep 0.1\n"
+                                                            "== e\n"
+                                                            "sleep 0.05\n"
+                                                            "== f [8 CPUs]\n"
+                                                            "sleep 0.05\n"
+                                                            "== g\n"
+                                                            "sleep 0.05\n"
+                                                            "== h\n"
+                                                            "sleep 0.05\n"),
+                                       four, &summary, &results);
+    bool ordered = results != 0;
+    for (uint64_t i = 1; ordered && i < 8; i += 1)
+    {
+        ordered = results[i - 1].start <= results[i].start;
+    }
+    const bool fitted = results != 0 && results[0].cpus == 2 && results[1].cpus == 2 && results[2].cpus == 3 && results[3].cpus == 1 && results[5].cpus == 4 &&
+                        results[2].start >= results[0].end && results[2].start >= results[1].end && results[3].start < results[2].end &&
+                        results[4].start >= (results[2].end < results[3].end ? results[2].end : results[3].end) && results[5].start >= results[2].end &&
+                        results[5].start >= results[4].end && results[6].start >= results[5].end;
+    parallel_test_check(test, "CPUs: at most 4 at once", ordered && fitted && summary.succeeded && parallel_test_most_cpus(results, 8) == 4, report,
+                        "parallel: 8 commands, at most 4 CPUs at once\n"
+                        "== a [2 CPUs]: passed in * s, * s of CPU\n"
+                        "== b [2 CPUs]: passed in * s, * s of CPU\n"
+                        "== c [3 CPUs]: passed in * s, * s of CPU\n"
+                        "== d: passed in * s, * s of CPU\n"
+                        "== e: passed in * s, * s of CPU\n"
+                        "== f [8 CPUs]: passed in * s, * s of CPU\n"
+                        "== g: passed in * s, * s of CPU\n"
+                        "== h: passed in * s, * s of CPU\n"
+                        "parallel: 8 commands in * s, * s of CPU, at most 4 CPUs at once: 8 passed, 0 failed, 0 not started\n");
+    test->arena.length = 0;
+
+    // A command that doesn't fit beside the one running holds back the next, which would: the 1-CPU command starts only
+    // once the 2-CPU one has, which waits for the 3-CPU one to end.
+    report = parallel_test_run(test, parallel_test_string("== long [3 CPUs]\nsleep 0.2\n== wide [2 CPUs]\nsleep 0.05\n== small\nsleep 0.05\n"), four, &summary, &results);
+    parallel_test_check(test, "CPUs: a command that doesn't fit holds back the next",
+                        results != 0 && summary.succeeded && results[1].start >= results[0].end && results[2].start >= results[1].start && summary.peak == 2, report, 0);
+    test->arena.length = 0;
+
+    // Each command's BUSTER_PARALLEL_CPUS, once in its environment, is its CPUs, all of the jobs for one of more, though
+    // the runner's environment has another.
+    const char* saved = getenv("BUSTER_PARALLEL_CPUS");
+    char kept[64];
+    snprintf(kept, sizeof(kept), "%s", saved != 0 ? saved : "");
+    setenv("BUSTER_PARALLEL_CPUS", "7", 1);
+    report = parallel_test_run(test,
+                               parallel_test_string("== plain\necho \"$BUSTER_PARALLEL_CPUS $(env | grep -c '^BUSTER_PARALLEL_CPUS=')\"\n"
+                                                    "== two [2 CPUs]\necho \"$BUSTER_PARALLEL_CPUS $(env | grep -c '^BUSTER_PARALLEL_CPUS=')\"\n"
+                                                    "== eight [8 CPUs]\necho \"$BUSTER_PARALLEL_CPUS $(env | grep -c '^BUSTER_PARALLEL_CPUS=')\"\n"),
+                               four, &summary, &results);
+    if (saved != 0)
+    {
+        setenv("BUSTER_PARALLEL_CPUS", kept, 1);
+    }
+    else
+    {
+        unsetenv("BUSTER_PARALLEL_CPUS");
+    }
+    parallel_test_check(test, "CPUs: each command's BUSTER_PARALLEL_CPUS", summary.succeeded, report,
+                        "parallel: 3 commands, at most 4 CPUs at once\n"
+                        "== plain: passed in * s, * s of CPU\n"
+                        "1 1\n"
+                        "== two [2 CPUs]: passed in * s, * s of CPU\n"
+                        "2 1\n"
+                        "== eight [8 CPUs]: passed in * s, * s of CPU\n"
+                        "4 1\n"
+                        "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 not started\n");
+    test->arena.length = 0;
+
+    // CPU time: a shell's own and a process's it waits for come to their work, a sleep's to next to none, and the
+    // summary's to their sum. The child's command isn't its script's last, which bash would run in place of itself.
+    report = parallel_test_run(test,
+                               parallel_test_string("== busy\nfor ((i = 0; i < 400000; i++)); do :; done\n"
+                                                    "== child\nbash -c 'for ((i = 0; i < 400000; i++)); do :; done'\ntrue\n"
+                                                    "== sleeps\nsleep 0.3\n"),
+                               four, &summary, &results);
+    const uint64_t tenth = BUSTER_PARALLEL_NANOSECONDS / 10;
+    const bool timed = results != 0 && results[0].cpu >= tenth / 2 && results[1].cpu >= tenth / 2 && results[2].cpu < tenth &&
+                       results[2].end - results[2].start >= 3 * tenth && summary.cpu == results[0].cpu + results[1].cpu + results[2].cpu;
+    parallel_test_check(test, "CPUs: the commands' CPU time", summary.succeeded && timed, report, 0);
+    test->arena.length = 0;
+}
+
 static void parallel_test_output(ParallelTest* test)
 {
     ParallelSummary summary;
     ParallelResult* results = 0;
     const ParallelOptions options = { .jobs = 1 };
     const String8 report = parallel_test_run(test, parallel_test_string("== large\nhead -c 1048576 /dev/zero | tr '\\0' x\necho\n"), options, &summary, &results);
-    static const char head[] = "parallel: 1 commands, at most 1 at once\n== large: passed in * s\n";
-    static const char tail[] = "\nparallel: 1 commands in * s, at most 1 at once: 1 passed, 0 failed, 0 not started\n";
+    static const char head[] = "parallel: 1 commands, at most 1 CPUs at once\n== large: passed in * s, * s of CPU\n";
+    static const char tail[] = "\nparallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 not started\n";
     const uint64_t head_length = sizeof(head) - 1;
     const uint64_t tail_length = sizeof(tail) - 1;
     bool same = report.length == head_length + BUSTER_PARALLEL_TEST_LARGE_BYTES + tail_length && memcmp(report.pointer, head, head_length) == 0 &&
@@ -506,10 +693,10 @@ static void parallel_test_processes(ParallelTest* test)
     const bool timed = results != 0 && results[0].timed_out && results[0].end - results[0].start >= BUSTER_PARALLEL_NANOSECONDS &&
                        results[0].end - results[0].start < 10 * BUSTER_PARALLEL_NANOSECONDS;
     parallel_test_check(test, "a timeout", timed && !summary.succeeded && parallel_test_gone(test, "stuck"), report,
-                        "parallel: 1 commands, at most 1 at once\n"
-                        "== stuck: failed (timed out) in * s\n"
-                        "parallel: 1 commands in * s, at most 1 at once: 0 passed, 1 failed, 0 not started\n"
-                        "parallel: stuck failed (timed out) in * s\n");
+                        "parallel: 1 commands, at most 1 CPUs at once\n"
+                        "== stuck: failed (timed out) in * s, * s of CPU\n"
+                        "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 not started\n"
+                        "parallel: stuck failed (timed out) in * s, * s of CPU\n");
     test->arena.length = 0;
 
     // What a command leaves running is killed when its shell ends.
@@ -517,19 +704,19 @@ static void parallel_test_processes(ParallelTest* test)
     const ParallelOptions one = { .jobs = 1 };
     report = parallel_test_run(test, (String8){ .pointer = text, .length = length }, one, &summary, &results);
     parallel_test_check(test, "what a command leaves", summary.succeeded && summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && parallel_test_gone(test, "left"), report,
-                        "parallel: 1 commands, at most 1 at once\n"
-                        "== leaves: passed in * s\n"
+                        "parallel: 1 commands, at most 1 CPUs at once\n"
+                        "== leaves: passed in * s, * s of CPU\n"
                         "left\n"
-                        "parallel: 1 commands in * s, at most 1 at once: 1 passed, 0 failed, 0 not started\n");
+                        "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 not started\n");
     test->arena.length = 0;
 
     const ParallelOptions missing = { .jobs = 1, .shell = "/nonexistent/bash" };
     report = parallel_test_run(test, parallel_test_string("== a\ntrue\n== b\ntrue\n"), missing, &summary, &results);
     parallel_test_check(test, "a shell that can't start", !summary.succeeded && summary.failed == 2, report,
-                        "parallel: 2 commands, at most 1 at once\n"
+                        "parallel: 2 commands, at most 1 CPUs at once\n"
                         "== a: failed (can't start /nonexistent/bash: No such file or directory) in * s\n"
                         "== b: failed (can't start /nonexistent/bash: No such file or directory) in * s\n"
-                        "parallel: 2 commands in * s, at most 1 at once: 0 passed, 2 failed, 0 not started\n"
+                        "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 2 failed, 0 not started\n"
                         "parallel: a failed (can't start /nonexistent/bash: No such file or directory) in * s\n"
                         "parallel: b failed (can't start /nonexistent/bash: No such file or directory) in * s\n");
     test->arena.length = 0;
@@ -628,10 +815,10 @@ static void parallel_test_slow_reader(ParallelTest* test)
                                             "sleep 1", &summary, &results, &run_time);
     bool killed = results != 0 && results[1].timed_out && !results[1].passed && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
     parallel_test_check(test, "a slow reader, and a timeout", killed && summary.passed == 1 && summary.failed == 1 &&
-                                                                 parallel_test_large(report, "parallel: 2 commands, at most 2 at once\n== large: passed in * s\n",
-                                                                                     "== deadline: failed (timed out) in * s\n"
-                                                                                     "parallel: 2 commands in * s, at most 2 at once: 1 passed, 1 failed, 0 not started\n"
-                                                                                     "parallel: deadline failed (timed out) in * s\n"),
+                                                                 parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed in * s, * s of CPU\n",
+                                                                                     "== deadline: failed (timed out) in * s, * s of CPU\n"
+                                                                                     "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 not started\n"
+                                                                                     "parallel: deadline failed (timed out) in * s, * s of CPU\n"),
                         report.length < 4096 ? report : (String8){ 0 }, 0);
     test->arena.length = 0;
 
@@ -645,11 +832,11 @@ static void parallel_test_slow_reader(ParallelTest* test)
     report = parallel_test_slow_run(test, (String8){ .pointer = text, .length = length }, plain, "sleep 1", &summary, &results, &run_time);
     killed = results != 0 && results[1].interrupted && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
     parallel_test_check(test, "a slow reader, and a signal", killed && summary.signal == SIGTERM &&
-                                                                parallel_test_large(report, "parallel: 2 commands, at most 2 at once\n== large: passed in * s\n",
-                                                                                    "== stops: failed (killed by signal 15: Terminated) in * s\n"
-                                                                                    "parallel: 2 commands in * s, at most 2 at once: 1 passed, 1 failed, 0 not started, stopped by "
+                                                                parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed in * s, * s of CPU\n",
+                                                                                    "== stops: failed (killed by signal 15: Terminated) in * s, * s of CPU\n"
+                                                                                    "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 not started, stopped by "
                                                                                     "signal 15: Terminated\n"
-                                                                                    "parallel: stops failed (killed by signal 15: Terminated) in * s\n"),
+                                                                                    "parallel: stops failed (killed by signal 15: Terminated) in * s, * s of CPU\n"),
                         report.length < 4096 ? report : (String8){ 0 }, 0);
     test->arena.length = 0;
 
@@ -741,29 +928,29 @@ static void parallel_test_signals(ParallelTest* test)
     parallel_test_check(test, "SIGTERM", summary.signal == SIGTERM && !summary.succeeded && summary.not_started == 1 && results != 0 && results[0].interrupted &&
                                              parallel_test_signals_kept(&mask, actions),
                         report,
-                        "parallel: 2 commands, at most 1 at once\n"
-                        "== stops: failed (killed by signal 15: Terminated) in * s\n"
+                        "parallel: 2 commands, at most 1 CPUs at once\n"
+                        "== stops: failed (killed by signal 15: Terminated) in * s, * s of CPU\n"
                         "== waits: not started\n"
-                        "parallel: 2 commands in * s, at most 1 at once: 0 passed, 1 failed, 1 not started, stopped by signal 15: Terminated\n"
-                        "parallel: stops failed (killed by signal 15: Terminated) in * s\n");
+                        "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 1 not started, stopped by signal 15: Terminated\n"
+                        "parallel: stops failed (killed by signal 15: Terminated) in * s, * s of CPU\n");
     test->arena.length = 0;
 
     // A run stopped by a signal fails, though its command, which ignores it, passes.
     report = parallel_test_run(test, parallel_test_string("== shrugs\ntrap '' TERM\nkill -TERM $PPID\nsleep 0.05\n"), one, &summary, &results);
     parallel_test_check(test, "a signal with every command passing", summary.signal == SIGTERM && !summary.succeeded && summary.passed == 1 && results != 0 && results[0].interrupted,
                         report,
-                        "parallel: 1 commands, at most 1 at once\n"
-                        "== shrugs: passed in * s\n"
-                        "parallel: 1 commands in * s, at most 1 at once: 1 passed, 0 failed, 0 not started, stopped by signal 15: Terminated\n");
+                        "parallel: 1 commands, at most 1 CPUs at once\n"
+                        "== shrugs: passed in * s, * s of CPU\n"
+                        "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 not started, stopped by signal 15: Terminated\n");
     test->arena.length = 0;
 
     // A command that ignores SIGINT and SIGTERM: the first is sent on, and the second kills it.
     report = parallel_test_run(test, parallel_test_string("== ignores\ntrap '' INT TERM\nkill -INT $PPID\nkill -TERM $PPID\nexec sleep 30\n"), one, &summary, &results);
     parallel_test_check(test, "SIGINT, then SIGTERM", summary.signal == SIGINT && !summary.succeeded && parallel_test_signals_kept(&mask, actions), report,
-                        "parallel: 1 commands, at most 1 at once\n"
-                        "== ignores: failed (killed by signal 9: Killed) in * s\n"
-                        "parallel: 1 commands in * s, at most 1 at once: 0 passed, 1 failed, 0 not started, stopped by signal 2: Interrupt\n"
-                        "parallel: ignores failed (killed by signal 9: Killed) in * s\n");
+                        "parallel: 1 commands, at most 1 CPUs at once\n"
+                        "== ignores: failed (killed by signal 9: Killed) in * s, * s of CPU\n"
+                        "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 not started, stopped by signal 2: Interrupt\n"
+                        "parallel: ignores failed (killed by signal 9: Killed) in * s, * s of CPU\n");
     test->arena.length = 0;
 
     // SIGHUP ignored, as nohup leaves it, doesn't stop the run; and with SIGCHLD ignored, the runner still reaps its
@@ -778,12 +965,12 @@ static void parallel_test_signals(ParallelTest* test)
     }
     report = parallel_test_run(test, parallel_test_string("== hangs up\nkill -HUP $PPID\necho still here\n== exits\nexit 4\n"), one, &summary, &results);
     parallel_test_check(test, "SIGHUP and SIGCHLD ignored", summary.signal == 0 && summary.passed == 1 && parallel_test_signals_kept(&mask, ignored), report,
-                        "parallel: 2 commands, at most 1 at once\n"
-                        "== hangs up: passed in * s\n"
+                        "parallel: 2 commands, at most 1 CPUs at once\n"
+                        "== hangs up: passed in * s, * s of CPU\n"
                         "still here\n"
-                        "== exits: failed (exit status 4) in * s\n"
-                        "parallel: 2 commands in * s, at most 1 at once: 1 passed, 1 failed, 0 not started\n"
-                        "parallel: exits failed (exit status 4) in * s\n");
+                        "== exits: failed (exit status 4) in * s, * s of CPU\n"
+                        "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 1 failed, 0 not started\n"
+                        "parallel: exits failed (exit status 4) in * s, * s of CPU\n");
     for (uint64_t i = 0; i < 4; i += 1)
     {
         sigaction(signals[i], &original[i], 0);
@@ -849,12 +1036,12 @@ static void parallel_test_command_line(ParallelTest* test)
     int status = ready ? parallel_test_command(test, on_input, passing, -1) : -1;
     String8 report = parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output));
     parallel_test_check(test, "the command, a list on standard input", status == 0, report,
-                        "parallel: 2 commands, at most 2 at once\n"
-                        "== first: passed in * s\n"
+                        "parallel: 2 commands, at most 2 CPUs at once\n"
+                        "== first: passed in * s, * s of CPU\n"
                         "one\n"
-                        "== second: passed in * s\n"
+                        "== second: passed in * s, * s of CPU\n"
                         "two\n"
-                        "parallel: 2 commands in * s, at most 2 at once: 2 passed, 0 failed, 0 not started\n");
+                        "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 2 passed, 0 failed, 0 not started\n");
     test->arena.length = 0;
 
     char* from_file[] = { "compiler", "parallel", "--github", failing, 0 };
@@ -864,11 +1051,11 @@ static void parallel_test_command_line(ParallelTest* test)
     char expected[BUSTER_PARALLEL_TEST_TEXT_BYTES];
     const unsigned long long cpus = (unsigned long long)parallel_core_count();
     snprintf(expected, sizeof(expected),
-             "parallel: 1 commands, at most %llu at once\n"
-             "::group::fails: failed (exit status 2) in * s\n"
+             "parallel: 1 commands, at most %llu CPUs at once\n"
+             "::group::fails: failed (exit status 2) in * s, * s of CPU\n"
              "::endgroup::\n"
-             "parallel: 1 commands in * s, at most %llu at once: 0 passed, 1 failed, 0 not started\n"
-             "::error title=fails::failed (exit status 2) in * s\n",
+             "parallel: 1 commands in * s, * s of CPU, at most %llu CPUs at once: 0 passed, 1 failed, 0 not started\n"
+             "::error title=fails::failed (exit status 2) in * s, * s of CPU\n",
              cpus, cpus);
     parallel_test_check(test, "the command, a list in a file that fails", status == 1, report, expected);
     test->arena.length = 0;
@@ -988,10 +1175,10 @@ static void parallel_test_command_line(ParallelTest* test)
     report = parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output));
     parallel_test_check(test, "the command, a command that ends past its deadline unseen", continued && late_waited == runner && WIFEXITED(late_status) && WEXITSTATUS(late_status) == 1,
                         report,
-                        "parallel: 1 commands, at most 1 at once\n"
-                        "== late: failed (timed out) in * s\n"
-                        "parallel: 1 commands in * s, at most 1 at once: 0 passed, 1 failed, 0 not started\n"
-                        "parallel: late failed (timed out) in * s\n");
+                        "parallel: 1 commands, at most 1 CPUs at once\n"
+                        "== late: failed (timed out) in * s, * s of CPU\n"
+                        "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 not started\n"
+                        "parallel: late failed (timed out) in * s, * s of CPU\n");
     unlink(late);
     test->arena.length = 0;
 
@@ -1116,6 +1303,7 @@ static int run_parallel_tests(int argc, char** argv)
             parallel_test_lists(&test);
             parallel_test_order(&test);
             parallel_test_at_once(&test);
+            parallel_test_cpus(&test);
             parallel_test_output(&test);
             parallel_test_processes(&test);
             parallel_test_slow_reader(&test);

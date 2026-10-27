@@ -63,6 +63,129 @@ static void check_test_program_addressed(CheckTest* test)
     }
 }
 
+// `bytes` at the end of a mapping whose next page is PROT_NONE, so that an access past them faults: the start, or 0.
+static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, uint64_t bytes)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t pages = (bytes + page - 1) / page * page;
+    *mapped = pages + page;
+    uint8_t* base = mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = base != MAP_FAILED && mprotect(base + pages, page, PROT_NONE) == 0;
+    *mapping = base != MAP_FAILED ? base : 0;
+    return guarded ? base + pages - bytes : 0;
+}
+
+// #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
+// PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
+// ones, and the needed objects' count and numbering (object 0 never a symbol), at every density.
+static void check_test_program_declaring(CheckTest* test)
+{
+    static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
+    uint64_t checked = 0;
+    bool all = true;
+    uint64_t state = 0x442;
+    for (uint32_t c = 0; c <= 200 + sizeof(larger) / sizeof(larger[0]); c += 1)
+    {
+        const uint32_t count = c <= 200 ? c : larger[c - 201];
+        for (uint32_t density = 0; density < 4; density += 1)
+        {
+            uint8_t* maps[7] = { 0 };
+            uint64_t sizes[7] = { 0 };
+            uint32_t* declarations = (uint32_t*)check_test_program_guarded(&maps[0], &sizes[0], (uint64_t)count * sizeof(uint32_t));
+            uint32_t* nodes = (uint32_t*)check_test_program_guarded(&maps[1], &sizes[1], (uint64_t)count * sizeof(uint32_t));
+            // The tokens' room: count + 16, as the kernel's contract asks, and not one more.
+            uint32_t* tokens = (uint32_t*)check_test_program_guarded(&maps[2], &sizes[2], ((uint64_t)count + 16) * sizeof(uint32_t));
+            uint8_t* needed = check_test_program_guarded(&maps[3], &sizes[3], (uint64_t)count + 1);
+            SymbolId* object_symbols = (SymbolId*)check_test_program_guarded(&maps[4], &sizes[4], ((uint64_t)count + 1) * sizeof(SymbolId));
+            uint32_t* expected = (uint32_t*)check_test_program_guarded(&maps[5], &sizes[5], ((uint64_t)count + 1) * sizeof(uint32_t));
+            bool ready = declarations != 0 && nodes != 0 && tokens != 0 && needed != 0 && object_symbols != 0 && expected != 0;
+            const uint32_t limit = count / 2 + 1;
+            for (uint32_t t = 0; ready && t < count; t += 1)
+            {
+                state = state * 6364136223846793005u + 1442695040888963407u;
+                const uint32_t random = (uint32_t)(state >> 33);
+                // Density 0 declares nothing, 3 everything; between, about a quarter or a half of the tokens.
+                const bool declares = density == 3 || (density != 0 && random % (density == 1 ? 4 : 2) == 0);
+                declarations[t] = declares ? t : (random & 1) != 0 ? t + 1 : (random & 2) != 0 ? BUSTER_CHECK_NONE : t - 1;
+                nodes[t] = (random >> 8) % 3 == 0 ? (random >> 12) % limit : limit + (random >> 12) % 3;
+                needed[t + 1] = density == 3 || (density != 0 && (random >> 4) % (density == 1 ? 8 : 2) == 0);
+            }
+            if (ready)
+            {
+                needed[0] = 1;
+            }
+            for (uint32_t with_nodes = 0; ready && with_nodes < 2; with_nodes += 1)
+            {
+                uint32_t want = 0;
+                for (uint32_t t = 0; t < count; t += 1)
+                {
+                    if (declarations[t] == t || (with_nodes != 0 && nodes[t] < limit))
+                    {
+                        expected[want++] = t;
+                    }
+                }
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    const uint32_t got = check_program_declaring(declarations, with_nodes != 0 ? nodes : 0, limit, count, tokens, path == 0);
+                    const bool same = got == want && memcmp(tokens, expected, (uint64_t)want * sizeof(uint32_t)) == 0;
+                    all &= same;
+                    checked += 1;
+                    if (!same)
+                    {
+                        printf("  declaring tokens: count %u density %u nodes %u %s path: %u tokens, expected %u\n", count, density, with_nodes,
+                               path == 0 ? "scalar" : "vector", got, want);
+                    }
+                }
+            }
+            const uint32_t objects = count + 1;
+            uint32_t want = 0;
+            for (uint32_t object = 1; ready && object < objects; object += 1)
+            {
+                want += needed[object] != 0;
+            }
+            for (uint32_t path = 0; ready && path < 2; path += 1)
+            {
+                const uint32_t got = check_program_needed_count(needed, objects, path == 0);
+                // The symbols' objects exactly as many as the needed objects, ending at the protected page.
+                uint32_t* symbol_objects = got == want ? (uint32_t*)check_test_program_guarded(&maps[6], &sizes[6], (uint64_t)want * sizeof(uint32_t)) : 0;
+                memset(object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
+                if (symbol_objects != 0)
+                {
+                    check_program_needed_number(needed, objects, object_symbols, symbol_objects, path == 0);
+                }
+                bool same = symbol_objects != 0 && object_symbols[0] == 0;
+                SymbolId symbol = 0;
+                for (uint32_t object = 1; same && object < objects; object += 1)
+                {
+                    same = needed[object] != 0 ? object_symbols[object] == symbol + 1 && symbol_objects[symbol] == object : object_symbols[object] == 0;
+                    symbol += needed[object] != 0;
+                }
+                all &= same;
+                checked += 1;
+                if (!same)
+                {
+                    printf("  needed objects: count %u density %u %s path: %u symbols, expected %u\n", count, density, path == 0 ? "scalar" : "vector", got, want);
+                }
+                if (maps[6] != 0)
+                {
+                    munmap(maps[6], sizes[6]);
+                    maps[6] = 0;
+                }
+            }
+            all &= ready;
+            for (uint32_t m = 0; m < 7; m += 1)
+            {
+                if (maps[m] != 0)
+                {
+                    munmap(maps[m], sizes[m]);
+                }
+            }
+        }
+    }
+    printf("  declaring tokens and needed objects: %llu cases, both paths at PROT_NONE pages\n", (unsigned long long)checked);
+    check_test_expect(test, all, "declaring tokens and needed objects agree with the contract by both paths, at every count and density");
+}
+
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
 {
     return size == 0 || (a != 0 && b != 0 && memcmp(a, b, size) == 0);
@@ -171,6 +294,10 @@ static const char check_test_program_harness[] =
     // (clang -O0 returns in place), and a misaligned one shows in the first byte.
     "union external_wide{long double x;char c[40];};union external_wide external_wide(int n){union external_wide w;"
     "for(int i=0;i<40;i++)w.c[i]=(char)(n+i);if((unsigned long)&w%16)w.c[0]=99;return w;}\n"
+    // Structs aligned to 32 by value (MEMORY, on a stack aligned to 32 at the call), which clang's callee takes in place:
+    // an outgoing area off its alignment shows in their addresses.
+    "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int k,struct external_aligned x,struct external_aligned y){"
+    "return (int)(x.a+x.b+y.a*3+y.b)+k+(int)((((unsigned long)&x)|((unsigned long)&y))&31)*1000;}\n"
     // Structs of a complex long double, which return in st0 and st1: one returned to the program, and the program's
     // own called through a pointer.
     "struct external_cx{_Complex long double z;};struct external_cx external_complex(long double a,long double b){"
@@ -639,9 +766,82 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
     check_test_program_boundary_reason(test, source, name, accepted, machine, references, initializations, NULL);
 }
 
+// The jump tables the lowering makes of `source`'s switches (#136's item 7), by both paths: `tables` of them, with
+// `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table). The program must list exactly
+// its SWITCH controls with four CASE controls or more after them, in the controls' order (CheckProgram.switches), as a
+// scan of its controls finds them.
+static void check_test_program_tables(CheckTest* test, const char* source, const char* name, uint32_t tables, uint32_t entries)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                              pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "jump table source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        CheckProgramLowered lowered = { 0 };
+        const bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                           parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                           check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                           check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                           check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                           check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0 };
+        const bool lowered_ok = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) &&
+                                check_program_lower(&lowered, &program, path == 0, &output, &scratch);
+        uint32_t total = 0;
+        for (uint32_t t = 0; lowered_ok && t < lowered.table_count; t += 1)
+        {
+            total += lowered.tables[t].count;
+        }
+        char description[256];
+        snprintf(description, sizeof(description), "%s: %u jump tables of %u entries by the %s path (clang -O0's rule: %u of %u)", name,
+                 lowered_ok ? lowered.table_count : 0, total, path == 0 ? "scalar" : "vector", tables, entries);
+        check_test_expect(test, lowered_ok && lowered.table_count == tables && total == entries, description);
+        uint32_t listed = 0;
+        bool switches = lowered_ok;
+        for (uint32_t c = 0; switches && c < program.control_count; c += 1)
+        {
+            const bool control_switch = program.controls[c].kind == CHECK_CONTROL_SWITCH;
+            uint32_t cases = 0;
+            while (control_switch && c + 1 + cases < program.control_count && program.controls[c + 1 + cases].kind == CHECK_CONTROL_CASE)
+            {
+                cases += 1;
+            }
+            switches = !control_switch || cases < 4 || (listed < program.switch_count && program.switches[listed] == c);
+            listed += control_switch && cases >= 4;
+        }
+        snprintf(description, sizeof(description), "%s: the %s path's program lists %u switches of four cases or more, as its controls have them", name,
+                 path == 0 ? "scalar" : "vector", lowered_ok ? program.switch_count : 0);
+        check_test_expect(test, switches && listed == program.switch_count, description);
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
+#include "c_check_program_atomic_test.c"
+#include "c_check_program_asm_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -662,16 +862,159 @@ static void check_test_program_refused(CheckTest* test)
     arena_release(&scratch);
 }
 
+// The table of every type's class and facts that the bodies read (check_lower_classify_types) against its twin's, on the
+// types of random worlds of every kind (the type table's tests' world: pointers, arrays, functions, vectors, atomic
+// types, aligned typedefs, complex types of _BitInts, enums and records; and the calling convention's tests' world:
+// complex types of every floating type among them): of the whole world and of every count of its types to 300; then with
+// the kinds' column and both tables ending at a PROT_NONE page, for every count to 200, so that a read or a write past the
+// last type faults. And a function's memory classes from its entries' (check_lower_entry_classes), at the page's end too.
+static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[3] = { 0 };
+    bool guarded = true;
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        mappings[i] = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        guarded = guarded && mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, guarded, "the guarded columns of the types' classes");
+    for (uint32_t round = 0; round < 2; round += 1)
+    {
+        AbiTestWorld world;
+        const bool opened = abi_test_world_open(&world, 8192);
+        check_test_expect(test, opened, "a world of types to classify for the lowering");
+        if (opened)
+        {
+            if (round == 0)
+            {
+                type_test_world_build(&world.types, 531, 1000);
+            }
+            else
+            {
+                abi_test_world_build(&world, 531, 1000);
+            }
+            const TypeTable* table = &world.types.test.table;
+            const uint32_t count = table->types.count;
+            uint8_t* columns = malloc(4 * ((uint64_t)count + 1));
+            check_test_expect(test, columns != 0 && count > 300, "the world's types and their columns");
+            for (uint32_t prefix = 0; columns != 0 && prefix <= count; prefix = prefix < 300 ? prefix + 1 : prefix < count ? count : prefix + 1)
+            {
+                uint8_t* scalar_classes = columns;
+                uint8_t* scalar_facts = columns + count + 1;
+                uint8_t* vector_classes = columns + 2 * ((uint64_t)count + 1);
+                uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
+                memset(vector_classes, 0xa5, prefix + 1);
+                memset(vector_facts, 0xa5, prefix + 1);
+                check_lower_classify_types_scalar(table, prefix, scalar_classes, scalar_facts);
+                check_lower_classify_types(table, prefix, vector_classes, vector_facts);
+                const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
+                                  vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
+                char description[160];
+                snprintf(description, sizeof(description), "the first %u of world %u's %u types: their classes and facts by both paths", prefix, round, count);
+                check_test_expect(test, same, description);
+            }
+            for (uint32_t prefix = 0; columns != 0 && guarded && prefix <= 200 && prefix <= count; prefix += 1)
+            {
+                // The kinds copied to end at the guard page, read through a copy of the table that has them.
+                TypeTable copy = *table;
+                uint8_t* kinds = mappings[0] + page - prefix;
+                memcpy(kinds, table->types.kind, prefix);
+                copy.types.kind = kinds;
+                uint8_t* classes = mappings[1] + page - prefix;
+                uint8_t* facts = mappings[2] + page - prefix;
+                check_lower_classify_types_scalar(table, prefix, columns, columns + count + 1);
+                check_lower_classify_types(&copy, prefix, classes, facts);
+                char description[160];
+                snprintf(description, sizeof(description), "world %u's first %u types' classes and facts, at a page's end", round, prefix);
+                check_test_expect(test, memcmp(columns, classes, prefix) == 0 && memcmp(columns + count + 1, facts, prefix) == 0, description);
+            }
+            free(columns);
+            abi_test_world_close(&world);
+        }
+    }
+    // A function's memory classes from its entries' classes (check_lower_entry_classes) against its twin's: columns of
+    // every count to 200 ending at the guard page, of random classes but F80, I128 and U128, with one of those at a random
+    // place in one column of four, and none in the others.
+    for (uint32_t count = 0; guarded && count <= 200; count += 1)
+    {
+        for (uint32_t round = 0; round < 8; round += 1)
+        {
+            uint8_t* classes = mappings[0] + page - count;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                classes[i] = (uint8_t)(check_test_random(test) % BUSTER_TYPED_CLASS_F80);
+            }
+            const uint8_t memory[3] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128 };
+            if (count != 0 && round % 4 != 0)
+            {
+                classes[check_test_random(test) % count] = memory[round % 3];
+            }
+            const uint32_t vector = check_lower_entry_classes(classes, count);
+            const uint32_t scalar = check_lower_entry_classes_scalar(classes, count);
+            const uint32_t expected = count == 0 || round % 4 == 0 ? 0 : round % 3 == 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : BUSTER_CHECK_LOWER_ENTRIES_WIDE;
+            char description[160];
+            snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u by the vector path, %u by the scalar one, for %u", count,
+                     round, vector, scalar, expected);
+            check_test_expect(test, vector == expected && scalar == expected, description);
+        }
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED && mappings[i] != 0)
+        {
+            munmap(mappings[i], 2 * page);
+        }
+    }
+}
+
+// The x87's encodings, from n: zero, negative zero, a denormal, two pseudo-denormals, one, an unnormal, a pseudo-zero,
+// the infinities, a pseudo-infinity, quiet and signaling NaNs, a pseudo-NaN, the largest value and the largest unnormal.
+#define BUSTER_CHECK_TEST_X87_ENCODINGS \
+    "typedef union{struct{unsigned long m;unsigned short e;}b;long double x;}L;" \
+    "static const unsigned long ms[16]={0,0,1,0x8000000000000000UL,0x8000000000000001UL,0x8000000000000000UL,0x4000000000000000UL,0," \
+    "0x8000000000000000UL,0x8000000000000000UL,0,0xc000000000000000UL,0x8000000000000001UL,0x4000000000000000UL,0xffffffffffffffffUL," \
+    "0x7fffffffffffffffUL};" \
+    "static const unsigned short es[16]={0,0x8000,0,0,0x8000,0x3fff,0x3fff,0x3fff,0x7fff,0xffff,0x7fff,0x7fff,0x7fff,0x7fff,0x7ffe,0x7ffe};" \
+    "long double make(int n){L l;l.b.m=ms[(unsigned)n%16];l.b.e=es[(unsigned)n%16];return l.x;}"
+
+// The builtins of long double that this compiler's own main.c calls (#148, #129): clang -O0 classifies an x87 value by
+// the x87's compares or by its bits, by builtin, which the encodings tell apart. The fpclassify's normal and subnormal
+// selectors are constants, since clang evaluates the two in an order its own build decides (check_lower_floating_prepare).
+static __attribute__((noinline)) void check_test_program_long_double_builtins(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int tested(int n){long double x=make(n);return __builtin_isnan(x)+2*__builtin_isinf(x)+4*__builtin_isfinite(x)+8*__builtin_signbit(x)+"
+        "16*__builtin_fpclassify(0,1,2,3,4,x)+128*(__builtin_isinf_sign(x)+1);}", "long-double-classification-encodings", clang);
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int seen;int mark(int v){seen=seen*10+v;return v;}"
+        "int tested(int n){seen=0;long double x=make(n);L l;l.x=__builtin_fabsl(x);int r=__builtin_fpclassify(mark(1),mark(2),3,4,mark(5),x);"
+        "return (int)l.b.e+(int)(l.b.m>>48)*3+r*100000+seen+__builtin_signbit(x)*500000;}", "long-double-fabsl-and-fpclassify-selectors", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);"
+        BUSTER_CHECK_TEST_X87_ENCODINGS
+        "int tested(int n){long double x=make(n);clear_fp();int a=__builtin_fpclassify(11,22,33,44,55,x);int f=fp_state();"
+        "clear_fp();int b=__builtin_isinf_sign(x);int g=fp_state();clear_fp();int c=__builtin_isnan(x);int h=fp_state();"
+        "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
+    check_test_program_declaring(test);
     check_test_program_refused(test);
+    check_test_program_type_facts(test);
     check_test_program_selection(test, clang);
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
+    check_test_program_atomics(test, clang);
     check_test_program_diagnostics(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
@@ -693,6 +1036,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{return a+b+c+d+e+f+g+h+i+j;}int tested(int n){return (int)helper(n,1,2,3,4,5,6,7,8,9);}", "floating-stack-arguments", clang);
     check_test_program_source(test,
         "int tested(int n){int x=n;int*p=&x;int a=(*p)++;int b=++*p;*p+=3;return a+2*b+4*x;}", "addressed-local-updates", clang);
+    // An address constant cast to an integer type, of a class other than a pointer's (musl's syscalls take one).
+    check_test_program_source(test,
+        "volatile int lock;long sys(long n,long a){return n*3+(a&7);}long base(void){return (long)&lock;}"
+        "int tested(int n){long a=(long)&lock;long b=(long)(&lock+2);int c=(int)(long)&lock;return (int)(b-a)+(c==(int)a)+(base()==a)+(int)sys(n,(long)&lock)-(int)((long)&lock&7);}",
+        "address-constants-as-integers", clang);
     check_test_program_source(test,
         "int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);"
         "_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}", "narrow-values-and-bool", clang);
@@ -723,6 +1071,99 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){int x=7;switch(n++){case -2 ... 0:x=1;break;case 1:x=2;case 2:x+=4;break;default:x=9;}return x*10+n;}",
         "switch-range-and-fallthrough", clang);
+    // Jump tables (#136's item 7), each switch swept past its cases on both sides: holes, defaults in the middle and
+    // none, fallthrough, GNU ranges, negative and unsigned values at their types' ends, nested tables, and in loops.
+    check_test_program_source(test,
+        "static int dense(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;case 5:return 13;case 7:return 17;default:return -1;}}"
+        "static int nodefault(int x){int r=7;switch(x){case 1:r=1;break;case 2:r=2;break;case 3:r=3;break;case 4:r=4;break;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=-6;i<14;i++){s=s*3+(unsigned)dense(i+n);s=s*5+(unsigned)nodefault(i-n);}return (int)s;}",
+        "switch-table-dense", clang);
+    check_test_program_source(test,
+        "static int ranged(int x){int r=0;switch(x){case -7 ... -5:r+=1;case -4:r+=2;break;default:r+=100;case -1:r+=4;break;"
+        "case 0 ... 2:r+=8;break;case 4:r+=16;case 5:r+=32;break;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=-10;i<10;i++)s=s*7+(unsigned)ranged(i+n-5);return (int)s;}",
+        "switch-table-ranges", clang);
+    check_test_program_source(test,
+        "static int top(unsigned x){switch(x){case 4294967290u:return 1;case 4294967291u:return 2;case 4294967292u:return 3;"
+        "case 4294967294u:return 4;case 4294967295u:return 5;default:return 0;}}"
+        "static int utop(unsigned long long x){switch(x){case 18446744073709551610ull:return 1;case 18446744073709551611ull:return 2;"
+        "case 18446744073709551613ull:return 3;case 18446744073709551614ull:return 4;case 18446744073709551615ull:return 5;default:return 0;}}"
+        "int tested(int n){unsigned s=0;for(int i=-8;i<8;i++){s=s*5+(unsigned)top((unsigned)(i+n-12));s=s*7+(unsigned)utop((unsigned long long)(long long)(i+n-12));}"
+        "return (int)s;}",
+        "switch-table-unsigned-ends", clang);
+    check_test_program_source(test,
+        "static int wide(long x){switch(x){case -9223372036854775807L-1:return 1;case -9223372036854775807L:return 2;case -9223372036854775806L:return 3;"
+        "case -9223372036854775805L:return 4;case -9223372036854775803L:return 5;default:return 6;}}"
+        "static int high(long x){switch(x){case 9223372036854775803L:return 1;case 9223372036854775804L:return 2;case 9223372036854775805L:return 3;"
+        "case 9223372036854775806L:return 4;case 9223372036854775807L:return 5;default:return 6;}}"
+        "int tested(int n){unsigned s=0;for(int i=0;i<10;i++){s=s*7+(unsigned)wide((-9223372036854775807L-1)+(long)(i+n+3));"
+        "s=s*7+(unsigned)high(9223372036854775807L-(long)(i+n+3));s=s*7+(unsigned)wide((long)(i+n));}return (int)s;}",
+        "switch-table-long-ends", clang);
+    check_test_program_source(test,
+        "static int nested(int a,int b){int r=0;switch(a){case 0:switch(b){case 0:r=1;break;case 1:r=2;break;case 2:r=3;break;case 3:r=4;break;default:r=5;}break;"
+        "case 1:r=10;break;case 2:r=20;case 3:r+=30;break;default:r=-1;}return r;}"
+        "int tested(int n){unsigned s=0;for(int i=0;i<30;i++){if(i%7==6)continue;switch(i%5){case 0:s+=1;break;case 1:s*=3;"
+        "case 2:s+=(unsigned)nested(i%4,(i+n)%6);break;case 3:if(i>20)break;s^=0x55;break;case 4:s+=(unsigned)n;break;}}return (int)s;}",
+        "switch-table-nested-loop", clang);
+    check_test_program_source(test,
+        "enum color{red,green,blue,cyan,magenta,yellow};"
+        "static int named(enum color c){switch(c){case red:return 1;case green:return 2;case blue:return 3;case cyan:return 4;case yellow:return 6;default:return 0;}}"
+        "static int chars(char c){switch(c){case 'a':return 1;case 'b':return 2;case 'c':return 3;case 'e':return 5;case 'f':return 6;default:return 0;}}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*11+(unsigned)named((enum color)(i+n))+(unsigned)chars((char)('a'+i+n));return (int)s;}",
+        "switch-table-enum-char", clang);
+    // A table of 300 values with holes, every seventh value the default's.
+    char big[16384];
+    int length = snprintf(big, sizeof(big), "static int big(int x){switch(x){");
+    for (int k = 0; k < 300 && length > 0 && (size_t)length < sizeof(big); k += 1)
+    {
+        length += k % 7 == 3 ? 0 : snprintf(big + length, sizeof(big) - (size_t)length, "case %d:return %d;", k, (k * k) % 1000 + 1);
+    }
+    length += length > 0 && (size_t)length < sizeof(big) ?
+              snprintf(big + length, sizeof(big) - (size_t)length,
+                       "default:return -7;}}int tested(int n){unsigned s=0;for(int i=-5;i<305;i++)s=s*31+(unsigned)big(i+n);return (int)s;}") : 0;
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(big), "the 300-value switch's source fits");
+    check_test_program_source(test, big, "switch-table-300", clang);
+    check_test_program_tables(test, big, "switch-table-300-tables", 1, 300);
+    // The rule's edges: four clusters or more, a tenth of the range, cases at one place one cluster (`case 1: case 2:`, as
+    // LLVM's one block), classes of 32 and 64 bits, ranges of BUSTER_CHECK_LOWER_MAX_TABLE values at most.
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;case 5:return 13;"
+                                    "case 7:return 17;default:return -1;}}", "switch-tables-dense", 1, 8);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;default:return -1;}}", "switch-tables-three", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 13:return 5;case 26:return 7;case 39:return 9;default:return -1;}}",
+                              "switch-tables-tenth", 1, 40);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 14:return 5;case 28:return 7;case 42:return 9;default:return -1;}}",
+                              "switch-tables-sparse", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 1:case 2:case 3:case 4:return 1;default:return 0;}}", "switch-tables-one-place", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 1:case 2:return 1;case 3:case 4:return 2;case 5:return 3;case 6:return 4;case 7:return 5;default:return 0;}}",
+                              "switch-tables-shared-places", 1, 7);
+    check_test_program_tables(test, "int f(__int128 x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 11;default:return -1;}}",
+                              "switch-tables-int128", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0 ... 70000:return 1;case 70001:return 2;case 70002:return 3;case 70003:return 4;default:return 0;}}",
+                              "switch-tables-past-the-most", 0, 0);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0 ... 65531:return 1;case 65532:return 2;case 65533:return 3;case 65534:return 4;"
+                                    "case 65535:return 5;default:return 0;}}", "switch-tables-the-most", 1, 65536);
+    check_test_program_tables(test, "int f(int a,int b){int r=0;switch(a){case 0:switch(b){case 0:r=1;break;case 1:r=2;break;case 2:r=3;break;case 3:r=4;break;"
+                                    "default:r=5;}break;case 1:r=10;break;case 2:r=20;case 3:r+=30;break;default:r=-1;}return r;}", "switch-tables-nested", 2, 8);
+    // Empty GNU ranges (#536's review), which match nothing and which clang drops before LLVM sees the switch: last by
+    // their lower values, where one sized the table short of the case below it and its entry was written past the table's
+    // end; first, below the table's lowest value; as the fourth case, which they don't make; and an unsigned one past
+    // INT32_MAX. Then the same switches swept past their cases on both sides against clang's build.
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 4:return 9;case 5 ... 3:return 11;default:return -1;}}",
+                              "switch-tables-empty-range-last", 1, 5);
+    check_test_program_tables(test, "int f(int x){switch(x){case -5 ... -9:return 1;case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 9;default:return -1;}}",
+                              "switch-tables-empty-range-first", 1, 4);
+    check_test_program_tables(test, "int f(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 9 ... 4:return 9;default:return -1;}}",
+                              "switch-tables-empty-range-fourth", 0, 0);
+    check_test_program_tables(test, "int f(unsigned x){switch(x){case 4294967295u ... 0u:return 1;case 7:return 3;case 8:return 5;case 9:return 7;case 11:return 9;"
+                                    "default:return -1;}}", "switch-tables-empty-range-unsigned", 1, 5);
+    check_test_program_source(test,
+        "static int last(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 4:return 9;case 5 ... 3:return 11;default:return -1;}}"
+        "static int first(int x){switch(x){case -5 ... -9:return 1;case 0:return 3;case 1:return 5;case 2:return 7;case 3:return 9;default:return -1;}}"
+        "static int fourth(int x){switch(x){case 0:return 3;case 1:return 5;case 2:return 7;case 9 ... 4:return 9;default:return -1;}}"
+        "static int high(unsigned x){switch(x){case 4294967295u ... 0u:return 1;case 7:return 3;case 8:return 5;case 9:return 7;case 11:return 9;default:return -1;}}"
+        "int tested(int n){unsigned s=0;for(int i=-12;i<14;i++){s=s*7+(unsigned)last(i+n);s=s*5+(unsigned)first(i-n);s=s*3+(unsigned)fourth(i+n);"
+        "s=s*11+(unsigned)high((unsigned)(i+n));}return (int)s;}",
+        "switch-table-empty-ranges", clang);
     check_test_program_source(test,
         "int tested(int n){int x=1;switch(n){case 3 ... 1:x=7;break;case 2:x=5;break;default:x=9;}return x;}",
         "empty-gnu-case-range-is-warning-only", clang);
@@ -889,6 +1330,73 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "switch((i+n)&3){case 0:continue;case 1:{int h[(n&7)+1];h[0]=i;s+=h[0];break;}default:break;}s+=g[0];}"
         "return (int)(s%1000003);}",
         "vla-continue-through-switch", clang);
+    // Objects aligned past 16 bytes, in realigned frames (Tier0Frame.alignment_log2): arrays, structs, a long double and
+    // scalars (values aligned past 8 bytes are objects too), their addresses' low bits, which must be 0, in the result.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(64) int a;long b;}S64;int tested(int n){_Alignas(32) int x=n;_Alignas(4096) char page[100];S64 s;"
+        "_Alignas(16) double d=n*0.5;_Alignas(32) long double e=n+0.25L;page[0]=(char)n;page[99]=(char)(n+1);s.a=n*3;s.b=n*5;"
+        "unsigned long mask=((unsigned long)&x&31)|((unsigned long)page&4095)|((unsigned long)&s&63)|((unsigned long)&d&15)|((unsigned long)&e&31);"
+        "x+=7;d*=3;return x+page[0]+page[99]+s.a+(int)s.b+(int)d+(int)e+(int)mask*1000;}",
+        "objects-aligned-past-16", clang);
+    // Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
+    // object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
+    // arguments whose outgoing area the allocations keep aligned.
+    check_test_program_source(test,
+        "long sum8(long a,long b,long c,long d,long e,long f,long g,long h){return a+b+c+d+e+f+g+h;}"
+        "typedef struct{_Alignas(32) char c;}T;int tested(int n){_Alignas(128) long fixed[4]={n,n+1,n+2,n+3};long total=0;"
+        "for(int round=0;round<3;round++){int count=(n&7)+round+1;_Alignas(64) int v[count];T w[count+1];"
+        "for(int i=0;i<count;i++)v[i]=i*n;for(int i=0;i<=count;i++)w[i].c=(char)i;long sum=0;"
+        "for(int i=0;i<count;i++)sum+=v[i];for(int i=0;i<=count;i++)sum+=w[i].c;"
+        "unsigned long mask=((unsigned long)v&63)|((unsigned long)w&31)|((unsigned long)fixed&127);"
+        "total+=sum8(sum,fixed[0],fixed[1],fixed[2],fixed[3],round,(long)sizeof(w),(long)mask*1000);}return (int)(total%1000003);}",
+        "vlas-aligned-past-16", clang);
+    // A variable-length array aligned to 64 allocated below a guard array, while calls with two stack arguments put the
+    // outgoing area 16 bytes past the realigned frame's alignment: its storage, rounded up from the allocation's
+    // address, must leave the guard's bytes as they were (the allocation's room, its alignment less 16 bytes more).
+    check_test_program_source(test,
+        "long sum8(long a,long b,long c,long d,long e,long f,long g,long h){return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){long total=0;for(int k=1;k<=4;k++){char guard[16*k];for(int i=0;i<16*k;i++)guard[i]=(char)(i+n);"
+        "_Alignas(64) char v[64*k];for(int i=0;i<64*k;i++)v[i]=(char)0x5a;long bad=0;"
+        "for(int i=0;i<16*k;i++)bad+=guard[i]!=(char)(i+n);"
+        "total+=sum8(bad*100000,v[0],v[64*k-1],k,n,0,0,(long)((unsigned long)v&63)*1000);}return (int)(total%1000003);}",
+        "vlas-aligned-past-16-room", clang);
+    // Structs aligned to 32 and 64 passed by value (on a stack aligned to them at the call, which realigns the caller's
+    // frame) and returned (through a hidden pointer), the parameters' addresses aligned.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(32) long a;int b;}A32;typedef struct{_Alignas(64) char c;double d;}A64;"
+        "A32 make(int n){A32 r={n*2,n+1};return r;}"
+        "long take(A32 x,int k,A64 y,A32 z){return x.a+x.b+k+y.c+(long)y.d+z.a*3+z.b+"
+        "(long)(((unsigned long)&x&31)|((unsigned long)&y&63)|((unsigned long)&z&31))*1000;}"
+        "A64 pass(A64 y,int k){y.c+=(char)k;y.d*=2;return y;}"
+        "int tested(int n){A32 p=make(n);A64 q={(char)n,n*0.25};A32 r=make(n+5);A64 t=pass(q,n);return (int)take(p,n,t,r)+(int)t.d;}",
+        "aggregates-aligned-past-16-by-value", clang);
+    // A variadic definition whose named argument is aligned to 32 (on its caller's stack, aligned to 32 at the call): its
+    // incoming area so aligned, and the unnamed arguments after it, each read at its own alignment.
+    check_test_program_source(test,
+        "typedef struct{_Alignas(32) long a;int b;}A32;typedef struct{_Alignas(64) char c;long d;}A64;"
+        "long sum(int count,A32 first,...){__builtin_va_list ap;__builtin_va_start(ap,first);long s=first.a+first.b+(long)((unsigned long)&first&31)*1000;"
+        "for(int i=0;i<count;i++){A64 x=__builtin_va_arg(ap,A64);s+=x.c+x.d*(i+1);}long last=__builtin_va_arg(ap,long);__builtin_va_end(ap);return s+last;}"
+        "int tested(int n){A32 f={n,n+1};A64 x={(char)n,n*3L};A64 y={(char)(n+1),n*5L};return (int)(sum(2,f,x,y,(long)n*7)%1000003);}",
+        "variadic-named-argument-aligned-past-16", clang);
+    // Calls whose outgoing areas are aligned to 32 (of clang's callee in the harness, which takes its arguments in place),
+    // from functions with no object aligned past 16, whose frames the calls alone realign: two of frames 16 bytes apart,
+    // so that a frame left unrealigned would put one of their areas off 32. (After a variable-length array, clang's code
+    // rounds the allocation to 16 alone and its call's area may be off 32, where Tier 0's keeps the frame's alignment: a
+    // test of its own, tier0_deep_test.c's base, checks that.)
+    check_test_program_source(test,
+        "struct external_aligned{_Alignas(32) long a;int b;};int external_aligned_by_value(int,struct external_aligned,struct external_aligned);"
+        "struct external_aligned gx,gy;int inner(int n){return external_aligned_by_value(n,gx,gy);}"
+        "int padded(int n){volatile long pad[2]={n,n};return external_aligned_by_value(n+(int)(pad[1]-pad[0]),gx,gy);}"
+        "int tested(int n){gx.a=n;gx.b=n+1;gy.a=n*2;gy.b=n-1;return inner(n)+padded(n+1)*3;}",
+        "calls-aligned-past-16", clang);
+    // Parameters of types aligned past 8 bytes: objects of their alignment, from a register's part or an 8-byte stack slot
+    // (an aligned typedef passes as its base, so a slot is aligned to 8 alone), called at two stack depths 16 bytes apart.
+    check_test_program_source(test,
+        "typedef int aligned_int __attribute__((aligned(32)));typedef double aligned_double __attribute__((aligned(16)));"
+        "long check(aligned_int a,aligned_double b,int c,aligned_int d,long e,long f,long g,aligned_int h){a+=1;h*=2;"
+        "return a+(long)b+c+d+e+f+g+h+(long)(((unsigned long)&a&31)|((unsigned long)&b&15)|((unsigned long)&d&31)|((unsigned long)&h&31))*1000;}"
+        "int tested(int n){int r=(int)check(n,n*2.5,3,n+1,5,6,7,n*9);{char pad[16+(n&1)*16];pad[0]=0;r+=(int)check(n+pad[0],1.5,n,2,3,4,5,n);}return r;}",
+        "parameters-aligned-past-8", clang);
     check_test_program_source(test,
         "char a[24]=\"abcdefghijklmnop\";char b[24];int tested(int n){unsigned k=(unsigned)n%12;"
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
@@ -1467,16 +1975,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                 "vla-bound-reference", true, true, 1, 0);
     check_test_program_boundary(test, "int global;int tested(int n){asm volatile(\"\":\"=r\"(global):\"r\"(n):\"memory\");return global;}",
-                                "typed-asm-operands-and-machine-boundary", true, false, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
-                                "typed-asm-goto-target", true, false, 0, 0);
+                                "typed-asm-operands-and-machine-boundary", true, true, 1, 0);
+    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
+                                       "typed-asm-goto-target", true, false, 0, 0, "asm goto");
     check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
                                 "file-assembly-machine-boundary", true, false, 0, 0);
     check_test_program_boundary(test,
         "extern int missing;int tested(int n,...){__builtin_va_list ap;__builtin_va_start(ap,(missing++,n));"
         "int x=__builtin_va_arg(ap,int);__builtin_va_end(ap);return x;}", "varargs-unevaluated-final-parameter", true, true, 0, 1);
     check_test_program_boundary(test, "_Thread_local int g;int tested(int n){return g+n;}", "executable-tls-reference", true, true, 1, 0);
-    check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){_Alignas(32) int x=n;return x;}", "automatic-alignment-boundary", true, true, 0, 1);
+
     check_test_program_boundary(test, "int global;struct S{int x;int*p;};int tested(int n){struct S s={n,&global};return s.x;}",
                                 "aggregate-primary-initialization", true, true, 1, 1);
     check_test_program_boundary(test, "struct S{int x;};struct S make(int n);int tested(int n){return make(n).x;}",
@@ -1489,7 +1998,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_boundary(test, "long double g;int tested(int n){long double x=n+0.5L;g=x;return g>1;}", "long-double-lowering", true, true, 1, 1);
     check_test_program_boundary(test, "long double tested(int n){return ({long double t=n;t;});}", "long-double-statement-region-value", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){long double x=n;return (x?:2.0L)>1;}", "long-double-omitted-conditional-operand", true, true, 0, 1);
-    check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, false, 0, 1);
+    check_test_program_boundary(test, "int tested(int n){long double x=n;return __builtin_isnan(x);}", "long-double-floating-builtin", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){_Complex long double z=n;return __real__ z>1;}", "complex-long-double", true, true, 0, 1);
     // The complex types check_lower_complex doesn't take are refused by what they need: GNU's complex integer types,
     // and complex types of the floating types other than float, double and long double (clang 23 has no _Float128 in
@@ -1514,6 +2023,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
                                 "overlapping-case-ranges", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch(n){default:return 1;default:return 2;}}", "duplicate-default", false, false, 0, 0);
     check_test_program_boundary(test, "int tested(int n){switch((double)n){case 1:return 1;}return 0;}", "noninteger-switch", false, false, 0, 0);
+    check_test_program_asm(test, clang);
     check_test_program_build_release();
 }
 

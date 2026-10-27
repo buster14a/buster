@@ -566,12 +566,12 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             for (uint32_t report = 0; report < result->input.report_count; report += 1)
             {
                 const CheckInputReport* diagnostic = result->input.reports + report;
-                if (check_repair_input_report(repair, diagnostic) && diagnostic->token < result->position)
+                if ((check_repair_input_report(repair, diagnostic) || check_repair_loop_report(repair, &result->input, diagnostic)) && diagnostic->token < result->position)
                 {
                     result->token = diagnostic->token;
                     result->position = result->token;
                     result->pragma = diagnostic->pragma;
-                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_message(diagnostic->message));
+                    snprintf(result->message, sizeof(result->message), "%s", check_driver_input_report_message(&result->input, diagnostic));
                 }
             }
             if (result->adapted || result->input.diagnostic_graph)
@@ -581,7 +581,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
                     .scalar = scalar,
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
-                result->resource |= result->stream.status == CHECK_STATUS_RESOURCE;
+                result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
+                result->resource |= result->input.resource || result->stream.status == CHECK_STATUS_RESOURCE;
                 for (uint32_t report = 0; report < result->stream.report_count; report += 1)
                 {
                     const CheckReport* diagnostic = result->stream.reports + report;
@@ -726,7 +727,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                     path->token = path->input.reports[report].token;
                     path->position = path->token;
                     path->pragma = path->input.reports[report].pragma;
-                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_message(path->input.reports[report].message));
+                    snprintf(path->message, sizeof(path->message), "%s", check_driver_input_report_message(&path->input, path->input.reports + report));
                 }
             }
         }
@@ -738,7 +739,8 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .scalar = scalar,
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
-        path->resource |= path->stream.status == CHECK_STATUS_RESOURCE;
+        path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
+        path->resource |= path->input.resource || path->stream.status == CHECK_STATUS_RESOURCE;
         if (path->stream.report_count != 0 && path->stream.reports[0].token < path->token)
         {
             path->phase = "expression";
@@ -900,15 +902,19 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   unselected operands counted and a constant if's dead arm left out (CheckProgramOptions.folded_ifs). clang -O0
 //   doesn't emit the arm an integer constant condition never runs (CodeGenFunction::EmitIfStmt), and so leaves out
 //   what only it calls, as of musl's FORCE_EVAL; Tier 0 lowers it, and the selection counts it.
+// - inlined: a local function only ours has, whose definition has always_inline: clang -O0 inlines it at its calls
+//   (its always-inliner) and emits none of a local one it inlined everywhere, as of SQLite's SQLITE_INLINE
+//   allocateSpace; Tier 0 calls it.
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
     CHECK_CORPUS_SYMBOL_UNSELECTED,
     CHECK_CORPUS_SYMBOL_DROPPED,
+    CHECK_CORPUS_SYMBOL_INLINED,
     CHECK_CORPUS_SYMBOL_REASONS,
 } CheckCorpusSymbolReason;
 
-static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped" };
+static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped", "inlined" };
 
 typedef struct CheckCorpusSymbols CheckCorpusSymbols;
 struct CheckCorpusSymbols
@@ -1102,6 +1108,18 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
         }
         reason = !theirs && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
                  CHECK_CORPUS_SYMBOL_DROPPED : reason;
+    }
+    const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
+    for (uint32_t body = 0; difference->first && local_function && reason == CHECK_CORPUS_SYMBOL_REASONS && body < selected->program.body_count; body += 1)
+    {
+        const CheckProgramBody* definition = selected->program.bodies + body;
+        const CheckInputAttributes* attributes = input->attributes[definition->declaration];
+        bool always_inline = false;
+        for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+        {
+            always_inline |= attributes->records[i].kind == CHECK_ATTRIBUTE_ALWAYS_INLINE && !attributes->records[i].ignored;
+        }
+        reason = always_inline && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_INLINED : reason;
     }
     return reason;
 }
@@ -1517,6 +1535,17 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->initializer_warnings.count == b->initializer_warnings.count &&
                  a->program_diagnostic.status == b->program_diagnostic.status && a->program_diagnostic.token == b->program_diagnostic.token &&
                  a->program_diagnostic.position == b->program_diagnostic.position;
+    equal &= a->input.packed_member_count == b->input.packed_member_count;
+    for (uint32_t i = 0; equal && i < a->input.packed_member_count; i += 1)
+    {
+        const CheckInputPackedMember* left = a->input.packed_members + i;
+        const CheckInputPackedMember* right = b->input.packed_members + i;
+        equal = left->address == right->address && left->token == right->token && left->member == right->member && left->record == right->record &&
+                left->alignment_log2 == right->alignment_log2 && left->implicit_conversions == right->implicit_conversions && left->suppressed == right->suppressed &&
+                left->member_name.length == right->member_name.length && left->record_name.length == right->record_name.length &&
+                (left->member_name.length == 0 || memcmp(left->member_name.pointer, right->member_name.pointer, left->member_name.length) == 0) &&
+                (left->record_name.length == 0 || memcmp(left->record_name.pointer, right->record_name.pointer, left->record_name.length) == 0);
+    }
     for (uint32_t warning = 0; equal && warning < a->initializer_warnings.count; warning += 1)
     {
         equal = a->initializer_warnings.tokens[warning] == b->initializer_warnings.tokens[warning];
@@ -1558,7 +1587,15 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left->parser_binding_event_count == right->parser_binding_event_count &&
             left->intrinsic_declaration_count == right->intrinsic_declaration_count && left->intrinsic_call_count == right->intrinsic_call_count &&
             (left->intrinsic_ids == NULL) == (right->intrinsic_ids == NULL) && (left->deferred_tokens == NULL) == (right->deferred_tokens == NULL) &&
-            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL);
+            (left->overload_heads == NULL) == (right->overload_heads == NULL) && (left->explicit_abis == NULL) == (right->explicit_abis == NULL) &&
+            (left->loop_diagnostic == NULL) == (right->loop_diagnostic == NULL);
+    if (equal && left->loop_diagnostic != NULL)
+    {
+        const CheckInputLoopDiagnostic* l = left->loop_diagnostic;
+        const CheckInputLoopDiagnostic* r = right->loop_diagnostic;
+        equal = l->position == r->position && l->statement == r->statement && l->source == r->source && l->pragma == r->pragma &&
+                l->message == r->message && strcmp(l->text, r->text) == 0;
+    }
     for (uint32_t report = 0; equal && report < left->report_count; report += 1)
     {
         equal = left->reports[report].token == right->reports[report].token && left->reports[report].message == right->reports[report].message &&
@@ -3049,10 +3086,11 @@ static int run_checker_corpus(int count, char** arguments)
     if (symbols_requested)
     {
         printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
-               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
+               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
                symbols.different, symbols.unexplained, check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED],
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED], symbols.unsupported, symbols.failures);
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED],
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_INLINED], symbols.documented[CHECK_CORPUS_SYMBOL_INLINED], symbols.unsupported, symbols.failures);
         for (uint32_t i = 0; i < symbols.feature_count; i += 1)
         {
             printf("checker-corpus: symbols unsupported=%" PRIu64 " feature=%s\n", symbols.feature_counts[i], symbols.features[i]);

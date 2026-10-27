@@ -14,13 +14,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Both paths:**
   - `tier0_compile`, the vector path;
   - `tier0_compile_scalar`, its twin and oracle.
-- **Objects in the frame:** local arrays, structs and unions at their alignments, to 16.
+- **Objects in the frame:** local arrays, structs and unions at their alignments, to 2^30: past 16 bytes, in a
+  realigned frame ("Realigned frames", below), and values that must live in memory, read and written as objects.
 - **Indirect calls,** through `r11`.
 - **Block copies** (`COPY`) of up to 256 bytes, a struct's assignment.
 - **Structs and unions passed and returned by value** (#137), in registers, on the stack and through a hidden pointer,
   from #137's locations ("Structs and unions by value", below), and **variadic functions' incoming frames** (#356).
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
-  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer.
+  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
@@ -28,6 +29,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **128-bit integers** (#136): `__int128`'s and `unsigned __int128`'s classes, I128 and U128, whose values live in the
   slots long double's do ("128-bit integers", below), which #133's producer lowers `__int128` to ([the checker
   guide](c-checker.md)'s "Backend handoff").
+- **Vectors** (#136): GNU C's vector types and the intrinsics' `__m128` to `__m512i`, one class, VECTOR, whose values
+  live in 64-byte slots, and machine operations (the `X86` kind's rows, which name their registers by role), for a
+  target with AVX-512 ("Vectors", below).
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
@@ -39,27 +43,28 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
     for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
     sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
     `c_check_debug.c`);
-  - the frame (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`: the callee-saved registers the prologue
-    pushed, in `tier0_callee_saved`'s order, the bytes it reserved below them and whether it pushed rbp first and
-    pointed it at the push), which `unwind_tier0_frame` reads with the prologue's and epilogue's records for the C
-    driver's unwind tables (#395, [the unwind guide](unwind.md)): the prologue is the code's first records and the
-    epilogue's release, pops and ret its last;
+  - the frame (`Tier0Code.frame_saved`, `frame_size`, `frame_pointer`, `frame_alignment_log2` and `frame_base`: the
+    callee-saved registers the prologue pushed, in `tier0_callee_saved`'s order, the bytes it reserved below them,
+    whether it pushed rbp first and pointed it at the push, the alignment it rounded rsp down to after the
+    reservation and whether it then copied rsp into r15), which `unwind_tier0_frame` reads with the prologue's and
+    epilogue's records for the C driver's unwind tables (#395, [the unwind guide](unwind.md)): the prologue is the
+    code's first records and the epilogue's release, pops and ret its last;
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
-- **`benchmark-backend`.**
+- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on the functions `-c` compiles
+  of C files, `sqlite3.c`'s among them ("Measurements", below).
 
 - **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
-**Waits for #133, #145 and #146:**
+**Measured on SQLite,** which compiles now: Tier 0's own costs on `sqlite3.c`'s functions ("Measurements", below),
+and the whole compile's time and the generated code's run time and size against clang -O0's and tcc's, on its shell
+([#136's measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)) and on `speedtest1`,
+SQLite's own benchmark ("Measurements", below).
 
-- the corpora and `sqlite3.c`;
-- `speedtest1`;
-- the whole compile's time against tcc's.
-
-Until then, generated programs (below) stand in for #142's random programs.
+Generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 
@@ -75,14 +80,20 @@ Beside them are three tables, and optional parts for aggregates and for the symb
 - **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns
   make some of them **objects** in the frame: arrays, structs and unions.
   - `local_sizes`: an object's size in bytes, 0 for a value's local.
-  - `local_alignments`: its alignment's log2, at most 4 (16 bytes).
+  - `local_alignments`: its alignment's log2, at most 30 (`BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2`, 1 GB); past 4 (16
+    bytes), its function's frame is realigned ("Realigned frames", below).
 
   An object:
   - is a local of class VOID with `ADDRESS_TAKEN`, and a parameter only when it is a struct or union passed by value
-    ("Structs and unions by value", below);
-  - is reached only through `LOCAL_ADDRESS`: its elements and members are loads and stores through that address
-    (`PTR_ADD`, `LOAD`, `SET`), as a front end lowers `a[i]` and `s.m`;
-  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), so that every frame displacement fits a disp32.
+    ("Structs and unions by value", below), or a front end's value that must live in memory (a long double's, a 128-bit
+    integer's, one aligned past 8 bytes);
+  - is reached through `LOCAL_ADDRESS`: its elements and members are loads and stores through that address
+    (`PTR_ADD`, `LOAD`, `SET`), as a front end lowers `a[i]` and `s.m`. `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of a
+    class may name one too, of at least the class's bytes (a memory class's slot's 16: `tier0_value_object`), whose
+    first bytes they read or write, its home a memory operand as a slot's is: a front end's value that must live in
+    memory, which it then reads and writes as it would a value's local;
+  - with the others, takes at most `BUSTER_TIER0_MAX_OBJECT_BYTES` (1 GB), each counted as its size rounded up to 16
+    and, aligned past 16, its alignment less 16, so that every frame displacement fits a disp32.
 
   A function without objects leaves both columns 0.
 - **The parameters' locations** at entry, and the result's.
@@ -117,8 +128,8 @@ table. The kinds are:
 - `COPY`: `value` bytes, 1 to 256, from the address on top to the one under it, the ranges the same or apart (a
   struct's assignment). A front end copies more through `memcpy`, as clang -O0 does past 16 stores of 16 bytes.
 - the stack, for variable-length arrays, each U64 with no value:
-  - `ALLOCA` pops a byte count, rounds it up to 16, takes it from the stack and pushes the allocation's address, a
-    multiple of 16;
+  - `ALLOCA` pops a byte count, rounds it up to 16 (to the frame's alignment in a realigned frame, so that rsp keeps
+    it), takes it from the stack and pushes the allocation's address, a multiple of 16;
   - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it.
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
@@ -194,8 +205,9 @@ loads and stores are rejected. Existing varargs recipes receive the resulting
 pointers and apply each requested argument's own overflow alignment.
 
 Both compilation paths reject malformed role/ABI metadata and frame or
-incoming displacements outside signed 32-bit addressing. This bounded profile
-requires the ordinary 16-byte stack alignment. Shared `AbiVaList` and save-area
+incoming displacements outside signed 32-bit addressing. The incoming area is
+aligned to 16, or to a named argument's alignment past it, which raises it (a
+realigned frame's incoming places are rbp's). Shared `AbiVaList` and save-area
 constants are unchanged. Source production and Tier 1 support remain separate;
 the typed-to-IR consumer must reject these roles until it supports their layout.
 
@@ -204,9 +216,10 @@ variadic callees with GP/FP exhaustion, named stack arguments, real va_start /
 va_copy / va_arg recipes, intervening calls and full vector saves. It compares
 both Tier 0 paths and both encoders, guarded output edges, 24-byte list storage
 and independent ordinary-function byte fixtures. Every fixture also holds an
-object aligned to 16 (#362), whose bytes must survive the lists, the save area
-and the call, at a multiple of 16, apart from the lists, the canaries and the
-save area and below the overflow area. Run builds and tests only on
+object aligned to 16 (#362) or past it (to 32, 64, 128 and 4096, in a realigned
+frame), whose bytes must survive the lists, the save area and the call, at a
+multiple of its alignment, apart from the lists, the canaries and the save area
+and below the overflow area. Run builds and tests only on
 the approved 9700X, each through its own shared lock. This description records
 the test contract; qualification results are reported with the exact revision.
 
@@ -223,8 +236,10 @@ without aggregates:
   callee reads.
 - **Parameters:** a parameter that is an object is an aggregate passed by value. The prologue stores its register
   parts into its home. One on the stack whole keeps its incoming bytes as its home when its slot is a multiple of its
-  alignment (the incoming area starts at a multiple of 16); the prologue copies the others' slots into homes of their
-  own: a misaligned whole one, the high eightbyte alone in a slot, and a SPLIT one's slot.
+  alignment, to 16 (the incoming area starts at a multiple of 16); the prologue copies the others' slots into homes of
+  their own: a misaligned whole one, the high eightbyte alone in a slot, a SPLIT one's slot, and one aligned past 16,
+  into the realigned frame, since its caller aligns its slot only as far as its type's own alignment goes (an aligned
+  typedef passes as its base).
 - **Calls' results:** `call_result_objects[c]`, 1 + the local index of the object that receives call c's aggregate
   result, or 0. A result in registers is stored into the object after the call; for one through a hidden pointer, the
   object's address goes in rdi. The call's class is VOID: its result is the object, which the stream reads through
@@ -273,7 +288,7 @@ no emitter could follow (the compile paths check a function's calls when it has 
 and parameters are the typed stream's, which `tier0_validate` checks, as the compile paths' precondition): a location
 whose kind, registers or slot doesn't fit the size (`tier0_parts_valid`), a register outside the convention's or one
 that another part, another argument of the call or another parameter takes, a slot outside its call's stack area or an
-incoming one past int32, a call's stack alignment past 16, a result object that isn't an object with room for the
+incoming one past int32, a call's stack alignment past 2^30, a result object that isn't an object with room for the
 registers' whole widths, a hidden pointer without an object or where an argument takes rdi, a function whose hidden
 result pointer isn't parameter 0 in rdi, and an aggregate result of more than two registers. A function returning an
 aggregate, in registers or through the hidden pointer, must leave rax an address at every `RETURN`, which must be of
@@ -281,8 +296,9 @@ U64, and mustn't reach its end without one. `test-tier0`'s aggregate and paramet
 
 The producer (`c_check_program_lower.c`, [the checker guide](c-checker.md)) gives every call site with an aggregate
 result an object of its own, a function with a hidden result pointer its parameter 0, and an aggregate parameter's
-object its alignment, to 16; `docs/calling-convention.md` has the cross-check of C that this compiler compiles against
-clang's and GCC's.
+object its alignment, whatever it is (past 16, its function's frame is realigned, and a call's outgoing area aligned
+past 16 realigns its caller's); `docs/calling-convention.md` has the cross-check of C that this compiler compiles
+against clang's and GCC's.
 
 ## Long double (#136's item 8)
 
@@ -377,6 +393,71 @@ of anything but an object of at least 16 bytes (a value's local, a smaller objec
 value, `DIV` and `MOD` of them,
 a conversion between them and a floating class, a call's argument or result of them, a `RETURN` of them, and an entry
 of the classes in a function without `int128`. `interpreter.c` and `ir_lower.c` refuse them, as they refuse F80.
+
+## Vectors (#136)
+
+GNU C's vector types and the intrinsics' (`__m128`, `__m256i`, `__m512d` and the rest) are one class, VECTOR
+(`BUSTER_TYPED_CLASS_VECTOR`, 14), of 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
+lives in that depth's slot (`Tier0Frame.vector_area`, 64 bytes per depth), its bytes from the slot's first, so that
+calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (one class was left
+below the vector path's 16): each entry that makes or moves one has its own, and `tier0_validate` follows each depth's
+width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than an entry's is refused, not
+miscompiled.
+
+- **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
+  `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
+  `STORE_LOCAL` and `SET_LOCAL` (of an object of the vector's bytes, all of which they read or write), `DISCARD` and
+  `JUMP_VALUE`. Their operations are `X86` entries, below. Their globals are reached through their addresses, as long
+  double's are.
+- **Their code,** every entry deferred (`tier0_emit_vector_value`, counted by `tier0_count_vector_value`), through zmm16,
+  which no value of the floating stack's is in: `vmovdqu64` of the value's bytes between memory (the address, the
+  object) and zmm16, and of all 64 between zmm16 and a slot, whose bytes past the value's are then unspecified, as a
+  narrow integer's register's are; a constant of zeros by `vpxord` and a store, any other by its words as immediates
+  (`mov qword` of a sign-extended imm32, or two `mov dword`); `DISCARD` and `JUMP_VALUE` nothing.
+- **Calls pass and return them as aggregates,** as `__int128`'s: an argument is an object passed by its address
+  (`argument_sizes` its bytes), a call's result comes back into its result object, and a function returns one by its
+  object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
+  register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too), or on the stack.
+  A parameter is an object the prologue stores its register in.
+- **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
+  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
+  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
+  end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
+
+**Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
+up to 8 records each with their operands' classes (integers, floating values and VECTORs, each VECTOR one's bytes) and
+their result's, which the entry pops and pushes as `CALL` pops its arguments. A row's records name registers by role
+(`BUSTER_TIER0_ROLE_*`), never by number, and Tier 0 places each role at the entry (`tier0_operation_placement`):
+
+- `VECTOR(j)`, the row's vector register j, which holds VECTOR operand j (loaded from its slot at its width, the
+  register's bytes past the operand's zero, so that a form that reads it wider reads zeros) when the records start, and
+  whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others are free. The
+  VECTOR registers are the floating stack's free ones from its depth on (one further past a floating result's where no
+  floating operand takes its place), so a VEX form (which names registers below 16) reaches them where the floating
+  stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 is refused at its depth
+  (`TIER0_ERROR_DEPTH`), as an integer depth past the table is. The selections count the registers the operands' loads
+  write and the result's store reads among a row's, whatever its records name, so that no floating home is kept in one;
+- `FLOATING(j)` and `FLOATING_RESULT`, a floating operand's XMM register and the floating result's;
+- `INTEGER(j)`, `INTEGER_RESULT` and `SCRATCH(k)`, an integer operand's register (an address among them), the integer
+  result's, and up to four free ones, the depth registers past the entry's. An operand's is in a field no wider than its
+  class, whose register's bits past the class's are unspecified: a base or an index a 64-bit integer's, a 32-bit field a
+  32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
+- the opmask registers by number, k0 to k7, which no value keeps between entries.
+
+`tier0_operation_valid` checks each row: VEX and EVEX forms alone, their operands in their fields (no implicit
+register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
+registers), no branch, symbol or RIP-relative address, each field's role of its class (an integer operand's no
+narrower than its field), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
+registers and memory through its addresses, and nothing else; which forms a unit's target allows is the front end's to
+decide (#180's policy), as the instruction set of its rows is.
+
+`tier0_validate` refuses a vector entry in a function without `vectors`, a local of the class that isn't an object, a
+`LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
+other bytes or of a value of other bytes, a constant past `vector_constants` or of other bytes, an `X86` entry past
+the operations, of another class than its row's result or of an operand of another class or width, the arms of a
+`?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
+vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
+conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
 
 ## Conversions between U64 and floating values (#136's item 5)
 
@@ -473,6 +554,58 @@ past (a stack rises by one entry at a time at most, so it shows there first).
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
 crosses the line. `test-tier0`'s deep shape (below) has about 2% of its entries deep, and its cross-check's code is 1.33
 times clang -O0's (1.16 for the larger shape's), with run times about the same.
+
+## Realigned frames (#136)
+
+An object aligned past 16 bytes, or a call whose outgoing area is (`AbiCall.stack_alignment_log2` past 4: a struct or
+union aligned past 16 on its stack), needs a frame whose rsp is aligned past the 16 bytes the convention keeps.
+`tier0_frame_alignment` finds the most any of them needs, once per function, before selection: every object's (an
+aggregate parameter that keeps its incoming bytes rather than living in the frame is aligned to 16 at most, so it
+changes nothing) and every call's area. The vector path's twin, `tier0_frame_alignment_vector`, reads the objects'
+alignments 16 locals at a time, under the mask of the locals with sizes, and the calls' 4 at a time, each one's byte
+of the 16 an `AbiCall` takes. Past 16 bytes, the frame is realigned to it (`Tier0Frame.alignment_log2`, at most 2^30,
+the objects' limit):
+
+- **The prologue:** rbp pushed and pointed at the push, as a frame pointer's; the callee-saved pushes; the reservation
+  (`sub rsp, size`); then `and rsp, -alignment` (imm8 to 128 bytes, imm32 past it). Rounding after the reservation
+  takes at most the alignment less 8 more bytes of stack, where rounding first would take that much again in the
+  reservation's own rounding. The frame's places are at their offsets from rsp, each at a multiple of its alignment, so
+  the size needs no rounding of its own.
+- **The frame's places** (slots, objects, the call save area, the fixed, deep and memory classes' slots, the incoming
+  variadic save area) are rsp's, with no bias (`Tier0Frame.base`).
+- **With entries that move rsp** (`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE`: `Tier0Frame.based`), they are r15's: the
+  prologue pushes r15 with the callee-saved registers and sets it to rsp after the `and`, and r15 leaves the depth table
+  and the homes. r15 is the table's last register but rbp, so the stack keeps the table's first 13 depths, as a frame
+  pointer keeps its first 14 (`tier0_integer_depth_count`); clang takes rbx for its base pointer, which in Tier 0's
+  table would split the depths. An allocation rounds its bytes up to the frame's alignment rather than 16 (`add r,
+  alignment - 1; and r, -alignment`), so that rsp keeps the alignment at every call after it, and its address stays a
+  multiple of 16 above the outgoing area. (clang 23's code realigns such a frame the same way, its base rbx, but rounds
+  a dynamic allocation to 16 alone, so that a call after one may pass a struct aligned to 32 off its alignment, which
+  its callee takes in place: c_check_program_test.c's program of such calls leaves allocations out for that.)
+- **The incoming places** (stack parameters' homes and the slots the prologue reads, an aggregate's incoming bytes, the
+  variadic overflow area's anchor) are rbp's, past rbp's push and the return address: `[rbp + 16 + stack_offset]`
+  (`Tier0Frame.incoming_base` and `incoming`), since nothing knows rsp's distance from them.
+- **The epilogue** is a frame pointer's: rsp set back from rbp past the pushes (`lea rsp, [rbp - 8 * pushes]`), the
+  pops (r15's among them) and rbp's.
+- **The published frame** (`Tier0Code.frame_alignment_log2` and `frame_base`) lets `unwind_tier0_frame` check the `and`
+  and the base's `mov` after the reservation. Neither is a transition: from rbp's `mov` on, the CFA is rbp + 16, whatever
+  rsp does, so the realignment is part of the reservation, which the CFA doesn't follow ([the unwind guide](unwind.md)).
+
+A parameter aligned past 16 is copied into the realigned frame (`tier0_parameter_in_place`): an aligned typedef passes
+as its base, so its slot is aligned only as far as its type's own alignment goes, and a struct's own alignment past 16,
+which its caller does align its slot to, is copied the same way rather than trusted. A variadic definition's named
+arguments may be aligned past 16 (`incoming_variadic`'s stack alignment, which raises its incoming area's); its
+`va_arg` recipes align each argument they read as before.
+
+**At no cost to the rest.** `tier0_frame_alignment` and its twin are out of line and read the objects' alignments (in a
+function with objects) and every call's stack alignment, in loops kept rolled (the scalar twin's kept scalar too):
+clang's unrolled copies spread the few iterations a function takes over many instruction cache lines, which the
+per-entry passes evict between functions. Both selections take the frame's alignment as a constant
+(`tier0_select_entries` and `tier0_select_vector_entries`, as the memory classes' `memory`): a function without a
+realigned frame or the memory classes has main's loops, and one with either takes the out-of-line copy. The realigned
+prologue's records come from a cold helper (`tier0_emit_realignment`). A function without such objects or calls has the
+frame, the prologue, the epilogue and the code it had before: `sqlite3.c`'s objects and c-testsuite's 220 programs'
+are the same bytes as main's, by both paths. [Measurements](#measurements) has `benchmark-backend`'s.
 
 ## Symbols outside the image
 
@@ -579,7 +712,8 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    moves and loads never overwrite one another's sources.
 6. Objects come after the slots, in the locals' order:
    - each at a multiple of its alignment, taking its size rounded up to 8;
-   - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does.
+   - with an object aligned to 16, the frame keeps rsp a multiple of 16, as a function that calls does; with one aligned
+     past 16, the frame is realigned ("Realigned frames", below).
 
    The stack parameters' places and the overflow area's anchor count from the frame's final size, objects included,
    and every displacement is checked in 64 bits before it narrows to a disp32.
@@ -606,6 +740,9 @@ Structs and unions by value (below) need nothing more: the prologue reads their 
 is allocated, their homes and a call's result objects are addressed from rbp as the other homes are, a call copies them
 into the outgoing area at rsp and its red-zone temporaries are below rsp, and the epilogue loads a result's registers
 before it releases the frame. A function without them keeps the rsp-relative frame, record for record.
+
+**Realigned frames.** A function whose objects or calls' outgoing areas need more than 16 bytes' alignment has a frame
+pointer too, and rounds rsp down to that alignment after the reservation ("Realigned frames", below).
 
 **Templates.** A template is up to four records, one per (kind, class, variant). The variant says what the entry
 absorbed (`BUSTER_TIER0_VARIANT_*`); a home-dependent slot holds four templates, one per home case. A pointer
@@ -713,8 +850,8 @@ chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_
 ## Tests
 
 `test-tier0` (about 0.8 s, or 2.9 s with `--cross-check`, on the 9700X, before the records' shape) generates programs of
-six shapes: one function of integers, integers and calls, everything, larger, larger with structs and unions by value
-(#137), and larger past the depth tables, 300 each by default. Each program:
+seven shapes: one function of integers, integers and calls, everything, larger, larger with structs and unions by value
+(#137), larger past the depth tables, and that with objects aligned past 16 bytes, 300 each by default. Each program:
 
 1. Every function must pass `tier0_validate`.
 2. Both paths must compile it to the same records, branch columns, references and entries' first records, which must
@@ -742,12 +879,20 @@ Before the programs, checks of their own:
   homes, and an absorbed lane mustn't look its value up as a local's.
 - **objects:**
   - `tier0_validate` must refuse each break of an object's rules at its locals: a class, no `ADDRESS_TAKEN`, a
-    parameter, aligned to 32, sizes without alignments, a `LOCAL` of it, and past `BUSTER_TIER0_MAX_OBJECT_BYTES`.
-    It must take exactly the limit.
+    parameter, aligned past 2^30, sizes without alignments, a `LOCAL` of it, past `BUSTER_TIER0_MAX_OBJECT_BYTES`, and
+    an object aligned to 2^30 a byte past it (its size rounded up to 16 and its alignment less 16 count). It must take
+    exactly the limit, both ways.
   - 2,000 random frames, each of up to 24 locals: objects of 1 to 300 bytes at every alignment to 16, 8-byte values,
-    some address-taken, and `VA_LIST`s of 24 bytes. Both paths compile them, and must agree. Each local's place, from
-    its `LOCAL_ADDRESS`'s `lea`, must be a multiple of its alignment (8 but for objects), inside the frame and apart
-    from every other local's bytes. Under an object aligned to 16, rsp must be a multiple of 16.
+    some address-taken, and `VA_LIST`s of 24 bytes; in every other round a quarter of the objects aligned past 16 instead
+    (to 32, 64, 128 or 4096, from a sequence of their own, so that the other rounds' frames are the ones they were).
+    Both paths compile them, and must agree. Each local's place, from its `LOCAL_ADDRESS`'s `lea`, must be a multiple of
+    its alignment (8 but for objects), inside the frame and apart from every other local's bytes. Under an object
+    aligned to 16, rsp must be a multiple of 16; with one aligned past it, the frame must be realigned: rbp's push and
+    mov, the reservation and `and rsp` by the most any object needs, which the frame publishes.
+- **frame alignment:** `tier0_frame_alignment` and its vector twin against the test's own most, for every count of
+  locals to 40 and of calls to 12: random columns, each ending at a `PROT_NONE` page (a read past one faults), with
+  sizes of 0 among the locals (whatever their alignment's byte), alignments past 16 now and then (any byte, to 255),
+  and calls whose every other byte is random too; then the same without `local_sizes`, the calls' alone.
 - **unsigned floating:** the conversions between U64 and the floating classes (`tier0_emit_u64_convert`), each as a
   function of its parameter, compiled by both paths into the same records, encoded by both encoders and run on 22
   named values under each of MXCSR's four rounding modes: from U64 around 2^53, 2^63 and 2^64, where the halving's kept
@@ -765,7 +910,7 @@ Before the programs, checks of their own:
   Both paths must compile each alike in the form the check's own rule gives (the red zone form's records are those at
   negative displacements from rsp), the prologue must push the register form's scratch where it is callee-saved, and
   each call, as the unsigned floating check makes them, must give C's conversion and its flags and both sums.
-- **deep** (`tier0_deep_test.c`, #136's item 6): nine functions of one U64 parameter whose stacks fill their tables,
+- **deep** (`tier0_deep_test.c`, #136's item 6): eleven functions of one U64 parameter whose stacks fill their tables,
   then cross the line with an entry of each kind the generated programs reach rarely or never: a value pushed past it
   and dropped back to it (a `DISCARD`, which uses no register), `?:` whose condition, branch and arms' values cross it,
   a compare fused into its branch that drops two values across it, 17 floating values (through U64 conversions, one of
@@ -774,8 +919,13 @@ Before the programs, checks of their own:
   rsp moved past a frame pointer's line (#434's review): rsp saved, two allocations stored through and loaded back,
   rsp restored, every entry a deep one while the values below are in their slots, which rbp addresses; and a conversion
   to U64 deep on the floating stack alone at integer depth 13, whose register form's scratch would be rbp, which
-  nothing else in it reaches. Each must compile by both paths into the same records with deep entries, a frame pointer
-  exactly in the cases that have one, write no callee-saved register that its prologue doesn't push (by
+  nothing else in it reaches; a realigned frame's 14 (an object aligned to 64) and two past them, among them the
+  object's address modulo 64 and its first word; and a realigned frame with a base, r15, the table's last register but
+  rbp (an object aligned to 4096 and rsp saved): 13 values, then an allocation past them, rounded up to the frame's
+  4096, rsp modulo 4096 after it and the object's and the allocation's addresses' low bits (all 0), their words, and
+  rsp restored. Each must compile by both paths into the same records with deep entries, a frame pointer exactly in the
+  cases that have one, the realigned frames published as such, write no callee-saved register that its prologue
+  doesn't push (by
   `x86_instructions_effects_scalar`), be encoded alike by both encoders, and give this file's model of it natively on
   six inputs.
 - **copies:**
@@ -904,7 +1054,10 @@ Before the programs, checks of their own:
 - pointer arithmetic as a U64 value, with element sizes for each of its templates: 1 to 8, imul's imm32, and sizes past
   it to 2^64 − 8;
 - with the `objects` option (the shapes everything and larger), up to three objects a function:
-  - local arrays of 2 to 16 elements and structs of 2 to 5 members laid out as C lays them out, some `_Alignas(16)`;
+  - local arrays of 2 to 16 elements and structs of 2 to 5 members laid out as C lays them out, some `_Alignas(16)`,
+    and with the `over_aligned` option (the seventh shape) half of those `_Alignas(32)`, `_Alignas(64)` or
+    `_Alignas(4096)` instead, from a draw a program without the option doesn't make, whose functions' frames are
+    realigned (a copy between them takes `BUSTER_TIER0_MAX_COPY_BYTES` at most);
   - elements and members read, written (an element also by `+=`) and pointed into;
   - each object's address modulo its alignment as a value (`(unsigned long)&v & 15`), 0 wherever the object is placed
     right;
@@ -944,14 +1097,16 @@ Before the programs, checks of their own:
   whose first 8 bytes hold its own address as the C library's thread control block does. Each run copies the
   thread-locals' first values into the block, points FS at the thread pointer for the entry's call alone, and copies
   them back beside the other globals, whose bytes it compares with the interpreter's.
-- with the `deep` option (the sixth shape), values past the depth tables: one function in four has 13 to 32
-  parameters, whose callers evaluate each argument over the ones before it on the stacks, and expressions have room
+- with the `deep` option (the sixth and seventh shapes), values past the depth tables: one function in four has 13 to
+  32 parameters, whose callers evaluate each argument over the ones before it on the stacks, and expressions have room
   for 40 values at once. With the default count, at least one entry in a hundred must be deep (about 2% are). A program
   without the option is the one the same seed gave before it;
 - with the `records` option (the fifth shape, #137), structs and unions passed and returned by value, from a catalog
   that `tier0_tables_open` builds in the type table and classifies: byte arrays of 1 to 17 bytes, whose parts load in
   every way and the largest of which goes on the stack; floats and doubles, mixed with integers both ways round; unions;
-  a member aligned to 16 (one part of 16 bytes); the empty struct; and records past 16 bytes, on the stack and returned
+  a member aligned to 16 (one part of 16 bytes); the empty struct; records aligned to 32 (on a stack aligned to 32 at the
+  call, which realigns the caller's frame, and copied into the callee's realigned frame); and records past 16 bytes, on
+  the stack and returned
   through a hidden pointer. Functions take records as parameters and return them, calls pass the scope's objects of
   them and their results land in objects of their own. With the default count, the programs must reach every kind of
   part, location and result the catalog makes (`tier0_test_coverage`: all but an ignored argument with bytes and an XMM
@@ -983,7 +1138,7 @@ milliseconds a program, where `clang -shared` of the same data as C took tens: i
 Then as many programs of the records shape are linked **mixed**: their even functions Tier 0's and their odd ones
 clang's (clang's own copies of the even ones made weak), so that calls pass and return structs and unions by value
 between the two compilers both ways; each must give what clang's own build gives. And as many of the deep shape, as the
-larger shape's are.
+larger shape's are, and of the shape aligned past 16 bytes, whose objects clang's frames realign as Tier 0's do.
 
 **Robustness:**
 
@@ -1159,14 +1314,42 @@ path's 11.1.
   and 574.25: a test of the flag at each use, and clang's code for the shared passes, which moves by about that much with
   any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
   are the same bytes as main's.
+- **Realigned frames (#136)** at about one instruction per entry to code without them. On these programs, which have no
+  object aligned past 16, the 9700X measured the branch with main merged in (`acb5131`) against main's `bbe59b7` in six
+  rounds in alternating order: the vector path at 170.86 instructions per entry against 169.85, its cycles (80.36 to
+  80.74 against 80.45 to 80.79) and alone (78.70 to 79.06 against 78.93 to 79.27) within main's spread, and the scalar
+  path at 573.75 instructions against 570.95 (233.06 cycles against 230.70). The instruction is each function's: the
+  frame alignment's scan before selection, the frame's added fields, and the prologue's and the layout's checks of the
+  realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head ran the vector path 1.15% and the scalar
+  one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after `main.c`'s) sat 14,928 bytes further on, and
+  main moved by as much (`.skip` before the unit's code, no code changed) ran its vector path 0.8% slower. `-c
+  sqlite3.c`'s objects are main's, and its time within main's spread
+  ([the record](https://github.com/buster14a/buster-performance/tree/0373f98c785caface34a91546b277ef57d816344/docs/measurements/aligned-objects-136-2026-10-27)).
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
-  The vector path is still about 2.3 times that; the budget is not met.
+  On the generated programs the vector path's cycles per entry are about 2.3 times that. On `sqlite3.c` (below) the
+  three stages take 41 to 42 cycles per output token, 1.3 times the budget: it is not met.
 - **Where the time goes** after the second round (perf on the 7940HS, each pass kept out of line), as shares of the
   vector path's time:
   - emission 21%, fusion and depths (P0 to P4) 16%, selection 13% (the slot gather the largest part), measuring 10%;
   - the call emitter and its count 14% together, for the 3.6% of entries that are deferred;
   - the immediates' choice (`x86_choose_forms`) and applying it 11%;
   - the homes, the frame, the prologue and the per-function setup 15%.
+
+**On `sqlite3.c`** (`benchmark-backend-source`, [record](https://github.com/buster14a/buster-performance/tree/9a5bad45a0e39305ee4f426f98b171a105d0f659/docs/measurements/backend-source-136-2026-10-26)):
+the functions `-c` lowers of the frozen SQLite 3.53.2 amalgamation, with the 9700X job's options. That is 2,602
+functions, 400,995 typed entries and 366,044 records (0.91 per entry, against the generated programs' 1.15), with
+3.49% of the entries deferred. The 9700X, CPU 2, medians of 21 passes, the range over three processes:
+
+| Variant | ns per entry | Cycles per entry | Instructions per entry | Cycles per record | IPC |
+| --- | --- | --- | --- | --- | --- |
+| Vector path | 11.4–11.7 | 63.1–64.7 | 152.7 | 69.1–70.9 | 2.36–2.42 |
+| Scalar path | 30.8–30.9 | 170.9–171.3 | 526.7 | 187.2–187.7 | 3.07–3.08 |
+| `size_branches` | 0.94–0.95 | 5.2 | 11.1 | 5.7 | 2.1 |
+| `x86_encode` | 0.70–0.72 | 3.9–4.0 | 14.2 | 4.3–4.4 | 3.6 |
+
+- The vector path takes 62.6 cycles per entry alone, and 63.5 after 200 ms of the scalar path.
+- Real code costs less per entry than the generator's (79.6 cycles there): it makes fewer records per entry.
+- The three stages take about 5.3 ms for the file, 41 to 42 cycles for each of its 706,237 output tokens.
 
 **Generated code against clang -O0** (the cross-check's 60 programs for each of seeds 1, 2, 3, 5, 7 and 11, on the
 9700X, each run alone under its lock and pinned to CPU 2):
@@ -1180,6 +1363,39 @@ path's 11.1.
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
 
+**SQLite's speedtest1 against clang -O0 and tcc**
+([record](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
+The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. They are built with SQLite's own
+`test/speedtest.tcl` options four ways:
+
+- by `-c` (main at `e04462c1`), linked by cc;
+- by the direct path, both files as one unit;
+- by clang -O0, linked by cc;
+- by tcc.
+
+Each build runs with that script's options at `--size 5`, from a database on tmpfs. On the 9700X, CPU 2, every build
+gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
+instructions and instructions per cycle medians of 3 rounds under `perf stat`:
+
+| | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
+| --- | --- | --- | --- | --- |
+| Run time | 294.4 ms | 295.7 ms | 293.3 ms | 271.5 ms |
+| User-space instructions | 6,866 M | 6,865 M | 3,922 M | 4,833 M |
+| Instructions per cycle | 4.47 | 4.46 | 2.59 | 3.45 |
+| `.text` of the executable | 1,331,336 B | 1,331,216 B | 1,024,342 B | 1,295,452 B |
+| `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
+
+- **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
+  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
+- **Code size:**
+  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
+    sizes known before writing.
+- **`switch`** is a chain of compares in case order:
+  - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
+  - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
+  - jump tables (#136's item 7) will change both, and the record's scripts can measure them again.
+
 ## Follow-ups
 
 - **Deep values' refusals:** a function with values of the memory classes past the depth tables, and a call with
@@ -1189,14 +1405,14 @@ path's 11.1.
   and loads every register at each crossing: a stack of 15 integer values that takes and drops one a few times pays
   about 30 records each time, where storing and loading the one register the entry needs would do.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
-  - objects aligned past 16, which need the frame realigned (a frame pointer now exists for variable-length arrays);
   - bit-fields need no entry of their own: the checker's lowering reads and writes the bytes that hold a field's bits
     as pieces of 8, 4, 2 and 1 bytes, with shifts and masks (`docs/c-checker.md`, "Bit-fields"). It refuses a field
     whose bits are spread over more than 8 bytes (a packed one), with `CHECK_PROGRAM_UNSUPPORTED`;
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;
-  - `switch` (no kind yet: a compare sequence or a jump table).
+  - `switch` needs no entry of its own: the checker's lowering dispatches it by compares or, where clang -O0 would,
+    through a jump table and `JUMP_INDIRECT` to its cases' labels (`docs/c-checker.md`, "Switches").
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
   padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
@@ -1210,9 +1426,10 @@ path's 11.1.
   is rax (its depth's), with templates keyed by them.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
-- **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
-  them; `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole compile against
-  tcc. c-testsuite (#145) runs.
+- **Real corpora:** `sqlite3.c`'s functions are measured, both paths alike on each (`benchmark-backend-source`), and
+  SQLite's shell and `speedtest1` compile and run against clang -O0's and tcc's builds ("Measurements"); c-testsuite
+  (#145) runs. Still to do: the other corpora's functions, contract 6 measured on them, and #144's benchmark rows
+  for real functions.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
   writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a

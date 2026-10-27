@@ -75,9 +75,12 @@ static uint32_t check_literal_digit(uint8_t c)
     return value;
 }
 
-static CheckLiteral check_literal_integer(const uint8_t* bytes, uint32_t length)
+// An integer constant's type and value, into `result`, which the caller zeroed (a literal that isn't valid leaves it so).
+// The literals' functions write into their caller's result rather than return a CheckLiteral: clang built each returned
+// one in a temporary and copied it up with loads wider than the stores that wrote it, a failed store-to-load forward on
+// every integer literal (#510).
+static void check_literal_integer(const uint8_t* bytes, uint32_t length, CheckLiteral* result)
 {
-    CheckLiteral result = { 0 };
     uint32_t radix = 10;
     uint32_t position = 0;
     if (length >= 2 && bytes[0] == '0')
@@ -155,14 +158,10 @@ static CheckLiteral check_literal_integer(const uint8_t* bytes, uint32_t length)
             // An unsuffixed decimal that needs the unsigned extension is unsigned long long, as Clang diagnoses.
             type = !unsign && radix == 10 && value > INT64_MAX ? BUSTER_TYPE_ULLONG : type;
         }
-        result = (CheckLiteral)
-        {
-            .type = type,
-            .integer = value,
-            .valid = true,
-        };
+        result->type = type;
+        result->integer = value;
+        result->valid = true;
     }
-    return result;
 }
 
 // A _Float16 constant's value (the f16 suffix), rounded to nearest with ties to even as clang rounds the spelling.
@@ -197,7 +196,8 @@ static long double check_literal_half(const char* spelling, char** end)
     return result;
 }
 
-static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch)
+// A number without an imaginary suffix, into `result`, which the caller zeroed.
+static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
 {
     const bool hex = length > 2 && bytes[0] == '0' && (bytes[1] | 32u) == 'x';
     bool real = false;
@@ -208,10 +208,9 @@ static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t le
         exponent |= c == (hex ? 'p' : 'e');
         real |= bytes[i] == '.' || c == (hex ? 'p' : 'e');
     }
-    CheckLiteral result = { 0 };
     if (!real)
     {
-        result = check_literal_integer(bytes, length);
+        check_literal_integer(bytes, length, result);
     }
     else if (!hex || exponent)
     {
@@ -271,24 +270,21 @@ static CheckLiteral check_literal_number_plain(const uint8_t* bytes, uint32_t le
                 value = strtold(spelling, &end);
             }
             // Range warnings do not make a literal a syntax error. Preserve the host target's rounded result.
-            result = (CheckLiteral)
-            {
-                .type = type,
-                .floating = value,
-                .real = true,
-                .valid = separators && end != spelling && end == spelling + written,
-            };
+            result->type = type;
+            result->floating = value;
+            result->real = true;
+            result->valid = separators && end != spelling && end == spelling + written;
         }
         else
         {
-            result.resource = true;
+            result->resource = true;
         }
         arena_pop_to(scratch, mark);
     }
-    return result;
 }
 
-static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, Arena* scratch)
+// A number's type and value, into `result`, which the caller zeroed.
+static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* scratch, CheckLiteral* result)
 {
     uint32_t imaginary = UINT32_MAX;
     uint32_t suffix = length;
@@ -313,30 +309,28 @@ static CheckLiteral check_literal_number(const uint8_t* bytes, uint32_t length, 
         }
         suffix -= 1;
     }
-    CheckLiteral result = { 0 };
     if (imaginary == UINT32_MAX)
     {
-        result = check_literal_number_plain(bytes, length, scratch);
+        check_literal_number_plain(bytes, length, scratch, result);
     }
     else if (imaginary != 0)
     {
         const uint64_t mark = scratch->length;
         uint8_t* spelling = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, length);
-        result.resource = spelling == 0;
+        result->resource = spelling == 0;
         if (spelling != 0)
         {
             memcpy(spelling, bytes, imaginary);
             memcpy(spelling + imaginary, bytes + imaginary + 1, length - imaginary - 1);
-            result = check_literal_number_plain(spelling, length - 1, scratch);
-            if (result.valid)
+            check_literal_number_plain(spelling, length - 1, scratch, result);
+            if (result->valid)
             {
-                result.type = BUSTER_TYPE_COMPLEX(type_index(result.type));
-                result.imaginary = true;
+                result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));
+                result->imaginary = true;
             }
         }
         arena_pop_to(scratch, mark);
     }
-    return result;
 }
 
 static CheckValue check_literal_value(CheckLiteral literal)

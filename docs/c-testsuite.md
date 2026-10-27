@@ -102,7 +102,10 @@ links libm by name, the direct path taking `-l` libraries as GCC's driver does
 ([the checker guide](c-checker.md)).
 
 The 9700X job fetches the commit in a step of its own and runs the self-test
-and the subset with `--cross-check --jobs 4` among its tests at once.
+and the subset among its tests at once, as two commands (#522): the self-test
+on one CPU, since most of its 7 s waits out its timeouts, and the subset with
+`--cross-check` on four, `--jobs "$BUSTER_PARALLEL_CPUS"` (a worker per CPU of
+its heading's).
 
 ## Results
 

@@ -26,6 +26,8 @@ struct UnwindTier0Test
     // Functions with a frame pointer (variable-length arrays), which only the published frame describes.
     uint32_t framed;
     uint64_t framed_masks;
+    uint32_t realigned;
+    uint32_t based;
 };
 
 static bool unwind_tier0_test_expect(UnwindTier0Test* test, bool condition, const char* check, uint64_t id)
@@ -56,8 +58,8 @@ static X86Instruction unwind_tier0_test_record(uint16_t form, uint8_t reg, uint8
 }
 
 // A frame pointer's descriptor as tier0_emit_prologue and tier0_emit_epilogue lay its records out: rbp's push, its mov
-// and the other pushes first, then the reservation if any (no transition); the release (no transition), the other pops,
-// rbp's and the ret last. Each transition ends where the next record starts.
+// and the other pushes first, then the reservation if any and a realigned frame's and and base's mov (no transitions); the
+// release (no transition), the other pops, rbp's and the ret last. Each transition ends where the next record starts.
 static UnwindFunction unwind_tier0_test_pointer_frame(const Tier0Code* code, const uint32_t* offsets, uint32_t size)
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
@@ -84,7 +86,7 @@ static UnwindFunction unwind_tier0_test_pointer_frame(const Tier0Code* code, con
 static bool unwind_tier0_test_keeps_rbp(const Tier0Code* code)
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
-    const uint32_t first = 2 + pushes + (code->frame_size != 0 ? 1 : 0);
+    const uint32_t first = 2 + pushes + (code->frame_size != 0 ? 1 : 0) + (code->frame_alignment_log2 != 0 ? 1 : 0) + (code->frame_base ? 1 : 0);
     const uint32_t release = code->count - (pushes + 3);
     bool keeps = first <= release;
     for (uint32_t r = first; keeps && r < release; r += 1)
@@ -188,6 +190,8 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
         valid = unwind_tier0_test_expect(test, unwind_tier0_test_keeps_rbp(&codes[0]), "a frame pointer's body leaves rbp alone", id);
         test->framed += valid ? 1 : 0;
         test->framed_masks |= valid ? 1ull << codes[0].frame_saved : 0;
+        test->realigned += valid && codes[0].frame_alignment_log2 != 0 ? 1 : 0;
+        test->based += valid && codes[0].frame_base ? 1 : 0;
     }
     if (valid)
     {
@@ -268,12 +272,15 @@ static void unwind_tier0_test_generated(UnwindTier0Test* test, Arena* arena)
     Tier0Tables tables = { 0 };
     const bool opened = tier0_tables_open(&tables);
     unwind_tier0_test_expect(test, opened, "type and ABI tables", 0);
-    const uint32_t shapes = BUSTER_ARRAY_LENGTH(options) + 2;
+    // The last shape: past the depth tables with objects aligned past 16 bytes, whose functions' frames are realigned (with
+    // a base where they move rsp).
+    const uint32_t shapes = BUSTER_ARRAY_LENGTH(options) + 3;
     for (uint32_t shape = 0; opened && shape < shapes; shape += 1)
     {
         Tier0ProgramOptions shape_options = options[shape < BUSTER_ARRAY_LENGTH(options) ? shape : BUSTER_ARRAY_LENGTH(options) - 1];
         shape_options.records = shape == BUSTER_ARRAY_LENGTH(options) ? &tables.records : 0;
-        shape_options.deep = shape == BUSTER_ARRAY_LENGTH(options) + 1;
+        shape_options.deep = shape >= BUSTER_ARRAY_LENGTH(options) + 1;
+        shape_options.over_aligned = shape == BUSTER_ARRAY_LENGTH(options) + 2;
         for (uint32_t seed = 0; seed < BUSTER_ARRAY_LENGTH(seeds); seed += 1)
         {
             const uint64_t mark = arena->length;
@@ -297,6 +304,7 @@ static void unwind_tier0_test_generated(UnwindTier0Test* test, Arena* arena)
                             "generated coverage includes calls, loops, alternate returns and pointer stores", 0);
     unwind_tier0_test_expect(test, test->indirect_calls != 0 && test->objects != 0, "generated coverage includes indirect calls and objects", 0);
     unwind_tier0_test_expect(test, test->framed != 0 && __builtin_popcountll(test->framed_masks) > 1, "generated coverage includes frame pointers' functions", 0);
+    unwind_tier0_test_expect(test, test->realigned != 0 && test->based != 0, "generated coverage includes realigned frames, with and without a base", 0);
 }
 
 typedef struct UnwindTier0Fixture UnwindTier0Fixture;
@@ -514,7 +522,7 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
     if (unwind_tier0_test_expect(test, ready, "build refusal baseline with two saves and an aligned call", 0))
     {
         unwind_tier0_test_result(test, &original, UNWIND_OK, 2000);
-        for (uint32_t mutation = 0; mutation < 53; mutation += 1)
+        for (uint32_t mutation = 0; mutation < 54; mutation += 1)
         {
             UnwindTier0Fixture fixture;
             memcpy(&fixture, &original, sizeof(fixture));
@@ -579,6 +587,8 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
                 case 51: fixture.code.records = 0; wanted = UNWIND_ERROR_INVALID; break;
                 // Tier 0's indirect call, through r11, is a call like its direct one (26's through rax isn't).
                 case 52: *call = unwind_tier0_test_record(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, 0, 0, 0); measure = true; wanted = UNWIND_OK; break;
+                // A ud2 ends only a frameless function (#523): this one's epilogue still needs its ret.
+                case 53: fixture.records[fixture.code.count - 1].form = X86_FORM_UD2; measure = true; break;
             }
             if (!measure || unwind_tier0_test_expect(test, unwind_tier0_test_measure(&fixture), "mutated instruction remains encoder-valid", mutation))
             {
@@ -653,9 +663,11 @@ static void unwind_tier0_test_boundaries(UnwindTier0Test* test)
 }
 
 // A frame pointer's function as Tier 0 lays it out (`saved` without RBP's bit): rbp pushed and pointed at its push,
-// the other pushes and the reservation; a body that allocates on the stack as ALLOCA's records do; the release, the
-// pops, rbp's and the ret. Its offsets measured, its expected descriptor from its transitions' records.
-static bool unwind_tier0_test_pointer_fixture(UnwindTier0Fixture* fixture, uint8_t saved, uint32_t frame)
+// the other pushes and the reservation, with `alignment_log2` rsp rounded down to 2^alignment_log2 after it (a
+// realigned frame's and, imm8 to 128 bytes) and with `base` too rsp copied into r15 (`saved` with r15's bit); a body that
+// allocates on the stack as ALLOCA's records do; the release, the pops, rbp's and the ret. Its offsets measured, its
+// expected descriptor from its transitions' records (the and and the base's mov are none).
+static bool unwind_tier0_test_pointer_fixture(UnwindTier0Fixture* fixture, uint8_t saved, uint32_t frame, uint32_t alignment_log2, bool base)
 {
     static const uint8_t registers[] = {
         X86_REGISTER_RBX,
@@ -670,6 +682,8 @@ static bool unwind_tier0_test_pointer_fixture(UnwindTier0Fixture* fixture, uint8
     fixture->code.frame_saved = saved;
     fixture->code.frame_size = frame;
     fixture->code.frame_pointer = true;
+    fixture->code.frame_alignment_log2 = (uint8_t)alignment_log2;
+    fixture->code.frame_base = base;
     fixture->expected.saved = saved;
     fixture->expected.pointer = 1;
     uint32_t* count = &fixture->code.count;
@@ -690,6 +704,15 @@ static bool unwind_tier0_test_pointer_fixture(UnwindTier0Fixture* fixture, uint8
     {
         const uint16_t form = frame <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
         fixture->records[(*count)++] = unwind_tier0_test_record(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame);
+    }
+    if (alignment_log2 != 0)
+    {
+        const uint16_t form = alignment_log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32;
+        fixture->records[(*count)++] = unwind_tier0_test_record(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)-(int64_t)(UINT64_C(1) << alignment_log2));
+    }
+    if (base)
+    {
+        fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R15, BUSTER_X86_REGISTER_DIRECT, 0, 0);
     }
     fixture->body = *count;
     fixture->records[(*count)++] = unwind_tier0_test_record(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, 100);
@@ -733,7 +756,8 @@ static void unwind_tier0_test_frame_result(UnwindTier0Test* test, const UnwindTi
 }
 
 // The published frame's reader (unwind_tier0_frame): every mask with and without a frame pointer, at every kind of
-// reservation, then each record and field it checks broken in turn, refused with the descriptor left alone.
+// reservation, and realigned (to 32 and 4096, the and's two forms, with r15 its base where the mask has it), then each
+// record and field it checks broken in turn, refused with the descriptor left alone.
 static void unwind_tier0_test_frames(UnwindTier0Test* test)
 {
     static const uint32_t frames[] = { 0, 8, 4096 };
@@ -748,20 +772,28 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
                 unwind_tier0_test_frame_result(test, &fixture, UNWIND_OK, id);
             }
             if ((saved & 2) == 0 &&
-                unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&fixture, (uint8_t)saved, frames[frame]), "build each frame pointer's frame", id))
+                unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&fixture, (uint8_t)saved, frames[frame], 0, false), "build each frame pointer's frame", id))
             {
                 unwind_tier0_test_frame_result(test, &fixture, UNWIND_OK, id + 1000);
+            }
+            const uint32_t alignment_log2 = frame % 2 == 0 ? 5 : 12;
+            if ((saved & 2) == 0 && unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&fixture, (uint8_t)saved, frames[frame], alignment_log2, (saved & 32) != 0),
+                                                             "build each realigned frame", id))
+            {
+                unwind_tier0_test_frame_result(test, &fixture, UNWIND_OK, id + 2000);
             }
         }
     }
     UnwindTier0Fixture pointer;
     UnwindTier0Fixture fixed;
-    const bool ready = unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&pointer, 5, 40) && unwind_tier0_test_fixture(&fixed, 5, 40, 7),
+    UnwindTier0Fixture realigned;
+    const bool ready = unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&pointer, 5, 40, 0, false) && unwind_tier0_test_fixture(&fixed, 5, 40, 7) &&
+                                                          unwind_tier0_test_pointer_fixture(&realigned, 37, 40, 6, true),
                                                 "build the published frame's refusal baselines", 0);
-    for (uint32_t mutation = 0; ready && mutation < 34; mutation += 1)
+    for (uint32_t mutation = 0; ready && mutation < 36; mutation += 1)
     {
         UnwindTier0Fixture fixture;
-        memcpy(&fixture, mutation < 24 ? &pointer : &fixed, sizeof(fixture));
+        memcpy(&fixture, mutation < 24 || mutation == 35 ? &pointer : &fixed, sizeof(fixture));
         unwind_tier0_test_bind(&fixture);
         X86Instruction* records = fixture.records;
         const uint32_t last = fixture.code.count - 1;
@@ -806,12 +838,49 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
             case 31: records[fixture.body - 1].form = X86_FORM_NOP; break;
             case 32: records[0].form = X86_FORM_POP_R64; break;
             case 33: fixture.code.count = 1; wanted = UNWIND_ERROR_INVALID; break;
+            // A ud2 ends only a frameless function (#523): a frame's epilogue still needs its ret.
+            case 34: records[last].form = X86_FORM_UD2; break;
+            case 35: records[last].form = X86_FORM_UD2; break;
         }
         if (mutation == 22)
         {
             fixture.expected.frame_size = 0;
         }
         unwind_tier0_test_frame_result(test, &fixture, wanted, 6000 + mutation);
+    }
+    // A realigned frame's: push rbp, mov rbp, rsp, push rbx, push r12, push r15, sub rsp, 40, and rsp, -64, mov r15, rsp
+    // ... lea rsp, [rbp - 24], pop r15, pop r12, pop rbx, pop rbp, ret; each mutation of its realignment, and of what its
+    // frame publishes of it.
+    for (uint32_t mutation = 0; ready && mutation < 16; mutation += 1)
+    {
+        UnwindTier0Fixture fixture;
+        memcpy(&fixture, &realigned, sizeof(fixture));
+        unwind_tier0_test_bind(&fixture);
+        X86Instruction* records = fixture.records;
+        UnwindError wanted = UNWIND_ERROR_UNSUPPORTED;
+        switch (mutation)
+        {
+            case 0: wanted = UNWIND_OK; break;
+            case 1: records[6].immediate = -32; break;
+            case 2: records[6].immediate = -128; break;
+            case 3: records[6].form = X86_FORM_AND_RM64_IMM32; break;
+            case 4: records[6].rm = X86_REGISTER_RBP; break;
+            case 5: records[6].form = X86_FORM_OR_RM64_IMM8; break;
+            case 6: records[7].rm = X86_REGISTER_R14; break;
+            case 7: records[7].reg = X86_REGISTER_RBP; break;
+            case 8: records[7].mode = BUSTER_X86_MEMORY_BASE; break;
+            case 9: fixture.code.frame_alignment_log2 = 7; break;
+            // A published alignment past 16 that the and's immediate can't hold, or with no frame pointer, or a base without
+            // a realignment, or without r15 among the pushes, is no frame Tier 0 makes.
+            case 10: fixture.code.frame_alignment_log2 = 4; wanted = UNWIND_ERROR_INVALID; break;
+            case 11: fixture.code.frame_alignment_log2 = 32; wanted = UNWIND_ERROR_INVALID; break;
+            case 12: fixture.code.frame_pointer = false; wanted = UNWIND_ERROR_INVALID; break;
+            case 13: fixture.code.frame_alignment_log2 = 0; wanted = UNWIND_ERROR_INVALID; break;
+            case 14: fixture.code.frame_saved = 5; wanted = UNWIND_ERROR_INVALID; break;
+            // Without the base published, the mov is the body's: the frame reads as a realigned one without a base.
+            case 15: fixture.code.frame_base = false; wanted = UNWIND_OK; break;
+        }
+        unwind_tier0_test_frame_result(test, &fixture, wanted, 6200 + mutation);
     }
     // Missing inputs.
     UnwindFunction descriptor;
@@ -842,15 +911,18 @@ static void unwind_tier0_test_guards(UnwindTier0Test* test)
     if (unwind_tier0_test_expect(test, ready, "guarded records, offsets and descriptor", 0))
     {
         // A count of zero must reject without reading either guarded pointer. Every other fixture has a body of
-        // count-1 one-byte NOPs followed by RET; the final record and offset end exactly at inaccessible pages.
-        for (uint32_t count = 0; count <= 66; count += 1)
+        // count-1 one-byte NOPs followed by RET, or by UD2, which ends a frameless function too (#523: the terminal
+        // builtins' helper is a UD2 alone); the final record and offset end exactly at inaccessible pages.
+        for (uint32_t case_index = 0; case_index <= 2 * 66 + 1; case_index += 1)
         {
+            const uint32_t count = case_index / 2;
+            const uint16_t ending = (case_index & 1) != 0 ? X86_FORM_UD2 : X86_FORM_RET;
             X86Instruction* records = (X86Instruction*)(mapping + page - count * sizeof(X86Instruction));
             uint32_t* offsets = (uint32_t*)(mapping + 3 * page - count * sizeof(uint32_t));
             UnwindFunction* output = (UnwindFunction*)(mapping + 5 * page - sizeof(UnwindFunction));
             for (uint32_t i = 0; i < count; i += 1)
             {
-                records[i] = unwind_tier0_test_record(i + 1 == count ? X86_FORM_RET : X86_FORM_NOP, 0, 0, 0, 0, 0);
+                records[i] = unwind_tier0_test_record(i + 1 == count ? ending : X86_FORM_NOP, 0, 0, 0, 0, 0);
                 offsets[i] = i;
             }
             const Tier0Code code = {
@@ -869,17 +941,58 @@ static void unwind_tier0_test_guards(UnwindTier0Test* test)
                 }
                 const UnwindError error = exact != 0 ? unwind_tier0_scalar(&code, offsets, count, output) : unwind_tier0(&code, offsets, count, output);
                 unwind_tier0_test_expect(test, error == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", count);
+                                                  memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", case_index);
                 memset(output, 0xd8 + exact, sizeof(*output));
                 const UnwindError framed = unwind_tier0_frame(&code, offsets, count, output);
                 unwind_tier0_test_expect(test, framed == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", count);
+                                                  memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", case_index);
             }
         }
     }
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, 6 * page);
+    }
+}
+
+// The terminal builtins' helper (cbuiltin_terminal_helper, a ud2 alone, #523), as the C driver emits it: both
+// analyzer paths and the published frame's reader give it a frameless descriptor of no transitions; a ud2 short of
+// the end is still the body's, which the analyzer refuses.
+static void unwind_tier0_test_terminal(UnwindTier0Test* test, Arena* arena)
+{
+    static const CBuiltinId ids[] = { CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
+    {
+        const uint64_t mark = arena->length;
+        const CBuiltinTerminalHelper helper = cbuiltin_terminal_helper(ids[i], arena);
+        uint32_t offsets[2] = { 0 };
+        const int64_t size = helper.code.error == TIER0_OK ? x86_measure_scalar(helper.code.records, helper.code.count, offsets) : -1;
+        const bool ready = unwind_tier0_test_expect(test, helper.code.error == TIER0_OK && helper.code.count == 1 && size == 2, "build the terminal builtins' helper", 7000 + i);
+        const UnwindFunction expected = {
+            .size = 2,
+        };
+        for (uint32_t reader = 0; ready && reader < 3; reader += 1)
+        {
+            UnwindFunction descriptor;
+            memset(&descriptor, 0xe7, sizeof(descriptor));
+            const UnwindError error = reader == 0 ? unwind_tier0(&helper.code, offsets, 2, &descriptor) :
+                                      reader == 1 ? unwind_tier0_scalar(&helper.code, offsets, 2, &descriptor) :
+                                                    unwind_tier0_frame(&helper.code, offsets, 2, &descriptor);
+            unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&descriptor, 1) == UNWIND_OK && memcmp(&descriptor, &expected, sizeof(expected)) == 0,
+                                     "the terminal helper's frameless descriptor", 7010 + 3 * i + reader);
+        }
+        // The ud2 followed by a ret: a body's ud2 has no successor the analyzer follows; the reader takes the producer's
+        // word for the body, and its ret ends the function.
+        X86Instruction records[2] = { ready ? helper.code.records[0] : (X86Instruction){ 0 }, { .form = X86_FORM_RET } };
+        Tier0Code code = helper.code;
+        code.records = records;
+        code.count = 2;
+        const uint32_t sized[2] = { 0, 2 };
+        UnwindFunction descriptor;
+        unwind_tier0_test_expect(test, ready && unwind_tier0(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED &&
+                                           unwind_tier0_scalar(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED,
+                                 "the analyzer refuses a ud2 in a body", 7020 + i);
+        arena_pop_to(arena, mark);
     }
 }
 
@@ -895,11 +1008,14 @@ static bool unwind_tier0_test(void)
         unwind_tier0_test_boundaries(&test);
         unwind_tier0_test_guards(&test);
         unwind_tier0_test_frames(&test);
+        unwind_tier0_test_terminal(&test, &arena);
         unwind_tier0_test_generated(&test, &arena);
     }
     arena_release(&arena);
     printf("native unwind analyzer: %" PRIu64 " checks, %" PRIu64 " failed; %u actual functions, saved-mask coverage %016" PRIx64
-           ", %u calling functions, %u backward branches, %u alternate-return functions, %u pointer stores; %u with a frame pointer, masks %016" PRIx64 "\n",
-           test.checked, test.failed, test.functions, test.generated_masks, test.calls, test.loops, test.returns, test.pointers, test.framed, test.framed_masks);
+           ", %u calling functions, %u backward branches, %u alternate-return functions, %u pointer stores; %u with a frame pointer, masks %016" PRIx64
+           ", %u realigned, %u with a base\n",
+           test.checked, test.failed, test.functions, test.generated_masks, test.calls, test.loops, test.returns, test.pointers, test.framed, test.framed_masks,
+           test.realigned, test.based);
     return test.failed == 0;
 }

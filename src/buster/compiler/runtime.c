@@ -61,8 +61,9 @@
 // member each loads (Runtime.reference_members); and its COMDAT groups (RuntimeGroup, a range per piece, each with its
 // atoms and its signature's number among the runtime's distinct signatures), whose first in link order the link keeps.
 //
-// main.c includes this file after import.c. runtime_libraries_import takes BUSTER_LINKER_ENTRY rather than static:
-// main.c's units compile it in one unit alone (link.c). Layout, in this order:
+// main.c includes this file after import.c. runtime_libraries_import and the four runtime_import functions take
+// BUSTER_LINKER_ENTRY rather than static: main.c's units compile them in one unit alone (link.c). Layout, in this
+// order:
 //   - API: RuntimeError, RuntimeObject, RuntimeProbe, RuntimeBinding, Runtime and the entry points' prototypes.
 //   - Files: probing and reading.
 //   - The search: GCC's installation, the crt objects and libc's script.
@@ -357,10 +358,10 @@ struct Runtime
 // snapshot's mapping, for a runtime loaded from one). On failure, the error says what went wrong and the runtime's
 // fields where. runtime_import_static does the same for a static executable's runtime, runtime_import_static_pie for a
 // static PIE's and runtime_import_shared for a shared library's.
-static __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
-static __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_static_pie(Runtime* runtime);
+BUSTER_LINKER_ENTRY __attribute__((unused)) RuntimeError runtime_import_shared(Runtime* runtime);
 // runtime_import, runtime_import_static, runtime_import_static_pie or runtime_import_shared, by `kind`.
 static __attribute__((unused)) RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind);
 // Finds the default interpreter through libc.so's script without importing CRT objects, archives or library symbols.
@@ -1898,22 +1899,22 @@ static RuntimeError runtime_import_kind(Runtime* runtime, RuntimeKind kind)
     return result;
 }
 
-static RuntimeError runtime_import(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_DYNAMIC);
 }
 
-static RuntimeError runtime_import_static(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_static(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC);
 }
 
-static RuntimeError runtime_import_static_pie(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_static_pie(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_STATIC_PIE);
 }
 
-static RuntimeError runtime_import_shared(Runtime* runtime)
+BUSTER_LINKER_ENTRY RuntimeError runtime_import_shared(Runtime* runtime)
 {
     return runtime_import_kind(runtime, RUNTIME_KIND_SHARED);
 }

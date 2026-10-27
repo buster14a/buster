@@ -73,9 +73,13 @@ class and a new temporary-local range. It leaves one result on the typed value
 stack and preserves values already below it. Overflow stores the converted
 low result through the supplied pointer before producing the boolean. Runtime
 descriptors currently represent ordinary signed/unsigned 8-, 16-, 32- and
-64-bit integers and unsigned one-bit booleans in byte storage. Boolean stores
-retain the low mathematical bit; they do not use the ordinary nonzero-to-true
-cast. Other bit-precise memory representations return an explicit unsupported
+64-bit integers, unsigned one-bit booleans in byte storage, and 128-bit
+integers (`BUSTER_CBUILTIN_LOWER_WIDE`, signed or not: a width's seven bits
+stop at 127). Boolean stores retain the low mathematical bit; they do not use
+the ordinary nonzero-to-true cast. A 128-bit operand's slot is an address-taken
+frame object (class VOID) holding its 16 bytes, which the recipe reads as two
+64-bit limbs, and a 128-bit destination takes its two limbs in two stores.
+Other bit-precise memory representations return an explicit unsupported
 status.
 
 The caller supplies mutually disjoint kind, class, value, local-class and
@@ -89,7 +93,12 @@ scalar copy twin. No allocations or retained scratch storage are required.
 
 The recipes use the existing target-independent `BUSTER_TYPED_*` operations.
 Byte swaps and counts use fixed shifts, masks and arithmetic. Full overflow
-products use four 32-by-32 products and exact two-limb correction. Generated
+products use four 32-by-32 products and exact two-limb correction. With a
+128-bit operand or destination, the exact result is three limbs of 64 bits for a
+sum or a difference and four for a product, whose columns' 64-by-64 products are
+U128 multiplications of zero-extended limbs, less 2^128 times the other
+operand's pattern for each negative operand; an unsigned product never sets its
+top two limbs all ones, so it can't pass as a negative value. Generated
 programs therefore require baseline x86-64; the host's vector publication does
 not grant AVX-512, POPCNT, LZCNT or TZCNT to output code. Zero arguments to clz
 or ctz remain undefined by the source contract, independently of the sequence's
@@ -291,8 +300,36 @@ its representation. It uses integer masks and comparisons, preserves the
 enclosing stack and leaves I32. Its `fpclassify` result is a category index
 0 NaN, 1 infinity, 2 normal, 3 subnormal, 4 zero; the source producer still
 owns conditional selector evaluation. Certified infinity/NaN constants use
-their exact raw bits. Unknown NaN calls, long double and wider runtime
-formats need another lowering path and remain explicit refusals here.
+their exact raw bits. Unknown NaN calls, long double constants and wider
+runtime formats need another lowering path and remain explicit refusals here.
+
+A long double's (F80) classification and `fabsl` read the argument's frame
+object, which the producer makes for the call: the significand's 64 bits, its
+top bit the explicit integer bit, and the sign and exponent's 16. Clang 23's
+-O0 code classifies an x87 value partly by the x87's compares (`isnan`,
+`fpclassify` and `isinf_sign`'s test), which take the encodings the x87 doesn't
+support (a nonzero exponent without the integer bit: unnormals, pseudo-zeros,
+pseudo-infinities and pseudo-NaNs) as unordered and a pseudo-denormal (a zero
+exponent with it) as the number it is, at least the smallest normal's
+magnitude; and partly by its bits (`isinf`, `isfinite`, `signbit`). The recipes
+give each builtin's results for every encoding with integer tests alone:
+
+| builtin | clang's test | result |
+| --- | --- | --- |
+| `isnan` | `fucomip` of x with x | (e != 0 and no integer bit) or (e = 0x7fff and m > 2^63) |
+| `isnan`, FENV_ACCESS | LLVM's strictfp integer test | (e = 0) = integer bit, or (e = 0x7fff and m > 2^63) |
+| `isinf` | bits | e = 0x7fff and m = 2^63 |
+| `isinf_sign` | `fucomip` of \|x\| with infinity | `isinf`'s, by the sign |
+| `isfinite` | bits | e = 0, or e != 0x7fff with the integer bit |
+| `fpclassify` | `fucomip`s with 0, x, infinity and the smallest normal | zero e = 0 and m = 0; subnormal e = 0, no integer bit, m != 0; normal the integer bit and e != 0x7fff; infinity as `isinf`; NaN the rest |
+| `signbit` | bits | the sign |
+
+(e is the exponent and m the significand.) Under FENV_ACCESS, `fpclassify` and
+`isinf_sign` keep the producer's quiet comparisons, the x87's for a long
+double, which raise invalid as clang's do; the recipe's isnan takes the call's
+FENV_ACCESS (`CBuiltinFloatLowerCall.fenv_access`). `fabsl` clears the object's
+sign bit in place and leaves its value, F80: no x87 operation touches the
+bits, so a signaling NaN keeps its payload, as the x87's `fabs` keeps it.
 
 ## Atomic and terminal helper calls
 
@@ -323,15 +360,46 @@ a RET by itself does not constrain optimization. Each original order,
 pointer and value expression must still execute once even when the helper
 does not inspect its numeric order.
 
-The producer must establish natural alignment at least `required_alignment`.
-Unknown or insufficient alignment, wider objects and formats outside the
-selected helper need another real fallback. A helper must not make unaligned
-ordinary MOV appear atomic. The semantic result retains alignment evidence
-and unsupported requirements without turning valid source into fake success.
+An atomic object's alignment is the one clang's code generation gives its
+address (`EmitPointerWithAlignment`), the owner's decision for #126 (2026-10-26):
+`check_graph_atomic_alignment` (`c_checker.c`) works it out from the pointer
+argument's subgraph as clang does.
 
-`c_check_builtin_atomic_rmw.c` checks 30 scalar GNU and legacy spellings:
-exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, legacy
-lock-test-and-set and lock-release. It retains actual source types, converted
+- A pointer value gets its pointee type's alignment: an aligned typedef's, which
+  may be less.
+- An object at the base of an `&` path gets its declaration's alignment
+  (`getDeclAlign`): an aligned attribute's alone, which may also be less, or else
+  its type's, at least 16 for an array of 16 bytes or more. The reader's witness
+  (`check_input_declaration_alignment`) gives it.
+- A member gets its base's alignment at its offset, so a packed record's members
+  get 1.
+- An element and pointer arithmetic get the alignment at the element's offset,
+  or at its size for an index that isn't a constant.
+- An explicit cast gets its own pointee type's alignment, unless its operand's
+  came from a declaration.
+
+clang calls libatomic for an object aligned below its size, and the lowering
+refuses that one: "a misaligned atomic object, which clang calls libatomic for".
+It also refuses a path it doesn't model: "an atomic object whose address's
+alignment this doesn't work out". `test-checker` compiles 30 such accesses with
+clang. The lowering must refuse exactly the ones whose clang object calls an
+`__atomic_` function. A helper must not make an unaligned ordinary MOV look
+atomic. The semantic result keeps the alignment evidence and unsupported
+requirements without turning valid source into a fake success.
+
+`c_check_builtin_atomic_rmw.c` checks 34 scalar GNU and legacy spellings:
+exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, clang's
+min/max extensions (`__atomic_fetch_min`, `__atomic_max_fetch` and the other
+two: integers and its floating types, never pointers), legacy
+lock-test-and-set and lock-release. The source checker takes every one of them
+(#126): `check_graph_builtin_op` gives them the atomic op, and the graph and
+the declaration-time reader send them to this module, with the orders' ICE
+proofs from the source's own analysis (`check_builtin_atomic_rmw_order_ice`).
+The lowering calls the leaves below: `c_check_program_helpers.c` plans one per
+builtin, width and format. It takes integers, pointers and bool, and GNU's
+exchange of `float` and `double` through the F32/F64 leaves. A legacy call's
+protected variables, floating arithmetic, min and max, bool arithmetic and
+NAND, and integers narrower than a byte stay refused by name. The checker retains actual source types, converted
 fixed operands, old/new/boolean/void result kind, conditional object/expected
 writes and explicit runtime format. Checking never reads or folds a source
 memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
@@ -363,8 +431,11 @@ Success permits read-only expected storage and `expected == object` without
 overwriting the desired object value. Legacy CAS instead takes an expected
 value. Legacy lock-release is a pure exact-width MOV of zero followed by
 MFENCE: it adds no object read or read/modify/write event. All calls remain
-unknown-effect compiler barriers, including release, and require proven
-natural object alignment and operation-appropriate accessibility.
+unknown-effect compiler barriers, including release, and require natural
+object alignment, as above, and operation-appropriate accessibility. clang's
+min and max compare in the object's width, unsigned for integer and bool bits
+and signed for `SIGNED_BITS`, which no other operation takes. The loop keeps
+the operand where it is smaller or larger (CMP, then CMOV).
 
 Source-valid operations can still require an unsupported runtime format.
 Canonical boolean exchange/CAS/AND/OR/XOR/release preserve 0/1 storage.
@@ -372,8 +443,12 @@ Boolean add/sub/NAND may produce noncanonical bytes and remain explicit
 runtime gaps rather than being silently normalized. Floating exchange alone
 has F32/F64 raw-bit leaves; floating arithmetic, wider/complex formats,
 sub-byte integer representations, objects wider than eight bytes and absent
-or insufficient alignment proof need another consumer. Floating helper
-transport never numerically converts between FP and integer bits. No module
+or insufficient alignment need another consumer. Floating helper transport
+never numerically converts between FP and integer bits: `check_lower_helper`
+passes and takes a `float` or `double` as its bits, through a frame
+temporary. Atomic loads and stores of them are lowered so too; before #126's
+alignment rule they were refused, and a numeric conversion would have
+changed their values. No module
 grants source, constant-expression or either-tier capability merely because
 typed checking or an isolated helper succeeds.
 
@@ -440,7 +515,7 @@ hash-pins all four inputs before publishing output. Derived LLVM data retains
 its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
 input, tool and output provenance is in
 [`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
-The 1,506-row frozen own-main subset includes explicit `bit_cast` parser and
+The 1,534-row frozen own-main subset includes explicit `bit_cast` parser and
 `va_list` predefined-type gaps. These are not invented function declarations
 and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
 not a general `__has_builtin` answer. Header/language restrictions and custom
@@ -448,7 +523,7 @@ rules remain consumer obligations.
 
 `builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
 two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
-the 1,457 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the 1,483 recorded x86/x86-64 members. Neither a name prefix nor membership in
 the complete installed catalogue attests the audited operand-constraint scope.
 Membership also does not replace successful ordinary prototype checking.
 
@@ -469,8 +544,23 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds the 185 audited SemaX86 constraint facts for the
-183 affected names in the frozen 1,457-name own-main target-builtin scope.
+`c_check_builtin_x86.c` adds the 208 audited SemaX86 constraint facts for the
+206 affected names in the frozen 1,483-name own-main target-builtin scope: 87
+rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 54 direct ranges.
+#126 added the 26 x86 names this compiler's build calls that the first
+inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
+among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
+shuffle, rotate and mask-shift builtins, and `executable_benchmark.c`'s
+`scattersiv16si`), with their 17 ranges and 6 scales, and
+`__builtin_unpredictable` and `__builtin_assume`. `builtin_intrinsic_own_main_prototype_in_scope` also admits
+the generic records no checker module owns whose clang checking is their
+prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
+`__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
+this checker doesn't give); they take the x86 path, which adds no rule for
+them. Neither path folds a call in a constant context, nor takes one as
+`_Generic`'s controlling expression yet (#488), and a direct range's
+violation is an event nothing reports yet (#487).
 The producer attests exact catalogue membership and successful ordinary
 prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain

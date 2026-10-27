@@ -3343,8 +3343,9 @@ static bool abi_test_fixtures(void)
 // members of no size (GCC ignores them where clang makes a wide record or offset 16 MEMORY), misaligned members (GCC
 // checks a member's scalars against their sizes, and no _BitInt, where clang checks each member's alignment), so no
 // packing and no alignment a typedef lowers; and what GCC lays out otherwise: arrays whose element's size isn't a
-// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, _BitInt(128) bit-fields of all 128 bits
-// (GCC aligns them to 16 at an offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
+// multiple of its alignment (GCC refuses them), bit-fields of aligned typedefs, bit-fields aligned below their types'
+// alignment (abi_test_world_record has the rule), _BitInt(128) bit-fields of all 128 bits (GCC aligns them to 16 at an
+// offset 16 divides), abi_test_gcc_enum_differs's enums, and aligned typedefs whose
 // declaration spells a vector: GCC applies a declarator's attributes before the vector_size of its specifiers, so it
 // drops the aligned of `typedef long __attribute__((vector_size(8))) *T __attribute__((aligned(32)))`.
 
@@ -3491,6 +3492,18 @@ static bool abi_test_spells_vector(const TypeTable* table, TypeId type)
     return type_kind(table, walk) == BUSTER_TYPE_KIND_VECTOR;
 }
 
+// A member's alignment, as log2 + 1 (0 for none), in a world of GCC's (`gcc`) or clang's: the one drawn, but none for a
+// bit-field aligned below its type's alignment in GCC's. Clang checks that a bit-field fits its type's storage unit
+// before it aligns the field as its attribute says, and GCC after: a field aligned below its type, which crosses the
+// unit only once aligned, is moved to the next unit by GCC and left across it by clang.
+// `char c; unsigned long f : 45 __attribute__((aligned(4)))` has f at byte 8 in GCC and at byte 4 in clang, and
+// `char c; unsigned f : 20 __attribute__((aligned(2)))` at byte 4 and at byte 2.
+static uint8_t abi_test_member_alignment(bool gcc, const TypeTable* table, TypeId type, uint32_t width, uint8_t alignment_log2)
+{
+    const bool lowered = width != BUSTER_TYPE_NOT_BIT_FIELD && alignment_log2 != 0 && alignment_log2 - 1u < type_alignment_log2(table, type);
+    return gcc && lowered ? 0 : alignment_log2;
+}
+
 // A record of random members, completed: small ones mostly, bit-fields, arrays of small types, earlier records, and
 // now and then a flexible array member and attributes. Returns 0 if the table refused it.
 static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool big)
@@ -3533,11 +3546,13 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
         }
         type = world->gcc && type_size(table, type) == 0 ? BUSTER_TYPE_CHAR : type;
         const bool unnamed = width == 0 || (width != BUSTER_TYPE_NOT_BIT_FIELD && type_test_below(random, 4) == 0 && !world->gcc);
+        const uint8_t alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, 5)) : 0;
+        // GCC's worlds take the same draws, so that other seeds' worlds stay as they were, but not every alignment.
         members[m] = (TypeMember){
             .name = unnamed ? 0 : type_test_new_name(&world->types),
             .type = type,
             .bit_width = width,
-            .alignment_log2 = !unnamed && type_test_below(random, 16) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 5)) : 0,
+            .alignment_log2 = abi_test_member_alignment(world->gcc, table, type, width, alignment_log2),
             .packed = !unnamed && type_test_below(random, 16) == 0 && !world->gcc,
         };
     }
@@ -3552,7 +3567,7 @@ static TypeId abi_test_world_record(AbiTestWorld* world, uint64_t* random, bool 
     const TypeRecordAttributes attributes = {
         .packed = type_test_below(random, 8) == 0 && !world->gcc,
         .pack_log2 = type_test_below(random, 10) == 0 && !world->gcc ? (uint8_t)(1 + type_test_below(random, 4)) : 0,
-        .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, world->compiled ? 4 : 6)) : 0,
+        .alignment_log2 = type_test_below(random, 10) == 0 ? (uint8_t)(1 + type_test_below(random, 6)) : 0,
     };
     const TypeId record = type_tag(table, is_union ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT, type_test_new_name(&world->types));
     TypeId result = 0;
@@ -3802,9 +3817,9 @@ static void abi_test_world_build(AbiTestWorld* world, uint64_t seed, uint32_t co
         }
         else if (pick < 12)
         {
-            // (Aligned to 16 at most in a compiled world, which this compiler's frame objects are.)
+            // (To 64, in a compiled world too: this compiler realigns a frame for objects aligned past 16.)
             const TypeId base = abi_test_world_pick(world, &random, true);
-            const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, world->compiled ? 5 : 7);
+            const uint32_t alignment_log2 = (uint32_t)type_test_below(&random, 7);
             const bool lowered = alignment_log2 <= type_alignment_log2(table, type_strip_aligned(table, base));
             const bool gcc_divergent = lowered || abi_test_spells_vector(table, base);
             abi_test_world_add(world, world->gcc && gcc_divergent ? 0 : type_aligned(table, type_unqualified(base), alignment_log2));
@@ -3926,6 +3941,28 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                 const uint32_t vector_count = abi_classify_all(&vector, table);
                 const uint32_t scalar_count = abi_classify_all_scalar(&scalar, table);
                 abi_test_expect(&tally, vector_count == scalar_count && vector_count != 0, "worlds", "the paths classified different counts");
+                // A table of the world's types alone (#442's lowering, which makes none) classifies them as the whole one does,
+                // and one with fewer rows than the types, or more than the room, is refused with its arena as it was.
+                Arena counted_arena = arena_reserve(abi_capacity_bytes(table->types.count));
+                AbiTable counted;
+                const uint64_t empty = counted_arena.length;
+                const bool refused = !abi_initialize_types(&counted, &counted_arena, table, width, table->types.count - 1) && counted_arena.length == empty &&
+                                     !abi_initialize_types(&counted, &counted_arena, table, width, table->types.capacity + 1) && counted_arena.length == empty;
+                abi_test_expect(&tally, refused, "worlds", "a table of fewer rows than types, or more than the room, was made");
+                const bool counted_made = abi_initialize_types(&counted, &counted_arena, table, width, table->types.count);
+                abi_test_expect(&tally, counted_made && abi_classify_all(&counted, table) == vector_count, "worlds", "the table of the types alone classified another count");
+                for (uint32_t index = 1; counted_made && index < table->types.count; index += 1)
+                {
+                    const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, counted.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
+                                             BUSTER_ABI_ROW_BYTES) == 0 &&
+                                      vector.pass[index] == counted.pass[index] && vector.stack_bytes[index] == counted.stack_bytes[index] &&
+                                      vector.alignment_log2[index] == counted.alignment_log2[index] && vector.storage[index] == counted.storage[index] &&
+                                      vector.layout[index] == counted.layout[index] && memcmp(&vector.results[index], &counted.results[index], sizeof(AbiReturn)) == 0;
+                    // Only a classified type's columns are written; an unclassified one's pass is clear in both.
+                    const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+                    snprintf(detail, sizeof(detail), "type %u: the table of the types alone differs from the whole table's", index);
+                    abi_test_expect(&tally, vector.pass[index] == counted.pass[index] && (!classified || same), "worlds", detail);
+                }
                 for (uint32_t index = 1; index < table->types.count; index += 1)
                 {
                     const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
@@ -4015,6 +4052,21 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     abi_test_expect(&tally, same, "worlds", detail);
                 }
                 free(again);
+                // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
+                // with room for them, and touches nothing past its own rows, while the whole table classifies them.
+                const uint32_t before = table->types.count;
+                TypeId pointer = (TypeId)(before - 1) << BUSTER_TYPE_INDEX_SHIFT;
+                for (uint32_t step = 0; step < 4 && table->types.count < before + 2; step += 1)
+                {
+                    pointer = type_pointer(&world.types.test.table, pointer);
+                }
+                const uint64_t counted_length = counted_arena.length;
+                const bool skipped = counted_made && table->types.count > before && abi_classify_all(&counted, table) == 0 &&
+                                     abi_classify_all_scalar(&counted, table) == 0 && counted_arena.length == counted_length;
+                abi_test_expect(&tally, skipped, "worlds", "the table of the types alone classified a type made after it");
+                abi_test_expect(&tally, abi_classify_all(&vector, table) == table->types.count - before, "worlds",
+                                "the whole table didn't classify the types made after the table of the types alone");
+                arena_release(&counted_arena);
             }
             arena_release(&vector_arena);
             arena_release(&scalar_arena);
@@ -4024,6 +4076,81 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
     free(frames);
     printf("%-34s %10" PRIu64 " offsets compared with the oracle\n", "worlds", compared);
     abi_test_report("worlds", tally);
+    return tally.failures == 0;
+}
+
+// The rule GCC's worlds keep for bit-fields (abi_test_member_alignment), whatever --seed draws. First on fixed fields:
+// `unsigned long : 45` and `unsigned : 20` aligned below their types' (GCC's worlds drop it), at and past them, a member
+// that isn't a bit-field and one without an alignment (both keep theirs). Then on worlds of the cross-check's size from
+// the fixed seeds 1 to BUSTER_ABI_TEST_GCC_SEEDS: GCC's, of the record runs and of the compiled run, must hold no
+// bit-field aligned below its type's, and clang's from the same seeds, which keep them, must hold some (8 do), or the
+// scan would pass whatever GCC's held. No compiler runs: the cross-check's seed may never draw a signature that passes
+// one (#508's seed 14 did), but a GCC world without the rule would hold several.
+#define BUSTER_ABI_TEST_GCC_SEEDS 16
+
+static bool abi_test_gcc_bit_fields(void)
+{
+    AbiTestTally tally = { 0 };
+    char detail[160];
+    AbiTestWorld fixed;
+    if (abi_test_expect(&tally, abi_test_world_open(&fixed, 64), "gcc bit-fields", "the world can't be made"))
+    {
+        const TypeTable* table = &fixed.types.test.table;
+        static const struct
+        {
+            TypeId type;
+            uint32_t width;
+            uint8_t alignment_log2;
+            bool dropped;
+        } fields[] = {
+            { BUSTER_TYPE_ULONG, 45, 3, true },
+            { BUSTER_TYPE_UINT, 20, 2, true },
+            { BUSTER_TYPE_ULONG, 45, 4, false },
+            { BUSTER_TYPE_ULONG, 45, 5, false },
+            { BUSTER_TYPE_UINT, 20, 3, false },
+            { BUSTER_TYPE_ULONG, BUSTER_TYPE_NOT_BIT_FIELD, 2, false },
+            { BUSTER_TYPE_ULONG, 45, 0, false },
+        };
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fields); f += 1)
+        {
+            const uint8_t gcc = abi_test_member_alignment(true, table, fields[f].type, fields[f].width, fields[f].alignment_log2);
+            const uint8_t clang = abi_test_member_alignment(false, table, fields[f].type, fields[f].width, fields[f].alignment_log2);
+            snprintf(detail, sizeof(detail), "field %u (width %u, alignment %u): GCC's worlds give %u, clang's %u", f, fields[f].width, fields[f].alignment_log2, gcc,
+                     clang);
+            abi_test_expect(&tally, gcc == (fields[f].dropped ? 0 : fields[f].alignment_log2) && clang == fields[f].alignment_log2, "gcc bit-fields", detail);
+        }
+        abi_test_world_close(&fixed);
+    }
+    uint64_t members = 0;
+    // Clang's worlds' bit-fields aligned below their types', then GCC's.
+    uint64_t below[2] = { 0, 0 };
+    for (uint32_t round = 0; round < BUSTER_ABI_TEST_GCC_SEEDS * 3; round += 1)
+    {
+        AbiTestWorld world;
+        const uint32_t kind = round % 3;
+        if (abi_test_expect(&tally, abi_test_world_open(&world, 8192), "gcc bit-fields", "the world can't be made"))
+        {
+            world.gcc = kind != 0;
+            world.compiled = kind == 2;
+            abi_test_world_build(&world, 1 + round / 3, 600);
+            const TypeTable* table = &world.types.test.table;
+            for (uint32_t m = 1; m < table->members.count; m += 1)
+            {
+                // A member's alignment is its log2 + 1, and 0 for none.
+                const uint8_t alignment = table->members.alignment_log2[m];
+                const bool bit_field = (table->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                below[kind != 0] += bit_field && alignment != 0 && alignment - 1u < type_alignment_log2(table, table->members.type[m]);
+            }
+            members += table->members.count - 1;
+            abi_test_world_close(&world);
+        }
+    }
+    snprintf(detail, sizeof(detail), "GCC's worlds have %" PRIu64 " bit-fields aligned below their types'", below[1]);
+    abi_test_expect(&tally, below[1] == 0, "gcc bit-fields", detail);
+    abi_test_expect(&tally, below[0] != 0, "gcc bit-fields", "clang's worlds have no bit-field aligned below its type's, so GCC's prove nothing");
+    printf("%-34s %10" PRIu64 " members; bit-fields aligned below their types': %" PRIu64 " of clang's, %" PRIu64 " of GCC's\n", "gcc bit-fields", members,
+           below[0], below[1]);
+    abi_test_report("gcc bit-fields", tally);
     return tally.failures == 0;
 }
 
@@ -4041,9 +4168,14 @@ static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeI
            kind != BUSTER_TYPE_KIND_VOID && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && !half;
 }
 
+// Tier 0's objects' alignment's log2, at most (BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2; tier0_test.c, which main.c includes
+// after tier0.c and this file, checks it).
+#define BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2 30
+
 // Whether this compiler's C passes a type as an argument and a result (a compiled world's cross-check): an integer of up
-// to 64 bits, an enum, a pointer, float and double, aligned to 8 at most, and a long double, a 128-bit integer, a complex
-// float, double or long double, a struct or a union aligned to 16 at most.
+// to 64 bits, an enum, a pointer, float and double, a long double, a 128-bit integer, a complex float, double or long
+// double, a struct or a union, at any alignment the world makes (a value aligned past 8 bytes is an object of its own, and
+// past 16 one in a realigned frame).
 static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
 {
     const uint32_t resolved = abi_resolved_index(table, type);
@@ -4055,7 +4187,7 @@ static bool abi_test_compiled_passes(const TypeTable* table, TypeId type)
                                                               code == BUSTER_TYPE_CODE_COMPLEX + BUSTER_TYPE_CODE_LONG_DOUBLE);
     const bool wide = (kind == BUSTER_TYPE_KIND_FLOATING && code == BUSTER_TYPE_CODE_LONG_DOUBLE) || (kind == BUSTER_TYPE_KIND_INTEGER && table->types.size[resolved] == 16) ||
                       complex || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return (scalar && type_alignment_log2(table, type) <= 3) || (wide && type_alignment_log2(table, type) <= 4);
+    return (scalar || wide) && type_alignment_log2(table, type) <= BUSTER_ABI_TEST_TIER0_MAX_ALIGNMENT_LOG2;
 }
 
 // Random calls: their results (void now and then), counts (mostly small, a few long ones past the registers), named
@@ -5018,11 +5150,13 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         signature->variadic = variadic;
         uint32_t offset = 0;
         // Tier 0 holds a call's arguments at once, on its stacks of 15 integer and 16 floating values (a long double's
-        // value on the integer one, as a 128-bit integer's), and copies its aggregates through each stack's first free
-        // register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or a
-        // function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under them
-        // when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an argument
-        // past 13 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
+        // value on the integer one, as a 128-bit integer's; 14 integer ones in a frame realigned for an object or an
+        // argument aligned past 16 bytes, whose rbp is the table's last), and copies its aggregates through each stack's
+        // first free register (#136); past them it takes values to its frame's deep slots, but not a call's aggregates or
+        // a function's long doubles and 128-bit integers. Our caller's `r = c_callee(...)` may hold r's address under
+        // them when the result is a struct, a union, a long double or a 128-bit integer. So in a compiled world an
+        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit
+        // both).
         uint32_t depths[2] = { 0, 0 };
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -5035,7 +5169,7 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
             type = cross->gcc && variadic && a < named && abi_test_gcc_variadic_differs(cross->abi, type) ? BUSTER_TYPE_LONG : type;
             const TypeId stripped = type_strip_aligned(table, type);
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
-            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 2);
+            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3);
             type = cross->compiled && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : type;
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;
@@ -7098,6 +7232,7 @@ static int run_calling_convention_tests(int argc, char** argv)
         bool passed = abi_test_merge();
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
+        passed = abi_test_gcc_bit_fields() && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
         passed = (!cross_check || abi_test_cross_descriptors()) && passed;
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep)) && passed;

@@ -2934,19 +2934,22 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   in a static executable; a shared library keeps them, with GOT pairs.
   Split-stack PIEs and libraries link and run.
 
-**The cost**, on a 4-core Xeon VM (not the 9700X), against main (7e3782a),
-the two builds' runs alternating: the dynamic runtime's snapshot grew from
-3,145,713 bytes to 3,150,769 (its directory from 278,784 to 283,840: 61 more
-global names, 3,389, the unwinder's and `libgcc_s.so.1`'s names `libgcc.a`
-lacks, and its versions' and exports' columns), with two more probes
-(`libgcc_s.so.1` absent from GCC's installation and found in a library
-directory). `runtime_open` from the snapshot took 26.9 to 30.6 us before and
-28.2 to 31.6 after over four runs each, within the VM's noise; each probe's
-`stat` is about 0.9 us of it. Binding one worker took the same. The C driver
-compiling and linking a hello world, 220 alternating runs each, took a median
-of 9.90 ms before and 9.96 after (p10 9.40 and 9.40), with a peak resident
-set of 28.9 MB and about 1,850 minor faults both ways; its executable is the
-same bytes. The 9700X's run against #483's record is still to be made.
+**The cost**, on the 9700X against #511's merge base (e04462c), with #483's
+harness in three alternating rounds
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)):
+the dynamic runtime's snapshot grew from 3,282,344 bytes to 3,286,696 (45
+more global names, 3,432, and four more probes: `libgcc_s.so.1` in GCC's
+installation and in the library directories). A link that doesn't import
+`libgcc_s.so.1` pays 0.8 us in `runtime_open` (11.7 to 11.9 us before, 12.6
+to 12.7 after), nearly all of it the probes' `stat`s, and 0.02 to 0.04 us in
+`bind_end` (1,919 instructions for one worker: the as-needed pass over a third
+library); `bind_begin`, the write and the direct link's resident memory are
+the same. The C driver's hello world took 0.08 to 0.10 ms and 2 MB more, all
+of it one transparent huge page of `.bss`: the larger code moves `.bss`, and
+`unwind.c`'s `unwind_indices`, which every link clears whole, then straddles
+a 2 MB boundary. With huge pages disabled the two builds' runs take memory
+within 20 KB and, in two rounds of three, time within 0.01 ms. That page follows
+the executable's layout, which any change can move.
 
 `test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
 libraries' and its exports apart from theirs, `__udivti3` a member's of
@@ -3029,13 +3032,19 @@ thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
 status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
 bytes, and without RELR; every access's bytes in the file must be the
 relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
-are compared with lld's links with `--cross-check`, and both run.
-`dynamic_test_tls_refusals` writes what a PIE refuses, by every lane count
-and the exact twins, without an output: the fixture without `__tls_get_addr`
-named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`) and a
-call of `__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`,
-naming it); a local-dynamic access to `errno` binds, and `link_check` refuses
-it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
+are compared with lld's links with `--cross-check`, and both run. A call of
+`__tls_get_addr` that no access makes (one whose fixup doesn't follow a
+`TLSGD` or `TLSLD` fixup, `executable_relaxed_call`'s rule) is an ordinary
+call of the loader's function, through its stub or its GOT slot, as it was
+before the relaxation and as GNU ld and lld link it (#511's review): a
+fixture calls it both ways with the executable's own module and offset,
+beside an access whose call the relaxation consumes (status 120). Only a
+static executable, where nothing defines it, still refuses such a call
+(`EXECUTABLE_ERROR_UNSUPPORTED`). `dynamic_test_tls_refusals` writes what a
+PIE refuses, by every lane count and the exact twins, without an output: the
+fixture without `__tls_get_addr` named (`EXECUTABLE_ERROR_RELOCATION` at its
+first access to `errno`); a local-dynamic access to `errno` binds, and
+`link_check` refuses it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
 call of `__splitstack_getcontext` by both paths into the same bytes, which
 name `libgcc_s.so.1` and run.
 
@@ -3055,7 +3064,10 @@ local-dynamic access with its `DTPOFF32`, on one lane at 2,000 and 180,000
 workers: the count and the symbols' pass about 3 ns each, and the chunks 12 ns
 (16 ns with the `DTPOFF32`). These are the whole writer's deltas between the
 programs, whose fixups' kinds and sections differ, not the relaxation's code
-alone ([the measurement record](https://github.com/buster14a/buster-performance/blob/c5c33148b8d0a891ec7f8eb94faabc748139b3ef/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+alone ([#515's record](https://github.com/buster14a/buster-performance/blob/c5c33148b8d0a891ec7f8eb94faabc748139b3ef/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+`benchmark-executable --only dynamic`, whose programs have no TLS accesses,
+wrote them in the same time before and after, its count within the rounds'
+spread ([#489's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)).
 
 #### The unwind tables
 
@@ -4649,12 +4661,22 @@ calling its entry or starting replacement threads. `lane_alone` does not
 permit nesting. The entry's shared writes are visible when `lane_run` returns;
 each worker releases its scratch arenas after the operation, while the
 calling thread keeps its scratch and gets its prior lane context, counter and
-CPU affinity back. Dispatch/completion synchronization is separate from the
-barriers inside an operation.
+CPU affinity back. A command whose operations follow one another can have its
+workers keep their arenas instead (`lane_team_keep_scratch`), emptied after
+each operation and released when the team stops: `link-foreign` does (#501),
+where it measured 2.5% off its small links on eight lanes and 0.7% off a
+102,400-worker one (each link's 14 reservations and unmappings fewer, and 28
+to 47 page faults), for up to 1.9 MB more peak resident memory ([the
+record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)). The benchmarks'
+teams release them, so that each operation pays for its scratch as a command
+does. Dispatch/completion synchronization is separate from the barriers inside
+an operation.
 
-`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
-output modes of `benchmark-executable` own teams. Each handler starts and
-stops its team in the translation unit that runs the operations: the
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link`, the
+output modes of `benchmark-executable` and `link-foreign` own teams:
+`link-foreign`'s resolution, conversion and write share one (#501). Each
+handler starts and stops its team in the translation unit that runs the
+operations: the
 benchmarks' units have thread-local contexts of their own, beside the one
 that `main.c`'s units share (`lane.c`). The ordinary
 preprocess/parse command still runs on one lane; the broader frontend work is

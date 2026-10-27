@@ -1095,7 +1095,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     const CheckLiteral new_ucn = check_literal_character(basic_ucn, sizeof(basic_ucn) - 1, true, false);
     check_test_expect(test, !old_ucn.valid && new_ucn.valid && new_ucn.integer == 65, "basic-character UCNs are accepted only from C23 onward");
     const uint64_t mark = scratch->length;
-    const CheckLiteral floating = check_literal_number((const uint8_t*)"0x1.000002p100f", sizeof("0x1.000002p100f") - 1, scratch);
+    CheckLiteral floating = { 0 };
+    check_literal_number((const uint8_t*)"0x1.000002p100f", sizeof("0x1.000002p100f") - 1, scratch, &floating);
     check_test_expect(test, floating.valid && floating.type == BUSTER_TYPE_FLOAT && floating.floating == 0x1.000002p100L && scratch->length == mark,
                       "a hexadecimal float literal retains its source-format value and releases scratch");
     // _Float16's f16 suffix, with the values clang 23 gives (each checked there with a _Static_assert): midpoints of
@@ -1125,7 +1126,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)halves[i].spelling, (uint32_t)strlen(halves[i].spelling), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)halves[i].spelling, (uint32_t)strlen(halves[i].spelling), scratch, &half);
         char description[128];
         snprintf(description, sizeof(description), "%s is a _Float16 constant with clang's value", halves[i].spelling);
         check_test_expect(test, half.valid && half.type == BUSTER_TYPE_FLOAT16 && half.floating == halves[i].value && scratch->length == mark, description);
@@ -1138,7 +1140,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(imaginary_halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)imaginary_halves[i], (uint32_t)strlen(imaginary_halves[i]), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)imaginary_halves[i], (uint32_t)strlen(imaginary_halves[i]), scratch, &half);
         check_test_expect(test, half.valid && half.imaginary && half.type == BUSTER_TYPE_COMPLEX(type_index(BUSTER_TYPE_FLOAT16)) && half.floating == 1.5L,
                           "an imaginary f16 literal, with its i before or after the f16");
     }
@@ -1151,10 +1154,12 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_halves); i += 1)
     {
-        const CheckLiteral half = check_literal_number((const uint8_t*)invalid_halves[i], (uint32_t)strlen(invalid_halves[i]), scratch);
+        CheckLiteral half = { 0 };
+        check_literal_number((const uint8_t*)invalid_halves[i], (uint32_t)strlen(invalid_halves[i]), scratch, &half);
         check_test_expect(test, !half.valid && !half.resource, "a suffix that only starts like f16 is invalid, as clang has it");
     }
-    const CheckLiteral hexadecimal = check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch);
+    CheckLiteral hexadecimal = { 0 };
+    check_literal_number((const uint8_t*)"0x1f16", sizeof("0x1f16") - 1, scratch, &hexadecimal);
     check_test_expect(test, hexadecimal.valid && hexadecimal.type == BUSTER_TYPE_INT && hexadecimal.integer == 0x1f16, "a hexadecimal integer ending in f16 is an integer");
 }
 
@@ -1845,6 +1850,9 @@ struct CheckSourceFixture
     uint32_t standard;
     // Whether both sides check it with plain char unsigned (-funsigned-char).
     bool char_unsigned;
+    // An unsupported fixture that clang rejects, as what this can't decide: an error, or valid code whose own error comes
+    // later. Its refusal is no later than clang's first error.
+    bool undecided;
 };
 
 static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, uint32_t token)
@@ -1890,9 +1898,10 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
     for (uint32_t p = 0; p < 2; p += 1)
     {
         ready = ready && parse_initialize(&parsers[p], &parser_options[p], pp_options.language) && check_test_types_open(&types[p]);
-        input_storage[p] = arena_reserve(UINT64_C(1) << 24);
-        output_storage[p] = arena_reserve(UINT64_C(1) << 24);
-        scratch[p] = arena_reserve(UINT64_C(1) << 24);
+        // Room for check_test_initializer_nesting's 300,000 levels; only what a fixture uses is touched.
+        input_storage[p] = arena_reserve(UINT64_C(1) << 28);
+        output_storage[p] = arena_reserve(UINT64_C(1) << 28);
+        scratch[p] = arena_reserve(UINT64_C(1) << 28);
         ready = ready && input_storage[p].base != 0 && output_storage[p].base != 0 && scratch[p].base != 0;
     }
     ready = ready && pp_run_source(&pp, path, (const uint8_t*)fixture->source, (uint32_t)strlen(fixture->source));
@@ -1970,10 +1979,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         char description[320];
         snprintf(description, sizeof(description), "%s: %s expected, %s from %s path, first line %u (clang %u)", fixture->name,
                  fixture->rejected ? "reject" : "accept", rejected[p] ? "reject" : "accept", p == 0 ? "scalar" : "vector", lines[p], clang->line);
-        check_test_expect(test, rejected[p] == fixture->rejected && (!fixture->unsupported || unsupported[p]), description);
+        // A refusal is the fixture's kind: an unsupported construct for an unsupported fixture, and otherwise an error.
+        check_test_expect(test, rejected[p] == fixture->rejected && (!fixture->rejected || fixture->unsupported == unsupported[p]), description);
         if (!fixture->unsupported && !fixture->extension)
         {
             check_test_expect(test, rejected[p] == clang->rejected && (!rejected[p] || lines[p] == clang->line), description);
+        }
+        else if (fixture->undecided)
+        {
+            check_test_expect(test, clang->rejected && lines[p] <= clang->line, description);
         }
     }
     if (ready)
@@ -3039,6 +3053,675 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // #126: the builtins this compiler's own main.c calls, which clang checks as these show.
+        {
+            "atomic read-modify-write builtins and their result types",
+            "typedef unsigned long U64;\nint f(U64* u, int* i, unsigned char* c, _Bool* b, int** p, double* d)\n{\n    _Static_assert(_Generic(__atomic_fetch_add(u, 1, __ATOMIC_RELAXED), U64: 1, default: 0), \"fetch_add\");\n    _Static_assert(_Generic(__atomic_add_fetch(i, 1, __ATOMIC_SEQ_CST), int: 1, default: 0), \"add_fetch\");\n    _Static_assert(_Generic(__atomic_exchange_n(c, 1, __ATOMIC_ACQ_REL), unsigned char: 1, default: 0), \"exchange_n\");\n    _Static_assert(_Generic(__atomic_compare_exchange_n(i, i, 3, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED), _Bool: 1, default: 0), \"cas\");\n    _Static_assert(_Generic(__atomic_fetch_add(p, 4, __ATOMIC_RELAXED), int*: 1, default: 0), \"pointer add\");\n    _Static_assert(_Generic(__atomic_fetch_sub(d, 1, __ATOMIC_RELAXED), double: 1, default: 0), \"fetch_sub double\");\n    _Static_assert(_Generic(__sync_val_compare_and_swap(u, 1, 2), U64: 1, default: 0), \"sync val cas\");\n    _Static_assert(_Generic(__sync_bool_compare_and_swap(u, 1, 2), _Bool: 1, default: 0), \"sync bool cas\");\n    __sync_lock_release(b);\n    (void)__sync_fetch_and_or(u, 1, i, c);\n    (void)__atomic_fetch_nand(u, 1, __ATOMIC_RELAXED);\n    (void)__atomic_xor_fetch(b, 1, __ATOMIC_RELAXED);\n    return __sync_fetch_and_add(i, 1) + __sync_lock_test_and_set(c, 1);\n}\n",
+            false,
+            false
+        },
+        {
+            "atomic min and max",
+            "unsigned f(unsigned* u, int* i, float* x, _Bool* b)\n{\n    _Static_assert(_Generic(__atomic_fetch_min(u, 1, __ATOMIC_RELAXED), unsigned: 1, default: 0), \"fetch_min\");\n    _Static_assert(_Generic(__atomic_max_fetch(x, 1, __ATOMIC_RELAXED), float: 1, default: 0), \"max_fetch\");\n    return __atomic_fetch_max(i, 1, 5) + __atomic_min_fetch(u, 2, 0) + __atomic_fetch_min(b, 1, 5);\n}\n",
+            false,
+            false
+        },
+        {
+            "an atomic min of a pointer refused",
+            "int* f(int** p) { return __atomic_fetch_min(p, 0, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic and of a float refused",
+            "float f(float* p) { return __atomic_fetch_and(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic compare-exchange of a float refused",
+            "_Bool f(float* p, float* e) { return __atomic_compare_exchange_n(p, e, 1, 0, 5, 2); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic exchange of a const object refused",
+            "int f(const int* p) { return __atomic_exchange_n(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic read-modify-write of a _BitInt refused",
+            "unsigned _BitInt(32) f(unsigned _BitInt(32)* p) { return __atomic_fetch_add(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic fetch with an order too few refused",
+            "int f(int* p) { return __atomic_fetch_add(p, 1); }\n",
+            true,
+            false
+        },
+        {
+            "128-bit operands of the overflow builtins",
+            "int f(__int128 a, unsigned __int128 b, long c)\n{\n    __int128 r = 0;\n    unsigned __int128 u = 0;\n    return __builtin_mul_overflow(a, b, &r) + __builtin_add_overflow(c, a, &u) + __builtin_sub_overflow(b, c, &r);\n}\n",
+            false,
+            false
+        },
+        {
+            "the rotates, unpredictable and assume",
+            "unsigned long long f(unsigned char a, unsigned short b, unsigned c, unsigned long long d, long x)\n{\n    __builtin_assume(x > 0);\n    return __builtin_rotateleft8(a, 1) + __builtin_rotateright8(a, 9) + __builtin_rotateleft16(b, 3) + __builtin_rotateright16(b, 3) +\n           __builtin_rotateleft32(c, 7) + __builtin_rotateright32(c, 7) + __builtin_rotateleft64(d, 9) + __builtin_rotateright64(d, 9) +\n           (__builtin_unpredictable(x > 2) ? 1 : 0);\n}\n",
+            false,
+            false
+        },
+        {
+            "a rotate of a struct refused",
+            "struct S { int a; } s;\nunsigned f(void) { return __builtin_rotateleft32(s, 1); }\n",
+            true,
+            false
+        },
+        {
+            "an assumption of a struct refused",
+            "void f(void) { struct S { int a; } s = { 0 }; __builtin_assume(s); }\n",
+            true,
+            false
+        },
+        {
+            "rdtsc, pause and xgetbv",
+            "unsigned long long f(void)\n{\n    __builtin_ia32_pause();\n    return __rdtsc() + __builtin_ia32_xgetbv(0);\n}\n",
+            false,
+            false
+        },
+        {
+            "the build's immediates of the x86 builtins in range",
+            "typedef int I16 __attribute__((vector_size(64)));\ntypedef long long L8 __attribute__((vector_size(64)));\ntypedef long long L4 __attribute__((vector_size(32)));\ntypedef long long L2 __attribute__((vector_size(16)));\ntypedef int I8 __attribute__((vector_size(32)));\ntypedef int I4 __attribute__((vector_size(16)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef char C32 __attribute__((vector_size(32)));\ntypedef short S32 __attribute__((vector_size(64)));\nunsigned long long f(I16 a, L8 q, L4 h, L2 t, I8 e, I4 i, C16 c, C32 w, S32 s, const void* p, void* o)\n{\n    unsigned long long r = __builtin_ia32_ucmpd512_mask(a, a, 7, 0xffff) + __builtin_ia32_ucmpd256_mask(e, e, 0, 0xff) +\n                           __builtin_ia32_ucmpb128_mask(c, c, 4, 0xffff) + __builtin_ia32_ucmpb256_mask(w, w, 4, ~0u) +\n                           __builtin_ia32_ucmpw512_mask(s, s, 6, ~0u) + __builtin_ia32_kshiftlihi(1, 255) + __builtin_ia32_kshiftlidi(1, 0);\n    I16 g = __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 4) + __builtin_ia32_alignd512(a, a, 255) + __builtin_ia32_shuf_i32x4(a, a, 0) +\n            __builtin_ia32_inserti32x4(a, i, 3) + __builtin_ia32_prold512(a, 31);\n    L8 l = __builtin_ia32_gathersiv8di(q, p, e, 0xff, 8) + __builtin_ia32_gatherdiv8di(q, p, q, 0xff, 1) + __builtin_ia32_alignq512(q, q, 7);\n    __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 2);\n    __builtin_ia32_scatterdiv8di(o, 0xff, q, q, 8);\n    __builtin_ia32_scattersiv16si(o, 0xffff, a, a, 4);\n    L4 x = __builtin_ia32_extracti64x4_mask(q, 1, h, 0xff) + __builtin_ia32_insert128i256(h, t, 1);\n    I4 v = __builtin_ia32_vec_set_v4si(i, 5, 3);\n    return r + (unsigned long long)g[0] + (unsigned long long)l[0] + (unsigned long long)x[0] + (unsigned long long)v[0] +\n           (unsigned)__builtin_ia32_vec_ext_v4si(i, 3) + (unsigned char)__builtin_ia32_vec_ext_v16qi(c, 15);\n}\n",
+            false,
+            false
+        },
+        {
+            "a gather's scale refused",
+            "typedef int I16 __attribute__((vector_size(64)));\nI16 f(I16 a, const void* p) { return __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 3); }\n",
+            true,
+            false
+        },
+        {
+            "a scatter's scale refused",
+            "typedef long long L8 __attribute__((vector_size(64)));\ntypedef int I8 __attribute__((vector_size(32)));\nvoid f(L8 q, I8 e, void* o) { __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 16); }\n",
+            true,
+            false
+        },
+        {
+            "unsigned one-bit _BitInt",
+            "unsigned _BitInt(1) a = 1;\n_BitInt(1) unsigned b;\ntypedef unsigned _BitInt(1) B1;\nB1 c;\nint f(void) { unsigned _BitInt(1) d = 1; return d + (int)sizeof d + (int)sizeof(unsigned _BitInt(1)); }\n",
+            false,
+            false
+        },
+        {
+            "signed one-bit _BitInt refused",
+            "int a;\n_BitInt(1) x;\n",
+            true,
+            false
+        },
+        {
+            "a typedef of an unsigned _BitInt keeps it unsigned",
+            "typedef unsigned _BitInt(8) U8;\nU8 x = 255;\n_Static_assert((U8)-1 > 0, \"unsigned\");\ntypedef _BitInt(8) S8;\n_Static_assert((S8)-1 < 0, \"signed\");\nint f(void) { U8 y = 200; return y > 100; }\n",
+            false,
+            false
+        },
+        {
+            "no_builtin on definitions",
+            "__attribute__((no_builtin(\"memset\"))) void f(void) {}\n__attribute__((no_builtin)) void g(void) {}\n__attribute__((no_builtin(\"memset\", \"memcpy\"))) void h(void) {}\n__attribute__((no_builtin(\"not_a_builtin\"))) void k(void) {}\nint x __attribute__((no_builtin(\"memset\")));\n",
+            false,
+            false
+        },
+        {
+            "no_builtin on a declaration refused",
+            "int a;\n__attribute__((no_builtin(\"memset\"))) void f(void);\n",
+            true,
+            false
+        },
+        {
+            "no_builtin with a number refused",
+            "int a;\n__attribute__((no_builtin(1))) void f(void) {}\n",
+            true,
+            false
+        },
+        {
+            "FP_CONTRACT at file scope and a compound's start",
+            "#pragma STDC FP_CONTRACT OFF\ndouble f(double a, double b) {\n#pragma STDC FP_CONTRACT ON\n return a * b + 1; }\n#pragma STDC FP_CONTRACT DEFAULT\ndouble g(double a) { if (a) {\n#pragma STDC FP_CONTRACT OFF\n return a; } return 0; }\n#pragma STDC FP_CONTRACT MAYBE\ndouble x;\n",
+            false,
+            false
+        },
+        {
+            "FP_CONTRACT inside a compound refused",
+            "double f(double a, double b) { double c = a * b;\n#pragma STDC FP_CONTRACT ON\n return c + 1; }\n",
+            true,
+            false
+        },
+        {
+            "loop hints before each kind of loop",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable) interleave(disable)\n for (int i = 0; i < n; i += 1) s += p[i];\n#pragma clang loop unroll(disable)\n while (n--) s += 1;\n#pragma clang loop unroll(full)\n do s += 1; while (s < 9);\n if (n)\n#pragma clang loop vectorize(assume_safety) interleave(assume_safety)\n while (n--) s += 1;\n#pragma clang loop vectorize(disable)\n#pragma clang loop interleave(disable)\n for (;;) break;\n return s; }\n",
+            false,
+            false
+        },
+        {
+            "loop hint counts and widths",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize_width(4) unroll_count(8) interleave_count(2)\n while (n--) s += 1;\n#pragma clang loop vectorize_width(4, scalable) pipeline(disable)\n while (n--) s += 1;\n#pragma clang loop vectorize_width(fixed) vectorize_predicate(enable) distribute(enable) pipeline_initiation_interval(3)\n while (n--) s += 1;\n#pragma clang loop unroll_count(0x10) vectorize_predicate(enable) vectorize(disable)\n while (n--) s += 1;\n#pragma clang loop unroll(disable) vectorize(disable),\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "the unroll pragmas",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n while (n--) s += 1;\n#pragma unroll 4\n while (n--) s += 1;\n#pragma unroll(4)\n while (n--) s += 1;\n#pragma nounroll\n while (n--) s += 1;\n#pragma unroll_and_jam 2\n while (n--) s += 1;\n#pragma nounroll_and_jam\n while (n--) s += 1;\n#pragma GCC unroll 4\n while (n--) s += 1;\n#pragma unroll 0\n while (n--) s += 1;\n#pragma nounroll 4\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "a loop hint before another statement refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable)\n s = 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a block refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable)\n { for (int i = 0; i < n; i += 1) s += p[i]; } return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a labeled loop refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n L: for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint after a do-while refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n do s += 1; while (--n);\n#pragma clang loop unroll(disable)\n return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint before a closing brace refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n}\n",
+            true,
+            false
+        },
+        {
+            "an unroll pragma before another statement refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n s = 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint at file scope refused",
+            "#pragma clang loop vectorize(disable)\nint x;\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's invalid argument refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(maybe)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's invalid option refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorise(enable)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint without an option refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint without parentheses refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize enable\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint left open refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's zero count refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll_count(0)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's count past int refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(2147483648)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's floating count refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop interleave_count(1.5)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable) unroll(enable)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hints across pragmas refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop distribute(enable)\n#pragma clang loop distribute(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "duplicate loop hint counts refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize_width(4, fixed) vectorize_width(8)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll pragma beside a loop hint refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma unroll\n#pragma clang loop unroll(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible loop hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(4)\n for (int i = 0; i < n; i += 1) s += p[i]; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible unroll hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(enable) unroll_count(4)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        // #480's review: GCC unroll is clang's unroll, whose count may be left out; a count clang can't read is an error
+        // (an empty one, an unclosed one, one no expression starts with), not a constant this doesn't evaluate; and the
+        // pragmas clang drops (a count's tokens after nounroll, or after a count's parentheses) are no hint.
+        {
+            "GCC unroll without a count",
+            "int g(int n)\n{\n    int s = 0;\n#pragma GCC unroll\n    for (int i = 0; i < n; i += 1)\n    {\n        s += i;\n    }\n    return s;\n}\n",
+            false,
+            false
+        },
+        {
+            "an unroll count in empty parentheses refused",
+            "int f(int n) { int s = 0;\n#pragma unroll()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a GCC unroll count in empty parentheses refused",
+            "int f(int n) { int s = 0;\n#pragma GCC unroll ( )\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count no expression starts with refused",
+            "int f(int n) { int s = 0;\n#pragma unroll ;\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unclosed unroll_and_jam count refused",
+            "int f(int n) { int s = 0;\n#pragma unroll_and_jam (4\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count's expression unsupported",
+            "int f(int n) { int s = 0;\n#pragma unroll (4 + 4)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "the unroll pragmas clang drops, and one it reads a literal from",
+            "int f(int n) { int s = 0;\n#pragma nounroll 4\n#pragma unroll 4\n while (n--) s += 1;\n#pragma unroll (4) x\n#pragma unroll 8\n while (n--) s += 1;\n#pragma unroll 4)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "an unroll count clang reads a literal from, twice, refused",
+            "int f(int n) { int s = 0;\n#pragma unroll 4)\n#pragma unroll 8\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "GCC unroll beside unroll refused",
+            "int f(int n) { int s = 0;\n#pragma unroll\n#pragma GCC unroll\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        // #480's second review: an empty clang loop count is clang's missing argument, and only an expression's keywords
+        // start a count.
+        {
+            "an empty unroll_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty interleave_count refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop interleave_count()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty vectorize_width refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an empty pipeline_initiation_interval refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop pipeline_initiation_interval()\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count no expression starts with refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(;)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a clang loop count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(return)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a statement keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll return\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of a type keyword refused",
+            "int f(int n) { int s = 0;\n#pragma unroll int\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of typeof refused",
+            "int f(int n) { int s = 0;\n#pragma unroll typeof(1)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an unroll count of sizeof unsupported",
+            "int f(int n) { int s = 0;\n#pragma unroll sizeof(int)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "a clang loop count of an enumerator unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        // clang drops a loop pragma with tokens after its options (or a count's parentheses), with a warning: no hint, so
+        // nothing to place or to check, at file scope too; it ignores what follows the state or the constant expression an
+        // argument starts with, with a warning; licm takes disable and vectorize_predicate assume_safety. Counts this
+        // doesn't evaluate stay unsupported: their errors can precede the statement and its Sema conflicts (#503).
+        {
+            "loop pragmas clang drops, at file scope and before a statement",
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\nint f(int n) { int s = 0;\n"
+            "#pragma clang loop unroll(enable) 4\n#pragma nounroll 4\n#pragma unroll (4) x\n s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "a dropped clang loop pragma's arguments and hints unchecked",
+            "int f(int n) { int s = 0;\n#pragma clang loop unroll_count(0) 4\n#pragma clang loop unroll_count() 4\n"
+            "#pragma clang loop unroll_count(4))\n#pragma clang loop unroll(disable)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "what follows a loop hint's argument ignored",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize(enable x) unroll(enable, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(scalable, 4) interleave_count(4, x)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4, scalable x) unroll_count(4 = 5)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(4 x, scalable)\n while (n--) s += 1;\n"
+            "#pragma clang loop vectorize_width(fixed, 4)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm and vectorize_predicate's assume_safety",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) vectorize_predicate(assume_safety)\n while (n--) s += 1; return s; }\n",
+            false,
+            false
+        },
+        {
+            "licm enabled refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(enable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "licm twice refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop licm(disable) licm(disable)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a vectorize_width count without its kind refused",
+            "int f(int n) { int s = 0;\n#pragma clang loop vectorize_width(4, x)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "an enumerator count beside unroll(full) unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) unroll(full)\n while (n--) s += 1; return s; }\n",
+            true,
+            true,
+            .undecided = true
+        },
+        {
+            "an enumerator width beside vectorize(disable) unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop vectorize(disable) vectorize_width(N)\n while (n--) s += 1; return s; }\n",
+            true,
+            true,
+            .undecided = true
+        },
+        {
+            "an enumerator count before an invalid state refused",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N) vectorize(bogus)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        // In a body, clang checks a count before it places the hint: an error at the count's pragma when it is invalid, and
+        // at the statement only when it is valid (#480's fourth review).
+        {
+            "a misplaced enumerator count unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll_count(N)\n s += 1; return s; }\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a misplaced count of a variable unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n    n++;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a misplaced unroll count of a variable unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma unroll N\n    n++;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator unroll count after unroll(enable) unsupported",
+            "enum { N = 4 };\nint f(int n) { int s = 0;\n#pragma clang loop unroll(enable)\n#pragma unroll N\n while (n--) s += 1; return s; }\n",
+            true,
+            true,
+            .undecided = true
+        },
+        // #480's third and fourth reviews: before one loop, a later pragma's error is clang's first only when an earlier
+        // count is valid, and the earlier count's when it isn't (a variable, a division by zero, an enumerator of 0). A
+        // count this doesn't evaluate leaves the loop's pragmas unsupported.
+        {
+            "an enumerator count before unroll(full)'s pragma unsupported",
+            "enum { N = 4 };\nint f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator width before vectorize(disable)'s pragma unsupported",
+            "enum { N = 4 };\nint f(int n) {\n#pragma clang loop vectorize_width(N)\n#pragma clang loop vectorize(disable)\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator unroll count before another unsupported",
+            "enum { N = 4 };\nint f(int n) {\n#pragma unroll N\n#pragma GCC diagnostic push\n#pragma unroll 4\n    while (n--) {}\n    return n;\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a variable's count before unroll(full)'s pragma unsupported",
+            "int N = 4;\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "a count divided by zero before unroll(full)'s pragma unsupported",
+            "void f(int n) {\n#pragma clang loop unroll_count(4 / 0)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator count of 0 before unroll(full)'s pragma unsupported",
+            "enum { N = 0 };\nvoid f(int n) {\n#pragma clang loop unroll_count(N)\n#pragma clang loop unroll(full)\n    while (n--) {}\n}\n",
+            true,
+            true,
+            false,
+            0,
+            false,
+            true
+        },
+        {
+            "an enumerator unroll count at file scope refused",
+            "enum { N = 4 };\n#pragma unroll N\nint x;\n",
+            true,
+            false
+        },
+        // An inferred array's elements of struct type from subscripts, members and indirections, and compound literals in
+        // a block-scope static's initializer, as this compiler's own main.c has them.
+        {
+            "struct-valued elements of an inferred array",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(const S8* x, struct W w, struct W** q)\n{\n    const S8 a[] = { x[1], x[2] };\n    _Static_assert(sizeof a == 2 * sizeof(S8), \"two\");\n    S8 b[] = { x[0], { \"c\", 1 }, x[1] };\n    _Static_assert(sizeof b == 3 * sizeof(S8), \"three\");\n    S8 c[] = { *x, (*x), w.s, w.t[1], q[0]->s, (*q)->t[0] };\n    _Static_assert(sizeof c == 6 * sizeof(S8), \"six\");\n    unsigned long d[] = { x[1].length, w.t[0].length, q[1]->s.length };\n    _Static_assert(sizeof d == 3 * sizeof(unsigned long), \"three scalars\");\n    return (int)(a[1].length + b[2].length + c[5].length + d[2]);\n}\n",
+            false,
+            false
+        },
+        // #495's review: a subscript's pointer as either operand, and chains of steps around 16, the walk's old limit.
+        {
+            "reversed subscripts in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct W { S s; S t[2]; };\nint f(S* p, int i, struct W* w, S** q)\n{\n    S a[] = { 0[p], 1[p] };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"two\");\n    S b[] = { p[0], i[p], 1[w->t], 0[q][1], 1[0[q]], (i[q])[i] };\n    _Static_assert(sizeof b == 6 * sizeof(S), \"six\");\n    int c[] = { 0[p].a, i[p].b, (1[w->t]).a };\n    _Static_assert(sizeof c == 3 * sizeof(int), \"three scalars\");\n    return a[1].b + b[5].a + c[2];\n}\n",
+            false,
+            false
+        },
+        {
+            "chains of 15, 16 and 17 steps in an inferred array",
+            "typedef struct { int a, b; } S;\nstruct C { S s[2]; struct C* next; };\nint f(S*************** p, S**************** q, S***************** r, struct C* x)\n{\n    S a[] = { ***************p, ***************p };\n    _Static_assert(sizeof a == 2 * sizeof(S), \"15\");\n    S b[] = { ****************q, ****************q };\n    _Static_assert(sizeof b == 2 * sizeof(S), \"16\");\n    S c[] = { *****************r, *****************r };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"17\");\n    S d[] = { x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[1],\n              x->next->next->next->next->next->next->next->next->next->next->next->next->next->next->next->s[0], x->s[1] };\n    _Static_assert(sizeof d == 3 * sizeof(S), \"16 and 17 members and subscripts\");\n    return a[1].a + b[1].a + c[1].a + d[2].b;\n}\n",
+            false,
+            false
+        },
+        {
+            "compound literals in static initializers",
+            "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
+            false,
+            false
+        },
+        {
+            "a compound literal of a parameter in a static's initializer refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(int n)\n{\n    static const S8 g[] = { (S8){ \"a\", n } };\n    return (int)sizeof g;\n}\n",
+            true,
+            false
+        },
+        {
+            "an automatic compound literal's address in a static's initializer refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(void)\n{\n    static const S8* g = &(S8){ \"a\", 1 };\n    return g != 0;\n}\n",
+            true,
+            false
+        },
+        {
+            "a struct where an inferred array's member goes refused",
+            "typedef struct { char* pointer; unsigned long length; } S8;\nstruct W { S8 s; S8 t[2]; };\nint f(const S8* x)\n{\n    S8 a[] = { x->pointer, x[1] };\n    return (int)sizeof a;\n}\n",
+            true,
+            false
+        },
+        {
+            "incompatible loop hints across pragmas refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll(disable)\n#pragma clang loop unroll_count(4)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "incompatible pipeline hints refused",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop pipeline(disable) pipeline_initiation_interval(3)\n while (n--) s += 1; return s; }\n",
+            true,
+            false
+        },
+        {
+            "a loop hint's constant expression unsupported",
+            "int f(int* p, int n) { int s = 0;\n#pragma clang loop unroll_count(4 + 4)\n while (n--) s += 1; return s; }\n",
+            true,
+            true
+        },
+        {
+            "an inferred array of compound literals, calls and conditionals",
+            "struct L { unsigned i; unsigned t; };\nstruct L g(int);\nunsigned f(int s, unsigned a, struct L x) {\n const struct L r[] = { s ? (struct L){ 0, a } : x, (struct L){ .i = 1, .t = a }, g(s), (x), s ? x : (struct L){ 4, a }, { 2, 3 } };\n _Static_assert(sizeof r == 6 * sizeof(struct L), \"six elements\");\n return r[0].t; }\n",
+            false,
+            false
+        },
+        {
+            "an inferred array with braces elided",
+            "struct L { unsigned i; unsigned t; };\nunsigned f(unsigned a) {\n const struct L r[] = { a, a + 1, 2, 3 };\n _Static_assert(sizeof r == 2 * sizeof(struct L), \"two elements\");\n return r[1].t; }\n",
+            false,
+            false
+        },
         // Plain char unsigned (-funsigned-char): its conversions, promotions, division and shifts, character constants,
         // _Generic (char stays a type of its own), a mode attribute's base, and C23's char-based enum, and the assertions
         // that hold only where it is signed, refused.
@@ -3177,7 +3860,7 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
     for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
     {
         const CheckSourceFixture* fixture = i < BUSTER_ARRAY_LENGTH(fixtures) ? &fixtures[i] : &random_fixtures[i - BUSTER_ARRAY_LENGTH(fixtures)];
-        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && !fixture->unsupported && !fixture->extension), "source fixture expectation differs from clang");
+        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && (!fixture->unsupported || fixture->undecided) && !fixture->extension), "source fixture expectation differs from clang");
         check_test_source(test, fixture, paths[i], &outcomes[i]);
     }
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
@@ -3186,6 +3869,103 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         unlink(paths[i]);
     }
     if (directory[0] != 0)
+    {
+        rmdir(directory);
+    }
+}
+
+// #480's fifth review: an inferred array's struct element in d parentheses, or after d ?:'s, has its type read from the
+// tree's links in one pass, not from a scan of what's left at each level. Against clang at depths it parses (its
+// brackets stop at 256), then alone, timed: 60,000 parentheses and 40,000 ?:'s must check within 20 times what a tenth
+// of them takes, plus 0.2 s, as linear work does. The scans took 0.62 s for 30,000 parentheses on the laptop and 1.16 s
+// for 30,000 ?:'s, 9 times as long as for 10,000, which a tenth's 20 times doesn't allow.
+static bool check_test_nesting_source(Arena* text, uint32_t form, uint32_t depth, const char* path)
+{
+    const char literal[] = "(struct S){ .x = 1 }";
+    const uint64_t capacity = (uint64_t)depth * 8 + 512;
+    char* source = BUSTER_ARENA_PUSH_ARRAY(text, char, capacity);
+    uint64_t length = 0;
+    if (source != 0)
+    {
+        length += (uint64_t)snprintf(source, capacity, "struct S { int x; int y; };\nvoid f(struct S s) {\n    struct S a[] = { ");
+        for (uint32_t level = 0; level < depth; level += 1)
+        {
+            memcpy(source + length, form == 0 ? "(" : "0 ? s : ", form == 0 ? 1 : 8);
+            length += form == 0 ? 1 : 8;
+        }
+        memcpy(source + length, literal, sizeof(literal) - 1);
+        length += sizeof(literal) - 1;
+        for (uint32_t level = 0; form == 0 && level < depth; level += 1)
+        {
+            source[length++] = ')';
+        }
+        length += (uint64_t)snprintf(source + length, capacity - length, ", %s };\n    _Static_assert(sizeof a == 2 * sizeof(struct S), \"two elements\");\n}\n", literal);
+    }
+    const bool valid = source != 0 && length < capacity && parse_test_write(path, source, length);
+    return valid;
+}
+
+static __attribute__((noinline)) void check_test_initializer_nesting(CheckTest* test, const char* clang)
+{
+    static const uint32_t compared[] = {
+        64,
+        200,
+    };
+    static const uint32_t timed[] = {
+        60000,
+        40000,
+    };
+    char directory[] = "/tmp/buster-checker-nesting-XXXXXX";
+    const bool created = mkdtemp(directory) != 0;
+    check_test_expect(test, created, "initializer nesting fixtures' directory");
+    for (uint32_t form = 0; created && form < 2; form += 1)
+    {
+        const char* name = form == 0 ? "a struct element in nested parentheses" : "a struct element after nested ?:'s";
+        const char* levels = form == 0 ? "parentheses" : "?:'s";
+        // Depths clang parses, against its answer, and then a tenth of the timed depth and the timed depth itself.
+        double seconds[2] = { 0 };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compared) + 2; c += 1)
+        {
+            const bool timing = c >= BUSTER_ARRAY_LENGTH(compared);
+            const uint32_t depth = !timing ? compared[c] : c == BUSTER_ARRAY_LENGTH(compared) ? timed[form] / 10 : timed[form];
+            char path[96];
+            snprintf(path, sizeof(path), "%s/%u.c", directory, form * 8 + c);
+            char* paths[] = {
+                path,
+            };
+            const char* arguments[] = {
+                "-std=gnu17",
+            };
+            Arena text = arena_reserve((uint64_t)depth * 8 + 4096);
+            ParseTestClang outcome = { 0 };
+            bool ready = check_test_nesting_source(&text, form, depth, path);
+            ready = ready && (timing || parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome));
+            char description[200];
+            snprintf(description, sizeof(description), "%u %s around an inferred array's struct element: %s", depth, levels,
+                     timing ? "the fixture is written" : "clang accepts it");
+            check_test_expect(test, ready && !outcome.rejected, description);
+            if (ready)
+            {
+                const CheckSourceFixture fixture = {
+                    .name = name,
+                    .source = (const char*)text.base,
+                };
+                struct timespec start;
+                struct timespec stop;
+                clock_gettime(CLOCK_MONOTONIC, &start);
+                check_test_source(test, &fixture, path, &outcome);
+                clock_gettime(CLOCK_MONOTONIC, &stop);
+                seconds[timing ? c - BUSTER_ARRAY_LENGTH(compared) : 0] = timing ? (double)(stop.tv_sec - start.tv_sec) + (double)(stop.tv_nsec - start.tv_nsec) * 1e-9 : 0;
+            }
+            unlink(path);
+            arena_release(&text);
+        }
+        char description[200];
+        snprintf(description, sizeof(description), "%u %s checked in %.3f s, within 20 times %u's %.3f s and 0.2 s", timed[form], levels, seconds[1],
+                 timed[form] / 10, seconds[0]);
+        check_test_expect(test, seconds[1] < 20.0 * seconds[0] + 0.2, description);
+    }
+    if (created)
     {
         rmdir(directory);
     }
@@ -3339,9 +4119,64 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_program_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
+#include "c_check_input_scan_test.c"
+
+// The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
+// builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
+// that take a record and that don't, at random places.
+static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* test)
+{
+    static const uint16_t recorded[] = {
+        CBUILTIN_HUGE_VAL,
+        CBUILTIN_FLT_ROUNDS,
+        CBUILTIN_CONSTANT_P,
+        CBUILTIN_OBJECT_SIZE,
+        CBUILTIN_ATOMIC_LOAD_N,
+        CBUILTIN_ATOMIC_FETCH_ADD,
+        CBUILTIN_ATOMIC_MAX_FETCH,
+        CBUILTIN_SYNC_LOCK_RELEASE,
+        CBUILTIN_SHUFFLEVECTOR,
+    };
+    static const uint16_t unrecorded[] = {
+        CBUILTIN_BSWAP16,
+        CBUILTIN_ADD_OVERFLOW,
+        CBUILTIN_UMULL_OVERFLOW,
+        CBUILTIN_EXPECT,
+        CBUILTIN_MEMCPY,
+        CBUILTIN_BIT_CAST,
+        CBUILTIN_ELEMENTWISE_ABS,
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "guarded builtin column allocation");
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint16_t* builtins = (uint16_t*)(mapping + page) - count;
+        uint32_t expected = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t draw = check_test_random(test) % 16;
+            const uint32_t pick = check_test_random(test);
+            builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
+            expected += draw < 2;
+        }
+        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
+        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
+        char description[160];
+        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
+                 vector, scalar, expected);
+        check_test_expect(test, vector == expected && scalar == expected, description);
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page);
+    }
+}
 
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
+static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
 
@@ -3402,6 +4237,7 @@ static int run_checker_tests(int argc, char** argv)
             arena_release(&output);
             arena_release(&storage);
             check_test_sources(&test, clang);
+            check_test_initializer_nesting(&test, clang);
             check_test_source_extensions(&test, clang);
             check_test_overloads(&test, clang);
             check_test_overload_sources(&test, clang);
@@ -3414,6 +4250,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_target_options(&test);
             check_test_bindings(&test);
             check_test_builtin_graph(&test, &types.table, clang);
+            check_test_builtin_capacity(&test);
+            check_test_input_scans(&test);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_builtin_vector_graph(&test, &types.table, clang);
@@ -3447,6 +4285,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_mutations(&test, clang);
             check_test_source_benchmark(&test);
             check_test_lowering_source_benchmark(&test);
+            check_test_backend_source_benchmark(&test);
             check_test_corpus_symbol_reasons(&test, clang);
         }
         check_test_types_close(&types);
