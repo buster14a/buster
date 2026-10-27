@@ -632,6 +632,20 @@ back all its output on failure and validates the completed Link on success.
 Tests pass these atoms through the production ELF writer and independently
 compare bytes, symbol targets and relocation addends with Clang's object files.
 
+Materialized payloads are constructed directly in an unpublished suffix of
+`bytes`, with no second payload copy when atoms are published. A zero-fill
+candidate releases its suffix; a failed batch restores the original length
+before returning. When the byte arena cannot fit a candidate, temporary scratch
+storage permits its zero-fill classification and exact capacity demand to
+complete; a nonzero payload in that storage can never be published. Scratch
+otherwise holds metadata proportional to objects and initializer references,
+not a second image of every payload. Live input prefixes in either arena remain
+valid throughout planning. Literal pools, non-TLS readonly objects and objects
+with live relocations already determine their section without scanning bytes.
+Other materialized objects use an early-exit 64-byte zero test with bounded
+masked tails. Avoiding materialization of explicit-zero aggregates is separate
+work in [#596](https://github.com/buster14a/buster/issues/596).
+
 ## Backend handoff
 
 `c_check_program.c` consumes the typed stream, source control records, asm

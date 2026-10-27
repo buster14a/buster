@@ -17,16 +17,18 @@
 //
 // bytes and scratch are distinct, disjoint caller-owned arenas. Their newly allocated suffixes must not overlap
 // inputs or Link tables; live input prefixes in either stable-address arena are permitted.
-// The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds object bytes, sorted
-// final relocations and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
-// capacity checks precede publication. A failed call leaves Link (including its error), symbols and byte length
+// The byte arena owns published atom bytes and must outlive Link consumers. Plans build directly in its unpublished
+// suffix; scratch holds sorted final relocations and a symbol bitset. If a candidate does not fit the byte arena,
+// scratch supplies temporary bytes so classification and exact capacity demand still complete. Such a payload is
+// never published. Zero-fill candidates release their byte suffix. All type, constant, symbol, duplicate, binding and
+// capacity checks precede Link publication. A failed call leaves Link (including its error), symbols and byte length
 // unchanged. Empty batches accept null input arrays. Records may be partitioned into batches only when local
 // forward-reference definitions remain in the same batch or were published earlier.
 //
 // The batch boundary preserves independent object work and avoids reparsing, interning or name lookup. Planning
 // encodes each subobject once, applies source-order replacements and counts final output; publication uses existing
-// Link adds. This consumer has no measured SIMD or multicore throughput claim; target-host measurement of the
-// source producer, plan and object-writer consumer remains required before choosing a vector specialization.
+// Link adds without another payload copy. Only writable/TLS objects without live relocations need a zero scan;
+// that scan stops at the first nonzero block and uses masked tails within the logical input.
 #ifndef BUSTER_C_CHECK_DATA_INCLUDED
 #define BUSTER_C_CHECK_DATA_INCLUDED
 
@@ -85,7 +87,6 @@ struct CheckDataScalar
     int64_t addend;
     uint8_t size;
     uint8_t alignment_log2;
-    uint8_t class;
 };
 
 typedef struct CheckDataFixup CheckDataFixup;
@@ -131,18 +132,15 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     bool floating = false;
     bool complex = false;
     bool pointer = false;
-    bool readonly = false;
     if (status == CHECK_DATA_OK)
     {
         const TypeId stripped = type_strip_aligned(types, object->type);
         base = type_unqualified(stripped);
-        const uint32_t qualifiers = type_qualifiers(stripped);
         const uint8_t kind = type_kind(types, base);
         integer = check_action_integer_type(types, base, &width, &is_signed);
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        readonly = (qualifiers & BUSTER_TYPE_CONST) != 0;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
         const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
@@ -309,17 +307,37 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
             }
         }
     }
-    if (status == CHECK_DATA_OK)
-    {
-        uint8_t nonzero = 0;
-        for (uint32_t byte = 0; byte < plan->size; byte += 1)
-        {
-            nonzero |= plan->bytes[byte];
-        }
-        plan->class = readonly ? (plan->object != 0 ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_RODATA) :
-                      (nonzero != 0 || plan->object != 0 ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS);
-    }
     return status;
+}
+
+static bool check_data_nonzero(const uint8_t* bytes, uint64_t size)
+{
+    bool nonzero = false;
+    uint64_t byte = 0;
+    for (; !nonzero && size - byte >= 64; byte += 64)
+    {
+        const __m512i block = _mm512_loadu_si512(bytes + byte);
+        nonzero = _mm512_test_epi64_mask(block, block) != 0;
+    }
+    if (!nonzero && byte != size)
+    {
+        const __mmask64 mask = (UINT64_C(1) << (size - byte)) - 1;
+        const __m512i tail = _mm512_maskz_loadu_epi8(mask, bytes + byte);
+        nonzero = _mm512_test_epi64_mask(tail, tail) != 0;
+    }
+    return nonzero;
+}
+
+static uint8_t* check_data_payload(Arena* bytes, Arena* scratch, uint64_t size)
+{
+    uint8_t* storage = arena_push(bytes, size, 1);
+    if (storage == 0)
+    {
+        // A writable candidate may still be BSS. Otherwise the final byte-count preflight rejects this batch,
+        // after validation has retained the same exact demand and diagnostics as a sufficiently large arena.
+        storage = arena_push(scratch, size, 1);
+    }
+    return storage;
 }
 
 static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
@@ -356,9 +374,10 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
 
 static CheckDataStatus check_data_plan_object(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
                                              const SymbolId* object_symbols, uint32_t object_count, const Link* link,
-                                             Arena* scratch, CheckDataPlan* plan)
+                                             Arena* bytes, Arena* scratch, CheckDataPlan* plan)
 {
     *plan = (CheckDataPlan){ 0 };
+    const uint64_t byte_start = bytes->length;
     CheckDataStatus status = CHECK_DATA_OK;
     if (!type_is_valid(types, object->type) || !type_is_complete(types, object->type))
     {
@@ -430,7 +449,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
             status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
             plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
-            plan->bytes = arena_push(scratch, plan->size, 1);
+            plan->bytes = check_data_payload(bytes, scratch, plan->size);
             if ((live_count != 0 && plan->fixups == 0) || (plan->size != 0 && plan->bytes == 0))
             {
                 status = CHECK_DATA_RESOURCE;
@@ -451,7 +470,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         }
         else if (plan->size != 0)
         {
-            plan->bytes = arena_push(scratch, plan->size, 1);
+            plan->bytes = check_data_payload(bytes, scratch, plan->size);
             if (plan->bytes == 0)
             {
                 status = CHECK_DATA_RESOURCE;
@@ -468,7 +487,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         status = check_data_plan_scalar(types, stream, object, object_symbols, object_count, link, &scalar);
         if (status == CHECK_DATA_OK)
         {
-            plan->bytes = arena_push(scratch, plan->size, 1);
+            plan->bytes = check_data_payload(bytes, scratch, plan->size);
             if (plan->bytes == 0)
             {
                 status = CHECK_DATA_RESOURCE;
@@ -622,20 +641,37 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     }
     if (status == CHECK_DATA_OK)
     {
-        uint8_t nonzero = 0;
-        for (uint64_t byte = 0; plan->bytes != 0 && byte < plan->size; byte += 1)
-        {
-            nonzero |= plan->bytes[byte];
-        }
-        const bool initialized = nonzero != 0 || plan->fixup_count != 0;
         const bool tls = (link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_TLS;
         const bool readonly = (type_qualifiers(base) & BUSTER_TYPE_CONST) != 0;
+        const bool scan = !object->string_pool && (tls || !readonly) && plan->fixup_count == 0 && plan->bytes != 0;
+        const bool initialized = plan->fixup_count != 0 || (scan && check_data_nonzero(plan->bytes, plan->size));
         plan->class = tls ? (initialized ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_TBSS) :
                       readonly ? (plan->fixup_count != 0 ? BUSTER_LINK_CLASS_DATA_RELRO : BUSTER_LINK_CLASS_RODATA) :
                       initialized ? BUSTER_LINK_CLASS_DATA : BUSTER_LINK_CLASS_BSS;
         if (object->string_pool)
         {
             plan->class = type_size(types, type_element(types, base)) == 1 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;
+        }
+        if (link_class_is_zero_fill(plan->class))
+        {
+            arena_pop_to(bytes, byte_start);
+            plan->bytes = 0;
+        }
+        else if (plan->bytes == 0 && plan->size != 0)
+        {
+            plan->bytes = check_data_payload(bytes, scratch, plan->size);
+            if (plan->bytes == 0)
+            {
+                status = CHECK_DATA_RESOURCE;
+            }
+            else
+            {
+                memset(plan->bytes, 0, plan->size);
+            }
+        }
+        if (plan->size == 0)
+        {
+            plan->bytes = 0;
         }
     }
     return status;
@@ -652,6 +688,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
     const uint64_t byte_start = bytes != 0 ? bytes->length : 0;
     if (types == 0 || link == 0 || bytes == 0 || scratch == 0 || bytes == scratch || count > (1u << 30) ||
+        (bytes != 0 && bytes->length > bytes->capacity) || (scratch != 0 && scratch->length > scratch->capacity) ||
         (count != 0 && (objects == 0 || object_symbols == 0)) ||
         link->error != LINK_ERROR_NONE || link->atoms.count == 0 || link->symbols.count == 0 || link->fixups.count == 0 || link->fixups.wide_count == 0 ||
         link->atoms.count > link->atoms.capacity || link->symbols.count > link->symbols.capacity ||
@@ -685,7 +722,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     for (uint32_t i = 0; result->status == CHECK_DATA_OK && i < count; i += 1)
     {
         CheckDataPlan* plan = &plans[i];
-        result->status = check_data_plan_object(types, stream, &objects[i], object_symbols, object_count, link, scratch, plan);
+        result->status = check_data_plan_object(types, stream, &objects[i], object_symbols, object_count, link, bytes, scratch, plan);
         if (result->status == CHECK_DATA_OK)
         {
             const uint64_t bit = UINT64_C(1) << (plan->symbol % 64);
@@ -744,16 +781,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
         result->wide_addend_count = wide_count;
         result->byte_count = byte_count;
         if (count > link->atoms.capacity - link->atoms.count || fixup_count > link->fixups.capacity - link->fixups.count ||
-            wide_count > link->fixups.wide_capacity - link->fixups.wide_count)
-        {
-            result->status = CHECK_DATA_RESOURCE;
-        }
-    }
-    uint8_t* storage = 0;
-    if (result->status == CHECK_DATA_OK && byte_count != 0)
-    {
-        storage = arena_push(bytes, byte_count, 1);
-        if (storage == 0)
+            wide_count > link->fixups.wide_capacity - link->fixups.wide_count || byte_count > bytes->capacity - byte_start)
         {
             result->status = CHECK_DATA_RESOURCE;
         }
@@ -762,26 +790,12 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
     // Publishing in record order preserves atom order, each atom's contiguous fixups and source identities.
     if (result->status == CHECK_DATA_OK && count != 0)
     {
+        assert(bytes->length - byte_start == byte_count);
         result->atom_begin = link->atoms.count;
-        uint64_t offset = 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckDataPlan* plan = &plans[i];
-            uint8_t* atom_bytes = 0;
-            if (!link_class_is_zero_fill(plan->class) && plan->size != 0)
-            {
-                atom_bytes = storage + offset;
-                if (plan->bytes != 0)
-                {
-                    memcpy(atom_bytes, plan->bytes, plan->size);
-                }
-                else
-                {
-                    memset(atom_bytes, 0, plan->size);
-                }
-                offset += plan->size;
-            }
-            const AtomId atom = link_add_atom(link, plan->class, plan->alignment_log2, plan->size, atom_bytes, unit);
+            const AtomId atom = link_add_atom(link, plan->class, plan->alignment_log2, plan->size, plan->bytes, unit);
             const bool defined = link_define_symbol(link, plan->symbol, atom, 0, plan->size);
             assert(atom != 0 && defined);
             link->symbols.source[plan->symbol] = BUSTER_LINK_SOURCE_PROGRAM;
