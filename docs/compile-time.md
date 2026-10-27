@@ -412,6 +412,86 @@ the merge (55.2 to 40.2 ns in the first measurement).
 - **The program pass.** Most of what remains of it is the bodies' builds and
   their reference walks, one statement at a time.
 
+## The passes after checking (#592)
+
+**Measured against `main` on the 9700X.** Medians of 15 interleaved
+`--time-stages` runs of each build, pinned to CPU 2, the order rotating by
+round: `main` at `8ab9a208` and #592's head (`d4be6a47`), both built as the
+9700X job builds (`BUSTER_DEBUG_INFO=0`). Each build's object is the same bytes,
+by both paths.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/c5bd1be7700cb65d9b2f68df244579cd1cd06646/docs/measurements/sparse-passes-592-2026-10-27)
+holds every run, the scripts and the builds' identities; perf stat's counters
+are 12 runs of each build, in turn.
+
+| | `main` | head | change |
+| --- | ---: | ---: | ---: |
+| `check-declarations` | 5.350 ms | 2.895 ms | -45.9% |
+| `static-data` | 1.522 ms | 0.446 ms | -70.7% |
+| `select` | 1.390 ms | 0.881 ms | -36.6% |
+| `emit-setup` | 1.426 ms | 1.240 ms | -13.0% |
+| the four | 9.688 ms | 5.462 ms | -43.6% |
+| the clock's span | 146.656 ms | 142.028 ms | -3.2% |
+| user instructions (perf stat) | 1,556.0 M | 1,452.8 M | -6.6% |
+| user cycles (perf stat) | 692.5 M | 667.9 M | -3.6% |
+
+- **Ranges.** No stage's ranges overlap: `check-declarations` 5.19 to 5.59 ms
+  against 2.81 to 3.01, `static-data` 1.46 to 1.55 against 0.43 to 0.46,
+  `select` 1.32 to 1.44 against 0.85 to 1.00, `emit-setup` 1.40 to 1.48 against
+  1.21 to 1.28, and the span 145.9 to 147.2 ms against 141.3 to 143.1.
+- **Counters.** The instructions are the same in every round of each build
+  (1,555.99 M against 1,452.81 M); the cycles' rounds run 690.5 to 695.6 M
+  against 665.2 to 670.2 M.
+
+**What they did.** Each went over every token of the unit (716,380 in the
+frozen `sqlite3.c`), or cleared token-sized columns, for entries a few
+thousand tokens have.
+
+**What changed.** Each stage finds its entries with the reader's AVX-512 scans
+(`check_input_scan_*`, 8, 16 or 64 tokens at a time; the scalar path takes
+every token) and visits only them:
+- **The diagnostics' report** (`check_driver_reports`). It filled a 16-bit
+  column of every token's warnings and a 64-bit one of its first report, then
+  walked every token. It now gathers the warnings as keys of their token and
+  flags, from the tokens with attributes, the constants' warnings, the nodes'
+  warnings and the excess elements, and the reports as keys of their token and
+  order; sorts both by token (`c_bindings_sort`); and walks only the tokens
+  with a pragma, a warning, a packed member's address or a report, with the
+  cursors a walk of every token keeps, which a test keeps as its oracle.
+- **The initializers** (`check_initializers_run`). One list of the
+  declarations with initializers (`check_init_declarations`) serves its
+  checks, the constant objects' table and its plans, in place of three passes
+  over every token; the excess elements' tokens are put in order only where
+  there are any.
+- **The static data** (`check_data_prepare`). It finds the static
+  declarations as keys of their object and token, sorted by object, and works
+  out each object's last declaration, definition and alignment per object, in
+  place of three token-sized columns and two passes over every object id. Its
+  result keeps the keys and the static objects with their last declarations
+  (`check_data_latest`), not a token-sized column of them.
+- **The selection** (`check_program_select_mode`). The body that holds a label,
+  a block-scope static or a builtin is found by a search of the bodies'
+  openings (`check_program_token_body`), rather than read from a column filled
+  over every body's tokens; the roots and inline rules come from the data's
+  static declarations, per static object, rather than from every declaring
+  token into two object-sized columns.
+- **The emission's setup.** `check_program_object_access` finds the defining
+  tokens in the `defined` and `tentative` bytes, rather than reading four
+  columns at every declaring token; the attributes' passes visit only the
+  declaring tokens that have attributes.
+
+**What is left.**
+- **The initializers' walks.** Most of `check-declarations` is now
+  `check_init_walk`, the walk of each initializer's own tokens. On a Zen 4
+  laptop's profile a quarter of its samples were `check_init_string`'s search
+  of all the unit's string literals for each string element, which
+  [#593](https://github.com/buster14a/buster/issues/593) makes linear.
+- **The emission's attributes.** `emit-setup`'s passes still read the
+  attributes of every declaring token, to find those that have any.
+- **Dense maps.** `declaration_plans` (by declaration token), and the
+  selection's `object_definitions`, `needed` and `object_symbols` (by object)
+  stay token-sized: the lowering and the emission read them at arbitrary
+  tokens. Their clearing is the rest of the selection's cost.
+
 ## Linking is not in the 194.8 ms
 
 **`-c` doesn't link at all.** The 194.8 ms of #136's speedtest1 record, and the
