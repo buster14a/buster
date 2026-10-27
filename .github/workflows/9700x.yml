@@ -594,8 +594,8 @@ jobs:
           ./build/compiler test-ssa-ir
           == Check the frozen SQLite source against Clang
           # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
-          # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129): it refuses
-          # sqlite3.c, so this run counts the refusal's feature, and the musl run above compares objects.
+          # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129), which it
+          # does for sqlite3.c since #567 lowers its atomics: SQLITE_INLINE's allocateSpace is ours alone, "inlined".
           unset CPATH C_INCLUDE_PATH
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658

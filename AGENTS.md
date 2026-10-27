@@ -270,7 +270,11 @@ designs and the compilers already built this way.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
-  acceptance remain separate requirements.
+  acceptance remain separate requirements. The atomic builtins lower through
+  per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
+  clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
+  #126); `test-checker` runs them against clang's code and checks that a
+  misaligned one is refused exactly where clang calls libatomic.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -4718,10 +4722,11 @@ checks each file as the driver does and compares it with
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
-names the checked source makes; a difference must have one of three documented
+names the checked source makes; a difference must have one of four documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects": folded constants, unselected operands, and a constant `if`'s
-dropped arm, from the model `CheckProgramOptions.folded_ifs`), and a file the
+-O0's objects": folded constants, unselected operands, a constant `if`'s
+dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
+`always_inline` function, which clang inlines everywhere), and a file the
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
