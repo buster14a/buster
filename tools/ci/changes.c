@@ -381,6 +381,13 @@ static const ChangesBenchmark changes_benchmarks[] = {
                    "x86_target",
     },
     {
+        .name = "check-lanes",
+        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
+                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
+                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|"
+                   "object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target",
+    },
+    {
         .name = "checker",
         .unit = "c_checker_benchmark.c",
     },

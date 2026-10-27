@@ -522,7 +522,7 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
     if (unwind_tier0_test_expect(test, ready, "build refusal baseline with two saves and an aligned call", 0))
     {
         unwind_tier0_test_result(test, &original, UNWIND_OK, 2000);
-        for (uint32_t mutation = 0; mutation < 53; mutation += 1)
+        for (uint32_t mutation = 0; mutation < 54; mutation += 1)
         {
             UnwindTier0Fixture fixture;
             memcpy(&fixture, &original, sizeof(fixture));
@@ -587,6 +587,8 @@ static void unwind_tier0_test_mutations(UnwindTier0Test* test)
                 case 51: fixture.code.records = 0; wanted = UNWIND_ERROR_INVALID; break;
                 // Tier 0's indirect call, through r11, is a call like its direct one (26's through rax isn't).
                 case 52: *call = unwind_tier0_test_record(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, 0, 0, 0); measure = true; wanted = UNWIND_OK; break;
+                // A ud2 ends only a frameless function (#523): this one's epilogue still needs its ret.
+                case 53: fixture.records[fixture.code.count - 1].form = X86_FORM_UD2; measure = true; break;
             }
             if (!measure || unwind_tier0_test_expect(test, unwind_tier0_test_measure(&fixture), "mutated instruction remains encoder-valid", mutation))
             {
@@ -788,10 +790,10 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
     const bool ready = unwind_tier0_test_expect(test, unwind_tier0_test_pointer_fixture(&pointer, 5, 40, 0, false) && unwind_tier0_test_fixture(&fixed, 5, 40, 7) &&
                                                           unwind_tier0_test_pointer_fixture(&realigned, 37, 40, 6, true),
                                                 "build the published frame's refusal baselines", 0);
-    for (uint32_t mutation = 0; ready && mutation < 34; mutation += 1)
+    for (uint32_t mutation = 0; ready && mutation < 36; mutation += 1)
     {
         UnwindTier0Fixture fixture;
-        memcpy(&fixture, mutation < 24 ? &pointer : &fixed, sizeof(fixture));
+        memcpy(&fixture, mutation < 24 || mutation == 35 ? &pointer : &fixed, sizeof(fixture));
         unwind_tier0_test_bind(&fixture);
         X86Instruction* records = fixture.records;
         const uint32_t last = fixture.code.count - 1;
@@ -836,6 +838,9 @@ static void unwind_tier0_test_frames(UnwindTier0Test* test)
             case 31: records[fixture.body - 1].form = X86_FORM_NOP; break;
             case 32: records[0].form = X86_FORM_POP_R64; break;
             case 33: fixture.code.count = 1; wanted = UNWIND_ERROR_INVALID; break;
+            // A ud2 ends only a frameless function (#523): a frame's epilogue still needs its ret.
+            case 34: records[last].form = X86_FORM_UD2; break;
+            case 35: records[last].form = X86_FORM_UD2; break;
         }
         if (mutation == 22)
         {
@@ -906,15 +911,18 @@ static void unwind_tier0_test_guards(UnwindTier0Test* test)
     if (unwind_tier0_test_expect(test, ready, "guarded records, offsets and descriptor", 0))
     {
         // A count of zero must reject without reading either guarded pointer. Every other fixture has a body of
-        // count-1 one-byte NOPs followed by RET; the final record and offset end exactly at inaccessible pages.
-        for (uint32_t count = 0; count <= 66; count += 1)
+        // count-1 one-byte NOPs followed by RET, or by UD2, which ends a frameless function too (#523: the terminal
+        // builtins' helper is a UD2 alone); the final record and offset end exactly at inaccessible pages.
+        for (uint32_t case_index = 0; case_index <= 2 * 66 + 1; case_index += 1)
         {
+            const uint32_t count = case_index / 2;
+            const uint16_t ending = (case_index & 1) != 0 ? X86_FORM_UD2 : X86_FORM_RET;
             X86Instruction* records = (X86Instruction*)(mapping + page - count * sizeof(X86Instruction));
             uint32_t* offsets = (uint32_t*)(mapping + 3 * page - count * sizeof(uint32_t));
             UnwindFunction* output = (UnwindFunction*)(mapping + 5 * page - sizeof(UnwindFunction));
             for (uint32_t i = 0; i < count; i += 1)
             {
-                records[i] = unwind_tier0_test_record(i + 1 == count ? X86_FORM_RET : X86_FORM_NOP, 0, 0, 0, 0, 0);
+                records[i] = unwind_tier0_test_record(i + 1 == count ? ending : X86_FORM_NOP, 0, 0, 0, 0, 0);
                 offsets[i] = i;
             }
             const Tier0Code code = {
@@ -933,17 +941,58 @@ static void unwind_tier0_test_guards(UnwindTier0Test* test)
                 }
                 const UnwindError error = exact != 0 ? unwind_tier0_scalar(&code, offsets, count, output) : unwind_tier0(&code, offsets, count, output);
                 unwind_tier0_test_expect(test, error == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", count);
+                                                  memcmp(output, &expected, sizeof(expected)) == 0, "exact guarded analyzer tails", case_index);
                 memset(output, 0xd8 + exact, sizeof(*output));
                 const UnwindError framed = unwind_tier0_frame(&code, offsets, count, output);
                 unwind_tier0_test_expect(test, framed == (count != 0 ? UNWIND_OK : UNWIND_ERROR_INVALID) &&
-                                                  memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", count);
+                                                  memcmp(output, &expected, sizeof(expected)) == 0, "guarded published frame tails", case_index);
             }
         }
     }
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, 6 * page);
+    }
+}
+
+// The terminal builtins' helper (cbuiltin_terminal_helper, a ud2 alone, #523), as the C driver emits it: both
+// analyzer paths and the published frame's reader give it a frameless descriptor of no transitions; a ud2 short of
+// the end is still the body's, which the analyzer refuses.
+static void unwind_tier0_test_terminal(UnwindTier0Test* test, Arena* arena)
+{
+    static const CBuiltinId ids[] = { CBUILTIN_TRAP, CBUILTIN_UNREACHABLE };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
+    {
+        const uint64_t mark = arena->length;
+        const CBuiltinTerminalHelper helper = cbuiltin_terminal_helper(ids[i], arena);
+        uint32_t offsets[2] = { 0 };
+        const int64_t size = helper.code.error == TIER0_OK ? x86_measure_scalar(helper.code.records, helper.code.count, offsets) : -1;
+        const bool ready = unwind_tier0_test_expect(test, helper.code.error == TIER0_OK && helper.code.count == 1 && size == 2, "build the terminal builtins' helper", 7000 + i);
+        const UnwindFunction expected = {
+            .size = 2,
+        };
+        for (uint32_t reader = 0; ready && reader < 3; reader += 1)
+        {
+            UnwindFunction descriptor;
+            memset(&descriptor, 0xe7, sizeof(descriptor));
+            const UnwindError error = reader == 0 ? unwind_tier0(&helper.code, offsets, 2, &descriptor) :
+                                      reader == 1 ? unwind_tier0_scalar(&helper.code, offsets, 2, &descriptor) :
+                                                    unwind_tier0_frame(&helper.code, offsets, 2, &descriptor);
+            unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&descriptor, 1) == UNWIND_OK && memcmp(&descriptor, &expected, sizeof(expected)) == 0,
+                                     "the terminal helper's frameless descriptor", 7010 + 3 * i + reader);
+        }
+        // The ud2 followed by a ret: a body's ud2 has no successor the analyzer follows; the reader takes the producer's
+        // word for the body, and its ret ends the function.
+        X86Instruction records[2] = { ready ? helper.code.records[0] : (X86Instruction){ 0 }, { .form = X86_FORM_RET } };
+        Tier0Code code = helper.code;
+        code.records = records;
+        code.count = 2;
+        const uint32_t sized[2] = { 0, 2 };
+        UnwindFunction descriptor;
+        unwind_tier0_test_expect(test, ready && unwind_tier0(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED &&
+                                           unwind_tier0_scalar(&code, sized, 3, &descriptor) == UNWIND_ERROR_UNSUPPORTED,
+                                 "the analyzer refuses a ud2 in a body", 7020 + i);
+        arena_pop_to(arena, mark);
     }
 }
 
@@ -959,6 +1008,7 @@ static bool unwind_tier0_test(void)
         unwind_tier0_test_boundaries(&test);
         unwind_tier0_test_guards(&test);
         unwind_tier0_test_frames(&test);
+        unwind_tier0_test_terminal(&test, &arena);
         unwind_tier0_test_generated(&test, &arena);
     }
     arena_release(&arena);

@@ -96,6 +96,14 @@ static bool unwind_tier0_offset(const Tier0Code* code, const uint32_t* final_off
     return final_offsets[record] < end && end <= size;
 }
 
+// Whether a function's last record ends it: the epilogue's ret, or for a frameless function (no push, reservation or
+// frame pointer: the CFA rsp + 8 throughout) a ud2, which never returns, as the terminal builtins' helper is
+// (c_builtin_terminal_helpers.c, __builtin_trap's and __builtin_unreachable's, #523).
+static bool unwind_tier0_end(const X86Instruction* record, bool frameless)
+{
+    return record->form == X86_FORM_RET || (frameless && record->form == X86_FORM_UD2);
+}
+
 static bool unwind_tier0_store(const X86Instruction* record, const X86Effects* effects, uint32_t frame_size, uint32_t pushes)
 {
     const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0;
@@ -172,7 +180,7 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
     uint32_t epilogue = 0;
     if (error == UNWIND_OK)
     {
-        if (suffix > code->count - begin || code->records[code->count - 1].form != X86_FORM_RET)
+        if (suffix > code->count - begin || !unwind_tier0_end(&code->records[code->count - 1], pushes == 0 && built.frame_size == 0))
         {
             error = UNWIND_ERROR_UNSUPPORTED;
         }
@@ -213,8 +221,8 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
             }
         }
     }
-    // Prefix and suffix are bounded by fourteen frame events and the final RET. The body's offset checks share its
-    // effects pass below, so there is no additional whole-function validation walk.
+    // Prefix and suffix are bounded by fourteen frame events and the final RET (or UD2). The body's offset checks share
+    // its effects pass below, so there is no additional whole-function validation walk.
     for (uint32_t i = 0; error == UNWIND_OK && i < begin; i += 1)
     {
         error = unwind_tier0_offset(code, final_offsets, size, i) ? UNWIND_OK : UNWIND_ERROR_INVALID;
@@ -336,9 +344,11 @@ static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
 // compare the two there), and this takes the producer's word for the others (a frame pointer, a computed goto's
 // indirect jump). A realigned frame's and, like its reservation, is no transition: from rbp's mov on, the CFA is rbp's,
 // whatever rsp does. Its work is constant per function, which is what makes the C driver's unwind tables cheap enough to
-// have by default; scalar, since no column of many items is there to take in lanes. UNWIND_ERROR_INVALID for code or a
-// frame its records can't be, UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue that isn't the frame's and
-// UNWIND_ERROR_LIMIT past the format's limits, each leaving the descriptor alone.
+// have by default; scalar, since no column of many items is there to take in lanes. A frameless function may end in a
+// ud2 rather than the ret (unwind_tier0_end): the terminal builtins' helper, a ud2 alone, whose FDE of no transitions
+// lets an unwinder from its trap reach its caller. UNWIND_ERROR_INVALID for code or a frame its records can't be,
+// UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue that isn't the frame's and UNWIND_ERROR_LIMIT past the format's
+// limits, each leaving the descriptor alone.
 static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
 {
     UnwindError error = UNWIND_OK;
@@ -434,7 +444,8 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
         events[count++] = at;
         at += 1;
     }
-    error = records != 0 && error == UNWIND_OK && !(at == code->count - 1 && records[at].form == X86_FORM_RET) ? UNWIND_ERROR_UNSUPPORTED : error;
+    const bool frameless = saved == 0 && !pointer && code != 0 && code->frame_size == 0;
+    error = records != 0 && error == UNWIND_OK && !(at == code->count - 1 && unwind_tier0_end(&records[at], frameless)) ? UNWIND_ERROR_UNSUPPORTED : error;
     // The transitions' ends, each after the one before and before the ret's end, as branch sizing's offsets have them.
     uint32_t previous = 0;
     for (uint32_t event = 0; error == UNWIND_OK && event < count; event += 1)
