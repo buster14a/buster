@@ -171,7 +171,7 @@ static bool dynamic_test_gcc_s_inputs(const ExecutableDynamic* dynamic, const Li
     const uint32_t named = bind->libraries != 0 ? bind->libraries->count : 0;
     bool valid = dynamic->library_count == named + 2 + (needed ? 1 : 0);
     uint32_t catalogs = 0;
-    for (uint32_t l = 0; l < dynamic->library_count; l += 1)
+    for (uint32_t l = named; l < dynamic->library_count; l += 1)
     {
         const String8 name = dynamic->libraries[l].name;
         const String8 gcc = runtime->gcc_s.soname;
