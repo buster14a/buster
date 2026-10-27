@@ -7,9 +7,11 @@
 //     its changes (TypeChanges). Where the walk skips a body, check_deferred_cut records the reader's counts there: its
 //     types and tags, its binding events and active declarations, and each table the walk appends to.
 //   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
-//     BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies' tokens beyond twice the largest body's, no more than bodies. The
-//     first lane reads the costliest part itself, and every lane takes the others from one counter, costliest first
-//     (check_deferred_lane): the others are woken for the bodies and read them more slowly. A lane copies the top
+//     BUSTER_CHECK_DEFERRED_LANE_TOKENS (and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of
+//     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies.
+//     It cuts the bodies into parts before the lanes start (parts_by_cost); the first lane reads the costliest part
+//     itself, and every lane takes the others from one counter, costliest first (check_deferred_lane): the others are
+//     woken for the bodies and read them more slowly. A lane copies the top
 //     level's reader when it takes its first part, so that one that takes none copies nothing
 //     (check_deferred_lane_prepare), and sets it back for each body to what source order's reader is at the body's
 //     opening (check_deferred_body): the file scope's bindings from their history (#319's environment, c_environment.c)
@@ -41,10 +43,11 @@
 #include <time.h>
 
 #define BUSTER_CHECK_DEFERRED_MAX_LANES 64
-// The bodies' tokens that pay for a lane past the first, beyond twice the largest body's (check_deferred_bodies): on the
-// 9700X a second lane paid on units of 13,902 and 14,105 such tokens and lost on ones of 7,553 and 10,185
-// (docs/c-deferred-bodies.md, "How many lanes").
-#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 12288
+// The bodies' tokens that pay for a lane past the first, beyond their critical path (check_deferred_bodies): this many,
+// and one more per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, since a lane's copy of the reader
+// grows with the top level (docs/c-deferred-bodies.md, "How many lanes").
+#define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
+#define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
 // A lane's arenas (CheckDeferredArenas), in this order in one mapping: its reader's records, its scratch and its
 // bodies' results of 64 GB each, its copy of the top level's table of 16 GB and the table's index of 4 GB.
 #define BUSTER_CHECK_DEFERRED_LANE_ARENAS 5
@@ -194,12 +197,16 @@ struct CheckDeferred
     CheckDeferredResult* results;
     uint32_t body_count;
     uint32_t body_capacity;
-    // The largest body's tokens (the first of them), the largest of the others' and the lane that read the largest.
+    // The largest body's tokens (the first of them), the largest of the others' and the lane that read the largest; the
+    // top level's tokens (the unit's outside its bodies), and the bodies' tokens beyond their critical path that paid for
+    // a lane (check_deferred_bodies).
     uint32_t largest_body;
     uint32_t second_body;
     uint32_t largest_index;
     uint32_t largest_lane;
     uint32_t largest_parameters;
+    uint32_t top_tokens;
+    uint32_t lane_tokens;
     const CheckInputReader* top_reader;
     CEnvironment environment;
     CheckDeferredLane lane_states[BUSTER_CHECK_DEFERRED_MAX_LANES];
@@ -1375,13 +1382,18 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
         deferred->largest_parameters = parameters > deferred->largest_parameters ? parameters : deferred->largest_parameters;
     }
     CheckDeferredRun run = { .deferred = deferred };
-    // One lane, and one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies' tokens beyond twice the largest
-    // body's: a lane costs its copy of the reader and its wake-up, which its share of the walks must pay for, and a lane
-    // woken for the bodies reads them at about half the first lane's speed, so the lane that takes the largest body may
-    // take twice as long as the first would. And no more lanes than bodies, which are at least as many as the parts: a
-    // lane past them would take none.
-    const uint64_t largest = (uint64_t)deferred->largest_body * 2;
-    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > largest ? total - largest : 0) / BUSTER_CHECK_DEFERRED_LANE_TOKENS;
+    // One lane, and one more per `lane_tokens` of the bodies' tokens beyond their critical path: the larger of the
+    // largest body, which the first lane reads itself, and twice the second largest, which a woken lane reads at about
+    // half the first lane's speed. A lane costs its copy of the reader and its wake-up, which its share of the walks must
+    // pay for, and the copy grows with the top level: BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one more per
+    // BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens. And no more lanes than bodies, which are at least
+    // as many as the parts: a lane past them would take none.
+    const uint32_t count = reader->parser->tokens.count;
+    deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
+    deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+    const uint64_t second = (uint64_t)deferred->second_body * 2;
+    const uint64_t path = deferred->largest_body > second ? deferred->largest_body : second;
+    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / deferred->lane_tokens;
     const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
     const uint32_t active = paid < most ? (uint32_t)paid : most;
     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of

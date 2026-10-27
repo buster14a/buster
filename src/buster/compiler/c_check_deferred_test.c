@@ -7,10 +7,14 @@
 // column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
 // direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
 // whether the deferred reader must merge it or leave it to source order. A merged unit's bodies must run on that many
-// lanes, and its reader be copied by one of them at least and by no more (#432's review). Each fixture is read again on
-// 8 lanes by the reader's rule of how many (one lane, and one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of the bodies'
-// tokens beyond twice the largest body's), and six of bodies of known tokens are read by the rule alone: on each side
-// of a second lane and of an eighth, and beside a largest body, which leaves the others fewer tokens. A unit that
+// lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
+// group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
+// BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
+// the bodies' tokens beyond the larger of the largest body's and twice the second largest's), and eight of bodies of
+// known tokens are read by the rule alone: on each side of a second lane and of an
+// eighth, beside a largest body, which the first lane reads itself, and beside a second largest, which a woken lane
+// reads in about twice its tokens' time; their largest body must be the first lane's, also on every lane with the first
+// lane starting once the others have taken from the counter (CheckDeferred.late_first). A unit that
 // merges, but the rule's sides, is checked again with its first lane taking every part, when no other lane may copy the
 // reader; with its merge failing after the replay, which must give source order's result; on 8 lanes by a state that
 // read it before, on one lane and on eight, whose memory the reading takes over, poisoned or as it was left; and with the
@@ -288,51 +292,70 @@ static bool check_deferred_test_memory(void)
     return valid;
 }
 
-// The lanes a unit's bodies run on, written again from the rule (docs/c-deferred-bodies.md, "How many lanes"): one, and
-// one more per BUSTER_CHECK_DEFERRED_LANE_TOKENS of their tokens beyond twice the largest body's, or with `every` as
-// many as there are lanes; and no more than `lanes` or the bodies, none without bodies.
-static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t largest, uint64_t lanes, bool every)
+// The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
+// from the rule (docs/c-deferred-bodies.md, "How many lanes").
+static uint64_t check_deferred_test_lane_tokens(uint64_t top)
 {
-    const uint64_t beyond = tokens > largest * 2 ? tokens - largest * 2 : 0;
-    const uint64_t wanted = every ? lanes : 1 + beyond / BUSTER_CHECK_DEFERRED_LANE_TOKENS;
+    return BUSTER_CHECK_DEFERRED_LANE_TOKENS + top / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+}
+
+// The lanes a unit's bodies run on, written again from the rule: one, and one more per check_deferred_test_lane_tokens
+// of their tokens beyond the larger of the largest body's and twice the second largest's, or with `every` as many as
+// there are lanes; and no more than `lanes` or the bodies, none without bodies.
+static uint64_t check_deferred_test_lanes(uint64_t bodies, uint64_t tokens, uint64_t top, uint64_t largest, uint64_t second, uint64_t lanes, bool every)
+{
+    const uint64_t path = largest > second * 2 ? largest : second * 2;
+    const uint64_t beyond = tokens > path ? tokens - path : 0;
+    const uint64_t wanted = every ? lanes : 1 + beyond / check_deferred_test_lane_tokens(top);
     const uint64_t most = bodies < lanes ? bodies : lanes;
     return wanted < most ? wanted : most;
 }
 
-// The rule's sides, with BUSTER_CHECK_DEFERRED_LANE_TOKENS (N): `bodies` functions of empty statements, whose bodies
-// have N tokens each from their opening brace to their closing one, but the first `first` times as many and the last
-// `fewer` fewer; and the lanes the rule gives them on 8. A second lane needs N tokens beyond twice the largest body's,
-// and an eighth seven times as many, each with a token fewer too; and a largest body of four times N beside four of N, a
-// token fewer, which leave one lane, and beside five, which take two.
+// The rule's sides, with N the tokens that pay for a lane in their unit, whose top level is five tokens a function
+// (check_deferred_test_lane_tokens): `bodies` functions of empty statements, whose bodies
+// have N tokens each from their opening brace to their closing one, but the first `first` times as many, the second
+// `second` times as many, and the last `fewer` fewer; and the lanes the rule gives them on 8. Bodies of N: a second lane
+// needs N tokens beyond twice the second largest body's, and an eighth seven times as many, each with a token fewer too.
+// A largest body of four times N, which the first lane reads itself, beside one of N, and of a token fewer: the second
+// lane its tokens beyond the largest body's pay for (#448's rule, which counted the largest body twice, took one). A
+// largest body of three times N beside one of twice N, whose woken lane reads it in about four times N's time, and one
+// of N and of a token fewer: the third lane its tokens beyond four times N pay for.
 typedef struct CheckDeferredSize CheckDeferredSize;
 struct CheckDeferredSize
 {
     const char* name;
     uint32_t bodies;
     uint32_t first;
+    uint32_t second;
     uint32_t fewer;
     uint32_t lanes;
 };
 
 static const CheckDeferredSize check_deferred_sizes[] =
 {
-    { "lane-tokens-below-two-lanes", 3, 1, 1, 1 },
-    { "lane-tokens-two-lanes", 3, 1, 0, 2 },
-    { "lane-tokens-below-eight-lanes", 9, 1, 1, 7 },
-    { "lane-tokens-eight-lanes", 9, 1, 0, 8 },
-    { "lane-tokens-large-body-and-four", 5, 4, 1, 1 },
-    { "lane-tokens-large-body-and-five", 6, 4, 0, 2 },
+    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1 },
+    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2 },
+    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7 },
+    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8 },
+    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1 },
+    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2 },
+    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2 },
+    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3 },
 };
 
-// A CheckDeferredSize's unit: its bodies and the tokens they hold in all, and the largest one's.
-static void check_deferred_sized(char* text, uint64_t capacity, const CheckDeferredSize* size, uint64_t* tokens, uint64_t* largest)
+// A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
+// largest of the others'.
+static void check_deferred_sized(char* text, uint64_t capacity, const CheckDeferredSize* size, uint64_t* tokens, uint64_t* largest, uint64_t* second)
 {
     uint64_t length = 0;
     *tokens = 0;
     *largest = 0;
+    *second = 0;
     for (uint32_t b = 0; b < size->bodies && length < capacity; b += 1)
     {
-        const uint64_t body = (uint64_t)BUSTER_CHECK_DEFERRED_LANE_TOKENS * (b == 0 ? size->first : 1) - (b + 1 == size->bodies ? size->fewer : 0);
+        // `void fB(void)`: five tokens of the top level a function.
+        const uint64_t lane_tokens = check_deferred_test_lane_tokens((uint64_t)size->bodies * 5);
+        const uint64_t body = lane_tokens * (b == 0 ? size->first : b == 1 ? size->second : 1) - (b + 1 == size->bodies ? size->fewer : 0);
         length += (uint64_t)snprintf(text + length, capacity - length, "void f%u(void) {", b);
         for (uint64_t i = 2; i < body && length < capacity; i += 1)
         {
@@ -340,6 +363,7 @@ static void check_deferred_sized(char* text, uint64_t capacity, const CheckDefer
         }
         length += length < capacity ? (uint64_t)snprintf(text + length, capacity - length, "}\n") : 0;
         *tokens += body;
+        *second = body > *largest ? *largest : body > *second ? body : *second;
         *largest = body > *largest ? body : *largest;
     }
 }
@@ -475,9 +499,10 @@ static int run_checker_deferred_tests(int count, char** arguments)
         const CheckDeferredSize* size = f > listed ? check_deferred_sizes + (f - listed - 1) : 0;
         uint64_t size_tokens = 0;
         uint64_t size_largest = 0;
+        uint64_t size_second = 0;
         if (size != 0)
         {
-            check_deferred_sized(sized, sizeof(sized), size, &size_tokens, &size_largest);
+            check_deferred_sized(sized, sizeof(sized), size, &size_tokens, &size_largest, &size_second);
         }
         const char* name = f < listed ? check_deferred_fixtures[f].name : size == 0 ? "many-bodies" : size->name;
         const char* source = f < listed ? check_deferred_fixtures[f].source : size == 0 ? many : sized;
@@ -505,15 +530,18 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 check_corpus_deferred_every_lane = true;
                 // The rule's lanes, and the reader copied by one of them at least and by no more; and a side of the
                 // rule's bodies of the tokens it was made with, on the lanes it was made for.
-                const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body,
-                                                                lane_counts[l], every);
+                const uint64_t top = outcome.tokens - outcome.deferred_body_tokens;
+                const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, top, outcome.deferred_largest_body,
+                                                                outcome.deferred_second_body, lane_counts[l], every);
                 // The parts a group of the bodies' lanes cuts, made before the lanes started (parts_by_cost).
                 const uint64_t group = most == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * most;
                 const uint64_t parts = outcome.deferred_bodies < group ? outcome.deferred_bodies : group;
                 const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
-                                                          outcome.deferred_copies <= most && outcome.deferred_parts == parts);
+                                                          outcome.deferred_copies <= most && outcome.deferred_parts == parts &&
+                                                          outcome.deferred_lane_tokens == check_deferred_test_lane_tokens(top));
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
-                                                       outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0 &&
+                                                       outcome.deferred_largest_body == size_largest && outcome.deferred_second_body == size_second &&
+                                                       outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right;
                 checks += 1;
@@ -525,7 +553,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                     fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s: %s%s%s%s\n", name, lane_counts[l], mode_names[m],
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
-                            copied ? "" : " (not the rule's lanes or their parts, or its reader copied by too many of them or by none)",
+                            copied ? "" : " (not the rule's lanes, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
                 }
             }
@@ -539,7 +567,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_every_lane = true;
-            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body, 8, false);
+            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
+                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, false);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected &&
                                 (!outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most));
             checks += 1;
@@ -631,7 +660,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
             const uint32_t first = check_corpus_deferred_reread;
             check_corpus_deferred_reread = 0;
             check_corpus_deferred_poison = false;
-            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.deferred_largest_body, 8, true);
+            const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
+                                                            outcome.deferred_largest_body, outcome.deferred_second_body, 8, true);
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
                                 outcome.deferred_copies >= (most != 0) && outcome.deferred_copies <= most && check_corpus_deferred_kept;
             checks += 1;

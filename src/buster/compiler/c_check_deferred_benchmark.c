@@ -22,8 +22,9 @@
 // to the first lane's arrival; the others' wake-up, from the first lane's arrival to the last one's, which on one lane
 // is none; and the lanes' arenas before they start, reserved or taken back (`arenas`); and in
 // how many passes the first lane read the largest body (`largest_first`). The unit's line gives its bodies' tokens, the
-// largest body's and the largest of the others' (`second_body`). A unit the deferred reader leaves to source order is
-// said so. This measures the reader (check_input) alone, not the graph's checking after it.
+// largest body's and the largest of the others' (`second_body`), the top level's tokens and the bodies' tokens that pay
+// for a lane by the reader's rule (`lane_tokens`). A unit the deferred reader leaves to source order is said so. This
+// measures the reader (check_input) alone, not the graph's checking after it.
 //
 // With --cpus (a comma-separated list of at least --lanes CPUs), the command pins itself to the first, where the parse,
 // source order and the top level run, and its lanes to the list in order, in a team of its own that every run reuses.
@@ -135,6 +136,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
     uint64_t body_tokens = 0;
     uint32_t largest_body = 0;
     uint32_t second_body = 0;
+    uint32_t top_tokens = 0;
+    uint32_t lane_tokens = 0;
     uint64_t history_reads = 0;
     bool merged = true;
     const char* reason = 0;
@@ -180,6 +183,8 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 body_tokens = deferred.body_tokens;
                 largest_body = deferred.largest_body;
                 second_body = deferred.second_body;
+                top_tokens = deferred.top_tokens;
+                lane_tokens = deferred.lane_tokens;
                 history_reads = deferred.history_reads;
                 if (!warm)
                 {
@@ -194,9 +199,9 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
         const uint32_t count = (uint32_t)passes;
         const double tokens = pp.output.count != 0 ? (double)pp.output.count : 1.0;
         const double per_body = bodies != 0 ? (double)bodies : 1.0;
-        printf("checker-deferred: file=%s tokens=%u bodies=%" PRIu64 " body_tokens=%" PRIu64 " largest_body=%u second_body=%u history_reads=%" PRIu64
-               " merged=%s%s%s%s parse=%.2f source_order=%.2f ns/token\n", file, pp.output.count, bodies, body_tokens, largest_body, second_body,
-               history_reads, merged ? "yes" : "no",
+        printf("checker-deferred: file=%s tokens=%u bodies=%" PRIu64 " body_tokens=%" PRIu64 " largest_body=%u second_body=%u top_tokens=%u"
+               " lane_tokens=%u history_reads=%" PRIu64 " merged=%s%s%s%s parse=%.2f source_order=%.2f ns/token\n", file, pp.output.count, bodies,
+               body_tokens, largest_body, second_body, top_tokens, lane_tokens, history_reads, merged ? "yes" : "no",
                merged ? "" : " (", merged ? "" : (reason != 0 ? reason : "unknown"), merged ? "" : ")", (double)check_source_median(parses, count) / tokens,
                (double)check_source_median(sequential, count) / tokens);
         for (uint32_t way = 0; way < 2; way += 1)

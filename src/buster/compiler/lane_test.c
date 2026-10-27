@@ -826,8 +826,9 @@ static uint64_t lane_test_order_failures(const uint64_t* cost_prefix, const uint
 }
 
 // parts_by_cost's checks of one input, by lane 0 alone: for the group's lane count, the group's boundaries and order
-// (`boundaries` and `order`, from lane_parts_by_cost); and for others, as many parts as a group of them would cut,
-// range_part_by_cost's boundaries, and an order of every part once by lane_parts_by_cost's rules.
+// (`boundaries` and `order`, from lane_parts_by_cost); and for others, as many parts as a group of them would cut (of
+// BUSTER_LANE_MAX_COUNT lanes for more), range_part_by_cost's boundaries, and an order of every part once by
+// lane_parts_by_cost's rules.
 static uint64_t lane_test_check_parts_alone(const uint64_t* cost_prefix, uint64_t count, uint64_t parts, const uint64_t* boundaries, const uint32_t* order)
 {
     uint64_t failures = 0;
@@ -835,13 +836,13 @@ static uint64_t lane_test_check_parts_alone(const uint64_t* cost_prefix, uint64_
     uint64_t* alone_boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
     uint32_t* alone_order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LANE_MAX_PARTS);
     uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, BUSTER_LANE_MAX_PARTS);
-    const uint32_t lane_counts[] = { lane_count(), 1, 2, 3, 5, 8, 64, BUSTER_LANE_MAX_COUNT };
+    const uint32_t lane_counts[] = { lane_count(), 1, 2, 3, 5, 8, 64, BUSTER_LANE_MAX_COUNT, BUSTER_LANE_MAX_COUNT + 1 };
     for (uint32_t l = 0; alone_boundaries != 0 && alone_order != 0 && seen != 0 && l < BUSTER_ARRAY_LENGTH(lane_counts); l += 1)
     {
-        const uint64_t lanes = lane_counts[l];
+        const uint64_t lanes = lane_counts[l] < BUSTER_LANE_MAX_COUNT ? lane_counts[l] : BUSTER_LANE_MAX_COUNT;
         const uint64_t most = lanes == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * lanes;
         const uint64_t expected = count < most ? count : most;
-        const uint64_t made = parts_by_cost(cost_prefix, count, (uint32_t)lanes, alone_boundaries, alone_order);
+        const uint64_t made = parts_by_cost(cost_prefix, count, lane_counts[l], alone_boundaries, alone_order);
         failures += made != expected ? 1 : 0;
         if (made == expected)
         {

@@ -28,8 +28,8 @@
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
-//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, lane_take, lane_alone
-//     and lane_restore.
+//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, parts_by_cost, lane_take,
+//     lane_alone and lane_restore.
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
@@ -429,10 +429,10 @@ static __attribute__((unused)) uint64_t lane_part_count(uint64_t count);
 //         ... the items from boundaries[part] to boundaries[part + 1] ...
 //     }
 static __attribute__((unused)) uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
-// lane_parts_by_cost's parts and order for a group of `lanes` lanes, made by the calling thread alone, and how many: for a
-// phase cut before its lanes start, whose lanes then take the parts with no sync before their first take
-// (c_check_deferred.c's first lane reads the costliest part while the others wake). The lanes read boundaries and order
-// as lane_run's dispatch publishes them.
+// lane_parts_by_cost's parts and order for a group of `lanes` lanes (BUSTER_LANE_MAX_COUNT for more, as no group has
+// more), made by the calling thread alone, and how many: for a phase cut before its lanes start, whose lanes then take
+// the parts with no sync before their first take (c_check_deferred.c's first lane reads the costliest part while the
+// others wake). The lanes read boundaries and order as lane_run's dispatch publishes them.
 static __attribute__((unused)) uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the group's lanes, and `parts` or more
 // once they are all taken. Every lane of the group takes until it gets `parts` or more, and then no more until the
@@ -751,7 +751,7 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
 
 static uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order)
 {
-    const uint64_t parts = lane_part_count_for(count, lanes);
+    const uint64_t parts = lane_part_count_for(count, lanes < BUSTER_LANE_MAX_COUNT ? lanes : BUSTER_LANE_MAX_COUNT);
     for (uint64_t i = 0; i <= parts; i += 1)
     {
         boundaries[i] = lane_part_boundary(cost_prefix, count, i, parts);
