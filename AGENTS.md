@@ -832,7 +832,10 @@ designs and the compilers already built this way.
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
   (`size_branches`, its scalar twin `size_branches_scalar`, and
   `branch_sizing_validate`, the checks the two leave to the code generator, as
-  `x86_encode` leaves `x86_validate`'s). The scalar path gets its initial
+  `x86_encode` leaves `x86_validate`'s; `branch_sizing_validate_branches` and
+  its twin are those checks but `x86_validate`, the branch columns alone,
+  which the C driver's emission runs on Tier 0's valid records, keeping
+  `x86_validate` for `--verify`, #532). The scalar path gets its initial
   offsets from `x86_measure_scalar`; neither sizing path retains machine
   code. The former encoded-byte scratch column, chunk-size setting and chunk
   rebasing are removed. `branch_sizing_generate.c` generates
@@ -1926,7 +1929,9 @@ measurements are informational.
 `./build/compiler test-branch-sizing [--seed N] [--count N] [--cross-check]
 [--keep]` (about 1.4 s on the 9700X, and 2.5 s with `--cross-check`) checks
 `branch_sizing.c`. Every function it sizes must be one `branch_sizing_validate`
-accepts, as the code generator's are, and both paths must give identical
+accepts, as the code generator's are, and so must both paths of the branch
+columns' check (`branch_sizing_validate_branches` and its twin), and both
+sizing paths must give identical
 results: the records, the offsets, the length, the rounds, the long branches
 and the worklist's evaluations. Each result must also be the test's reference's
 (relaxation over the records, as an assembler does it, with each record's
@@ -1937,14 +1942,17 @@ record, and be long exactly where a rel8 can't reach:
 - forms: every form number as a branch's record, with and without a segment
   override or the fixup flag: `branch_sizing_validate` accepts `JMP_REL8` and
   the 16 `Jcc_REL8` (found from the form table's opcodes), which grow by 3 and
-  4 to the rel32 forms after them, and refuses every other;
+  4 to the rel32 forms after them, and refuses every other, and so do both
+  paths of the columns' check (the vector path's bitmap of the forms against
+  the scalar path's list);
 - errors, `branch_sizing_validate`'s: a branch's index equal to the one
   before, below it, at the count and past it, a target past the count, a form
   that isn't a branch's, a branch's form with FS, GS or the fixup flag, at
   every place among 40 branches (the first error is the one reported), more
   branches than records, more records than `x86_encode` takes (which both
   paths refuse too), and a record `x86_validate` rejects, after a branch's
-  error;
+  error; both paths of the columns' check must give each but the last, which
+  they take;
 - boundaries: a probe branch, forward and backward, jmp and jcc, at every
   displacement from 100 to 135 and from −140 to −105 with every branch short,
   over 0 to 3 branches that grow or don't: it must end long exactly when its
@@ -1954,13 +1962,19 @@ record, and be long exactly where a rel8 can't reach:
   `branch_sizing_generate.c`'s filler or random instructions of every form;
   also with the worklist from rounds 1, 2 and 3 and with no round limit,
   which must give the same records and offsets;
+- columns: 4,000 random functions of up to 1,200 records broken 0 to 3 times
+  at random (an index, a target, a branch's form, or a record `x86_validate`
+  rejects): both paths of the columns' check must give
+  `branch_sizing_validate`'s first error, or take the function where only
+  `x86_validate` refuses it;
 - chains (`branch_sizing_chain`) of 1 to 1,000 links, forward and backward,
   which take a round per link: up to `BUSTER_BRANCH_SIZING_ROUNDS`, then the
   worklist;
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
-  and every branch count up to 40: a read past an end faults, and the command
-  then names the case and exits with status 1;
+  and every branch count up to 40, checked by both paths of the columns'
+  check and sized: a read past an end faults, and the command then names the
+  case and exits with status 1;
 - memory: a function sized with no scratch memory to spare, then 64 bytes
   more at a time until it succeeds: every failure must be
   `BRANCH_SIZING_ERROR_MEMORY` and leave the records and offsets as they were.
