@@ -808,6 +808,7 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
         check_test_expect(test, status == 0, path == 0 ? "the jump tables' program compiles with -c" : "the jump tables' program compiles with -c, scalar");
         compiled = compiled && status == 0;
         free(text);
+        text = NULL;
     }
     check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of jump tables");
     uint64_t length = 0;
@@ -827,12 +828,14 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     char* const link[] = { (char*)clang, "-o", linked_path, objects[0], NULL };
     const int linked = compiled ? check_test_driver_spawn(link, &text) : -1;
     free(text);
+    text = NULL;
     char captured[64];
     check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
                       "clang's link of the object dispatches through the tables as clang's own code does");
     char* const direct[] = { (char*)executable, "-o", direct_path, source, NULL };
     const int built = written ? check_test_driver_spawn(direct, &text) : -1;
     free(text);
+    text = NULL;
     check_test_expect(test, built == 0 && check_test_driver_capture(direct_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
                       "the direct path's executable dispatches through the tables as clang's own code does");
     unlink(source);
