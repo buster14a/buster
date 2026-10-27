@@ -127,6 +127,157 @@ static void static_locals(unsigned n)
     printf("int main(void)\n{\n    return counter_%u() & 1;\n}\n", n / 2);
 }
 
+static void string_calls(unsigned n)
+{
+    printf("int puts(const char*);\nvoid f(void)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    puts(\"string number %u\");\n", i);
+    printf("}\n");
+}
+
+static void string_declarations(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("const char* p_%u = \"string number %u\";\n", i, i);
+}
+
+static void char_arrays(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("static const char s_%u[] = \"string number %u\";\n", i, i);
+    printf("const char* get(int i)\n{\n    return i ? s_0 : s_%u;\n}\n", n - 1);
+}
+
+static void wide_strings(unsigned n)
+{
+    printf("typedef int wchar_t;\nstatic const wchar_t* const t[] =\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    L\"wide %u\",\n", i);
+    printf("};\nconst wchar_t* get(int i)\n{\n    return t[i];\n}\n");
+}
+
+static void nested_arrays(unsigned n)
+{
+    printf("static const int t[][4] =\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    { %u, %u, %u, %u },\n", i, i + 1, i + 2, i + 3);
+    printf("};\nint get(int i)\n{\n    return t[i][i & 3];\n}\n");
+}
+
+static void nested_designators(unsigned n)
+{
+    printf("struct In\n{\n    int a;\n    int b[4];\n};\nstruct Out\n{\n    struct In in;\n    long c;\n};\nstatic struct Out t[%u] =\n{\n", n);
+    for (unsigned i = 0; i < n; i++)
+        printf("    [%u].in.b[%u] = %u,\n    [%u].c = %u,\n", n - 1 - i, i & 3, i, n - 1 - i, i);
+    printf("};\nlong get(int i)\n{\n    return t[i].c + t[i].in.b[1];\n}\n");
+}
+
+static void compound_literals(unsigned n)
+{
+    printf("struct P\n{\n    int x;\n    int y;\n};\nint f(int v)\n{\n    int s = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    s += ((struct P){ v, %u }).y;\n", i);
+    printf("    return s;\n}\n");
+}
+
+static void static_asserts(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("_Static_assert(%u + 1 > %u, \"assert %u\");\n", i, i, i);
+    printf("int main(void)\n{\n    return 0;\n}\n");
+}
+
+static void generics(unsigned n)
+{
+    printf("int f(int x, double y)\n{\n    int s = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    s += _Generic(%s, int: %u, double: %u, default: 0);\n", i % 2 ? "x" : "y", i, i + 1);
+    printf("    return s;\n}\n");
+}
+
+static void parameters(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+    {
+        printf("int g_%u(", i);
+        for (unsigned p = 0; p < 24; p++)
+            printf("%sint a%u", p ? ", " : "", p);
+        printf(")\n{\n    return a0 + a23 + %u;\n}\n", i);
+    }
+    printf("int main(void)\n{\n    int s = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+    {
+        printf("    s += g_%u(", i);
+        for (unsigned p = 0; p < 24; p++)
+            printf("%s%u", p ? ", " : "", p + i);
+        printf(");\n");
+    }
+    printf("    return s & 1;\n}\n");
+}
+
+static void variadic_calls(unsigned n)
+{
+    printf("int printf(const char*, ...);\nvoid f(int a, double b, const char* c)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    printf(\"%%d %%f %%s %u\\n\", a + %u, b, c);\n", i, i);
+    printf("}\n");
+}
+
+static void pragma_packs(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#pragma pack(push, %u)\nstruct K_%u\n{\n    char a;\n    int b;\n};\n#pragma pack(pop)\n", 1u << (i % 4), i);
+    printf("int get(struct K_%u* k)\n{\n    return k->b;\n}\n", n - 1);
+}
+
+static void conditionals(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#if defined(X_%u) || %u > %u\nint c_%u = %u;\n#elif %u\nint c_%u = 0;\n#else\nint c_%u = 1;\n#endif\n", i, i % 7, i % 5, i, i, i % 3, i, i);
+}
+
+static void line_directives(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#line %u \"file_%u.c\"\nint l_%u = %u;\n", i + 1, i % 64, i, i);
+}
+
+static void function_table(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("static int h_%u(int x)\n{\n    return x + %u;\n}\n", i, i);
+    printf("int (*const table[])(int) =\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    h_%u,\n", i);
+    printf("};\n");
+}
+
+static void shadowing(unsigned n)
+{
+    printf("int f(int x)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    {\n        int x_%u = x + %u;\n        int v = x_%u * 3;\n        x ^= v;\n    }\n", i % 64, i, i % 64);
+    printf("    return x;\n}\n");
+}
+
+static void casts(unsigned n)
+{
+    printf("long f(long x)\n{\n    long s = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    s += (long)(short)(unsigned char)(int)(x + %u);\n", i);
+    printf("    return s;\n}\n");
+}
+
+static void assembly(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+    {
+        printf("    .text\n    .globl f_%u\n    .type f_%u, @function\nf_%u:\n    pushq %%rbp\n    movq %%rsp, %%rbp\n", i, i, i);
+        printf("    movl %%edi, %%eax\n    imull $3, %%eax, %%eax\n    addl $%u, %%eax\n    cmpl $100, %%eax\n    jle .L_%u\n", i, i);
+        printf("    subl $7, %%eax\n.L_%u:\n    call f_%u\n    popq %%rbp\n    ret\n    .data\nd_%u:\n    .quad f_%u\n", i, i / 2, i, i);
+    }
+}
+
 static void bitfields(unsigned n)
 {
     printf("struct B\n{\n");
@@ -373,6 +524,24 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "forward-gotos") == 0) forward_gotos(n);
     else if (strcmp(mode, "members") == 0) members(n);
     else if (strcmp(mode, "bitfields") == 0) bitfields(n);
+    else if (strcmp(mode, "string-calls") == 0) string_calls(n);
+    else if (strcmp(mode, "string-declarations") == 0) string_declarations(n);
+    else if (strcmp(mode, "char-arrays") == 0) char_arrays(n);
+    else if (strcmp(mode, "wide-strings") == 0) wide_strings(n);
+    else if (strcmp(mode, "nested-arrays") == 0) nested_arrays(n);
+    else if (strcmp(mode, "nested-designators") == 0) nested_designators(n);
+    else if (strcmp(mode, "compound-literals") == 0) compound_literals(n);
+    else if (strcmp(mode, "static-asserts") == 0) static_asserts(n);
+    else if (strcmp(mode, "generics") == 0) generics(n);
+    else if (strcmp(mode, "parameters") == 0) parameters(n);
+    else if (strcmp(mode, "variadic-calls") == 0) variadic_calls(n);
+    else if (strcmp(mode, "pragma-packs") == 0) pragma_packs(n);
+    else if (strcmp(mode, "conditionals") == 0) conditionals(n);
+    else if (strcmp(mode, "line-directives") == 0) line_directives(n);
+    else if (strcmp(mode, "function-table") == 0) function_table(n);
+    else if (strcmp(mode, "shadowing") == 0) shadowing(n);
+    else if (strcmp(mode, "casts") == 0) casts(n);
+    else if (strcmp(mode, "assembly") == 0) assembly(n);
     else if (strcmp(mode, "typed-members") == 0) typed_members(n);
     else if (strcmp(mode, "label-values") == 0) label_values(n);
     else if (strcmp(mode, "static-locals") == 0) static_locals(n);
