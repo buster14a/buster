@@ -891,8 +891,48 @@ static bool snapshot_test_staleness(const ExecutableTestDirectory* directory, co
 
 // A stale optional-library probe must leave a no-use or weak-only link alone. Strong imports, archive members and
 // unresolved names (including a shared library's permitted undefined names) must request the caller's normal retry.
-static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime* runtime, BindPath path, bool stale)
+// A needed named library can force GCC retention without a direct GCC import or a version need. Its unversioned
+// strong reference and lack of DT_NEEDED must reach bind_end's runtime_needed check, not an earlier deferred check.
+static void snapshot_test_deferred_dependency(SnapshotTestTally* tally, const Runtime* runtime, BindPath path, bool stale, const char* directory)
 {
+    if (runtime->gcc_s.exports.count != 0)
+    {
+        Scratch scratch = scratch_begin(0);
+        const BindTestLibraryFile file = { "buster_deferred", "libbuster_deferred.so", "deferred_entry", "_Unwind_Backtrace", 0, 0 };
+        const bool written = bind_test_write_library(directory, &file, scratch.arena);
+        const String8 name = { .pointer = (char*)file.name, .length = strlen(file.name) };
+        const String8 place = { .pointer = (char*)directory, .length = strlen(directory) };
+        RuntimeLibraries libraries = { 0 };
+        const RuntimeError error = written ? runtime_libraries_import(&libraries, runtime, &name, 1, &place, 1) : RUNTIME_ERROR_IMPORT;
+        snapshot_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && libraries.needs[0].count == 0,
+                             "an unversioned named dependency imported", path);
+        if (error == RUNTIME_ERROR_NONE)
+        {
+            BindTestLink test;
+            const bool initialized = bind_test_link_begin(&test, runtime, bind_test_room(runtime));
+            const SymbolId main = initialized ? bind_test_symbol(&test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            const SymbolId entry = main != 0 ? bind_test_symbol(&test, file.export, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) : 0;
+            const bool begun = entry != 0 && bind_begin(&test.bind, &test.link, runtime, path, &test.bytes, 1, &test.arena) && bind_test_define(&test, main);
+            snapshot_test_expect(tally, begun && !test.bind.deferred_checked, "the named reference hasn't checked GCC at bind_begin", path);
+            test.bind.libraries = &libraries;
+            const bool ended = begun && bind_end(&test.bind, &test.link);
+            snapshot_test_expect(tally, begun && ended == !stale && test.bind.error == (stale ? BIND_ERROR_SNAPSHOT : BIND_ERROR_NONE) &&
+                                         test.bind.libraries_needed == 1 && (test.bind.runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0 &&
+                                         test.bind.deferred_checked && test.bind.gcc_s_needed,
+                                 "a named dependency checks stale GCC before forced retention; the retry retains it", path);
+            bind_test_link_end(&test);
+        }
+        runtime_libraries_release(&libraries);
+        char file_path[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        snprintf(file_path, sizeof(file_path), "%s/lib%s.so", directory, file.name);
+        unlink(file_path);
+        scratch_end(scratch);
+    }
+}
+
+static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime* runtime, BindPath path, bool stale, const char* directory)
+{
+    snapshot_test_deferred_dependency(tally, runtime, path, stale, directory);
     if (runtime->gcc_s.version_count != 0)
     {
         const ImportVersion* version = &runtime->gcc_s.versions[0];
@@ -992,7 +1032,7 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
                                  "only deferred validation sees the change", missing);
             for (uint32_t way = 0; way < 2; way += 1)
             {
-                snapshot_test_deferred_bind(&tally, &loaded, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, true);
+                snapshot_test_deferred_bind(&tally, &loaded, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, true, place);
             }
             runtime_release(&loaded);
         }
@@ -1004,7 +1044,7 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
         {
             for (uint32_t way = 0; way < 2; way += 1)
             {
-                snapshot_test_deferred_bind(&tally, &opened, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, false);
+                snapshot_test_deferred_bind(&tally, &opened, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, false, place);
             }
             runtime_release(&opened);
         }
