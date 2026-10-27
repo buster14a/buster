@@ -12,6 +12,9 @@ The cutover is **off** until repository variable `CI_9700X_ADMISSION_ENABLED` is
 `true`. With it off, the existing PR/push/daily/manual qualification path and
 required job remain in use. The hosted policy-fixture workflow tests this change
 before it is installed on `main`.
+Targeted dispatch inputs are rejected on hosted capacity while admission is off;
+they cannot fall back to a legacy physical run or download a nonexistent guard.
+An ordinary maintenance dispatch with no PR target retains the original path.
 
 First verify the compatible pool really has one host-lock slot and restrict
 **this repository's** physical entrypoint to:
@@ -41,8 +44,8 @@ write token to an executor. A read-only review-signal workflow wakes it; live
 review data and actual repository permissions decide the result.
 
 The dispatched executor uses the reviewed default-branch workflow and only read
-permissions. It checks out the immutable merge SHA selected for the current
-head/base pair. Its admission guard is compiled on hosted capacity, transferred
+permissions. It reconstructs the immutable merge SHA selected for the current
+live head/base pair. Its admission guard is compiled on hosted capacity, transferred
 as an immutable artifact of that same run/attempt, and checked against the
 hosted job's SHA-256 before each execution. A conflicted/stale admission therefore
 does not compile the guard or the compiler on the 9700X. Public fork revisions
@@ -89,7 +92,12 @@ GitHub Actions integration (15368). Do not change branch protection or require a
 rebase merely because a PR is behind its base.
 
 In active mode, a native PR workflow supplies the independent hosted `changes`
-preview; its skipped physical job is named `9700X queue request`. A selected PR
+preview; its skipped physical job uses a separate queue-request name. GitHub may
+display the literal name expression for a skipped job rather than its evaluated
+`9700X queue request` label; neither form is the required result. Native PRs
+from public forks always take that hosted-only preview path, even if repository
+variables are absent from its event context. The host source gate also enforces
+the boundary when a fork changes its own workflow. A selected PR
 gets a `workflow_dispatch` on reviewed `main`, whose physical job is named
 `9700X admitted execution`. That dispatch's native check belongs to `main`; it is
 **not** the PR's required result. Instead the controller publishes the existing
@@ -115,7 +123,7 @@ be a conflict. A known changed identity still invalidates the old lease.
 Documentation-only PRs receive the existing successful required result without
 hardware work, after confirming mergeability and the immutable base-to-merge
 diff. `docs/performance/**` remains code for qualification. Both names of a
-rename count. A comparison at GitHub's 300-file limit is conservatively code.
+rename count; the local object diff reads every changed path without REST's file cap.
 Conflicting or indeterminate docs-only PRs do not receive a false green skip.
 
 The event, dispatcher and reporter have separate SHA identities. GitHub reruns
@@ -123,6 +131,68 @@ retain their original event SHA/ref ([rerun semantics](https://docs.github.com/e
 rerunning a stale native PR workflow is therefore not the dispatch architecture.
 Current-head qualifications can also be created for PRs that opened with a
 conflict and never had an original PR run.
+
+### Live refs and the frozen merge
+
+The controller reads `headRef.target.oid` and `baseRef.target.oid` for the current
+branches. PR `baseRefOid`, REST `base.sha` and the generated test merge can be
+older snapshots. GitHub documents [deferred test-merge generation](https://docs.github.com/en/enterprise-server@3.21/admin/release-notes),
+and the live rollout observed this on an unchanged head after `main` advanced.
+Those cached fields are not current-pair authority. UNKNOWN still receives three
+bounded metadata retries and remains pending; neither a stale clean result nor
+a stale conflict decides admission for a changed base.
+
+For known metadata, hosted preflight reads the pinned Git objects over public
+HTTPS into a private bare repository and uses `git merge-tree --write-tree` to
+establish the actual current conflict state. It never checks out PR files, runs
+a PR program, follows a submodule, executes hooks or inherits external merge
+drivers. Git configuration, credentials, prompts, replacement objects, protocols
+and thread counts are constrained. No GitHub ref or PR branch is changed and
+the controller retains read-only contents permission. Clean behind PRs therefore
+qualify the new base without a forced update/rebase or a twelve-hour cache wait.
+
+A deterministic, unpublished automation commit records the resulting tree and
+the exact base/head parents. Its fixed metadata identifies the construction as
+`Buster 9700X frozen qualification merge v1`; it is not a human/DCO source commit.
+The lease's merge SHA is this canonical object, not GitHub's possibly stale test
+merge. Hosted admission independently reconstructs the same object and transfers
+only new merge objects in a small pack alongside its guard, through that exact
+run/attempt's immutable artifact. SHA-256 outputs authenticate both files.
+
+The hosted selector and physical executor check out the pinned base, fetch the
+pinned head and import the authenticated pack. They verify both parents and the
+resulting checkout SHA before reading/building PR source. A changed pair,
+different merge result, missing/corrupt pack or failed guard remains blocking.
+The physical guard rechecks live refs against the authenticated lease; it does
+not calculate mergeability or build the guard while holding the host lock.
+
+### Preflight cache and resource limits
+
+The durable PR row caches the immutable conflict result, canonical merge SHA,
+complete changed-path classification and Git-engine/method identity against both
+live input SHAs. An unchanged pair does not fetch or merge again during later
+reconciliations. A new head/base or engine invalidates the proof; a base advance
+never reuses an older result. The selected PR's pinned pair and cached proof are
+revalidated before grant. Each completed cache entry is saved independently so
+one later failure cannot erase work already done by this controller invocation.
+
+Uncached preflight runs in a separate process group. Its watchdog allows 30
+seconds per pair and 120 seconds total per reconcile. Actual Git workers inherit
+a 16 MiB OS file-size limit for fetched packs, a 15-second CPU limit per process,
+and a 512 MiB address-space limit. The parent monitors the private object store
+against 64 MiB and 8,192 entries every 20 ms, and kills the entire worker/helper
+group on a wall/storage limit. Core dumps are disabled. These limits constrain
+the fetch itself; the JSON/output-buffer limit alone does not bound transport.
+The monitored store may overshoot its threshold by in-flight writes before the
+watchdog kills the group; the per-file and process limits still apply.
+
+A fetch/resource failure discards the partial store and blocks only that PR's
+pair with a five-minute retry backoff. Cached eligible PRs remain usable, and
+other pairs can use the remaining reconcile budget. Exhausting the total budget
+defers uncached work to a later pass; it cannot become a conflict or green skip.
+`/ci retry` clears the failed-pair backoff. Frozen-pack construction has the same
+30-second worker/file/store limits before any physical job is admitted. The
+controller summary exposes computed/cache/deferred counts and Git work time.
 
 ## Priority and commands
 
@@ -255,8 +325,10 @@ events and every five minutes. The platform may delay scheduled wakeups; the
 guard stays closed until a valid lease exists. State is committed before dispatch.
 Head/base/mergeability metadata is batched in one bounded GraphQL query. Review
 and comment events refresh their target immediately; a missed signal is recovered
-within the 15-minute signal refresh interval, subject to GitHub scheduling. The
-selected PR's approvals/commands are read again before every grant. Immutable
+within the 15-minute signal refresh interval while capacity is occupied, subject
+to GitHub scheduling. Every candidate's approvals/commands are refreshed before
+a free-pool choice, so a coalesced promotion cannot remain hidden behind cached
+ordinary work. The selected PR is also read again immediately before its grant. Immutable
 diff classifications and unchanged ledger/check descriptions are reused. Waiting
 maintenance gates poll once a minute; a selected PR polls every five seconds for
 at most three minutes while its dispatch ID is bound. These bounds conserve the
@@ -277,10 +349,17 @@ Actions. Controller/runner outages cannot create a second lease.
 API/permission errors, unsupported/corrupt state, ambiguous dispatches or bounds
 exhaustion stop new admission. Bounds are 64 open PRs, 128 active candidates,
 64 run overrides, 100 unprocessed dispatch controls and 60,000 state JSON bytes.
+Metadata and frozen-object transfers are each bounded to 16 MiB.
 Do not delete the ledger or clear a lease while an executor could still be alive.
 First cancel/confirm terminal status, then reconcile. No branch-protection bypass,
 force-update or new service is a recovery step. A maintainer can inspect without
 writing using `admission --snapshot`.
+
+Disabling admission intentionally leaves existing controller statuses blocking
+until a valid qualification is restored. A new source-fix head can qualify through
+the ordinary pre-activation path; do not fabricate status success or bypass branch
+protection to recover. Stop controller writes before removing the host marker,
+and cancel/confirm terminal any controlled fork probe before restoring old behavior.
 
 Commit statuses are appended only when the required pending/failure/success state
 changes, avoiding queue-position updates consuming GitHub's per-SHA/context quota.
