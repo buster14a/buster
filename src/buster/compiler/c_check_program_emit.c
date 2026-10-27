@@ -164,6 +164,23 @@ static __attribute__((noinline)) bool check_program_emit_reserve_rows(CheckProgr
 // lane costs its thread's start, its writer's columns and its arenas' first pages, which its share of the bodies must pay
 // for, and the lane that takes the largest body takes at least as long as it.
 #define BUSTER_CHECK_EMIT_LANE_TOKENS 4096
+// A lane's arenas, as CheckProgramLanes.squeeze_arenas names them (the tests').
+#define BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT 1u
+#define BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH 2u
+#define BUSTER_CHECK_EMIT_SQUEEZE_BYTES 4u
+
+// Why an emission on lanes ran its bodies again on the calling thread alone (CheckProgramLanes.again): its lanes didn't
+// start (lane_run, which counts a lane it couldn't pin as one), or a part ran out of room in its lowering (or its lane
+// had none for its writer), in a body's Tier 0 code or in a body's code after Tier 0. One lane's arenas, the caller's,
+// then decide whether the unit fits.
+typedef enum CheckProgramAgain
+{
+    CHECK_PROGRAM_AGAIN_NONE,
+    CHECK_PROGRAM_AGAIN_START,
+    CHECK_PROGRAM_AGAIN_LOWERING,
+    CHECK_PROGRAM_AGAIN_TIER0,
+    CHECK_PROGRAM_AGAIN_CODE,
+} CheckProgramAgain;
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
@@ -191,13 +208,21 @@ struct CheckProgramLanes
     // other lanes take the parts it would have and finish theirs first.
     uint32_t slow_lane;
     uint32_t slow_microseconds;
-    // What the last emission ran: its lanes and parts, and whether it ran them again on one lane (lanes that couldn't
-    // start, or a resource's failure, which one lane's arenas, the caller's, decide); with `timing`, how long its steps
-    // took: from its start to the lanes' (the lowering's preparation and the access column), the lanes' run (with their
-    // threads' start), and from the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
+    // A test's lane short of room: the lane that takes the part holding body `squeeze_body` (its index plus one, 0 for
+    // none) has only `squeeze_room` bytes to spare in each of its arenas that `squeeze_arenas` names
+    // (BUSTER_CHECK_EMIT_SQUEEZE_*), as if they were that full, while it makes its writer, if that is its first part, and
+    // works on that part. What fails is a resource's, which runs the emission again on one lane, without the squeeze.
+    uint32_t squeeze_body;
+    uint32_t squeeze_arenas;
+    uint64_t squeeze_room;
+    // What the last emission ran: its lanes and parts, the lane that took the squeezed part (its index plus one, 0 for
+    // none), and whether it ran them again on one lane and why; with `timing`, how long its steps took: from its start to
+    // the lanes' (the lowering's preparation and the access column), the lanes' run (with their threads' start), and from
+    // the lanes' end to its own (the merge), in nanoseconds (the benchmark's).
     uint32_t active;
     uint32_t parts;
-    bool again;
+    uint32_t squeezed;
+    CheckProgramAgain again;
     bool timing;
     uint64_t prepare_ns;
     uint64_t lanes_ns;
@@ -435,9 +460,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
-// Lane `index`'s arenas and writer, for its first part: the caller's arenas for lane 0, and for another lane its own,
-// reserved the first time and otherwise put back (the emission before this one's are done with).
-static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
+// Lane `index`'s arenas, for its first part: the caller's for lane 0, and for another lane its own, reserved the first
+// time and otherwise put back (the emission before this one's are done with). Returns false if one can't be reserved.
+static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     bool valid = true;
     if (index == 0)
@@ -467,7 +492,14 @@ static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* la
         lane->scratch = &arenas->scratch;
         lane->bytes = &arenas->bytes;
     }
-    return valid && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+    return valid;
+}
+
+// Lane `index`'s arenas and writer, for its first part.
+static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
+{
+    return check_program_emit_lane_arenas(run, lane, index) &&
+           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
 }
 
 // A part's failure before it lowered anything: its lane had no room for its writer.
@@ -486,6 +518,40 @@ static void check_program_emit_part_refused(CheckEmitPart* part)
     part->code_failed = part->lower.end;
 }
 
+// The part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body): each of the
+// lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its writer, if this
+// is its first part, and works on the part; then its room comes back. Out of line, so that the lanes' loop carries none
+// of it.
+static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index)
+{
+    CheckProgramLanes* lanes = run->lanes;
+    const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
+    Arena* each[3] = { lane->output, lane->scratch, lane->bytes };
+    uint64_t capacities[3] = { 0, 0, 0 };
+    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    {
+        capacities[i] = each[i]->capacity;
+        const bool named = (lanes->squeeze_arenas & (UINT32_C(1) << i)) != 0;
+        each[i]->capacity = named && lanes->squeeze_room < capacities[i] - each[i]->length ? each[i]->length + lanes->squeeze_room : capacities[i];
+    }
+    lane->ready = lane->prepared ? lane->ready :
+                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+    lane->prepared = true;
+    if (lane->ready)
+    {
+        check_program_emit_part(run, lane, part);
+    }
+    else
+    {
+        check_program_emit_part_refused(part);
+    }
+    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    {
+        each[i]->capacity = capacities[i];
+    }
+    lanes->squeezed = index + 1;
+}
+
 // Every lane's entry: the parts by cost (CheckEmitRun.costs), taken costliest first. A lane prepares its writer when it
 // takes its first part, so that one that takes none spends nothing on it.
 static void check_program_emit_lane(void* argument)
@@ -500,15 +566,23 @@ static void check_program_emit_lane(void* argument)
         CheckEmitPart* result = run->parts + part;
         result->lower.first = (uint32_t)run->boundaries[part];
         result->lower.end = (uint32_t)run->boundaries[part + 1];
-        lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
-        lane->prepared = true;
-        if (lane->ready)
+        const uint32_t squeeze = run->lanes->squeeze_body;
+        if (squeeze != 0 && squeeze - 1 >= result->lower.first && squeeze - 1 < result->lower.end)
         {
-            check_program_emit_part(run, lane, result);
+            check_program_emit_squeezed(run, lane, result, index);
         }
         else
         {
-            check_program_emit_part_refused(result);
+            lane->ready = lane->prepared ? lane->ready : check_program_emit_lane_prepare(run, lane, index);
+            lane->prepared = true;
+            if (lane->ready)
+            {
+                check_program_emit_part(run, lane, result);
+            }
+            else
+            {
+                check_program_emit_part_refused(result);
+            }
         }
         if (run->lanes->slow_lane == index + 1)
         {
@@ -541,6 +615,77 @@ static void check_program_emit_alone(CheckEmitRun* run)
     {
         check_program_emit_part_refused(part);
     }
+}
+
+// The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
+// program's symbols, `access` 1 to symbol_count (Tier0Function.symbol_access): a symbol this unit doesn't define may be a
+// shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
+// writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
+// another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
+// check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
+// (check_program_emit_lanes) and check_program_access's share it.
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
+{
+    memset(defined, 0, (uint64_t)program->object_count + 1);
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        defined[program->bodies[b].object] = 1;
+    }
+    for (uint32_t token = 0; token < program->input->token_count; token += 1)
+    {
+        const uint32_t object = program->input->objects[token];
+        if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            (program->input->defined[token] || program->input->tentative[token]))
+        {
+            defined[object] = 1;
+        }
+    }
+    for (uint32_t s = 0; s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
+        const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
+        const bool thread_local = !literal && program->input->thread_local[declaration];
+        access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+    }
+}
+
+// How Tier 0 reaches each symbol of a lowered program, as check_lower_finish numbered them (Tier0Function.symbol_access):
+// one column, from `output`, for every body that `code`'s emission lowered of `program`, and `*defined_objects`, from
+// `scratch` (check_program_object_access). It has an entry for every symbol of the emission's link (CheckProgramCode.link):
+// the jump tables' and their labels' too, after the runtime functions', the unit's own and direct (Tier 0 compiles a
+// symbol past its column as direct, but tier0_validate refuses one). The helpers are the unit's, and the C runtime's
+// errno function isn't; libgcc's functions are linked into the image.
+// Returns whether there was room. benchmark-backend-source (tier0_source_benchmark.c) compiles the lowered functions
+// again with it: the emission's own column, made before its lanes, has the runtime functions' provisional symbols
+// (check_lower_runtime), and goes with its scratch.
+static bool check_program_access(CheckProgramCode* code, const CheckProgram* program, Arena* output, Arena* scratch, uint8_t** defined_objects)
+{
+    CheckProgramLowered* lowered = &code->lowered;
+    const uint32_t count = program->body_count;
+    const uint32_t numbered = program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
+    uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
+    uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
+    const bool valid = access != 0 && defined != 0;
+    *defined_objects = defined;
+    if (valid)
+    {
+        memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
+        check_program_object_access(program, access, defined);
+        for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
+        {
+            const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
+            access[symbol] = lowered->runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+        }
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            lowered->functions[b].symbol_access = access;
+            lowered->functions[b].symbol_count = access_count;
+        }
+    }
+    return valid;
 }
 
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
@@ -577,14 +722,11 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         valid = check_lower_prepare(&shared, &result->lowered, program, scalar, rows != NULL, output, scratch);
     }
     const uint32_t count = program->body_count;
-    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
-    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
-    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
-    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
-    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
-    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image. The
-    // runtime's functions have their provisional symbols while the bodies compile (check_lower_runtime), each its own, and
-    // the jump tables theirs after them (CheckLowerShared.provisional_tables), the unit's own: direct.
+    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
+    // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
+    // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
+    // bodies compile (check_lower_runtime), each its own, and the jump tables theirs after them
+    // (CheckLowerShared.provisional_tables), the unit's own: direct.
     const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
@@ -592,29 +734,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        memset(defined, 0, (uint64_t)program->object_count + 1);
-        for (uint32_t b = 0; b < count; b += 1)
-        {
-            defined[program->bodies[b].object] = 1;
-        }
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
-        {
-            const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (program->input->defined[token] || program->input->tentative[token]))
-            {
-                defined[object] = 1;
-            }
-        }
-        for (uint32_t s = 0; s < program->symbol_count; s += 1)
-        {
-            const uint32_t object = program->symbol_objects[s];
-            const uint32_t declaration = program->object_declarations[object];
-            const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
-            const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
-            const bool thread_local = !literal && program->input->thread_local[declaration];
-            access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
-        }
+        check_program_object_access(program, access, defined);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
@@ -668,7 +788,11 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         valid = run.orders[lane] != 0;
     }
     valid = valid && run.parts != 0 && run.lane_states != 0 && (active == 1 || run.boundaries != 0);
-    bool again = false;
+    CheckProgramAgain again = CHECK_PROGRAM_AGAIN_NONE;
+    if (lanes != NULL)
+    {
+        lanes->squeezed = 0;
+    }
     const uint64_t lanes_begin = timing ? check_program_lanes_now() : 0;
     if (valid && count != 0)
     {
@@ -681,16 +805,19 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         const uint64_t scratch_before = scratch->length;
         if (active > 1)
         {
-            again = !lane_run(active, check_program_emit_lane, &run, lanes->cpus);
-            for (uint32_t p = 0; !again && p < run.part_count; p += 1)
+            again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
-                again = part->lower.status == CHECK_PROGRAM_RESOURCE ||
-                        (part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY) ||
-                        (part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE);
+                const bool tier0 = part->tier0_failed != part->lower.end && run.codes[part->tier0_failed].error == TIER0_ERROR_MEMORY;
+                const bool code = part->code_failed != part->lower.end && run.bodies[part->code_failed].status == CHECK_PROGRAM_RESOURCE;
+                again = part->lower.status == CHECK_PROGRAM_RESOURCE ? CHECK_PROGRAM_AGAIN_LOWERING :
+                        tier0 ? CHECK_PROGRAM_AGAIN_TIER0 :
+                        code ? CHECK_PROGRAM_AGAIN_CODE :
+                               CHECK_PROGRAM_AGAIN_NONE;
             }
         }
-        if (active == 1 || again)
+        if (active == 1 || again != CHECK_PROGRAM_AGAIN_NONE)
         {
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);

@@ -2625,12 +2625,14 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control);
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index);
 
+// An integer type's descriptor for the builtins' recipes: its width (a 128-bit one's BUSTER_CBUILTIN_LOWER_WIDE) and
+// whether it is signed.
 static uint32_t check_lower_builtin_type(const TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
     bool sign = false;
     const bool integer = check_action_integer_type(types, type, &width, &sign);
-    const uint32_t result = integer ? width | (sign ? BUSTER_CBUILTIN_SIGNED : 0) : 0;
+    const uint32_t result = integer ? (width == 128 ? BUSTER_CBUILTIN_LOWER_WIDE : width) | (sign ? BUSTER_CBUILTIN_SIGNED : 0) : 0;
     return result;
 }
 
@@ -2664,12 +2666,14 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
     uint32_t locals[3] = { 0 };
     for (uint32_t i = 0; i < count; i += 1)
     {
-        // The recipes take values of the register classes alone.
-        if (check_lower_memory(program->types, conversions->operands[i].type))
+        // The recipes take values of the register classes, and an overflow builtin's 128-bit operands in frame objects
+        // of their own (check_lower_temporary's).
+        const TypeId type = conversions->operands[i].type;
+        if (check_lower_memory(program->types, type) && !(overflow && check_lower_wide(program->types, type)))
         {
             check_lower_unsupported(writer, "builtins of long double and __int128 operands");
         }
-        locals[i] = check_lower_temporary(writer, check_lower_class(program->types, conversions->operands[i].type));
+        locals[i] = check_lower_temporary(writer, check_lower_class(program->types, type));
     }
     call->a = locals[0];
     call->b = locals[1];
@@ -2680,7 +2684,8 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN, .node = index, .type = program->stream->values[node].type });
     for (uint32_t i = count; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
     {
-        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->local_classes[locals[i]], locals[i]);
+        // A 128-bit operand's object is a local of class VOID that SET_LOCAL of its value's class writes.
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, writer->value_classes[locals[i]], locals[i]);
         check_lower_operand(writer, node, i, false, conversions->operands[i].type);
     }
 }
@@ -2935,23 +2940,27 @@ static void check_lower_floating_recipe(CheckLowerWriter* writer, const CBuiltin
     check_lower_builtin_finish(writer, &buffer, result, type);
 }
 
-// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
+// A classification that FENV_ACCESS makes strict: fpclassify's conditional classifier, and isinf_sign's compare before
+// its recipe. Out of line, as few tasks are, so that the tasks' loop holds none of its code (check_lower_floating_emit).
+static __attribute__((noinline)) void check_lower_floating_strict(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CBuiltinFloatLowerCall* call = writer->floating + task.node;
     const uint8_t class = (uint8_t)call->argument_class;
     const bool narrow = class == BUSTER_TYPED_CLASS_F32;
-    const TypeId floating = narrow ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE;
-    const uint64_t infinity = narrow ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const bool x87 = class == BUSTER_TYPED_CLASS_F80;
+    const TypeId floating = narrow ? BUSTER_TYPE_FLOAT : x87 ? BUSTER_TYPE_LONG_DOUBLE : BUSTER_TYPE_DOUBLE;
     const CBuiltinFloatLowerCall absolute = {
-        .id = narrow ? CBUILTIN_FABSF : CBUILTIN_FABS,
+        .id = narrow ? CBUILTIN_FABSF : x87 ? CBUILTIN_FABSL : CBUILTIN_FABS,
         .argument_local = call->argument_local,
         .argument_class = class,
     };
-    if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && call->id == CBUILTIN_FPCLASSIFY)
+    if (call->id == CBUILTIN_FPCLASSIFY)
     {
         // Match the checked conditional classifier: zero, unordered, infinity, then normal magnitude. Quiet
-        // comparisons retain signaling-NaN exceptions and the machine's DAZ treatment without changing MXCSR.
+        // comparisons retain signaling-NaN exceptions and the machine's DAZ treatment without changing MXCSR; a long
+        // double's are the x87's (fucomip), and its fabsl clears the argument's sign, which nothing reads after it.
+        const uint64_t infinity = check_lower_float_bits(writer, class, __builtin_infl());
+        const uint64_t smallest = check_lower_float_bits(writer, class, narrow ? 0x1p-126L : x87 ? 0x1p-16382L : 0x1p-1022L);
         const uint32_t zero = check_lower_label(writer);
         const uint32_t nan = check_lower_label(writer);
         const uint32_t infinite = check_lower_label(writer);
@@ -2973,7 +2982,7 @@ static inline __attribute__((always_inline)) void check_lower_floating_emit(Chec
         check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
         check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, infinite);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, magnitude);
-        check_lower_emit(writer, BUSTER_TYPED_CONST, class, narrow ? UINT64_C(0x00800000) : UINT64_C(0x0010000000000000));
+        check_lower_emit(writer, BUSTER_TYPED_CONST, class, smallest);
         check_lower_emit(writer, BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0);
         check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, subnormal);
         check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 2);
@@ -2993,13 +3002,34 @@ static inline __attribute__((always_inline)) void check_lower_floating_emit(Chec
     }
     else
     {
-        if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && call->id == CBUILTIN_ISINF_SIGN)
+        // isinf_sign: clang's quiet compare of the magnitude with infinity, for the exceptions it raises, its value
+        // discarded; then the recipe.
+        CBuiltinFloatLowerCall magnitude = absolute;
+        if (x87)
         {
-            check_lower_floating_recipe(writer, &absolute, floating);
-            check_lower_emit(writer, BUSTER_TYPED_CONST, class, infinity);
-            check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
-            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
+            // fabsl clears its object's sign in place, and the recipe after the compare reads the argument's.
+            magnitude.argument_local = check_lower_temporary(writer, class);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, call->argument_local);
+            check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, magnitude.argument_local);
         }
+        check_lower_floating_recipe(writer, &magnitude, floating);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, class, check_lower_float_bits(writer, class, __builtin_infl()));
+        check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_floating_recipe(writer, call, task.type);
+    }
+}
+
+// Always inlined into both copies of the tasks' loop (check_lower_drain_body).
+static inline __attribute__((always_inline)) void check_lower_floating_emit(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const CBuiltinFloatLowerCall* call = writer->floating + task.node;
+    if (task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT && (call->id == CBUILTIN_FPCLASSIFY || call->id == CBUILTIN_ISINF_SIGN))
+    {
+        check_lower_floating_strict(writer, task);
+    }
+    else
+    {
         check_lower_floating_recipe(writer, call, task.type);
     }
 }
@@ -3027,16 +3057,11 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     {
         const CheckBuiltinFloatEffect* effect = stream->floating + selected;
         const CBuiltinId id = effect->runtime_builtin;
-        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF;
+        const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
         if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)))
         {
             check_lower_unsupported(writer, "this floating builtin");
-        }
-        else if (classify && check_lower_x87(program->types, effect->floating_type))
-        {
-            // The recipes test a float's or a double's bits.
-            check_lower_unsupported(writer, "floating builtins on long double");
         }
         else if (selectors && effect->selected_selector < 5)
         {
@@ -3064,8 +3089,10 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         {
             const uint32_t index = writer->floating_count++;
             const uint8_t class = check_lower_class(program->types, effect->floating_type);
+            // A long double's argument is a frame object of its own, which fabsl clears the sign of in place.
             const uint32_t argument = check_lower_temporary(writer, class);
-            writer->floating[index] = (CBuiltinFloatLowerCall){ .id = id, .argument_local = argument, .argument_class = class };
+            const bool fenv_access = graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
+            writer->floating[index] = (CBuiltinFloatLowerCall){ .id = id, .argument_local = argument, .argument_class = class, .fenv_access = fenv_access };
             if (selectors)
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
@@ -4685,7 +4712,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t varargs = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->varargs_count : 0;
     // Each long double constant a function's table holds comes from a node of that type (a constant's, or ++ and --'s
     // 1.0), so no function has more than the program has nodes, besides +0.0: a bound without a pass over the nodes'
-    // types, which every program would pay for (#423's review). Only a function with long double values writes the table.
+    // types, which every program would pay for (#423's review). A classification under FENV_ACCESS takes two, infinity
+    // and the smallest normal, and the nodes of its six operands none. Only a function with long double values writes
+    // the table.
     const uint64_t x87_capacity64 = (uint64_t)nodes + 1;
     const uint64_t capacity64 = (uint64_t)nodes * 32 + (uint64_t)program->control_count * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + 32;
@@ -4701,6 +4730,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         lowered->status = lowered->helpers.status;
         lowered->token = lowered->helpers.token;
+        lowered->reason = lowered->helpers.reason;
         valid = false;
     }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;

@@ -129,6 +129,38 @@ static __attribute__((unused)) bool builtin_intrinsic_own_main_x86_in_scope(cons
     return result;
 }
 
+// The frozen scope's generic table builtins that no dedicated checker module owns (no CBuiltinId) and whose clang Sema
+// checking is their prototype alone: llvmorg-23.1.1's SemaChecking.cpp has no case for the rotates or
+// __builtin_unpredictable, and __builtin_assume's (BuiltinAssume, line 6624) only warns of an argument's side effects.
+// https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/Sema/SemaChecking.cpp
+static const char* const builtin_intrinsic_prototype_names[] =
+{
+    "__builtin_assume",
+    "__builtin_rotateleft16",
+    "__builtin_rotateleft32",
+    "__builtin_rotateleft64",
+    "__builtin_rotateleft8",
+    "__builtin_rotateright16",
+    "__builtin_rotateright32",
+    "__builtin_rotateright64",
+    "__builtin_rotateright8",
+    "__builtin_unpredictable",
+};
+
+// Whether a call of the frozen scope's name is checked by its prototype (and an x86 one also by its SemaX86 rules): an
+// x86 record, or a generic one of builtin_intrinsic_prototype_names.
+static __attribute__((unused)) bool builtin_intrinsic_own_main_prototype_in_scope(const char* name, uint32_t length)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_lookup(name, length);
+    bool result = builtin_intrinsic_own_main_x86_in_scope(name, length);
+    const bool generic = info != 0 && strcmp(info->shard, "generic") == 0 && strcmp(info->record_kind, "table-record") == 0;
+    for (uint32_t i = 0; generic && !result && i < sizeof(builtin_intrinsic_prototype_names) / sizeof(builtin_intrinsic_prototype_names[0]); i += 1)
+    {
+        result = strlen(builtin_intrinsic_prototype_names[i]) == length && memcmp(builtin_intrinsic_prototype_names[i], name, length) == 0;
+    }
+    return result;
+}
+
 // Input/output slices are disjoint and bounded by count; zero count permits null. Positive count requires valid
 // naturally aligned slices. Per-name null or empty slices simply miss. The vector tail never reads inactive names.
 static __attribute__((unused)) void builtin_intrinsic_lookup_batch(const BuiltinIntrinsicName* inputs, const BuiltinIntrinsicInfo** outputs, uint32_t count, bool scalar)
