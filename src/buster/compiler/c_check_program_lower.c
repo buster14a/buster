@@ -2351,6 +2351,11 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     // (check_lower_bit_int_extend), before it is converted and stored.
     const uint8_t computing = check_lower_computed(calculated_class);
     const bool bit_int = writer->bit_ints && type_kind(program->types, type_strip_aligned(program->types, calculated)) == BUSTER_TYPE_KIND_BIT_INT;
+    // The old value of a _BitInt narrower than its class is extended from its width as it is read, before a postfix one
+    // keeps it and anything computes with it: its bits past the width in memory are whatever wrote them last (a union's
+    // other member, a character type's store), which clang's loads ignore, as check_lower_bit_int_node's do (#534's
+    // review).
+    const bool old_bit_int = writer->bit_ints && check_lower_bit_int_shift(program->types, stored) != 0;
     const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
     const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
     const bool subtract = op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT || op == CHECK_OP_SUBTRACT_ASSIGN;
@@ -2441,10 +2446,18 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_instruction(writer, BUSTER_TYPED_DUP, stored_class, 0);
         }
+        if (old_bit_int)
+        {
+            check_lower_bit_int_extend(writer, stored, false, true);
+        }
         check_lower_instruction(writer, get, stored_class, destination);
     }
     else if (!postfix)
     {
+        if (old_bit_int)
+        {
+            check_lower_bit_int_extend(writer, stored, false, true);
+        }
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_operand(writer, node, 0, true, 0);
@@ -2454,6 +2467,10 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, stored_class, old_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_STORE_LOCAL, stored_class, old_temporary);
+        if (old_bit_int)
+        {
+            check_lower_bit_int_extend(writer, stored, false, true);
+        }
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, 0);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);

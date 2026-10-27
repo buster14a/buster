@@ -744,6 +744,23 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "return (int)pu.v+(int)ps.v*7+(int)(pw.v%1009)+(int)(pw.s%1013)*3+b[n&1]+c[n&3]*3+d[n&7]*5+u1.c*11+u2.s*13+"
         "(int)r*100+(int)q+external_bit_apply(mine,n)*1000;}",
         "bit-int-memory-and-calls", clang);
+    // Updates of storage whose bits past the width a union's other member or a character type set: the old value is read
+    // as clang reads it, from its width alone, through a member, an address-taken local and a global, by shifts,
+    // division, remainder and postfix increments, whose old value is the result (#534's review).
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "static U5 g5;static S13 g13;"
+        "static void set13(S13*p,unsigned v){((unsigned char*)p)[0]=(unsigned char)v;((unsigned char*)p)[1]=(unsigned char)(v>>8);}"
+        "int tested(int n){union{unsigned char raw;U5 value;}u;u.raw=(unsigned char)(0xe0|(n&1));u.value>>=1;int r=(int)u.value;"
+        "union{unsigned char raw;S5 value;}s;s.raw=(unsigned char)(0x10|(n&15));s.value>>=1;r=r*3+(int)s.value;"
+        "u.raw=(unsigned char)(0xe0|(n&31));u.value/=3;r=r*5+(int)u.value;u.raw=(unsigned char)(0xa0|(n&31));u.value%=7;r=r*7+(int)u.value;"
+        "u.raw=(unsigned char)(0xe0|(n&31));r=r*11+(int)u.value++;r=r*13+(int)u.value;s.raw=(unsigned char)(0x60|(n&31));r=r*17+(int)s.value--;"
+        "U5 local=0;unsigned char*p=(unsigned char*)&local;*p=(unsigned char)(0xc0|(n&31));local>>=2;r=r*19+(int)local;"
+        "*p=(unsigned char)(0xa0|(n&31));r=r*37+(int)local++;r=r*43+(int)local;"
+        "*(unsigned char*)&g5=(unsigned char)(0xe0|(n&31));g5/=5;r=r*23+(int)g5;*(unsigned char*)&g5=(unsigned char)(0x60|(n&31));r=r*41+(int)g5++;"
+        "set13(&g13,0xe000u|(unsigned)(n*97&0x1fff));g13>>=3;r=r*29+(int)g13;set13(&g13,0x6000u|(unsigned)(n*89&0x1fff));g13%=1000;"
+        "return r*31+(int)g13;}",
+        "bit-int-updates-of-noncanonical-storage", clang);
 }
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
