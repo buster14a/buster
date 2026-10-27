@@ -1497,7 +1497,9 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
     }
 }
 
-static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, const CheckStream* stream,
+#include "c_check_x86_diagnostic.c"
+
+static bool check_program(CheckProgram* program, const Parser* parser, const CheckInput* input, CheckStream* stream,
                           const TypeTable* types, CheckProgramOptions options, Arena* output, Arena* scratch)
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
@@ -1937,6 +1939,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 program->symbol_objects[symbol - 1] = object;
             }
         }
+    }
+    if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
+    {
+        program->status = CHECK_PROGRAM_RESOURCE;
     }
     if (!valid || program->status != CHECK_PROGRAM_OK)
     {
