@@ -640,7 +640,9 @@ static void check_test_program_boundary(CheckTest* test, const char* source, con
 }
 
 // The jump tables the lowering makes of `source`'s switches (#136's item 7), by both paths: `tables` of them, with
-// `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table).
+// `entries` entries in all, as clang -O0's rule gives them (check_lower_switch_table). The program must list exactly
+// its SWITCH controls with four CASE controls or more after them, in the controls' order (CheckProgram.switches), as a
+// scan of its controls finds them.
 static void check_test_program_tables(CheckTest* test, const char* source, const char* name, uint32_t tables, uint32_t entries)
 {
     static InternTable identifiers;
@@ -682,6 +684,22 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
         snprintf(description, sizeof(description), "%s: %u jump tables of %u entries by the %s path (clang -O0's rule: %u of %u)", name,
                  lowered_ok ? lowered.table_count : 0, total, path == 0 ? "scalar" : "vector", tables, entries);
         check_test_expect(test, lowered_ok && lowered.table_count == tables && total == entries, description);
+        uint32_t listed = 0;
+        bool switches = lowered_ok;
+        for (uint32_t c = 0; switches && c < program.control_count; c += 1)
+        {
+            const bool control_switch = program.controls[c].kind == CHECK_CONTROL_SWITCH;
+            uint32_t cases = 0;
+            while (control_switch && c + 1 + cases < program.control_count && program.controls[c + 1 + cases].kind == CHECK_CONTROL_CASE)
+            {
+                cases += 1;
+            }
+            switches = !control_switch || cases < 4 || (listed < program.switch_count && program.switches[listed] == c);
+            listed += control_switch && cases >= 4;
+        }
+        snprintf(description, sizeof(description), "%s: the %s path's program lists %u switches of four cases or more, as its controls have them", name,
+                 path == 0 ? "scalar" : "vector", lowered_ok ? program.switch_count : 0);
+        check_test_expect(test, switches && listed == program.switch_count, description);
         parse_release(&parser);
         check_test_types_close(&types);
         arena_release(&scratch);

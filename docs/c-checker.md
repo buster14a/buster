@@ -819,8 +819,11 @@ What the lowering covers past scalars (#145's programs):
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
-  (`check_lower_switch_table`), decided for every switch before any body is
-  lowered (`check_lower_switch_tables`). LLVM's rule at -O0
+  (`check_lower_switch_table`), decided before any body is lowered
+  (`check_lower_switch_tables`) for each switch of four cases or more, which
+  the checked program lists as it writes their controls
+  (`CheckProgram.switches`), and found by its control when its body is
+  lowered (`check_lower_table_of`). LLVM's rule at -O0
   (`SwitchLowering::findJumpTables`) takes a switch's whole range or nothing:
   four clusters or more (runs of consecutive values that go to one place;
   `case 1: case 2:` with nothing between them is one, as it is LLVM's one
@@ -853,12 +856,15 @@ What the lowering covers past scalars (#145's programs):
   table, where a label inside a function would split the function for a
   symbolizer, with the relocations against their sections' symbols. Deciding
   takes a merge sort of the switch's cases, scalar: a pass over a few cases
-  per switch. On
-  `sqlite3.c`, whose 53 tables hold 2,776 entries, the tables add about 431,000
-  instructions (0.019%) to `-c` and no cycles beyond the runs' spread (one
-  executable with the tables on and off, on the 9700X), and its shell runs
+  per listed switch. On `sqlite3.c`, whose 53 tables hold 2,776 entries, the
+  tables added about 431,000 instructions (0.019%) to `-c` before the function
+  lanes, and their temporaries 298,000, with no cycles beyond the runs' spread
+  (one executable with the tables on and off, on the 9700X), and its shell runs
   13.8% faster
   ([the record](https://github.com/buster14a/buster-performance/blob/6328c2664043f54076850f6c03c5a580ab5bfeb2/docs/measurements/switch-tables-136-2026-10-26/README.md)).
+  With the lanes, on one lane, the tables and their temporaries add about
+  900,000 instructions (0.04%; one executable with the tables on and off, on a
+  Zen 4 laptop's build).
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 

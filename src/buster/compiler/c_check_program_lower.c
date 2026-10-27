@@ -45,16 +45,18 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3",
 };
 
-// A switch's jump table (#136's item 7, check_lower_switch_tables): its function, and for each value from its cases'
-// lowest up the index of the label it goes to among the tables' labels (its default's, or the switch's end, where no case
-// has it). Its labels are `label_count` from `first_label` of the tables', `labels` their control entries: the default's
-// or the end's first, then each run of neighboring cases' that go to one place, in value order.
+// A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
+// program's controls, by which the lowering finds it (check_lower_table_of), and for each value from its cases' lowest up
+// the index of the label it goes to among the tables' labels (its default's, or the switch's end, where no case has it).
+// Its labels are `label_count` from `first_label` of the tables', `labels` their control entries: the default's or the
+// end's first, then each run of neighboring cases' that go to one place, in value order.
 typedef struct CheckLowerTable CheckLowerTable;
 struct CheckLowerTable
 {
     uint32_t* entries;
     uint32_t count;
     uint32_t function;
+    uint32_t control;
     uint32_t* labels;
     uint32_t label_count;
     uint32_t first_label;
@@ -215,14 +217,14 @@ struct CheckLowerWriter
     uint32_t* local_map;
     uint32_t* switch_locals;
     // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
-    // where its cases' compares dispatch it (CheckLowerShared.switch_tables, by control), and whether its first CASE
-    // control is still to write the table's dispatch (check_lower_switch_dispatch); the tables, and the provisional
-    // symbols of their addresses.
+    // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
+    // still to write the table's dispatch (check_lower_switch_dispatch); the tables, `table_count` of them, and the
+    // provisional symbols of their addresses.
     uint32_t table_switch;
     uint32_t table_current;
     bool table_pending;
-    const uint32_t* switch_tables;
     CheckLowerTable* tables;
+    uint32_t table_count;
     SymbolId provisional_tables;
     uint32_t* extent_locals;
     // Each variable-length array's identity plus one, by its bound's first token (0 for none), for its extent's local;
@@ -4028,11 +4030,11 @@ static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, C
 // range's values (its jump-table density, 10%); here of a class of 32 or 64 bits and a range of at most
 // BUSTER_CHECK_LOWER_MAX_TABLE values. The switch's CASE controls follow it, then its JUMP to its default or its end;
 // an empty GNU range among them (`case 5 ... 3`) counts for nothing. A table joins `lowered`'s (room for `capacity`),
-// its entries and labels from `output` and its labels numbered after the tables' before it, and *table is its index
-// (BUSTER_CHECK_NONE for none). `cases` and `sorted` are room for the program's cases. Returns false only when `output`
-// has no room. This is per switch, with the cases sorted: a scalar pass over a few cases.
+// its entries and labels from `output` and its labels numbered after the tables' before it. `cases` and `sorted` are room
+// for the program's cases. Returns false only when `output` has no room. This is per switch, with the cases sorted: a
+// scalar pass over a few cases.
 static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capacity, const CheckProgram* program, uint32_t b, uint32_t index, uint8_t class,
-                                     CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output, uint32_t* table)
+                                     CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output)
 {
     const CheckProgramBody* body = program->bodies + b;
     const CheckControl* controls = program->controls + body->first;
@@ -4047,7 +4049,6 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
     const uint64_t mask = narrow ? UINT32_MAX : UINT64_MAX;
     const uint64_t sign = class == BUSTER_TYPED_CLASS_I32 ? UINT64_C(1) << 31 : class == BUSTER_TYPED_CLASS_I64 ? UINT64_C(1) << 63 : 0;
     bool valid = true;
-    *table = BUSTER_CHECK_NONE;
     uint32_t cases = 0;
     if ((narrow || wide) && count >= 4 && end < body->count && controls[end].kind == CHECK_CONTROL_JUMP && lowered->table_count < capacity)
     {
@@ -4105,6 +4106,7 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                     .entries = entries,
                     .count = length,
                     .function = b,
+                    .control = body->first + index,
                     .labels = labels,
                     .label_count = label_count,
                     .first_label = first,
@@ -4112,7 +4114,6 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
                     .lower = (sorted[0].lower ^ sign) & mask,
                     .fallback = controls[end].target,
                 };
-                *table = lowered->table_count;
                 lowered->table_count += 1;
                 lowered->case_symbol_count += label_count;
             }
@@ -4122,37 +4123,53 @@ static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capa
 }
 
 // Every switch's jump table or none (check_lower_switch_table), before any body is lowered, so that whatever lane lowers
-// a body, the tables and their labels are numbered in source order (#151): `switch_tables` by each SWITCH control's
-// index in the program's controls (only those entries are written), the tables in `lowered` from `output`, the cases'
-// room from `scratch`. Returns false when an arena has no room.
-static bool check_lower_switch_tables(uint32_t** switch_tables, CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
+// a body, the tables and their labels are numbered in source order (#151), the tables in `lowered` from `output`, the
+// cases' room from `scratch`. Only a switch of four cases or more may have one, and the program lists those
+// (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are some
+// of the checked program's, with its controls). Returns false when an arena has no room.
+static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
 {
-    // A jump table takes four cases or more.
     const uint32_t capacity = program->case_count / 4;
     bool valid = true;
-    *switch_tables = 0;
-    if (capacity != 0 && program->stream != 0)
+    if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
     {
         lowered->tables = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, capacity);
-        *switch_tables = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->control_count + 1);
         CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
         CheckLowerCaseRange* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
-        valid = lowered->tables != 0 && *switch_tables != 0 && cases != 0 && sorted != 0;
+        valid = lowered->tables != 0 && cases != 0 && sorted != 0;
+        uint32_t s = 0;
         for (uint32_t b = 0; valid && b < program->body_count; b += 1)
         {
             const CheckProgramBody* body = program->bodies + b;
-            for (uint32_t i = 0; valid && i < body->count; i += 1)
+            while (s < program->switch_count && program->switches[s] < body->first)
             {
-                const CheckControl control = program->controls[body->first + i];
-                if (control.kind == CHECK_CONTROL_SWITCH)
-                {
-                    const uint8_t class = check_lower_class(program->types, program->stream->values[control.node].type);
-                    valid = check_lower_switch_table(lowered, capacity, program, b, i, class, cases, sorted, output, *switch_tables + body->first + i);
-                }
+                s += 1;
+            }
+            for (; valid && s < program->switch_count && program->switches[s] - body->first < body->count; s += 1)
+            {
+                const CheckControl control = program->controls[program->switches[s]];
+                const uint8_t class = check_lower_class(program->types, program->stream->values[control.node].type);
+                valid = check_lower_switch_table(lowered, capacity, program, b, program->switches[s] - body->first, class, cases, sorted, output);
             }
         }
     }
     return valid;
+}
+
+// The jump table of the SWITCH control at `control`, an index in the program's controls, or BUSTER_CHECK_NONE: a search
+// of the `count` tables, which check_lower_switch_tables made in the controls' order.
+static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t control)
+{
+    uint32_t first = 0;
+    uint32_t end = count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const bool before = tables[middle].control < control;
+        first = before ? middle + 1 : first;
+        end = before ? end : middle;
+    }
+    return first < count && tables[first].control == control ? first : BUSTER_CHECK_NONE;
 }
 
 // The index of a jump table's entry: the switch's value (in `local`, of `class`) less the table's lowest, unsigned.
@@ -4391,7 +4408,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         // Its CASE controls come next: through its jump table (check_lower_switch_tables decided it), its first one
         // writes the dispatch, and none compares.
         writer->table_switch = control.token;
-        writer->table_current = writer->switch_tables != 0 ? writer->switch_tables[writer->body->first + index] : BUSTER_CHECK_NONE;
+        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, writer->body->first + index);
         writer->table_pending = writer->table_current != BUSTER_CHECK_NONE;
     }
     else if (control.kind == CHECK_CONTROL_CASE)
@@ -4591,10 +4608,8 @@ struct CheckLowerShared
     // first of the provisional symbols the lowering's own take until check_lower_finish numbers them, the helpers' end.
     SymbolId declared_runtimes[CHECK_LOWER_RUNTIMES];
     SymbolId provisional_runtimes;
-    // Each switch's jump table or none, by its SWITCH control's index in the program's controls (check_lower_switch_tables;
-    // null for a program of fewer than four cases), and the first of the tables' provisional symbols, after the runtime
+    // The first of the jump tables' provisional symbols (check_lower_switch_tables decided the tables), after the runtime
     // functions': table t's address is provisional_tables + t while the bodies compile.
-    uint32_t* switch_tables;
     SymbolId provisional_tables;
 };
 
@@ -4737,7 +4752,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         shared->label_symbol_capacity += object != 0 && object - 1 < count && program->parser->tree.roles[object - 1] == PARSE_ROLE_LABEL;
     }
     // Every switch's jump table, decided before the bodies; the label symbols' room holds the tables' labels too.
-    valid = valid && check_lower_switch_tables(&shared->switch_tables, lowered, program, output, scratch);
+    valid = valid && check_lower_switch_tables(lowered, program, output, scratch);
     valid = valid && (uint64_t)shared->provisional_tables + lowered->table_count < UINT32_MAX;
     const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + lowered->case_symbol_count : 0;
     lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
@@ -4880,8 +4895,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .declared_runtimes = shared->declared_runtimes,
         .provisional_runtimes = shared->provisional_runtimes,
         .table_current = BUSTER_CHECK_NONE,
-        .switch_tables = shared->switch_tables,
         .tables = shared->lowered->tables,
+        .table_count = shared->lowered->table_count,
         .provisional_tables = shared->provisional_tables,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
