@@ -617,6 +617,72 @@ static void check_program_emit_alone(CheckEmitRun* run)
     }
 }
 
+// The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
+// program's symbols, `access` 1 to symbol_count (Tier0Function.symbol_access): a symbol this unit doesn't define may be a
+// shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
+// writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
+// another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
+// check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
+// (check_program_emit_lanes) and check_program_access's share it.
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
+{
+    memset(defined, 0, (uint64_t)program->object_count + 1);
+    for (uint32_t b = 0; b < program->body_count; b += 1)
+    {
+        defined[program->bodies[b].object] = 1;
+    }
+    for (uint32_t token = 0; token < program->input->token_count; token += 1)
+    {
+        const uint32_t object = program->input->objects[token];
+        if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            (program->input->defined[token] || program->input->tentative[token]))
+        {
+            defined[object] = 1;
+        }
+    }
+    for (uint32_t s = 0; s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
+        const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
+        const bool thread_local = !literal && program->input->thread_local[declaration];
+        access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+    }
+}
+
+// How Tier 0 reaches each symbol of a lowered program, as check_lower_finish numbered them (Tier0Function.symbol_access):
+// one column, from `output`, for every body that `lowered` holds of `program`, and `*defined_objects`, from `scratch`
+// (check_program_object_access). The helpers are the unit's, and the C runtime's errno function isn't; libgcc's
+// functions are linked into the image. Returns whether there was room. benchmark-backend-source (tier0_source_benchmark.c)
+// compiles the lowered functions again with it: the emission's own column, made before its lanes, has the runtime
+// functions' provisional symbols (check_lower_runtime), and goes with its scratch.
+static bool check_program_access(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch, uint8_t** defined_objects)
+{
+    const uint32_t count = program->body_count;
+    const uint32_t access_count = program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
+    uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
+    const bool valid = access != 0 && defined != 0;
+    *defined_objects = defined;
+    if (valid)
+    {
+        memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
+        check_program_object_access(program, access, defined);
+        for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
+        {
+            const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
+            access[symbol] = lowered->runtime_order[r] == CHECK_LOWER_RUNTIME_ERRNO ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+        }
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            lowered->functions[b].symbol_access = access;
+            lowered->functions[b].symbol_count = access_count;
+        }
+    }
+    return valid;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
 // `rows`, each source body's raw source rows too (c_check_debug.c), from `output`. With `lanes`, on up to lanes->lanes
@@ -651,13 +717,10 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         valid = check_lower_prepare(&shared, &result->lowered, program, scalar, rows != NULL, output, scratch);
     }
     const uint32_t count = program->body_count;
-    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
-    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
-    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
-    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
-    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
-    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image. The
-    // runtime's functions have their provisional symbols while the bodies compile (check_lower_runtime), each its own.
+    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: the program's symbols' as
+    // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
+    // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
+    // bodies compile (check_lower_runtime), each its own.
     const uint32_t access_count = valid ? shared.provisional_runtimes + CHECK_LOWER_RUNTIMES : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
@@ -665,29 +728,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        memset(defined, 0, (uint64_t)program->object_count + 1);
-        for (uint32_t b = 0; b < count; b += 1)
-        {
-            defined[program->bodies[b].object] = 1;
-        }
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
-        {
-            const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (program->input->defined[token] || program->input->tentative[token]))
-            {
-                defined[object] = 1;
-            }
-        }
-        for (uint32_t s = 0; s < program->symbol_count; s += 1)
-        {
-            const uint32_t object = program->symbol_objects[s];
-            const uint32_t declaration = program->object_declarations[object];
-            const bool literal = declaration == BUSTER_CHECK_NONE || program->input->compound_objects[declaration];
-            const bool own = literal || defined[object] || program->input->linkage[declaration] != 2;
-            const bool thread_local = !literal && program->input->thread_local[declaration];
-            access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
-        }
+        check_program_object_access(program, access, defined);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
