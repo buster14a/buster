@@ -545,6 +545,9 @@ when the selected program has no function bodies. Static object initializers
 and generated helpers do not consume it; semantic checking and object emission
 still run.
 
+The source snapshots, qualification receipts and before/after scaling campaign
+for #613 are tracked in [buster-performance#30](https://github.com/buster14a/buster-performance/pull/30).
+
 ### Finishing a type
 
 `abi_finish` derives the rest from a type's row[0] and what it is, the twin's
