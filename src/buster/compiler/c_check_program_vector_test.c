@@ -3,10 +3,10 @@
 //
 // #136's vectors in the lowering, against clang -O0's code of the same source for x86-64-v4 (AVX-512F, BW, DQ and VL):
 // every operator at each element type and width, compound assignments, calls passing and returning vectors in registers,
-// elements, literals, splats, casts, conditionals, globals, arrays and members of vector type. Their types are aligned to 16 at most, as
-// Tier 0's frame objects are until it realigns a frame. Then what the lowering refuses by name: vectors on x86-64,
-// operators AVX-512 has no instruction for, other sizes and over-aligned locals. Include after
-// c_check_program_test.c's runners.
+// elements, literals, splats, casts, conditionals, globals, arrays and members of vector type. Most of their types are aligned to
+// 16, and one program's to their sizes, 32 and 64, whose locals realign its frame (#552). Then what the lowering refuses by
+// name: vectors on x86-64, operators AVX-512 has no instruction for and other sizes. Include after c_check_program_test.c's
+// runners.
 
 static const char check_test_vector_types[] =
     "typedef signed char v64qi __attribute__((vector_size(64),aligned(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
@@ -91,6 +91,12 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "d*=2.0;d/=d+1.0;d-=0.25;FOLD(d);global_sum=a;global_sum+=a;*x+=global_sum;x[1]^=a;FOLD(global_sum);FOLD(x);"
             "return (int)h;}",
         },
+        {
+            "vector-aligned-locals",
+            "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
+            "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
+            "v16si array[2]={a,b};array[1]+=array[0];FOLD(array);return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
@@ -129,11 +135,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "vector-of-8-bytes",
             "typedef int v2si __attribute__((vector_size(8)));int tested(int n){v2si a={n},b={2};a=b;return a[0];}",
             "vector types of other than 16, 32 or 64 bytes",
-        },
-        {
-            "vector-aligned-local",
-            "typedef int v16si __attribute__((vector_size(64)));int tested(int n){v16si a={n},b={2};a=b;return a[0];}",
-            "local objects aligned past 16 bytes or larger than 1 GB",
         },
         {
             "vector-integer-cast",
