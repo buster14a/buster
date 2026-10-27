@@ -54,6 +54,11 @@ alternative (`check_asm_constraint_parse`):
 | a digit, `[name]` | the output's register (a matching input) |
 | `g`, `X` | a constant where one is allowed, else a register, else memory |
 
+A constant goes where its constraint's first alternative takes it: as an
+immediate if one of its letters' ranges takes it, else in a register if the
+alternative allows one, as GCC and clang place it. So `"rI"(31)` is `$31`, and
+`"rI"(40)` is a register.
+
 Every operand gets a register of its own, but matching pairs. No operand takes a
 clobbered register. Caller-saved registers come first, so most templates cost
 their helper no saves. An input fixed to an output's fixed register, as in
@@ -78,7 +83,7 @@ syntax:
 | In the template | Printed |
 | --- | --- |
 | `%0`, `%[name]` | a register by the operand's size, memory as `(%reg)`, a constant as `$value` |
-| `%b`, `%w`, `%k`, `%q` | the register's 8-, 16-, 32- or 64-bit name |
+| `%b`, `%w`, `%k`, `%q` | the register's 8-, 16-, 32- or 64-bit name; a constant as it is |
 | `%h` | the high byte register (ah, bh, ch, dh) |
 | `%c`, `%P`, `%p`, `%a` (constant) | the constant without `$` |
 | `%n` | the negated constant, without `$` |
@@ -211,7 +216,10 @@ has the commands, the logs and the default path's numbers against main.
     memory input after a register output, and an XMM matching input;
   - matching inputs narrower and wider than their outputs, in templates of no
     instructions and of one, below 0 too;
-  - `Z`'s constants at its boundaries.
+  - `Z`'s constants at its boundaries;
+  - constraints of a register and bounded immediates, whose constants their
+    letters take and don't, in templates that assemble only with an immediate
+    (`%c1`'s displacement) or only with a register (`%b1`'s `%cl`).
 
   Each refusal above is checked by name.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the

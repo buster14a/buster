@@ -421,9 +421,12 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
             refused = "this inline assembly operand modifier";
         }
     }
-    else if (modifier == 0 || modifier == 'c' || modifier == 'P' || modifier == 'p' || modifier == 'a' || modifier == 'n')
+    else if (modifier == 0 || modifier == 'b' || modifier == 'h' || modifier == 'w' || modifier == 'k' || modifier == 'q' || modifier == 'V' || modifier == 'c' ||
+             modifier == 'P' || modifier == 'p' || modifier == 'a' || modifier == 'n')
     {
-        check_asm_emit_text(scratch, modifier == 0 ? "$" : "", valid);
+        // The register modifiers print a constant as it is, as clang's do ("shll %b1" of "cI"(3) is shll $3).
+        const bool bare = modifier == 'c' || modifier == 'P' || modifier == 'p' || modifier == 'a' || modifier == 'n';
+        check_asm_emit_text(scratch, bare ? "" : "$", valid);
         check_asm_emit_number(scratch, modifier == 'n' ? (int64_t)(0 - (uint64_t)place->constant) : place->constant, valid);
     }
     else
@@ -775,6 +778,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         };
         const bool constant = !output && value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
                               (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && integer;
+        // An integer constant as clang prints it: its type's bits, sign-extended. One its letters' ranges don't take goes in
+        // a register where the constraint allows one too ("rI"(40)), as GCC and clang place it.
+        const uint32_t bits = width != 0 ? width : 64;
+        const uint64_t raw = (uint64_t)value->integer;
+        const int64_t extended = bits >= 64 ? (int64_t)raw : (int64_t)(raw << (64 - bits)) >> (64 - bits);
+        const bool fits = constant && constraint->immediate && check_asm_constant_fits(constraint, extended, bits);
         if (constraint->refused != NULL)
         {
             reason = constraint->refused;
@@ -791,15 +800,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             // A matching input: its output's place, below.
         }
-        else if (constraint->immediate && constant)
+        else if (constraint->immediate && constant && (fits || constraint->general == 0 || !registered))
         {
-            // An integer constant as clang prints it: its type's bits, sign-extended.
-            const uint32_t bits = width != 0 ? width : 64;
-            const uint64_t raw = (uint64_t)value->integer;
-            const int64_t extended = bits >= 64 ? (int64_t)raw : (int64_t)(raw << (64 - bits)) >> (64 - bits);
             place->kind = BUSTER_CHECK_ASM_CONSTANT;
             place->constant = extended;
-            reason = check_asm_constant_fits(constraint, extended, bits) ? NULL : "inline assembly constants outside their constraint's range";
+            reason = fits ? NULL : "inline assembly constants outside their constraint's range";
         }
         else if (constraint->general != 0 && registered)
         {

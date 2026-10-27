@@ -125,6 +125,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"movq %1, %0\" : \"=r\"(c) : \"Z\"((signed char)-1));__asm__(\"movl %1, %k0\" : \"=r\"(d) : \"Z\"((unsigned long)0xffffffff));"
         "return n+(int)(a>>32)*3+(int)(b>>40)*5+(int)c*7+(int)(d>>8);}",
         "asm-z-constants", clang);
+    // A constraint of a register and bounded immediates: a constant its letters take is the immediate ("rI"(31), which only
+    // %c1's displacement assembles; "cI"(3)), and another goes in the register ("rI"(40); "cI"(40), which %b1 prints %cl;
+    // "Kr"(-200)), as GCC and clang place them.
+    check_test_program_source(test,
+        "int tested(int n){long p=n;int a,b=n,x=n,y=n;__asm__(\"leal %c1(%2), %0\" : \"=r\"(a) : \"rI\"(31), \"r\"(p));"
+        "__asm__(\"addl %1, %0\" : \"+r\"(b) : \"rI\"(40));__asm__(\"shll %b1, %0\" : \"+r\"(x) : \"cI\"(3));"
+        "__asm__(\"shll %b1, %0\" : \"+r\"(y) : \"cI\"(40));int c=n;__asm__(\"subl %1, %0\" : \"+r\"(c) : \"Kr\"(-200));"
+        "return a+b*3+x*5+y+c*7;}",
+        "asm-register-or-immediate", clang);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
