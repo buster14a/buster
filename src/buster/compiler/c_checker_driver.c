@@ -1155,7 +1155,11 @@ static int run_check_command(int count, char** arguments, bool executable)
             TypeTable types = { 0 };
             if (ready)
             {
-                type_arena = arena_reserve(type_capacity_bytes(capacity));
+                // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
+                // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
+                // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+                const uint64_t type_bytes = type_capacity_bytes(capacity);
+                type_arena = arena_reserve_small(type_bytes, type_bytes);
                 index_arena = arena_reserve(type_index_capacity_bytes(capacity));
                 ready = capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
                 if (!ready)
