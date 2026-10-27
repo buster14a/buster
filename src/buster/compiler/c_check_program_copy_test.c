@@ -107,6 +107,10 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
         "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(char)(n+i);b=a;return (b=a).c[512]+b.c[0];}",
         "aggregate-copy-declared-runtime", clang);
     check_test_program_source(test,
+        "struct S{char c[513];};static struct S a,b;int tested(int n){a.c[512]=(char)n;b=a;"
+        "return __builtin_isnan(__builtin_sqrt((double)n))+b.c[512];}",
+        "aggregate-copy-shares-runtime-publication", clang);
+    check_test_program_source(test,
         "struct S{char c[1025];};struct S pass(struct S s){struct S r=s;return r;}"
         "int tested(int n){struct S a;for(int i=0;i<1025;i++)a.c[i]=(char)(n+i);struct S b=pass(a);"
         "for(int i=0;i<1025;i++)if(a.c[i]!=b.c[i])return -1003;return b.c[1024];}",
