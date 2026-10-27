@@ -38,6 +38,11 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "nested-selection-warnings",
+      "#define C(X) __builtin_choose_expr(1,0,(X))\n"
+      "#define N C(C(C(C(C(C(C(C(C(C(C(C((2147483647+1)))))))))))))\n"
+      "int f(void){enum {A=N}; return A;} int g(void){enum {B=N}; return B;}\n"
+      "int h(void){return _Generic(N,int:0,default:1);}\n", true },
     { "naked-valid-bodies", "__attribute__((naked)) void f(int n) { ; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
     { "naked-invalid-statement", "__attribute__((naked)) void f(void) { int x=1; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
     { "naked-parameter-reference", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(n)); }\nint g(int n) { return n; }\n", true },

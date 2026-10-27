@@ -348,6 +348,9 @@ struct CheckInputReader
     uint32_t* region_roots;
     uint8_t* constant_contexts;
     uint8_t* warning_suppressed;
+    uint16_t* warning_index;
+    uint32_t warning_index_base;
+    bool warning_index_ready;
     TypeId* declaration_bases;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
@@ -1400,6 +1403,32 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
 }
 
 static CheckOp check_input_binary(uint8_t kind);
+
+// A subtree is contiguous in token order and postorder. Its first token's own subtree starts the same postorder
+// run; extending that run to the requested length locates its root. The size and last-token checks reject slices
+// that cut a subtree or contain several roots. This shares the parser's retained sizes and the reader's inverse
+// postorder/ends; neither selections nor constant evaluation needs another tree or a range scan.
+static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t root = BUSTER_CHECK_NONE;
+    if (first < end && end <= parser->tokens.count)
+    {
+        const uint32_t position = reader->postorder_positions[first];
+        const uint32_t size = parser->sizes[position];
+        const uint32_t length = end - first;
+        if (size != 0 && size <= length && size <= position + 1 && length - size < parser->tokens.count - position)
+        {
+            const uint32_t after = position + length - size;
+            const uint32_t candidate = parser->postorder[after];
+            if (parser->sizes[after] == length && candidate >= first && candidate < end && reader->ends[candidate] == end - 1)
+            {
+                root = candidate;
+            }
+        }
+    }
+    return root;
+}
 
 // Declaration-time ICEs and type queries use the same semantic actions as expression graphs. The helper uses
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
@@ -4486,6 +4515,12 @@ static void check_input_constant_contexts(CheckInputReader* reader)
             check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
         }
     }
+    if (reader->warning_index_ready)
+    {
+        // Static contexts may replace the earlier independent-bound bit. Reopen the compact index before later
+        // intrinsic constant evaluation, which must see the current contexts and any newly clearable warnings.
+        memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
+    }
 }
 
 // The groups of names check_input_count_tokens counts the tokens of.
@@ -4733,7 +4768,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     {
         reader.predefined_positions[i] = BUSTER_CHECK_NONE;
     }
-    bool valid = syntax != 0 && arena != scratch && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && (parser->postorder != 0 || count == 0) &&
+    bool valid = syntax != 0 && arena != scratch && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && ((parser->postorder != 0 && parser->sizes != 0) || count == 0) &&
                  count < UINT32_MAX / 4 && graph_capacity <= UINT32_MAX && original_end <= count;
     const char* const builtin_members[] =
     {
@@ -4883,6 +4918,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(scope_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
+    reader.warning_index_base = 1;
+    while ((uint64_t)reader.warning_index_base * BUSTER_CHECK_WARNING_BLOCK < count)
+    {
+        reader.warning_index_base *= 2;
+    }
+    reader.warning_index = valid ? arena_push_array(scratch, (uint64_t)reader.warning_index_base * 2, sizeof(uint16_t), 64) : 0;
+    valid &= reader.warning_index != 0;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
     valid &= reader.value_next != 0;
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
@@ -5143,6 +5185,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 // after the walk run on the merge's table, which source order's walk would have made.
                 check_deferred_bodies(deferred, &reader);
                 types = reader.types;
+                // Lanes may have appended warnings after a top-level range last summarized their shared columns.
+                reader.warning_index_ready = false;
             }
             if (input->report_count == 0 && !input->resource)
             {

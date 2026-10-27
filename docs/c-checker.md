@@ -1429,3 +1429,44 @@ fixtures. Existing synthetic checker rates exclude source adaptation and are
 not end-to-end evidence. [#133](https://github.com/buster14a/buster/issues/133) owns supported-source/corpus completion and the
 whole source/check/data costs, allocations, memory and occupancy; [#145](https://github.com/buster14a/buster/issues/145)/[#138](https://github.com/buster14a/buster/issues/138)
 own the eventual complete compiler/program-quality evidence.
+
+## Nested selections and warning ranges (#603)
+
+`check_input_range_root` consumes the parser's postorder/subtree sizes and the
+reader's existing inverse postorder and subtree ends. A complete expression
+occupies one contiguous run in both orders. The first token's own subtree
+begins that run; its postorder position minus its subtree size, plus the
+expression length, locates the root in constant work. The root's size and last
+token validate the requested slice. Both source selections and declaration-time
+constant evaluation use this lookup, with no additional syntax-tree column.
+Raw attribute expressions retain their separate explicit-stack representation.
+
+`c_check_warning_input.c` applies clearing and suppression immediately in their
+original order. Its interval index has a two-byte summary per node and one leaf
+per 64 tokens, rounded to a power of two: less than one eighth of a byte per
+token for large inputs. The low byte summarizes clearable warnings; the high
+byte summarizes missing suppression bits. Completed intervals skip repeated
+updates, while a later warning write reopens its leaf's ancestor path. Range
+queries cost logarithmic index work plus the blocks that still need changes;
+repeated nested ranges no longer rescan their full token spans. Short ranges
+before index initialization use direct updates. The index borrows reader scratch
+and its first long range initializes conservative summaries, without reading
+the whole unit's warning columns.
+
+Scalar and masked AVX-512 block updates preserve independently evaluated bound
+contexts, both warning columns and the graph's suppression facts. Loads and
+stores stay within the requested range and logical token count. Boundary blocks
+retain conservative summaries for their untouched bytes. Deferred workers own
+separate indexes, so neither interval ancestors nor adjacent bodies' bytes are
+shared mutable summaries; joining workers invalidates the parent reader's old
+summaries. Replacing constant contexts also invalidates the index. Diagnostics
+retain their existing source-order consumer.
+
+`test-checker` checks every slice of two independent parser trees against a
+parent-scan root oracle, and ordered warning mutations against an immediate
+byte-update oracle with protected tails at every length through 257. Source
+fixtures cover nested selected/discarded arms, vector results, lvalues, bound
+warnings and rejected discarded expressions. `test-checker-deferred` covers
+warning-bearing selections in several bodies. The scaling campaign's original
+C generator and work-count instrumentation live in buster-performance under
+`docs/measurements/nested-selections-603-2026-10-27`.
