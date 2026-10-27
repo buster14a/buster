@@ -171,8 +171,8 @@ struct CheckDeferredLane
     uint64_t position_ns;
     uint64_t walk_ns;
     uint64_t copy_ns;
-    // With `timing`, when the lane reached the partition: CLOCK_MONOTONIC's nanoseconds, for CheckDeferred's dispatch_ns
-    // and wake_ns.
+    // With `timing`, when the lane arrived (check_deferred_lane): CLOCK_MONOTONIC's nanoseconds, for CheckDeferred's
+    // dispatch_ns and wake_ns.
     uint64_t arrived_ns;
 };
 
@@ -203,10 +203,12 @@ struct CheckDeferred
     const CheckInputReader* top_reader;
     CEnvironment environment;
     CheckDeferredLane lane_states[BUSTER_CHECK_DEFERRED_MAX_LANES];
-    // The bodies by cost, for the lanes' parts.
+    // The bodies by cost, and the lanes' parts, cut before the lanes start (parts_by_cost): the parts' boundaries, the
+    // order to take them in, the costliest first, and how many.
     uint64_t* costs;
     uint64_t* boundaries;
-    uint32_t* orders[BUSTER_CHECK_DEFERRED_MAX_LANES];
+    uint32_t* order;
+    uint64_t parts;
     // The state's memory, which outlives its readings: the one field check_input_deferred keeps of a reading before.
     CheckDeferredMemory memory;
     // The unit is for source order, and why.
@@ -223,9 +225,9 @@ struct CheckDeferred
     // scope's history (the environment's index), the lanes, the merge; and summed over the lanes, the bodies' walks and
     // their position checks: setting each body's heads from the history and its table's view, and taking them back. And
     // what a lane costs: its copy of the reader, summed over the lanes that copied it; lane_run's dispatch, from its call
-    // to the first lane's arrival at the partition (the first lane's pinning, and the others' wake calls); their
-    // wake-up, from the first lane's arrival to the last one's: the first lane's wait at the partition's sync, without
-    // the partition's own work, and none on one lane; and before the lanes, their arenas reserved or taken back.
+    // to the first lane's arrival (the first lane's pinning, and the others' wake calls); their wake-up, from the first
+    // lane's arrival to the last one's, none on one lane, which no lane waits for: the parts are cut before the lanes
+    // start; and before the lanes, their arenas reserved or taken back.
     bool timing;
     // The lanes' CPUs, which a caller whose lane team is pinned (lane_team_start) sets for lane_run to name; 0 for none.
     const uint32_t* cpus;
@@ -812,17 +814,18 @@ static void check_deferred_lane(void* argument)
     const uint32_t index = lane_index();
     CheckDeferredLane* lane = deferred->lane_states + index;
     lane->arenas = deferred->memory.lanes + index;
-    // The partition's sync is the first that every lane reaches: the first lane waits there for the last to arrive.
+    // No lane waits for another: the parts were cut before the lanes started.
     lane->arrived_ns = deferred->timing ? check_deferred_now() : 0;
-    uint32_t* order = deferred->orders[index];
-    const uint64_t parts = lane_parts_by_cost(deferred->costs, deferred->body_count, deferred->boundaries, order);
+    const uint64_t parts = deferred->parts;
+    const uint32_t* order = deferred->order;
     while (deferred->hold_lanes && index != 0 && __atomic_load_n(&deferred->held, __ATOMIC_ACQUIRE) == 0)
     {
         // A test's wait, which yields: the tests may run more lanes than CPUs.
         sched_yield();
     }
-    // The costliest part, order[0], is the first lane's own: the last lane to wake would reach the counter first, and a
-    // woken lane reads a body at about half the first lane's speed. The counter gives out the others, costliest first.
+    // The costliest part, order[0], is the first lane's own, which it starts at once: the others are woken for the
+    // bodies, and a woken lane reads a body at about half the first lane's speed. The counter gives out the others,
+    // costliest first, to every lane as it comes.
     for (uint64_t taken = index == 0 ? 0 : 1 + lane_take(parts - 1); taken < parts; taken = 1 + lane_take(parts - 1))
     {
         check_deferred_part(deferred, lane, index, order[taken]);
@@ -1335,12 +1338,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     deferred->costs = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint64_t, (uint64_t)deferred->body_count + 1) : 0;
     deferred->boundaries = deferred->costs != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint64_t, (uint64_t)BUSTER_LANE_MAX_PARTS + 1) : 0;
     deferred->results = deferred->boundaries != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredResult, (uint64_t)deferred->body_count + 1) : 0;
-    valid = valid && deferred->results != 0;
-    for (uint32_t lane = 0; valid && lane < deferred->lanes; lane += 1)
-    {
-        deferred->orders[lane] = BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, (uint64_t)BUSTER_LANE_MAX_PARTS + 1);
-        valid = deferred->orders[lane] != 0;
-    }
+    deferred->order = deferred->results != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, (uint64_t)BUSTER_LANE_MAX_PARTS + 1) : 0;
+    valid = valid && deferred->order != 0;
     uint64_t total = 0;
     for (uint32_t b = 0; valid && b < deferred->body_count; b += 1)
     {
@@ -1370,6 +1369,9 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > largest ? total - largest : 0) / BUSTER_CHECK_DEFERRED_LANE_TOKENS;
     const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
     const uint32_t active = paid < most ? (uint32_t)paid : most;
+    // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
+    // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
+    deferred->parts = valid && deferred->body_count != 0 ? parts_by_cost(deferred->costs, deferred->body_count, active, deferred->boundaries, deferred->order) : 0;
     // The lanes' arenas, on this thread: those of a lane the state hasn't run reserved, the others taken back. A lane
     // without them takes its parts' bodies for source order's (check_deferred_lane_prepare).
     const uint64_t arenas_begin = deferred->timing ? check_deferred_now() : 0;
@@ -1387,8 +1389,8 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     valid = valid && ran;
     deferred->lanes_ns = deferred->timing ? check_deferred_now() - lanes_begin : 0;
     deferred->largest_lane = valid && deferred->body_count != 0 ? deferred->results[deferred->largest_index].lane : 0;
-    // The first lane reaches the partition after lane_run's dispatch, and the last one after the others' wake-up; a
-    // lane that didn't run arrived nowhere (0).
+    // The first lane arrives after lane_run's dispatch, and the last one after the others' wake-up; a lane that didn't
+    // run arrived nowhere (0).
     const uint64_t first_arrival = deferred->lane_states[0].arrived_ns;
     uint64_t last_arrival = first_arrival;
     for (uint32_t lane = 0; lane < deferred->lanes && lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)

@@ -19,8 +19,8 @@
 // as after source order's walk); the position checks per body too, the lanes the bodies ran on (`active`: as many as
 // the reader's rule gives them, or with --every-lane every lane they can take) and how many copied the reader (those
 // that took a part). Then what a lane costs, in nanoseconds: its copy of the reader; lane_run's dispatch, from its call
-// to the first lane's arrival at the partition; the others' wake-up, from the first lane's arrival there to the last
-// one's, which on one lane is none; and the lanes' arenas before they start, reserved or taken back (`arenas`); and in
+// to the first lane's arrival; the others' wake-up, from the first lane's arrival to the last one's, which on one lane
+// is none; and the lanes' arenas before they start, reserved or taken back (`arenas`); and in
 // how many passes the first lane read the largest body (`largest_first`). The unit's line gives its bodies' tokens, the
 // largest body's and the largest of the others' (`second_body`). A unit the deferred reader leaves to source order is
 // said so. This measures the reader (check_input) alone, not the graph's checking after it.

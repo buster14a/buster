@@ -802,7 +802,70 @@ static uint32_t lane_test_cost_bucket(const uint64_t* cost_prefix, const uint64_
     return cost == 0 ? 64 : (uint32_t)__builtin_clzll(cost);
 }
 
-// Lane 0's checks of one input's loop: the output, every part taken once, the boundaries, and every lane's order.
+// An order's failures: the parts that exist, the costliest first (the first of them on a tie), then the others by
+// bucket, then by index.
+static uint64_t lane_test_order_failures(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t parts, const uint32_t* order)
+{
+    uint64_t failures = 0;
+    bool in_range = true;
+    uint64_t costliest = 0;
+    for (uint64_t taken_index = 0; taken_index < parts; taken_index += 1)
+    {
+        in_range = in_range && order[taken_index] < parts;
+        const uint64_t cost = lane_test_part_cost(cost_prefix, boundaries, taken_index);
+        costliest = cost > lane_test_part_cost(cost_prefix, boundaries, costliest) ? taken_index : costliest;
+    }
+    failures += in_range && (parts == 0 || order[0] == costliest) ? 0 : 1;
+    for (uint64_t taken_index = 2; in_range && taken_index < parts; taken_index += 1)
+    {
+        const uint32_t previous = lane_test_cost_bucket(cost_prefix, boundaries, order[taken_index - 1]);
+        const uint32_t current = lane_test_cost_bucket(cost_prefix, boundaries, order[taken_index]);
+        failures += previous > current || (previous == current && order[taken_index - 1] >= order[taken_index]) ? 1 : 0;
+    }
+    return failures;
+}
+
+// parts_by_cost's checks of one input, by lane 0 alone: for the group's lane count, the group's boundaries and order
+// (`boundaries` and `order`, from lane_parts_by_cost); and for others, as many parts as a group of them would cut,
+// range_part_by_cost's boundaries, and an order of every part once by lane_parts_by_cost's rules.
+static uint64_t lane_test_check_parts_alone(const uint64_t* cost_prefix, uint64_t count, uint64_t parts, const uint64_t* boundaries, const uint32_t* order)
+{
+    uint64_t failures = 0;
+    Scratch scratch = scratch_begin(0);
+    uint64_t* alone_boundaries = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_LANE_MAX_PARTS + 1);
+    uint32_t* alone_order = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, BUSTER_LANE_MAX_PARTS);
+    uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, BUSTER_LANE_MAX_PARTS);
+    const uint32_t lane_counts[] = { lane_count(), 1, 2, 3, 5, 8, 64, BUSTER_LANE_MAX_COUNT };
+    for (uint32_t l = 0; alone_boundaries != 0 && alone_order != 0 && seen != 0 && l < BUSTER_ARRAY_LENGTH(lane_counts); l += 1)
+    {
+        const uint64_t lanes = lane_counts[l];
+        const uint64_t most = lanes == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * lanes;
+        const uint64_t expected = count < most ? count : most;
+        const uint64_t made = parts_by_cost(cost_prefix, count, (uint32_t)lanes, alone_boundaries, alone_order);
+        failures += made != expected ? 1 : 0;
+        if (made == expected)
+        {
+            memset(seen, 0, made);
+            for (uint64_t part = 0; part < made; part += 1)
+            {
+                failures += alone_boundaries[part] != range_part_by_cost(cost_prefix, count, part, made).begin ? 1 : 0;
+                failures += alone_order[part] < made && seen[alone_order[part]] == 0 ? 0 : 1;
+                seen[alone_order[part] < made ? alone_order[part] : 0] = 1;
+            }
+            failures += alone_boundaries[made] != count ? 1 : 0;
+            failures += lane_test_order_failures(cost_prefix, alone_boundaries, made, alone_order);
+            // The group's own lane count: the very parts and order the lanes made together.
+            failures += l == 0 && (made != parts || memcmp(alone_boundaries, boundaries, (made + 1) * sizeof(uint64_t)) != 0 ||
+                                   memcmp(alone_order, order, made * sizeof(uint32_t)) != 0) ? 1 : 0;
+        }
+    }
+    failures += alone_boundaries != 0 && alone_order != 0 && seen != 0 ? 0 : 1;
+    scratch_end(scratch);
+    return failures;
+}
+
+// Lane 0's checks of one input's loop: the output, every part taken once, the boundaries, every lane's order, and
+// parts_by_cost's for the same input.
 static uint64_t lane_test_check_part_loop(LaneTest* test, const uint64_t* cost_prefix, uint64_t count, uint64_t parts, uint64_t input, uint64_t bytes)
 {
     const uint32_t lanes = lane_count();
@@ -825,25 +888,12 @@ static uint64_t lane_test_check_part_loop(LaneTest* test, const uint64_t* cost_p
     // The order: parts that exist, the costliest first (the first of them on a tie), then the others by bucket, then by
     // index; and the same for every lane.
     const uint32_t* order = test->part_orders[0];
-    bool in_range = true;
-    uint64_t costliest = 0;
-    for (uint64_t taken_index = 0; taken_index < parts; taken_index += 1)
-    {
-        in_range = in_range && order[taken_index] < parts;
-        const uint64_t cost = lane_test_part_cost(cost_prefix, test->part_boundaries, taken_index);
-        costliest = cost > lane_test_part_cost(cost_prefix, test->part_boundaries, costliest) ? taken_index : costliest;
-    }
-    failures += in_range && (parts == 0 || order[0] == costliest) ? 0 : 1;
-    for (uint64_t taken_index = 2; in_range && taken_index < parts; taken_index += 1)
-    {
-        const uint32_t previous = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index - 1]);
-        const uint32_t current = lane_test_cost_bucket(cost_prefix, test->part_boundaries, order[taken_index]);
-        failures += previous > current || (previous == current && order[taken_index - 1] >= order[taken_index]) ? 1 : 0;
-    }
+    failures += lane_test_order_failures(cost_prefix, test->part_boundaries, parts, order);
     for (uint32_t lane = 1; lane < lanes; lane += 1)
     {
         failures += memcmp(test->part_orders[lane], order, parts * sizeof(uint32_t)) != 0 ? 1 : 0;
     }
+    failures += lane_test_check_parts_alone(cost_prefix, count, parts, test->part_boundaries, order);
     return failures;
 }
 
