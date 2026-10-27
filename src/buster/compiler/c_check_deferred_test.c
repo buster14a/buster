@@ -449,7 +449,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 const bool copied = !outcome.deferred || (outcome.deferred_active == most && outcome.deferred_copies >= (most != 0) &&
                                                           outcome.deferred_copies <= most);
                 const bool sized_right = size == 0 || (outcome.deferred_bodies == size->bodies && outcome.deferred_body_tokens == size_tokens &&
-                                                       outcome.deferred_largest_body == size_largest &&
+                                                       outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0 &&
                                                        outcome.deferred_active == (size->lanes < lane_counts[l] ? size->lanes : lane_counts[l]));
                 const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected && copied && sized_right;
                 checks += 1;
@@ -462,7 +462,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
                             !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
                             copied ? "" : " (not the rule's lanes, or its reader copied by too many of them or by none)",
-                            sized_right ? "" : " (not the bodies' tokens it was made with, or not the lanes it was made for)");
+                            sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
                 }
             }
         }

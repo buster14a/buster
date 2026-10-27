@@ -32,8 +32,10 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    about half the first lane's speed, so the lane that takes the largest body
    may take twice as long as the first would ("How many lanes", below).
    `CheckDeferred.every_lane` runs every lane the bodies can take, as the tests
-   and `test-checker-corpus` do. `lane_parts_by_cost` cuts the bodies into parts by token count and each
-   lane takes parts with `lane_take`, costliest first. A lane copies the top
+   and `test-checker-corpus` do. `lane_parts_by_cost` cuts the bodies into parts by token count, the
+   costliest part first in its order. The first lane reads that part itself, and every lane takes the others
+   with `lane_take`, costliest first: a lane woken for the bodies would reach the counter first, and it reads
+   at about half the first lane's speed. A lane copies the top
    level's reader once, when it takes its first part
    (`check_deferred_lane_prepare`), so that a lane that takes none copies
    nothing (#432's review): its
