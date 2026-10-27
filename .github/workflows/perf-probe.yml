@@ -63,4 +63,4 @@ jobs:
 
       - name: Probe
         if: steps.cpu.outputs.capable == 'true'
-        run: bash .github/perf-probe/probe3.sh
+        run: bash .github/perf-probe/probe4.sh
