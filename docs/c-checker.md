@@ -680,8 +680,10 @@ What the lowering covers past scalars (#145's programs):
   each entry. A temporary of the class (a statement expression's value or the
   operands live around it, `?:` without its middle operand, a postfix one's old
   value) is a frame object of its own (`check_lower_temporary`).
-  The builtins of its operands and the floating classification builtins on it
-  are refused by name.
+  The floating classification builtins on it (`isnan`, `isinf`, `isinf_sign`,
+  `isfinite`, `signbit` and `fpclassify`) and `fabsl` are `c_builtin_float_lower.c`'s
+  recipes over its argument's frame object, with clang 23's -O0 result for every
+  x87 encoding ([the integration guide](c-builtins-integration.md#floating-checking)).
 - **The 128-bit integers.** `__int128` and `unsigned __int128` are Tier 0's
   I128 and U128 ([the Tier 0 guide](tier0.md#128-bit-integers-136)), memory
   classes as long double's is (`check_lower_memory_class`): their locals,
@@ -706,7 +708,9 @@ What the lowering covers past scalars (#145's programs):
   runtime joins as GCC's driver links them (`runtime.c`, `bind.c`). A shift
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
-  and a builtin of 128-bit operands are refused by name.
+  is refused by name. The overflow builtins take 128-bit operands and
+  destinations (`c_builtin_lower.c`'s `BUSTER_CBUILTIN_LOWER_WIDE`), each operand
+  in a frame object of its own.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
