@@ -2840,7 +2840,7 @@ static bool tier0_initialize(void)
 // What an entry pops and pushes, by kind: its first operand's stack (none, its own class's, its last operand's class's,
 // or the integer stack: an address), whether it has a last operand (the entry before it, of that entry's class), and
 // what it pushes (none, a value of its class, or an integer). CALL's are its arguments' and result's, and X86's its
-// row's operands' and result's.
+// row's operands' and result's (tier0_operation_effects).
 #define BUSTER_TIER0_STACK_NONE 0
 #define BUSTER_TIER0_STACK_CLASS 1
 #define BUSTER_TIER0_STACK_OPERAND 2
@@ -3046,15 +3046,6 @@ static void tier0_raw_effects(const Tier0Function* function, uint32_t i, int32_t
             counts[tier0_stack(function->argument_classes[first + a])] -= 1;
         }
         counts[1] -= function->call_targets[call] == 0 ? 1 : 0;
-        counts[tier0_stack(class)] += 1;
-    }
-    else if (kind == BUSTER_TYPED_X86)
-    {
-        const Tier0Operation* operation = &function->operations[function->values[i]];
-        for (uint32_t j = 0; j < operation->operand_count; j += 1)
-        {
-            counts[tier0_stack(operation->operand_classes[j])] -= 1;
-        }
         counts[tier0_stack(class)] += 1;
     }
     else
@@ -3329,6 +3320,30 @@ static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* lab
     else
     {
         tier0_fuse_entries(function, labels, entries, 0, 0);
+    }
+}
+
+// The X86 entries' effects, from their rows' operands and results, in place of the shape's that phase 1 gives them (one
+// push of their class): a pass of its own, which both paths make after phase 1 over a function with vectors alone, so
+// that the others' fusion has no look for the kind (in tier0_raw_effects, a compare that cost every entry two
+// instructions on the scalar path and one on the vector one). No X86 entry absorbs or is absorbed: their keys have no
+// fused variants.
+static __attribute__((noinline)) void tier0_operation_effects(const Tier0Function* function, Tier0Entries* entries)
+{
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        if (function->kinds[i] == BUSTER_TYPED_X86)
+        {
+            const Tier0Operation* operation = &function->operations[function->values[i]];
+            int32_t counts[3] = { 0, 0, 0 };
+            for (uint32_t j = 0; j < operation->operand_count; j += 1)
+            {
+                counts[tier0_stack(operation->operand_classes[j])] -= 1;
+            }
+            counts[tier0_stack(function->classes[i])] += 1;
+            entries->integer_effects[i] = (int8_t)counts[1];
+            entries->floating_effects[i] = (int8_t)counts[2];
+        }
     }
 }
 
@@ -7958,6 +7973,10 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
         memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
         tier0_labels(function, labels);
         tier0_fuse_scalar(function, labels, &entries);
+        if (function->vectors)
+        {
+            tier0_operation_effects(function, &entries);
+        }
         tier0_depths_scalar(function, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, false);
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
@@ -9269,12 +9288,10 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         previous_kinds = kinds;
         previous_classes = classes;
     }
-    // The calls' effects, from the calls table (they are few), and the machine operations', from their rows.
+    // The calls' effects, from the calls table (they are few).
     for (uint32_t first = 0; first < count; first += 64)
     {
-        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
-        const uint64_t operations = function->vectors ? _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86)) : 0;
-        uint64_t calls = (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | operations) & tier0_lanes(first, count);
+        uint64_t calls = _mm512_cmpeq_epi8_mask(tier0_bytes_at(function->kinds, first, count), _mm512_set1_epi8(BUSTER_TYPED_CALL)) & tier0_lanes(first, count);
         while (calls != 0)
         {
             const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
@@ -10122,6 +10139,10 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
         tier0_vector_labels(function, bits.labels);
         tier0_vector_values(function, &bits);
         tier0_vector_fuse(function, &bits, &entries);
+        if (function->vectors)
+        {
+            tier0_operation_effects(function, &entries);
+        }
         tier0_vector_depths(function, &bits, &entries);
         error = tier0_generate(function, &entries, scratch.arena, output, &code, true);
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
