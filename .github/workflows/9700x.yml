@@ -256,7 +256,12 @@ jobs:
         # perf's beside test-unwind's own. Brief phases on more don't count, as the 8-lane checks of the longer
         # test-files runs, whose CPU time stays near their time. The rest follow in the order of their times run alone,
         # the longest first. Each heading's report gives its CPU time beside its time, which over it shows the CPUs the
-        # command kept busy. Each command has 180 s from its start.
+        # command kept busy. Each command has 180 s from its start. The clang runs the predefines' tests compare with
+        # are kept between runs in the runner's cache directory (BUSTER_ORACLE_CACHE, oracle_cache.c, #542): the daily
+        # and dispatched runs take none, run every one and check each entry it would have read against what clang gives
+        # now, a stale entry failing the run, and then remove the entries that no test has written for two days.
+        env:
+          BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
         run: |
           # Temporary (#542's measurement, removed before review): every external tool the tests run, logged with its
           # CPU time by test (tools/ci/oracle_measure.c).
@@ -603,6 +608,8 @@ jobs:
           ./build/compiler test-preprocessor --tables src
           == Test the profiling tools
           ./build/compiler test-profile
+          == Test the oracle cache
+          ./build/compiler test-oracle-cache
           == Test deterministic diagnostic ordering
           ./build/compiler test-diagnostics
           == Test the corpus oracle's accounting and process failures
@@ -633,6 +640,10 @@ jobs:
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
+          oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
+          if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
+              find "$oracle" -type f -mtime +2 -delete
+          fi
 
       - name: Summarize the tests' external processes
         # Temporary (#542's measurement, removed before review).

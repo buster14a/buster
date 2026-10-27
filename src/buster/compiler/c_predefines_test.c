@@ -42,12 +42,14 @@ extern char** environ;
 #define BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS 256
 #define BUSTER_PREDEFINES_TEST_PARALLEL 16
 
-// One clang run: its arguments (after "clang"), and its standard output and exit status once run.
+// One clang run: its arguments (after "clang"), the file its standard input reads (null for none), and its standard
+// output and exit status once run.
 typedef struct PredefinesTestJob PredefinesTestJob;
 struct PredefinesTestJob
 {
     const char* arguments[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS];
     uint32_t argument_count;
+    const char* input;
     char* output;
     size_t length;
     int status;
@@ -110,6 +112,21 @@ static bool predefines_test_argument(PredefinesTestJobs* jobs, PredefinesTestJob
     return result;
 }
 
+// The run's input: `path`, which its standard input reads, and `-` as its last argument, so that its command and result
+// don't name the test's directory and the oracle cache can keep them (oracle_cache.c).
+static bool predefines_test_input(PredefinesTestJobs* jobs, PredefinesTestJob* job, const char* path)
+{
+    const size_t length = strlen(path);
+    char* copy = arena_push(&jobs->text, length + 1, 1);
+    const bool result = copy != 0 && predefines_test_argument(jobs, job, "-");
+    if (result)
+    {
+        memcpy(copy, path, length + 1);
+        job->input = copy;
+    }
+    return result;
+}
+
 // Appends the space-separated words of `text` as arguments.
 static bool predefines_test_words(PredefinesTestJobs* jobs, PredefinesTestJob* job, const char* text)
 {
@@ -138,7 +155,7 @@ static bool predefines_test_words(PredefinesTestJobs* jobs, PredefinesTestJob* j
     return result;
 }
 
-// The first job in [first, job) with `job`'s arguments, or `job` if none has them.
+// The first job in [first, job) with `job`'s arguments and input, or `job` if none has them.
 static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_t first, uint32_t job)
 {
     const PredefinesTestJob* wanted = &jobs->jobs[job];
@@ -146,7 +163,8 @@ static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_
     for (uint32_t i = first; result == job && i < job; i += 1)
     {
         const PredefinesTestJob* other = &jobs->jobs[i];
-        bool same = other->argument_count == wanted->argument_count;
+        bool same = other->argument_count == wanted->argument_count && (other->input == 0) == (wanted->input == 0) &&
+                    (other->input == 0 || strcmp(other->input, wanted->input) == 0);
         for (uint32_t a = 0; same && a < wanted->argument_count; a += 1)
         {
             same = strcmp(other->arguments[a], wanted->arguments[a]) == 0;
@@ -156,11 +174,33 @@ static uint32_t predefines_test_same_job(const PredefinesTestJobs* jobs, uint32_
     return result;
 }
 
-// Runs jobs [first, count) as `clang ARGUMENTS`, BUSTER_PREDEFINES_TEST_PARALLEL at a time, each one's standard output
-// into a file of `directory` and then into memory, and its standard error to /dev/null. CPATH and C_INCLUDE_PATH are
-// left out of their environment. A job with the arguments of an earlier one in the range takes its status and output
-// rather than run clang again (#465): the files the jobs read don't change while they run. Returns false if a process
-// can't start.
+// The oracle cache's key of a job (oracle_cache.c): clang's part (`tool`), its arguments, the variables of its
+// environment that change its result and its input's bytes. False if the input can't be read.
+static bool predefines_test_key(const PredefinesTestJob* job, OracleKey tool, char* const* environment, OracleKey* key)
+{
+    OracleHash hash;
+    oracle_hash_begin(&hash, oracle_cache(), "predefines: clang, its standard output and exit status");
+    oracle_hash_bytes(&hash, tool.bytes, sizeof(tool.bytes));
+    const uint64_t count = job->argument_count;
+    oracle_hash_bytes(&hash, &count, sizeof(count));
+    for (uint32_t a = 0; a < job->argument_count; a += 1)
+    {
+        oracle_hash_text(&hash, job->arguments[a]);
+    }
+    oracle_hash_environment(&hash, environment);
+    const bool result = job->input != 0 ? oracle_hash_file(&hash, job->input) : (oracle_hash_text(&hash, "/dev/null"), true);
+    *key = oracle_hash_end(&hash);
+    return result;
+}
+
+// Runs jobs [first, count) as `clang ARGUMENTS`, at most test_process_cpus() (and BUSTER_PREDEFINES_TEST_PARALLEL) at a
+// time, each one's standard input from its input (/dev/null without one), its standard output into a file of
+// `directory` and then into memory, and its standard error to /dev/null. CPATH and C_INCLUDE_PATH are left out of their
+// environment. A job with the arguments and input of an earlier one in the range takes its status and output rather
+// than run clang again (#465): the files the jobs read don't change while they run. With the oracle cache on
+// (oracle_cache.c, #542), a job whose entry is there takes it rather than run (`use`), and each job that runs is kept,
+// and checked against its entry (`check`). Returns false if a process can't start, an input can't be read or an entry
+// is stale.
 static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, const char* directory)
 {
     // The environment without CPATH and C_INCLUDE_PATH.
@@ -172,7 +212,9 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
     char** environment = calloc((size_t)variables + 1, sizeof(char*));
     pid_t* pids = calloc(jobs->count + 1, sizeof(pid_t));
     uint32_t* sources = calloc(jobs->count + 1, sizeof(uint32_t));
-    bool result = environment != 0 && pids != 0 && sources != 0;
+    OracleKey* keys = calloc(jobs->count + 1, sizeof(OracleKey));
+    bool* taken = calloc(jobs->count + 1, sizeof(bool));
+    bool result = environment != 0 && pids != 0 && sources != 0 && keys != 0 && taken != 0;
     uint32_t kept = 0;
     for (uint32_t i = 0; result && i < variables; i += 1)
     {
@@ -182,17 +224,34 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
             kept += 1;
         }
     }
+    OracleCache* cache = oracle_cache();
+    const bool cached = result && oracle_cache_active(cache);
+    OracleKey tool = { 0 };
+    if (cached)
+    {
+        OracleHash hash;
+        oracle_hash_begin(&hash, cache, "predefines: clang");
+        result = oracle_hash_tool(&hash, "clang");
+        tool = oracle_hash_end(&hash);
+    }
+    const uint32_t cpus = test_process_cpus();
+    const uint32_t parallel = cpus < BUSTER_PREDEFINES_TEST_PARALLEL ? cpus : BUSTER_PREDEFINES_TEST_PARALLEL;
     uint32_t next = first;
     uint32_t running = 0;
     while (result && (next < jobs->count || running > 0))
     {
-        while (result && next < jobs->count && running < BUSTER_PREDEFINES_TEST_PARALLEL)
+        while (result && next < jobs->count && running < parallel)
         {
-            // A job with an earlier one's arguments runs no clang: it takes that one's output below.
+            // A job with an earlier one's arguments and input runs no clang: it takes that one's output below.
             sources[next] = predefines_test_same_job(jobs, first, next);
-            if (sources[next] == next)
+            PredefinesTestJob* job = &jobs->jobs[next];
+            if (sources[next] == next && cached)
             {
-                PredefinesTestJob* job = &jobs->jobs[next];
+                result = predefines_test_key(job, tool, environment, &keys[next]);
+                taken[next] = result && oracle_cache_take(cache, keys[next], &job->status, &job->output, &job->length);
+            }
+            if (result && sources[next] == next && !taken[next])
+            {
                 char path[4200];
                 snprintf(path, sizeof(path), "%s/clang-%u.out", directory, next);
                 const char* argv[BUSTER_PREDEFINES_TEST_MAX_ARGUMENTS + 2];
@@ -204,6 +263,7 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
                 argv[job->argument_count + 1] = 0;
                 posix_spawn_file_actions_t actions;
                 posix_spawn_file_actions_init(&actions);
+                posix_spawn_file_actions_addopen(&actions, 0, job->input != 0 ? job->input : "/dev/null", O_RDONLY, 0);
                 posix_spawn_file_actions_addopen(&actions, 1, path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
                 posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0);
                 pid_t pid;
@@ -230,6 +290,7 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
             result &= done > 0;
         }
     }
+    uint32_t stale = 0;
     for (uint32_t i = first; result && i < jobs->count; i += 1)
     {
         if (sources[i] != i)
@@ -245,7 +306,7 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
                 jobs->jobs[i].status = source->status;
             }
         }
-        else
+        else if (!taken[i])
         {
             char path[4200];
             snprintf(path, sizeof(path), "%s/clang-%u.out", directory, i);
@@ -271,12 +332,26 @@ static bool predefines_test_run_jobs(PredefinesTestJobs* jobs, uint32_t first, c
             jobs->jobs[i].length = length;
             result = text != 0;
             unlink(path);
+            // The run's result, kept, and checked against its entry where it has one.
+            if (result && cached && !oracle_cache_keep(cache, keys[i], jobs->jobs[i].status, text, length))
+            {
+                const PredefinesTestJob* job = &jobs->jobs[i];
+                printf("predefines: the oracle cache's entry for clang");
+                for (uint32_t a = 0; a < job->argument_count; a += 1)
+                {
+                    printf(" %s", job->arguments[a]);
+                }
+                printf(" (input %s) is stale\n", job->input != 0 ? job->input : "/dev/null");
+                stale += 1;
+            }
         }
     }
     free(environment);
     free(pids);
     free(sources);
-    return result;
+    free(keys);
+    free(taken);
+    return result && stale == 0;
 }
 
 // Removes, in place, the lines of a -dM text (if it isn't null) that define the version macros of clang's patch release
@@ -558,7 +633,7 @@ static bool predefines_test_configuration(PredefinesTestJobs* jobs, const Predef
             result = predefines_test_argument(jobs, job, on);
         }
     }
-    result = result && predefines_test_words(jobs, job, "-x c") && predefines_test_argument(jobs, job, empty);
+    result = result && predefines_test_words(jobs, job, "-x c") && predefines_test_input(jobs, job, empty);
     return result;
 }
 
@@ -600,7 +675,7 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
         char flag[64];
         snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
         result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o -") && predefines_test_argument(&jobs, job, flag) &&
-                 predefines_test_argument(&jobs, job, source);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
     }
     result = result && predefines_test_run_jobs(&jobs, 0, directory);
     for (uint32_t c = 0; result && c < tables->cpu_count; c += 1)
@@ -644,7 +719,7 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
             snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
             snprintf(trigger, sizeof(trigger), "-mno-%s", soft[s][0]);
             result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o -") && predefines_test_argument(&jobs, job, flag) &&
-                     predefines_test_argument(&jobs, job, trigger) && predefines_test_argument(&jobs, job, source);
+                     predefines_test_argument(&jobs, job, trigger) && predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
         }
     }
     const uint32_t round2_features = jobs.count;
@@ -666,11 +741,12 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
                 result = predefines_test_argument(&jobs, job, flag);
             }
         }
-        result = result && (on[0] == 0 || predefines_test_argument(&jobs, job, on)) && predefines_test_argument(&jobs, job, source);
+        result = result && (on[0] == 0 || predefines_test_argument(&jobs, job, on)) && predefines_test_words(&jobs, job, "-x c") &&
+                 predefines_test_input(&jobs, job, source);
         // The down closure: -march=x86-64 and f's -mno- flag.
         job = result ? predefines_test_job(&jobs) : 0;
         result = job != 0 && predefines_test_words(&jobs, job, "-S -emit-llvm -o - -march=x86-64") && (off[0] == 0 || predefines_test_argument(&jobs, job, off)) &&
-                 predefines_test_argument(&jobs, job, source);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, source);
     }
     result = result && predefines_test_run_jobs(&jobs, round2, directory);
     for (uint32_t c = 0; result && c < tables->cpu_count; c += 1)
@@ -768,7 +844,7 @@ static bool predefines_test_generate(PredefinesTestTables* tables, const char* d
         char flag[64];
         snprintf(flag, sizeof(flag), "-march=%s", tables->cpu_names[c]);
         result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_argument(&jobs, job, flag) && predefines_test_words(&jobs, job, "-x c") &&
-                 predefines_test_argument(&jobs, job, empty);
+                 predefines_test_input(&jobs, job, empty);
     }
     result = result && predefines_test_run_jobs(&jobs, round3, directory);
     Arena arena = arena_reserve(1ull << 30);
@@ -1427,7 +1503,7 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     {
         PredefinesTestJob* job = predefines_test_job(&jobs);
         result = job != 0 && predefines_test_words(&jobs, job, "-dM -E") && predefines_test_words(&jobs, job, sets[s]) && predefines_test_words(&jobs, job, "-x c") &&
-                 predefines_test_argument(&jobs, job, empty);
+                 predefines_test_input(&jobs, job, empty);
     }
     result = result && predefines_test_run_jobs(&jobs, 0, directory);
     uint32_t failures = 0;
@@ -1472,12 +1548,12 @@ static bool predefines_test_dump(const char* directory)
         fclose(file);
     }
     PredefinesTestJob* job = result ? predefines_test_job(&jobs) : 0;
-    result = job != 0 && predefines_test_words(&jobs, job, "-dM -E -x c") && predefines_test_argument(&jobs, job, path);
+    result = job != 0 && predefines_test_words(&jobs, job, "-dM -E -x c") && predefines_test_input(&jobs, job, path);
     for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(evaluation); i += 1)
     {
         job = predefines_test_job(&jobs);
         result = job != 0 && predefines_test_words(&jobs, job, "-E -P") && predefines_test_words(&jobs, job, evaluation[i]) &&
-                 predefines_test_words(&jobs, job, "-x c") && predefines_test_argument(&jobs, job, value_path);
+                 predefines_test_words(&jobs, job, "-x c") && predefines_test_input(&jobs, job, value_path);
     }
     result = result && predefines_test_run_jobs(&jobs, 0, directory);
     // Ours: the -E command's own -dM printer, into a memory stream.
@@ -1660,5 +1736,6 @@ static bool predefines_test_run(const char* directory, uint64_t seed)
     bool result = predefines_test_tables(directory);
     result &= predefines_test_options(directory, seed, 400);
     result &= predefines_test_dump(directory);
+    oracle_cache_report(oracle_cache(), "predefines");
     return result;
 }

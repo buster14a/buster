@@ -178,6 +178,10 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/test_process.c"
+// The clang and gcc runs the tests compare with, kept between runs (#542), and its tests, for the test-oracle-cache
+// command.
+#include "buster/compiler/oracle_cache.c"
+#include "buster/compiler/oracle_cache_test.c"
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
@@ -1309,6 +1313,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
+    {
+        result = run_oracle_cache_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-c-testsuite") == 0)
     {
