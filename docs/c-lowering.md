@@ -353,9 +353,9 @@ retains the planner's original synthetic measurements.
 
 [#442](https://github.com/buster14a/buster/issues/442) attributed that rest, on
 the same harness split by stage, with profiles and ablations of #418
-([the record](https://github.com/buster14a/buster-performance/tree/3918dc06a3ea00780da7942e2aca615fb48c7c7a/docs/measurements/lowering-scans-442-2026-10-26)).
-**It was measured in a cloud VM on an Intel Xeon, not the 9700X**; its scripts
-make the 9700X's record, which is still to be made. The path's time after
+([the record](https://github.com/buster14a/buster-performance/tree/3fdc427d36380adc830f5484cc3cf5a08bd3149c/docs/measurements/lowering-scans-442-2026-10-26)).
+The attribution was made in a cloud VM on an Intel Xeon, without counters; the
+comparison below is the 9700X's, under its lock. The path's time after
 checking went mostly to passes over every token of the unit, most of them its
 headers', which predate #418: the selection's loop for declarations and its
 numbering of the needed objects over every object, the emission's three loops,
@@ -381,20 +381,24 @@ names a unit gives, only asm labels with a `.` go in the made names' table,
 since every made name has one and no identifier does.
 Every c-testsuite object, by both paths, is byte for byte what main wrote before.
 
-On that host, c-testsuite's 220 programs, each file's least run minimum over 6
-rounds of 101 passes, summed:
+On the 9700X, pinned to CPU 2, c-testsuite's 220 programs, each file's least
+run minimum over 6 rounds of 101 passes, summed:
 
-| | Main before #418 | #418's merge | Main at `7e3782a` | #442 |
+| | Main before #418 | #418's merge | Main at `7e3782a` | #442 (`8a81ea9`) |
 | --- | ---: | ---: | ---: | ---: |
-| All 220 (ns) | 4,310,181 | +4.9% | +4.9% | −25.5% |
-| The 216 whose output #418 kept | 3,977,392 | +4.5% | +4.1% | −25.2% |
-| The 4 whose output #418 changed | 332,789 | +9.4% | +14.2% | −28.8% |
-| Under 300 tokens (154) | 907,551 | +4.3% | +6.4% | +4.0% |
-| 3,000 tokens or more (46) | 2,843,942 | +5.2% | +5.0% | −32.7% |
+| All 220 (ns) | 1,856,242 | +1.8% | +4.6% | −17.3% |
+| The 216 whose output #418 kept | 1,718,753 | +1.7% | +4.4% | −17.5% |
+| The 4 whose output #418 changed | 137,489 | +2.8% | +6.6% | −14.7% |
+| Under 300 tokens (154) | 474,650 | +0.7% | +4.7% | +0.9% |
+| 3,000 tokens or more (60) | 1,304,588 | +2.2% | +4.5% | −24.3% |
 
-A second host repeated it (−24.8% in all, +1.7% under 300 tokens). The smallest
-units, which have few tokens to skip, keep a fixed cost: chiefly the ABI
-classification of the 64 builtin types on every lowering, whose rows are the
-same for every unit of a configuration but would need state that `main.c`'s
-units share to cache. These are the post-checking path's times, not the whole
-compiler's, and not what the selection saves against `--lower-all`.
+Every round's sum agreed (#442 −16.9 to −17.9%). Against main at `335424b`,
+after the function lanes (#151), the change merged with it is −19.8% in all,
+−2.5% under 300 tokens and −26.5% from 3,000, every round; and on the
+record's synthetic units of 200 and 2,000 definitions, whose few tokens leave the
+whole-unit passes little to cost, −3.7 to −7.9%. The Xeon gave −25.5% in all
+against main before #418, and +4.0% under 300 tokens. The smallest units, which
+have few tokens to skip, keep a fixed cost: chiefly the ABI classification of
+the 64 builtin types on every lowering, whose rows are the same for every unit
+of a configuration but would need state that `main.c`'s units share to cache.
+These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
