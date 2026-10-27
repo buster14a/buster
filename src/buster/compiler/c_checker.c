@@ -1245,10 +1245,11 @@ static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph,
     return first < graph->builtin_count && graph->builtin_calls[first].node == node ? graph->builtin_calls + first : NULL;
 }
 
-static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
+static void check_x86_action(TypeTable* types, const CheckX86Call* call, const CheckAction* action, CheckBuiltinX86Result* checked)
 {
     const uint32_t node = action->node;
-    const CheckX86Call* call = graph->x86_calls + stream->x86_count;
+    CheckActionResult ordinary_result;
+    CheckActionResult* result = &ordinary_result;
     CheckAction ordinary = *action;
     ordinary.op = CHECK_OP_CALL;
     ordinary.operands[0] = (CheckValue){ .type = action->type, .category = CHECK_FUNCTION };
@@ -1292,8 +1293,15 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
         .constant_evaluated_context = call->constant_evaluated_context,
         .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
     };
+    check_builtin_x86(types, &input, checked, 1);
+}
+
+static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
+{
+    const uint32_t node = action->node;
+    const CheckX86Call* call = graph->x86_calls + stream->x86_count;
     CheckBuiltinX86Result checked;
-    check_builtin_x86(types, &input, &checked, 1);
+    check_x86_action(types, call, action, &checked);
     *result = checked.action;
     CheckBuiltinX86Effect* effect = stream->x86 + stream->x86_count++;
     *effect = (CheckBuiltinX86Effect){

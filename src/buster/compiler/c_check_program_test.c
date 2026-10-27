@@ -68,9 +68,9 @@ static void check_test_program_addressed(CheckTest* test)
 
 // #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
-// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations
-// and needs (whose symbols #442's kernels number: check_test_program_declaring); and at 64 and 128 tokens, the cases'
-// marks, against a test of each token.
+// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations,
+// needs and naked functions, with room for their column and without (whose symbols #442's kernels number:
+// check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
 static void check_test_program_scans(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -88,6 +88,34 @@ static void check_test_program_scans(CheckTest* test)
     CheckTestTypes types = { 0 };
     ready = check_test_types_open(&types) && ready;
     check_test_expect(test, ready, "check_program's scanned columns have protected tails");
+    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked).
+    CheckInputAttribute records[3] = {
+        {
+            .kind = CHECK_ATTRIBUTE_NAKED,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_NAKED,
+            .ignored = true,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_NO_STACK_PROTECTOR,
+        },
+    };
+    CheckInputAttributes kinds_of_attributes[3] = {
+        {
+            .records = records,
+            .count = 1,
+        },
+        {
+            .records = records + 1,
+            .count = 1,
+        },
+        {
+            .records = records + 1,
+            .count = 2,
+        },
+    };
+    CheckInputAttributes* attributes[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
     const TypeId runtime = ready ? type_variable_array(&types.table, BUSTER_TYPE_INT, 1) : 0;
     for (uint32_t count = 0; ready && count <= BUSTER_CHECK_TEST_SCAN_TOKENS; count += 1)
     {
@@ -127,6 +155,8 @@ static void check_test_program_scans(CheckTest* test)
             kinds[token] = (uint8_t)((draw >> 26) % 4 == 0 ? PARSE_KIND_SWITCH : PARSE_KIND_IDENTIFIER);
             declared_types[token] = (draw >> 28) % 2 == 0 ? runtime : BUSTER_TYPE_INT;
             parents[token] = (draw >> 29) % 4 == 0 ? BUSTER_CHECK_NONE : (draw >> 10) % count;
+            const uint32_t attribute = (draw >> 16) % 8;
+            attributes[token] = attribute < 3 ? &kinds_of_attributes[attribute] : NULL;
         }
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
@@ -143,6 +173,7 @@ static void check_test_program_scans(CheckTest* test)
                 .initializer_nodes = initializer_nodes,
                 .body_declarations = body_declarations,
                 .declaration_bodies = declaration_bodies,
+                .attributes = attributes,
             };
             uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
@@ -192,16 +223,26 @@ static void check_test_program_scans(CheckTest* test)
                               "check_program's reached builtins agree with their scalar twin at every guarded tail");
             uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            bool rooms[2];
+            // The naked column in an arena of its own, every other time one with no room for it.
+            _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
             for (uint32_t path = 0; path < 2; path += 1)
             {
+                Arena naked = {
+                    .base = naked_bytes[path],
+                    .capacity = variant == 0 ? sizeof(naked_bytes[path]) : 0,
+                };
                 programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path] };
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
-                check_program_static_objects(&programs[path], needed[path], path == 0);
+                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0);
             }
-            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0,
-                              "check_program's static objects agree with their scalar twin at every guarded tail");
+            const bool naked_same = (programs[0].object_naked == 0) == (programs[1].object_naked == 0) &&
+                                    (programs[0].object_naked == 0 || memcmp(programs[0].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
+                                   rooms[0] == rooms[1] && naked_same,
+                              "check_program's static objects and naked functions agree with their scalar twin at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
             {
                 uint64_t cases = 0;
@@ -2247,6 +2288,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
+    check_test_program_source(test,
+        "int missing(void);int tested(int n){int x=n;"
+        "int a=_Generic(__builtin_rotateleft8(x++,missing()),unsigned char:3,default:7);"
+        "int b=_Generic(__builtin_ia32_rdpid(),unsigned:5,default:9);"
+        "int c=_Generic(__builtin_ia32_pause(),int:11,default:13);return x+a+b+c;}",
+        "intrinsic-generic-controls-unevaluated", clang);
     // GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
     // through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
     check_test_program_source(test,

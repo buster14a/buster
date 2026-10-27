@@ -1555,6 +1555,13 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
         {"movswl", "movsx", 2, 4},
         {"movswq", "movsx", 2, 8},
         {"movslq", "movsxd", 4, 8},
+        // The x87's memory widths: s a float's, l a double's and t the 10 bytes of an extended value.
+        {"flds", "fld", 4, 4},
+        {"fldl", "fld", 8, 8},
+        {"fldt", "fld", 10, 10},
+        {"fstps", "fstp", 4, 4},
+        {"fstpl", "fstp", 8, 8},
+        {"fstpt", "fstp", 10, 10},
     };
     bool found = false;
     for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(aliases); i += 1)
@@ -1566,6 +1573,65 @@ static bool asm_att_extension(String8* name, uint32_t* width, uint32_t* source_w
             *width = aliases[i].destination;
             *source_width = aliases[i].source;
         }
+    }
+    return found;
+}
+
+// A string instruction as the catalogue spells it, with its prefix (`rep movsb`, two tokens, is one mnemonic): repz and
+// repnz are repe and repne, rep before a compare or a scan is repe, and AT&T's dword suffix l is d. `name` is the
+// mnemonic's token; a prefix takes the next token, the instruction, which the parser then skips. Any other mnemonic
+// stays as it is, and only a prefix's first letter or an AT&T dword's suffix makes one worth comparing.
+static void asm_string_mnemonic(AsmParser* parser, String8* name, uint32_t end)
+{
+    static const char* const prefixes[][2] = { { "rep", "rep" }, { "repe", "repe" }, { "repz", "repe" }, { "repne", "repne" }, { "repnz", "repne" } };
+    static const char* const bases[] = { "movs", "stos", "lods", "cmps", "scas" };
+    const bool candidate = (name->length >= 3 && name->pointer[0] == 'r') || (!parser->options.intel && name->length == 5 && name->pointer[4] == 'l');
+    const char* prefix = NULL;
+    for (uint32_t i = 0; candidate && prefix == NULL && i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
+    {
+        prefix = x86_match_name(*name, prefixes[i][0]) ? prefixes[i][1] : NULL;
+    }
+    const bool prefixed = prefix != NULL && parser->at < end && parser->tokens[parser->at].kind == BUSTER_ASM_WORD;
+    const String8 instruction = prefixed ? asm_token_text(parser, parser->at) : *name;
+    uint32_t base = BUSTER_ARRAY_LENGTH(bases);
+    for (uint32_t i = 0; candidate && instruction.length == 5 && i < BUSTER_ARRAY_LENGTH(bases); i += 1)
+    {
+        base = memcmp(instruction.pointer, bases[i], 4) == 0 ? i : base;
+    }
+    const char written = base < BUSTER_ARRAY_LENGTH(bases) ? instruction.pointer[4] : 0;
+    const char size = !parser->options.intel && written == 'l' ? 'd' : written;
+    if ((size == 'b' || size == 'w' || size == 'd' || size == 'q') && (prefixed || size != written))
+    {
+        const char* spelled = prefixed && base >= 3 && strcmp(prefix, "rep") == 0 ? "repe" : prefixed ? prefix : "";
+        const uint64_t prefix_length = strlen(spelled);
+        const uint64_t length = prefix_length + (prefixed ? 1 : 0) + 5;
+        char* bytes = arena_push(parser->arena, length, 1);
+        if (bytes == 0)
+        {
+            asm_fail(parser, parser->tokens[parser->at - 1].start, "arena exhausted");
+        }
+        else
+        {
+            memcpy(bytes, spelled, prefix_length);
+            bytes[prefix_length] = ' ';
+            memcpy(bytes + length - 5, bases[base], 4);
+            bytes[length - 1] = size;
+            *name = (String8){ .pointer = bytes, .length = length };
+            parser->at += prefixed ? 1 : 0;
+        }
+    }
+}
+
+// Whether an AT&T instruction's operands (its tokens to `end`) name an XMM register: then movq is SSE2's, as GNU as
+// reads it, not mov's 64-bit form.
+static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
+{
+    bool found = false;
+    for (uint32_t i = parser->at; !found && i + 1 < end; i += 1)
+    {
+        X86Operand operand;
+        found = parser->tokens[i].kind == '%' && parser->tokens[i + 1].kind == BUSTER_ASM_WORD && asm_token_register(parser, i + 1, &operand) &&
+                operand.class == BUSTER_X86_CLASS_XMM;
     }
     return found;
 }
@@ -1583,15 +1649,17 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         *instruction = (AsmInstruction){.location = location};
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
         String8* name = &instruction->request.mnemonic;
+        asm_string_mnemonic(parser, name, end);
         uint32_t width = 0;
         uint32_t source_width = 0;
         // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
         bool known = asm_alias(name) || (!parser->options.intel && asm_att_extension(name, &width, &source_width));
         if (!parser->options.intel && !known && name->length > 1)
         {
-            // Strip integer suffixes only when the full mnemonic has no catalogue candidate.
+            // Strip integer suffixes only when the full mnemonic has no catalogue candidate, and movq's (mov's 64-bit
+            // form) unless an XMM operand makes it SSE2's.
             const uint32_t bucket = x86_match_bucket(parser->index, *name);
-            known = parser->index->names[bucket].pointer != 0;
+            known = parser->index->names[bucket].pointer != 0 && (!x86_match_name(*name, "movq") || asm_vector_operands(parser, end));
             if (!known)
             {
                 const char suffix = name->pointer[name->length - 1];
@@ -3001,11 +3069,21 @@ struct AsmCodeReference
     uint8_t kind;
 };
 
-// What asm_assemble_code makes of a source: `count` records, an instruction each, in order, every branch to a label of
-// the source's a rel8 with displacement 0, in `branches` (their indices, ascending) and `targets` (each label's next
-// record, or the count for the end), branch sizing's columns; and its symbolic fields (`references`, a record's
-// displacement's before its immediate's, in record order), each record with one marked BUSTER_X86_FORM_FIXUP. Or an
-// `error` at the source's byte `location`, with nothing kept.
+// A label asm_assemble_code's source defines by name (a numeric label or `.` has none): its name, in output's bytes, and
+// its next record (the count for the end), where the caller's symbol of it goes.
+typedef struct AsmCodeLabel AsmCodeLabel;
+struct AsmCodeLabel
+{
+    String8 name;
+    uint32_t record;
+};
+
+// What asm_assemble_code makes of a source: `count` records, an instruction each, in order; every jmp and jcc to a label
+// of the source's without an addend a rel8 with displacement 0, in `branches` (their indices, ascending) and `targets`
+// (each label's next record, or the count for the end), branch sizing's columns; its symbolic fields (`references`, a
+// record's displacement's before its immediate's, in record order), each record with one marked BUSTER_X86_FORM_FIXUP;
+// and its named labels (`labels`, in the order the source first names them). Or an `error` at the source's byte
+// `location`, with nothing kept.
 typedef struct AsmCode AsmCode;
 struct AsmCode
 {
@@ -3013,18 +3091,22 @@ struct AsmCode
     uint32_t* branches;
     uint32_t* targets;
     AsmCodeReference* references;
+    AsmCodeLabel* labels;
     const char* error;
     uint32_t count;
     uint32_t branch_count;
     uint32_t reference_count;
+    uint32_t label_count;
     uint32_t location;
 };
 
 // Assembles a source whose instructions another function's records hold (#147: a C asm statement's template, after its
 // operands are substituted), in place among them: instructions and labels, in either syntax and switching with
 // .intel_syntax and .att_syntax, which are its only directives. It has no sections, data or symbols of its own, so it
-// refuses every other directive; a label of its own is only a branch's target (jmp and jcc, which branch sizing grows,
-// with no addend), and every other symbol is the caller's to resolve, by name. Matching is asm_assemble's, by
+// refuses every other directive. A jmp or jcc to a label of its own, without an addend, is a branch that branch sizing
+// sizes. Every other symbolic field refers to a symbol by name, which the caller resolves: one of the source's named
+// labels (as data, a call's target, or with an addend), a label another source defines (a `.L` one among them), or any
+// other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets. Matching is asm_assemble's, by
 // options.vectorized's path; the parser's tables come from `scratch`, which is as it was after, and the result from
 // `output`, which a failure leaves as it was too.
 static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* output, Arena* scratch)
@@ -3050,13 +3132,20 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
         asm_match_instructions(&parser);
     }
     const uint32_t count = parser.instruction_count;
+    uint32_t label_count = 0;
+    for (uint32_t s = 1; parser.result.error == 0 && s < parser.symbol_count; s += 1)
+    {
+        label_count += parser.symbols[s].defined && !parser.symbols[s].internal;
+    }
     // Each label's next record: the instructions before its fragment.
     uint32_t* positions = parser.result.error == 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser.fragment_count + 1) : 0;
     result.records = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, count) : 0;
     result.branches = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
     result.targets = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
     result.references = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AsmCodeReference, 2 * (uint64_t)count) : 0;
-    if (parser.result.error == 0 && (positions == 0 || (count != 0 && (result.records == 0 || result.branches == 0 || result.targets == 0 || result.references == 0))))
+    result.labels = parser.result.error == 0 && label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AsmCodeLabel, label_count) : 0;
+    if (parser.result.error == 0 && (positions == 0 || (count != 0 && (result.records == 0 || result.branches == 0 || result.targets == 0 || result.references == 0)) ||
+                                     (label_count != 0 && result.labels == 0)))
     {
         asm_fail(&parser, 0, "arena exhausted placing inline assembly's records");
     }
@@ -3066,27 +3155,53 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
         positions[f] = at;
         at += parser.fragments[f].kind == ASM_INSTRUCTION;
     }
+    for (uint32_t s = 1; parser.result.error == 0 && s < parser.symbol_count; s += 1)
+    {
+        const AsmSymbol* symbol = &parser.symbols[s];
+        char* name = symbol->defined && !symbol->internal ? arena_push(output, symbol->name.length, 1) : 0;
+        if (symbol->defined && !symbol->internal && name == 0)
+        {
+            asm_fail(&parser, 0, "arena exhausted placing inline assembly's records");
+        }
+        else if (name != 0)
+        {
+            memcpy(name, symbol->name.pointer, symbol->name.length);
+            result.labels[result.label_count++] = (AsmCodeLabel){ .name = { .pointer = name, .length = symbol->name.length }, .record = positions[symbol->fragment] };
+        }
+    }
     for (uint32_t i = 0; parser.result.error == 0 && i < count; i += 1)
     {
         AsmInstruction* instruction = &parser.instructions[i];
         X86Instruction record = instruction->record;
         const X86FormDescription* form = x86_form_description(record.form);
+        // A branch to a label of the source's: sized as a jmp or jcc (its rel8 form, which grows to the rel32 one after
+        // it) without an addend; else, to a named label, a reference to it from the branch's rel32 form.
+        bool referred = !instruction->local_branch;
         if (instruction->local_branch)
         {
             const uint32_t row = record.form;
+            const AsmSymbol* target = &parser.symbols[instruction->expressions[0].plus];
             const bool sized = form->relative_bytes == 1 && row + 1 < X86_FORM_COUNT && x86_form_descriptions[row + 1].relative_bytes == 4 &&
                                strcmp(form->mnemonic, x86_form_descriptions[row + 1].mnemonic) == 0;
-            if (!sized || instruction->expressions[0].value != 0)
+            if (sized && instruction->expressions[0].value == 0)
             {
-                asm_fail(&parser, instruction->location, "a branch to inline assembly's own label must be jmp or jcc, without an addend");
+                result.branches[result.branch_count] = i;
+                result.targets[result.branch_count++] = positions[target->fragment];
+            }
+            else if (!target->internal && (sized || form->relative_bytes == 4))
+            {
+                record.form = (uint16_t)(sized ? row + 1 : row);
+                form = x86_form_description(record.form);
+                referred = true;
             }
             else
             {
-                result.branches[result.branch_count] = i;
-                result.targets[result.branch_count++] = positions[parser.symbols[instruction->expressions[0].plus].fragment];
+                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc.
+                asm_fail(&parser, instruction->location, form->relative_bytes == 1 && !sized ? "loop, loope, loopne and jrcxz in inline assembly" :
+                                                                                                "a branch to inline assembly's own numeric label must be jmp or jcc, without an addend");
             }
         }
-        for (uint32_t field = X86_FIXUP_DISPLACEMENT; !instruction->local_branch && field <= X86_FIXUP_IMMEDIATE && parser.result.error == 0; field += 1)
+        for (uint32_t field = X86_FIXUP_DISPLACEMENT; referred && field <= X86_FIXUP_IMMEDIATE && parser.result.error == 0; field += 1)
         {
             for (uint32_t j = 0; j < instruction->request.count && parser.result.error == 0; j += 1)
             {
@@ -3102,13 +3217,12 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 const uint32_t width = displacement ? 4 : form->immediate_bytes;
                 const bool truncated_lea = strcmp(form->mnemonic, "lea") == 0 && !form->w;
                 const bool signed_field = (displacement && !truncated_lea) || x86_match_sign_extends(form);
-                const bool local = symbol->internal || (symbol->name.length >= 2 && memcmp(symbol->name.pointer, ".L", 2) == 0);
-                char* name = !symbol->defined && !local && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
-                if (symbol->defined)
+                char* name = !symbol->internal && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
+                if (symbol->internal && symbol->defined)
                 {
-                    asm_fail(&parser, instruction->location, "inline assembly's own label is only a branch's target");
+                    asm_fail(&parser, instruction->location, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
                 }
-                else if (local)
+                else if (symbol->internal)
                 {
                     asm_fail(&parser, symbol->location, "undefined local symbol");
                 }
@@ -3123,7 +3237,8 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 else
                 {
                     // A symbol the source doesn't define may be preempted, so a call or jump to it is a CALL (PLT32), as
-                    // asm_instruction_fixups makes an undefined symbol's.
+                    // asm_instruction_fixups makes an undefined symbol's; and so is a branch to a label of the source's
+                    // that it doesn't size.
                     memcpy(name, symbol->name.pointer, symbol->name.length);
                     result.references[result.reference_count++] = (AsmCodeReference){
                         .name = { .pointer = name, .length = symbol->name.length },

@@ -138,6 +138,10 @@ struct CheckProgram
     SymbolId* object_symbols;
     uint32_t* symbol_objects;
     uint32_t* object_declarations;
+    // Per object, its first declaration with GNU's naked attribute (not ignored), which any declaration of a function may
+    // hold, and BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function is naked when that
+    // declaration is at or before its definition, as clang takes it (check_program_asm_naked).
+    uint32_t* object_naked;
     uint32_t control_count;
     uint32_t switch_count;
     uint32_t body_count;
@@ -239,6 +243,17 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
         program->token = token;
         program->diagnostic_position = token;
     }
+}
+
+// Whether a declaration's `attributes` hold GNU's naked attribute (CheckProgram.object_naked).
+static bool check_program_attribute_naked(const CheckInputAttributes* attributes)
+{
+    bool naked = false;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
+    }
+    return naked;
 }
 
 // Compact builtin descriptors start with their stable graph node and are source ordered in both schedulers.
@@ -1723,13 +1738,47 @@ static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* 
     return found;
 }
 
-// The static objects' declarations and whether each is needed, by object (#530): AVX-512 finds the static declarations 16
-// tokens at a time; the rest and the `scalar` path test every token.
-static void check_program_static_objects(CheckProgram* program, uint8_t* needed, bool scalar)
+// A static object's declaration at `token`: its object's declaration, whether the object is needed, and the first of its
+// declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one). Returns
+// whether the column had room, `room` again unless making it failed.
+static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    const uint32_t object = input->objects[token];
+    if (object != 0 && object <= count)
+    {
+        program->object_declarations[object] = token;
+        needed[object] |= input->defined[token] || input->tentative[token];
+        if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
+        {
+            if (program->object_naked == 0 && room)
+            {
+                program->object_naked = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
+                room = program->object_naked != 0;
+                if (room)
+                {
+                    memset(program->object_naked, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                }
+            }
+            if (room && program->object_naked[object] == BUSTER_CHECK_NONE)
+            {
+                program->object_naked[object] = token;
+            }
+        }
+    }
+    return room;
+}
+
+// The static objects' declarations, needs and naked functions, by object, in token order (#530): AVX-512 finds the static
+// declarations 16 tokens at a time; the rest and the `scalar` path test every token. Returns whether the naked functions'
+// column had room.
+static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, bool scalar)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    bool room = true;
     uint32_t token = 0;
     for (; !scalar && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
     {
@@ -1738,24 +1787,17 @@ static void check_program_static_objects(CheckProgram* program, uint8_t* needed,
                                    _mm_cmpneq_epi8_mask(_mm_loadu_si128((const __m128i*)(input->static_objects + token)), _mm_setzero_si128());
         for (uint32_t bits = declared; bits != 0; bits &= bits - 1)
         {
-            const uint32_t at = token + (uint32_t)__builtin_ctz(bits);
-            const uint32_t object = input->objects[at];
-            if (object != 0 && object <= count)
-            {
-                program->object_declarations[object] = at;
-                needed[object] |= input->defined[at] || input->tentative[at];
-            }
+            room = check_program_static_object(program, needed, token + (uint32_t)__builtin_ctz(bits), output, room);
         }
     }
     for (; token < count; token += 1)
     {
-        const uint32_t object = input->objects[token];
-        if (input->declarations[token] == token && input->static_objects[token] && object != 0 && object <= count)
+        if (input->declarations[token] == token && input->static_objects[token])
         {
-            program->object_declarations[object] = token;
-            needed[object] |= input->defined[token] || input->tentative[token];
+            room = check_program_static_object(program, needed, token, output, room);
         }
     }
+    return room;
 }
 
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
@@ -2081,7 +2123,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         memset(program->object_symbols, 0, ((uint64_t)count + 1) * sizeof(SymbolId));
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        check_program_static_objects(program, needed, options.scalar);
+        // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
+        // column comes with the unit's first one.
+        const bool naked_room = check_program_static_objects(program, needed, output, options.scalar);
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
@@ -2096,7 +2140,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         program->symbol_count = check_program_needed_count(needed, program->object_count, options.scalar);
         program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
-        valid = program->symbol_count == 0 || program->symbol_objects != 0;
+        valid = naked_room && (program->symbol_count == 0 || program->symbol_objects != 0);
         if (valid && program->symbol_count != 0)
         {
             check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, options.scalar);
