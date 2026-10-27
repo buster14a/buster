@@ -726,6 +726,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
         if (valid)
         {
             valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count, &code.link, 0, &bytes, scratch, &emission);
@@ -734,6 +735,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
             }
         }
+        check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
         if (valid)
         {
             // Binding takes the libraries between bind_begin, which check_program_emit ran, and bind_end.

@@ -1250,7 +1250,7 @@ static bool check_test_driver_time_report(const char* text, double* stages)
 
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
 // its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
-// runs, and -fsyntax-only's, which emits nothing.
+// runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
 static void check_test_driver_time_stages(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "#include <stdio.h>\n"
@@ -1303,6 +1303,39 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     text = NULL;
     check_test_expect(test, link_report && ran == 0 && stages[CHECK_STAGE_EXECUTABLE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] == 0,
                       "--time-stages on the direct path reports every stage once, and its executable runs");
+    // The direct path's -g on a program of many functions and tables, enough that each stage takes microseconds: the
+    // DWARF and the static data are their own stages, not the link's.
+    memset(stages, 0, sizeof(stages));
+    static char many[1u << 17];
+    uint64_t length = 0;
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "static int t%u[16] = { %u };\nstatic int f%u(void) { return t%u[0]; }\n", f, f, f, f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "int main(void)\n{\n    int s = 0;\n");
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    s += f%u();\n", f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    return s == 512 * 511 / 2 ? 0 : 1;\n}\n");
+    char debug_source[256];
+    snprintf(debug_source, sizeof(debug_source), "%s/time_stages_debug.c", directory);
+    const bool debug_made = made && length < sizeof(many) && parse_test_write(debug_source, many, length);
+    char* const debug_link[] = { compiler, "--time-stages", "-g", debug_source, "-o", linked, NULL };
+    const int debug_status = debug_made ? check_test_driver_spawn(debug_link, &text) : -1;
+    const bool debug_report = debug_status == 0 && check_test_driver_time_report(text, stages);
+    if (!debug_report)
+    {
+        printf("  --time-stages -g: status %d: %s\n", debug_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int debug_ran = debug_status == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, debug_report && debug_ran == 0 && stages[CHECK_STAGE_DEBUG] > 0 && stages[CHECK_STAGE_PUBLISH_DATA] > 0 &&
+                                stages[CHECK_STAGE_EXECUTABLE] > 0,
+                      "--time-stages -g on the direct path charges the DWARF and the static data to their own stages");
     memset(stages, 0, sizeof(stages));
     const int syntax_status = made ? check_test_driver_spawn(syntax, &text) : -1;
     check_test_expect(test, syntax_status == 0 && check_test_driver_time_report(text, stages) && stages[CHECK_STAGE_PARSE] > 0 && stages[CHECK_STAGE_LOWER] == 0,
@@ -1318,7 +1351,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
-    const char* const files[] = { source, plain, timed, linked };
+    const char* const files[] = { source, plain, timed, linked, debug_source };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
         unlink(files[f]);
