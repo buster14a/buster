@@ -495,7 +495,7 @@ jobs:
           ./build/compiler test-refinement src
           == Test differential harness accounting, subprocesses and failure preservation
           clang -std=c17 -O2 -Wall -Wextra -Werror tests/differential/lifecycle.c -o build/test-differential-lifecycle &&
-          ./build/test-differential-lifecycle ./build/compiler /usr/bin/clang
+          ./build/test-differential-lifecycle ./build/compiler "$(command -v clang)"
           == Test the independent preprocessor fuzz harness in C23
           ./build/compiler test-preprocessor-fuzz --std c23
           == Test Tier 1 selection, liveness and native fragments
