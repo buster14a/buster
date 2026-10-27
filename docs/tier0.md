@@ -1343,7 +1343,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;
-  - `switch` (no kind yet: a compare sequence or a jump table).
+  - `switch` needs no entry of its own: the checker's lowering dispatches it by compares or, where clang -O0 would,
+    through a jump table and `JUMP_INDIRECT` to its cases' labels (`docs/c-checker.md`, "Switches").
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
   padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
