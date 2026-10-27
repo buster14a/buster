@@ -10,7 +10,8 @@
 //   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
 //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
 //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
-//   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...
+//   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--copies N] [--directory PATH]
+//                            [--executable PATH | --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...
 //
 // - ab runs `TREE/build/compiler ARGUMENT...` (or TREE itself, when it is a file) for every tree, every argument list
 //   and every round, the trees in an order that rotates by round, each run pinned to --cpu and under --lock (the
@@ -32,22 +33,28 @@
 // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
 //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
 //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
-// - time-runs times whole processes of this executable (or --executable), one per argument list in each run, the lists
-//   in an order that rotates by run, after warm-up runs in list order: each one's wall time from fork to wait4's
-//   return, its user and system time, peak resident set and page faults, from wait4's rusage, every run's line and
-//   each list's medians. With --after-scalar MS, an untimed scalar loop runs MS ms before each timed process, on the
-//   same CPU, the state a compiler starts in after lighter work. Each process's output goes to /dev/null, and its exit
-//   status must be the one its list's first warm-up had. Each list starts at a `--list` (not `--`, which separates
-//   ab's own lists), so that ab, which pins it and takes the lock per run, can run it to compare whole drivers (#335).
+// - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
+//   one per argument list, executable and copy in each run, in an order that rotates by run, after warm-up runs in
+//   that order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
+//   resident set and page faults, from wait4's rusage, and its user cycles and instructions (perf_event_open from its
+//   exec, all its threads), every run's line and each one's medians. With --after-scalar MS, an untimed scalar loop
+//   runs MS ms before each timed process, on the same CPU, the state a compiler starts in after lighter work. Each
+//   process's output goes to /dev/null, and its exit status must be the one its first warm-up had. Each list starts at
+//   a `--list` (not `--`, which separates ab's own lists), so that ab, which pins it and takes the lock per run, can
+//   run it to compare whole drivers (#335). Comparing builds (#509): the same code runs up to 2% faster or slower from
+//   another address (a build's placement, build.sh's `shifts`) and 0.3% from another copy of the same file (other
+//   physical pages), so with several builds or --copies N it runs each executable from N copies made fresh in a
+//   directory of its own, interleaved with the other builds', and compares the builds by wall time and user cycles,
+//   with each one's spread over its placements and copies and each difference's range over them (profile_time_compare).
 //
 // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
-// profile_label_spills, profile_spill_report, profile_branch_misses), which profile_test.c checks, and ab's order is
-// profile_ab_tree. main.c includes this file after lane.c, for its arenas, and profile_test.c after it.
+// profile_label_spills, profile_spill_report, profile_branch_misses, and time-runs' profile_time_compare), which
+// profile_test.c checks, and ab's order is profile_ab_tree. main.c includes this file after lane.c, for its arenas, and profile_test.c after it.
 //
 // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
 // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
-// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_runs), and the commands
-// (run_profile_command).
+// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
+// profile_time_compare, profile_time_make_copies, profile_time_runs), and the commands (run_profile_command).
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -63,7 +70,9 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <sys/resource.h>
+#include <signal.h>
 #include <time.h>
+#include <linux/perf_event.h>
 
 // Every command's arena: the input files and what it builds from them. Its pages are committed only as they are touched.
 #define BUSTER_PROFILE_ARENA_CAPACITY (64ull << 30)
@@ -82,6 +91,11 @@
 #define BUSTER_PROFILE_SPILL_LABEL "buster_spill."
 // ab's --cpu: sched_setaffinity's mask of 1,024 CPUs, as glibc's cpu_set_t.
 #define BUSTER_PROFILE_CPUS 1024
+// time-runs' limits on executables and copies, whose numbers name the copies with three digits each, and the buffer it
+// copies them through.
+#define BUSTER_PROFILE_EXECUTABLES 999
+#define BUSTER_PROFILE_COPIES 999
+#define BUSTER_PROFILE_COPY_BUFFER (1ull << 20)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The report
@@ -1617,7 +1631,9 @@ static bool profile_count_option(const char* text, uint64_t* value);
 // Where profile_spin's state goes, so that its loop isn't removed.
 static volatile uint64_t profile_spin_sink;
 
-// One timed process: wall time from fork to wait4's return, and wait4's rusage and status.
+// One timed process: wall time from its release to wait4's return, wait4's rusage and status, and its user cycles and
+// instructions from its exec to its exit, all its threads', as perf stat counts them (counted: both counters opened
+// and ran the whole time).
 typedef struct ProfileTimed ProfileTimed;
 struct ProfileTimed
 {
@@ -1627,13 +1643,30 @@ struct ProfileTimed
     uint64_t peak_kb;
     uint64_t minor_faults;
     uint64_t major_faults;
+    uint64_t cycles;
+    uint64_t instructions;
+    bool counted;
     int status;
 };
 
+// What time-runs runs. Its builds are executables, each at one or more placements (one executable per placement: a
+// build linked at several code shifts, build.sh's `shifts`), and the executables are in the order the slots take them:
+// placement by placement, each build's in turn, so that neighbouring slots are other builds'. With copies, each
+// executable runs from that many copies of itself, made fresh for the command.
 typedef struct ProfileTimeRuns ProfileTimeRuns;
 struct ProfileTimeRuns
 {
-    const char* executable;
+    // Executable e is placement placements[e] of build builds[e], named build_names[builds[e]].
+    const char* const* executables;
+    const uint64_t* builds;
+    const uint64_t* placements;
+    uint64_t executable_count;
+    const char* const* build_names;
+    uint64_t build_count;
+    // How many copies of each executable run in its place (0: the executables themselves), and the directory to make
+    // them in (null for $TMPDIR, or /tmp).
+    uint64_t copies;
+    const char* directory;
     // Argument lists, as ab's: list l is arguments[starts[l]] to arguments[starts[l] + counts[l] - 1].
     char* const* arguments;
     const uint64_t* starts;
@@ -1644,6 +1677,82 @@ struct ProfileTimeRuns
     uint64_t after_scalar_ms;
     int output;
 };
+
+// A slot of a run: an executable, a copy of it (0 without copies) and a list.
+typedef struct ProfileTimeSlot ProfileTimeSlot;
+struct ProfileTimeSlot
+{
+    uint64_t executable;
+    uint64_t copy;
+    uint64_t list;
+};
+
+// The copies each executable runs from: at least the one, itself.
+static uint64_t profile_time_copies(const ProfileTimeRuns* t)
+{
+    return t->copies != 0 ? t->copies : 1;
+}
+
+static uint64_t profile_time_slot_count(const ProfileTimeRuns* t)
+{
+    return t->executable_count * profile_time_copies(t) * t->list_count;
+}
+
+// Slot `slot`'s executable, copy and list: the executable changes fastest, then the copy, then the list, so that a run
+// takes every build's copies in turn, list by list.
+static ProfileTimeSlot profile_time_slot(const ProfileTimeRuns* t, uint64_t slot)
+{
+    const uint64_t copies = profile_time_copies(t);
+    return (ProfileTimeSlot){
+        .executable = slot % t->executable_count,
+        .copy = (slot / t->executable_count) % copies,
+        .list = slot / (t->executable_count * copies),
+    };
+}
+
+static uint64_t profile_time_slot_index(const ProfileTimeRuns* t, uint64_t executable, uint64_t copy, uint64_t list)
+{
+    return (list * profile_time_copies(t) + copy) * t->executable_count + executable;
+}
+
+// The executable that is placement `placement` of build `build`, or executable_count if it has none.
+static uint64_t profile_time_executable(const ProfileTimeRuns* t, uint64_t build, uint64_t placement)
+{
+    uint64_t result = t->executable_count;
+    for (uint64_t e = 0; e < t->executable_count; e += 1)
+    {
+        result = t->builds[e] == build && t->placements[e] == placement ? e : result;
+    }
+    return result;
+}
+
+static uint64_t profile_time_placement_count(const ProfileTimeRuns* t, uint64_t build)
+{
+    uint64_t result = 0;
+    for (uint64_t e = 0; e < t->executable_count; e += 1)
+    {
+        result += t->builds[e] == build;
+    }
+    return result;
+}
+
+// Prints a slot's executable and copy (" main placement 2 copy 3"), where the command has more than one of either.
+static void profile_time_print_unit(int output, const ProfileTimeRuns* t, ProfileTimeSlot slot)
+{
+    if (t->executable_count > 1 || t->copies != 0)
+    {
+        const uint64_t build = t->builds[slot.executable];
+        dprintf(output, " %s", t->build_names[build]);
+        if (profile_time_placement_count(t, build) > 1)
+        {
+            dprintf(output, " placement %llu", (unsigned long long)(t->placements[slot.executable] + 1));
+        }
+        if (t->copies != 0)
+        {
+            dprintf(output, " copy %llu", (unsigned long long)(slot.copy + 1));
+        }
+    }
+}
 
 static uint64_t profile_now_ns(void)
 {
@@ -1672,34 +1781,99 @@ static void profile_spin(uint64_t ms)
     profile_spin_sink = state;
 }
 
-// Runs `executable` with `argv` (argv[0] the executable) once, its standard streams on /dev/null.
+// A counter of the child's user-mode events, from its exec to its exit, with every thread it starts (as perf stat's),
+// or -1 where perf_event_open refuses it.
+static int profile_open_counter(pid_t child, uint64_t config)
+{
+    struct perf_event_attr attribute = { 0 };
+    attribute.size = sizeof(attribute);
+    attribute.type = PERF_TYPE_HARDWARE;
+    attribute.config = config;
+    attribute.disabled = 1;
+    attribute.enable_on_exec = 1;
+    attribute.inherit = 1;
+    attribute.exclude_kernel = 1;
+    attribute.exclude_hv = 1;
+    attribute.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+    return (int)syscall(SYS_perf_event_open, &attribute, child, -1, -1, PERF_FLAG_FD_CLOEXEC);
+}
+
+// A counter's value, closing it; false if it couldn't be read or didn't count the whole time (multiplexed).
+static bool profile_read_counter(int counter, uint64_t* value)
+{
+    uint64_t values[3] = { 0 };
+    const bool result = counter != -1 && read(counter, values, sizeof(values)) == (ssize_t)sizeof(values) && values[1] == values[2];
+    *value = result ? values[0] : 0;
+    if (counter != -1)
+    {
+        close(counter);
+    }
+    return result;
+}
+
+// Runs `executable` with `argv` (argv[0] the executable) once, its standard streams on /dev/null. The child waits on a
+// pipe until its counters are open, then execs; a child that can't be counted still runs.
 static ProfileTimed profile_time_one(const char* executable, char* const* argv)
 {
     ProfileTimed result = { .status = -1 };
-    const uint64_t start = profile_now_ns();
+    int release[2] = { -1, -1 };
+    const bool piped = pipe(release) == 0 && fcntl(release[0], F_SETFD, FD_CLOEXEC) == 0 && fcntl(release[1], F_SETFD, FD_CLOEXEC) == 0;
     const pid_t child = fork();
     if (child == 0)
     {
+        char byte = 0;
         const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
-        if (null != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(null, STDOUT_FILENO) != -1 && dup2(null, STDERR_FILENO) != -1)
+        if (piped)
+        {
+            close(release[1]);
+        }
+        // An end of file, the parent gone before it released the child, runs nothing.
+        const bool released = !piped || read(release[0], &byte, 1) == 1;
+        if (released && null != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(null, STDOUT_FILENO) != -1 && dup2(null, STDERR_FILENO) != -1)
         {
             execv(executable, argv);
         }
         _exit(127);
     }
+    const int cycles = child != -1 ? profile_open_counter(child, PERF_COUNT_HW_CPU_CYCLES) : -1;
+    const int instructions = child != -1 ? profile_open_counter(child, PERF_COUNT_HW_INSTRUCTIONS) : -1;
+    const uint64_t start = profile_now_ns();
+    if (piped)
+    {
+        close(release[0]);
+        if (child != -1 && write(release[1], "x", 1) != 1)
+        {
+            kill(child, SIGKILL);
+        }
+        close(release[1]);
+    }
     struct rusage usage;
     int status = 0;
     if (child != -1 && wait4(child, &status, 0, &usage) == child)
     {
+        const uint64_t wall_ns = profile_now_ns() - start;
+        uint64_t cycle_count = 0;
+        uint64_t instruction_count = 0;
+        const bool counted_cycles = profile_read_counter(cycles, &cycle_count);
+        const bool counted_instructions = profile_read_counter(instructions, &instruction_count);
         result = (ProfileTimed){
-            .wall_ns = profile_now_ns() - start,
+            .wall_ns = wall_ns,
             .user_us = (uint64_t)usage.ru_utime.tv_sec * 1000000ull + (uint64_t)usage.ru_utime.tv_usec,
             .system_us = (uint64_t)usage.ru_stime.tv_sec * 1000000ull + (uint64_t)usage.ru_stime.tv_usec,
             .peak_kb = (uint64_t)usage.ru_maxrss,
             .minor_faults = (uint64_t)usage.ru_minflt,
             .major_faults = (uint64_t)usage.ru_majflt,
+            .cycles = cycle_count,
+            .instructions = instruction_count,
+            .counted = counted_cycles && counted_instructions,
             .status = status,
         };
+    }
+    else
+    {
+        uint64_t unused = 0;
+        profile_read_counter(cycles, &unused);
+        profile_read_counter(instructions, &unused);
     }
     return result;
 }
@@ -1721,86 +1895,357 @@ static uint64_t profile_median(uint64_t* values, uint64_t count)
     return count != 0 ? values[count / 2] : 0;
 }
 
-// The warm-ups in list order, then the runs, each with every list in turn from an order that rotates by run
-// (profile_ab_tree's), then each list's medians. Returns how many processes failed: an exit status other than its
-// list's first warm-up's, a signal, or a process that didn't start (status 127, or no wait).
+// `value` against `reference`, in percent; 0 against a reference of 0.
+static double profile_change(double value, double reference)
+{
+    return reference != 0 ? (value / reference - 1) * 100 : 0;
+}
+
+// One metric's comparison of the builds on list `list`, into `report`: values[r * slot count + slot] is run r's
+// process in each slot (profile_time_slot). For each build, in order: its runs and their median; each placement's
+// median (over its copies' runs) and their spread, the largest over the smallest; the largest spread of one
+// placement's copies' medians; and, for every build but the first, its median against the first's, with that
+// difference's range over the placements, each of its placements' medians against each of the first build's, and
+// over the placements and the copies, each of its copies' medians against each of the first build's. The ranges pair
+// nothing: two trees' code starts at bases an arbitrary distance apart, so their placements of one number aren't the
+// same placement. Medians are printed divided by `scale`.
+static bool profile_time_compare(Arena* arena, ProfileReport* report, const ProfileTimeRuns* t, const uint64_t* values, uint64_t list, const char* metric, double scale)
+{
+    const uint64_t copies = profile_time_copies(t);
+    const uint64_t slot_count = profile_time_slot_count(t);
+    const uint64_t mark = arena->length;
+    uint64_t* gathered = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, t->runs * t->executable_count * copies + 1);
+    double* unit_medians = BUSTER_ARENA_PUSH_ARRAY(arena, double, t->executable_count * copies + 1);
+    double* placement_medians = BUSTER_ARENA_PUSH_ARRAY(arena, double, t->executable_count + 1);
+    const bool result = gathered != 0 && unit_medians != 0 && placement_medians != 0;
+    for (uint64_t e = 0; result && e < t->executable_count; e += 1)
+    {
+        for (uint64_t c = 0; c < copies; c += 1)
+        {
+            for (uint64_t r = 0; r < t->runs; r += 1)
+            {
+                gathered[r] = values[r * slot_count + profile_time_slot_index(t, e, c, list)];
+            }
+            unit_medians[e * copies + c] = (double)profile_median(gathered, t->runs);
+        }
+        uint64_t count = 0;
+        for (uint64_t c = 0; c < copies; c += 1)
+        {
+            for (uint64_t r = 0; r < t->runs; r += 1)
+            {
+                gathered[count] = values[r * slot_count + profile_time_slot_index(t, e, c, list)];
+                count += 1;
+            }
+        }
+        placement_medians[e] = (double)profile_median(gathered, count);
+    }
+    double reference = 0;
+    const uint64_t reference_placements = result ? profile_time_placement_count(t, 0) : 0;
+    if (result)
+    {
+        profile_print(report, "list %llu, %s:\n", (unsigned long long)(list + 1), metric);
+    }
+    for (uint64_t b = 0; result && b < t->build_count; b += 1)
+    {
+        const uint64_t placements = profile_time_placement_count(t, b);
+        uint64_t count = 0;
+        for (uint64_t p = 0; p < placements; p += 1)
+        {
+            const uint64_t e = profile_time_executable(t, b, p);
+            for (uint64_t c = 0; c < copies; c += 1)
+            {
+                for (uint64_t r = 0; r < t->runs; r += 1)
+                {
+                    gathered[count] = values[r * slot_count + profile_time_slot_index(t, e, c, list)];
+                    count += 1;
+                }
+            }
+        }
+        const double median = (double)profile_median(gathered, count);
+        reference = b == 0 ? median : reference;
+        profile_print(report, "  %s: %llu runs, median %.3f", t->build_names[b], (unsigned long long)count, median / scale);
+        double smallest = 0;
+        double largest = 0;
+        double copy_spread = 0;
+        for (uint64_t p = 0; p < placements; p += 1)
+        {
+            const uint64_t e = profile_time_executable(t, b, p);
+            smallest = p == 0 || placement_medians[e] < smallest ? placement_medians[e] : smallest;
+            largest = p == 0 || placement_medians[e] > largest ? placement_medians[e] : largest;
+            double least = unit_medians[e * copies];
+            double most = least;
+            for (uint64_t c = 1; c < copies; c += 1)
+            {
+                least = unit_medians[e * copies + c] < least ? unit_medians[e * copies + c] : least;
+                most = unit_medians[e * copies + c] > most ? unit_medians[e * copies + c] : most;
+            }
+            copy_spread = profile_change(most, least) > copy_spread ? profile_change(most, least) : copy_spread;
+        }
+        if (placements > 1)
+        {
+            profile_print(report, "; placements");
+            for (uint64_t p = 0; p < placements; p += 1)
+            {
+                profile_print(report, "%s %.3f", p == 0 ? "" : ",", placement_medians[profile_time_executable(t, b, p)] / scale);
+            }
+            profile_print(report, " (spread %.2f%%)", profile_change(largest, smallest));
+        }
+        if (copies > 1)
+        {
+            profile_print(report, "; copies within %.2f%%", copy_spread);
+        }
+        if (b != 0)
+        {
+            profile_print(report, "; against %s %+.2f%%", t->build_names[0], profile_change(median, reference));
+        }
+        const bool placed = placements > 1 || reference_placements > 1;
+        if (b != 0 && (placed || copies > 1))
+        {
+            double placements_low = 0;
+            double placements_high = 0;
+            double low = 0;
+            double high = 0;
+            for (uint64_t p = 0; p < placements; p += 1)
+            {
+                const uint64_t e = profile_time_executable(t, b, p);
+                for (uint64_t q = 0; q < reference_placements; q += 1)
+                {
+                    const uint64_t f = profile_time_executable(t, 0, q);
+                    const double change = profile_change(placement_medians[e], placement_medians[f]);
+                    placements_low = (p == 0 && q == 0) || change < placements_low ? change : placements_low;
+                    placements_high = (p == 0 && q == 0) || change > placements_high ? change : placements_high;
+                    for (uint64_t c = 0; c < copies; c += 1)
+                    {
+                        for (uint64_t d = 0; d < copies; d += 1)
+                        {
+                            const double copy_change = profile_change(unit_medians[e * copies + c], unit_medians[f * copies + d]);
+                            const bool first = p == 0 && q == 0 && c == 0 && d == 0;
+                            low = first || copy_change < low ? copy_change : low;
+                            high = first || copy_change > high ? copy_change : high;
+                        }
+                    }
+                }
+            }
+            profile_print(report, " (");
+            if (placed)
+            {
+                profile_print(report, "over placements %+.2f%% to %+.2f%%%s", placements_low, placements_high, copies > 1 ? "; " : "");
+            }
+            if (copies > 1)
+            {
+                profile_print(report, "over %s %+.2f%% to %+.2f%%", placed ? "placements and copies" : "copies", low, high);
+            }
+            profile_print(report, ")");
+        }
+        profile_print(report, "\n");
+    }
+    arena_pop_to(arena, mark);
+    return result && !report->full;
+}
+
+// Makes `copies` copies of each executable in a new directory under t->directory, named DIRECTORY/EEE-CCC (the
+// executable's and the copy's numbers, from 0), every one's path the same length, so that argv[0] puts every process's
+// stack at the same offset from its top. Each is written whole, so that its pages are the copy's own. Returns the
+// copies' paths, executable by executable, or null after removing what it made.
+static char** profile_time_make_copies(Arena* arena, const ProfileTimeRuns* t, char* directory, uint64_t directory_bytes)
+{
+    const char* base = t->directory != 0 ? t->directory : getenv("TMPDIR");
+    base = base != 0 && base[0] != 0 ? base : "/tmp";
+    const int written = snprintf(directory, directory_bytes, "%s/buster-time-runs-XXXXXX", base);
+    bool made = written > 0 && (uint64_t)written < directory_bytes && mkdtemp(directory) != 0;
+    const uint64_t count = t->executable_count * t->copies;
+    char** paths = made ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, count + 1) : 0;
+    char* buffer = paths != 0 ? arena_push(arena, BUSTER_PROFILE_COPY_BUFFER, 64) : 0;
+    uint64_t done = 0;
+    bool copying = buffer != 0;
+    for (uint64_t e = 0; copying && e < t->executable_count; e += 1)
+    {
+        for (uint64_t c = 0; copying && c < t->copies; c += 1)
+        {
+            const uint64_t length = strlen(directory) + sizeof("/000-000");
+            char* path = arena_push(arena, length, 1);
+            copying = path != 0;
+            if (copying)
+            {
+                snprintf(path, length, "%s/%03llu-%03llu", directory, (unsigned long long)e, (unsigned long long)c);
+                const int from = open(t->executables[e], O_RDONLY | O_CLOEXEC);
+                const int to = from != -1 ? open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0700) : -1;
+                ssize_t bytes = from != -1 && to != -1 ? read(from, buffer, BUSTER_PROFILE_COPY_BUFFER) : -1;
+                while (bytes > 0)
+                {
+                    bytes = write(to, buffer, (size_t)bytes) == bytes ? read(from, buffer, BUSTER_PROFILE_COPY_BUFFER) : -1;
+                }
+                // A file still open for writing can't be run (ETXTBSY): it is closed before any process starts.
+                const bool closed = to != -1 && close(to) == 0;
+                copying = bytes == 0 && closed;
+                if (from != -1)
+                {
+                    close(from);
+                }
+                paths[done] = path;
+                done += to != -1;
+                if (!copying)
+                {
+                    dprintf(t->output, "time-runs: can't copy %s to %s\n", t->executables[e], path);
+                }
+            }
+        }
+    }
+    if (made && !copying)
+    {
+        for (uint64_t i = 0; i < done; i += 1)
+        {
+            unlink(paths[i]);
+        }
+        rmdir(directory);
+    }
+    else if (!made)
+    {
+        dprintf(t->output, "time-runs: can't make a directory for the copies under %s\n", base);
+    }
+    return copying ? paths : 0;
+}
+
+// The warm-ups in slot order, then the runs, each with every slot in turn from an order that rotates by run
+// (profile_ab_tree's), then each slot's medians and, with more than one executable or copies, each list's comparison
+// of its builds (profile_time_compare): by wall time, and by user cycles where every process was counted. Returns how
+// many processes failed: an exit status other than its slot's first warm-up's, a signal, or a process that didn't
+// start (status 127, or no wait); and one more if the copies couldn't be made or the report couldn't be printed.
 static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
 {
     uint64_t failures = 0;
     const uint64_t mark = arena->length;
-    ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, t->runs * t->list_count + 1);
-    int* expected = BUSTER_ARENA_PUSH_ARRAY(arena, int, t->list_count + 1);
-    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, t->runs + 1);
+    const uint64_t slot_count = profile_time_slot_count(t);
+    ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, t->runs * slot_count + 1);
+    int* expected = BUSTER_ARENA_PUSH_ARRAY(arena, int, slot_count + 1);
+    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, t->runs * slot_count + 1);
     uint64_t longest = 0;
     for (uint64_t l = 0; l < t->list_count; l += 1)
     {
         longest = t->counts[l] > longest ? t->counts[l] : longest;
     }
     char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, longest + 2);
-    const bool ready = timed != 0 && expected != 0 && values != 0 && argv != 0;
+    char directory[4096];
+    char** copies = 0;
+    if (timed != 0 && t->copies != 0)
+    {
+        copies = profile_time_make_copies(arena, t, directory, sizeof(directory));
+    }
+    const bool ready = timed != 0 && expected != 0 && values != 0 && argv != 0 && (t->copies == 0 || copies != 0);
     failures += !ready;
     for (uint64_t run = 0; ready && run < t->warmups + t->runs; run += 1)
     {
         const bool warmup = run < t->warmups;
-        for (uint64_t position = 0; position < t->list_count; position += 1)
+        for (uint64_t position = 0; position < slot_count; position += 1)
         {
-            const uint64_t l = warmup ? position : profile_ab_tree(run - t->warmups, position, t->list_count);
-            argv[0] = (char*)t->executable;
-            for (uint64_t a = 0; a < t->counts[l]; a += 1)
+            const uint64_t s = warmup ? position : profile_ab_tree(run - t->warmups, position, slot_count);
+            const ProfileTimeSlot slot = profile_time_slot(t, s);
+            const char* executable = copies != 0 ? copies[slot.executable * t->copies + slot.copy] : t->executables[slot.executable];
+            argv[0] = (char*)executable;
+            for (uint64_t a = 0; a < t->counts[slot.list]; a += 1)
             {
-                argv[1 + a] = t->arguments[t->starts[l] + a];
+                argv[1 + a] = t->arguments[t->starts[slot.list] + a];
             }
-            argv[1 + t->counts[l]] = 0;
+            argv[1 + t->counts[slot.list]] = 0;
             profile_spin(warmup ? 0 : t->after_scalar_ms);
-            const ProfileTimed one = profile_time_one(t->executable, argv);
+            const ProfileTimed one = profile_time_one(executable, argv);
             const bool exited = one.status != -1 && WIFEXITED(one.status) && WEXITSTATUS(one.status) != 127;
             if (warmup && run == 0)
             {
-                expected[l] = one.status;
+                expected[s] = one.status;
             }
-            const bool same = exited && one.status == expected[l];
+            const bool same = exited && one.status == expected[s];
             failures += !same;
             if (!warmup)
             {
-                timed[(run - t->warmups) * t->list_count + l] = one;
-                dprintf(t->output, "run %llu list %llu: %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, status %d%s\n",
-                        (unsigned long long)(run - t->warmups + 1), (unsigned long long)(l + 1), (double)one.wall_ns / 1e6, (double)one.user_us / 1e3,
-                        (double)one.system_us / 1e3, (unsigned long long)one.peak_kb, (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults,
+                timed[(run - t->warmups) * slot_count + s] = one;
+                dprintf(t->output, "run %llu list %llu", (unsigned long long)(run - t->warmups + 1), (unsigned long long)(slot.list + 1));
+                profile_time_print_unit(t->output, t, slot);
+                dprintf(t->output, ": %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, %llu user cycles, %llu instructions, status %d%s\n",
+                        (double)one.wall_ns / 1e6, (double)one.user_us / 1e3, (double)one.system_us / 1e3, (unsigned long long)one.peak_kb,
+                        (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults, (unsigned long long)one.cycles, (unsigned long long)one.instructions,
                         exited ? WEXITSTATUS(one.status) : -1, same ? "" : " (FAILED: another status than the first warm-up's)");
             }
             else if (!same)
             {
-                dprintf(t->output, "warm-up %llu list %llu: FAILED (status %d)\n", (unsigned long long)(run + 1), (unsigned long long)(l + 1), exited ? WEXITSTATUS(one.status) : -1);
+                dprintf(t->output, "warm-up %llu list %llu", (unsigned long long)(run + 1), (unsigned long long)(slot.list + 1));
+                profile_time_print_unit(t->output, t, slot);
+                dprintf(t->output, ": FAILED (status %d)\n", exited ? WEXITSTATUS(one.status) : -1);
             }
         }
     }
-    for (uint64_t l = 0; ready && t->runs != 0 && l < t->list_count; l += 1)
+    bool counted = true;
+    for (uint64_t s = 0; ready && s < slot_count; s += 1)
     {
-        uint64_t medians[6];
-        for (uint32_t field = 0; field < 6; field += 1)
+        const ProfileTimeSlot slot = profile_time_slot(t, s);
+        uint64_t medians[8];
+        for (uint32_t field = 0; t->runs != 0 && field < 8; field += 1)
         {
             for (uint64_t r = 0; r < t->runs; r += 1)
             {
-                const ProfileTimed* one = &timed[r * t->list_count + l];
-                const uint64_t fields[6] = { one->wall_ns, one->user_us, one->system_us, one->peak_kb, one->minor_faults, one->major_faults };
+                const ProfileTimed* one = &timed[r * slot_count + s];
+                const uint64_t fields[8] = { one->wall_ns, one->user_us, one->system_us, one->peak_kb, one->minor_faults, one->major_faults, one->cycles, one->instructions };
                 values[r] = fields[field];
+                counted = counted && one->counted;
             }
             medians[field] = profile_median(values, t->runs);
         }
-        // values holds the sorted major faults now; the wall times' extremes again.
+        // values holds the sorted instructions now; the wall times' extremes again.
         for (uint64_t r = 0; r < t->runs; r += 1)
         {
-            values[r] = timed[r * t->list_count + l].wall_ns;
+            values[r] = timed[r * slot_count + s].wall_ns;
         }
         profile_median(values, t->runs);
-        dprintf(t->output, "list %llu [", (unsigned long long)(l + 1));
-        for (uint64_t a = 0; a < t->counts[l]; a += 1)
+        if (t->runs != 0)
         {
-            dprintf(t->output, "%s%s", a == 0 ? "" : " ", t->arguments[t->starts[l] + a]);
+            dprintf(t->output, "list %llu", (unsigned long long)(slot.list + 1));
+            profile_time_print_unit(t->output, t, slot);
+            dprintf(t->output, " [");
+            for (uint64_t a = 0; a < t->counts[slot.list]; a += 1)
+            {
+                dprintf(t->output, "%s%s", a == 0 ? "" : " ", t->arguments[t->starts[slot.list] + a]);
+            }
+            dprintf(t->output,
+                    "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, %llu user cycles, %llu "
+                    "instructions\n",
+                    (unsigned long long)t->runs, (double)medians[0] / 1e6, (double)values[0] / 1e6, (double)values[t->runs - 1] / 1e6, (double)medians[1] / 1e3,
+                    (double)medians[2] / 1e3, (unsigned long long)medians[3], (unsigned long long)medians[4], (unsigned long long)medians[5],
+                    (unsigned long long)medians[6], (unsigned long long)medians[7]);
         }
-        dprintf(t->output, "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major\n",
-                (unsigned long long)t->runs, (double)medians[0] / 1e6, (double)values[0] / 1e6, (double)values[t->runs - 1] / 1e6, (double)medians[1] / 1e3,
-                (double)medians[2] / 1e3, (unsigned long long)medians[3], (unsigned long long)medians[4], (unsigned long long)medians[5]);
+    }
+    if (ready && t->runs != 0 && (t->executable_count > 1 || t->copies > 1))
+    {
+        ProfileReport report = { .arena = arena_reserve(BUSTER_PROFILE_REPORT_CAPACITY) };
+        bool compared = report.arena.base != 0;
+        for (uint64_t l = 0; compared && l < t->list_count; l += 1)
+        {
+            for (uint64_t i = 0; i < t->runs * slot_count; i += 1)
+            {
+                values[i] = timed[i].wall_ns;
+            }
+            compared = profile_time_compare(arena, &report, t, values, l, "wall time (ms)", 1e6);
+            for (uint64_t i = 0; compared && counted && i < t->runs * slot_count; i += 1)
+            {
+                values[i] = timed[i].cycles;
+            }
+            compared = compared && (!counted || profile_time_compare(arena, &report, t, values, l, "user cycles (millions)", 1e6));
+        }
+        const String8 text = profile_report_text(&report);
+        compared = compared && write(t->output, text.pointer, text.length) == (ssize_t)text.length;
+        failures += !compared;
+        if (!counted)
+        {
+            dprintf(t->output, "time-runs: user cycles weren't counted for every process, so they aren't compared\n");
+        }
+        arena_release(&report.arena);
+    }
+    if (copies != 0)
+    {
+        for (uint64_t i = 0; i < t->executable_count * t->copies; i += 1)
+        {
+            unlink(copies[i]);
+        }
+        rmdir(directory);
     }
     dprintf(t->output, "time-runs: done, %llu failed processes\n", (unsigned long long)failures);
     arena_pop_to(arena, mark);
@@ -1809,8 +2254,17 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
 
 static int run_time_runs_command(Arena* arena, int argc, char** argv)
 {
-    ProfileTimeRuns t = { .executable = "/proc/self/exe", .runs = 21, .warmups = 1, .output = STDOUT_FILENO };
-    bool valid = true;
+    ProfileTimeRuns t = { .runs = 21, .warmups = 1, .output = STDOUT_FILENO };
+    // At most one executable per pair of arguments, and one build each.
+    const char** executables = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)argc + 1);
+    uint64_t* builds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc + 1);
+    uint64_t* placements = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc + 1);
+    const char** build_names = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)argc + 1);
+    // The executables in the order they are given, with their builds, before they are put in the slots' order.
+    const char** given = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)argc + 1);
+    uint64_t* given_builds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc + 1);
+    bool valid = executables != 0 && builds != 0 && placements != 0 && build_names != 0 && given != 0 && given_builds != 0;
+    uint64_t given_count = 0;
     int i = 1;
     while (valid && i < argc && strcmp(argv[i], "--list") != 0)
     {
@@ -1827,9 +2281,30 @@ static int run_time_runs_command(Arena* arena, int argc, char** argv)
         {
             t.after_scalar_ms = value;
         }
-        else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
+        else if (strcmp(argv[i], "--copies") == 0 && i + 1 < argc && profile_count_option(argv[i + 1], &value) && value <= BUSTER_PROFILE_COPIES)
         {
-            t.executable = argv[i + 1];
+            t.copies = value;
+        }
+        else if (strcmp(argv[i], "--directory") == 0 && i + 1 < argc)
+        {
+            t.directory = argv[i + 1];
+        }
+        else if ((strcmp(argv[i], "--executable") == 0 && i + 1 < argc) || (strcmp(argv[i], "--build") == 0 && i + 2 < argc))
+        {
+            // --executable PATH is a build of its own, named PATH; --build NAME PATH adds a placement to build NAME.
+            const bool named = argv[i][2] == 'b';
+            const char* name = argv[i + 1];
+            uint64_t build = t.build_count;
+            for (uint64_t b = 0; named && b < t.build_count; b += 1)
+            {
+                build = strcmp(build_names[b], name) == 0 ? b : build;
+            }
+            build_names[build] = name;
+            t.build_count += build == t.build_count;
+            given[given_count] = argv[i + 1 + named];
+            given_builds[given_count] = build;
+            given_count += 1;
+            i += named;
         }
         else
         {
@@ -1837,6 +2312,34 @@ static int run_time_runs_command(Arena* arena, int argc, char** argv)
         }
         i += 2;
     }
+    if (valid && given_count == 0)
+    {
+        given[0] = "/proc/self/exe";
+        given_builds[0] = 0;
+        build_names[0] = "/proc/self/exe";
+        given_count = 1;
+        t.build_count = 1;
+    }
+    // The slots' order: placement by placement, each build's in turn.
+    for (uint64_t p = 0; valid && t.executable_count < given_count; p += 1)
+    {
+        for (uint64_t b = 0; b < t.build_count; b += 1)
+        {
+            uint64_t placement = 0;
+            for (uint64_t g = 0; g < given_count; g += 1)
+            {
+                if (given_builds[g] == b && placement == p)
+                {
+                    executables[t.executable_count] = given[g];
+                    builds[t.executable_count] = b;
+                    placements[t.executable_count] = p;
+                    t.executable_count += 1;
+                }
+                placement += given_builds[g] == b;
+            }
+        }
+    }
+    valid = valid && t.executable_count <= BUSTER_PROFILE_EXECUTABLES;
     uint64_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
     uint64_t* counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
     valid = valid && i < argc && starts != 0 && counts != 0;
@@ -1853,13 +2356,18 @@ static int run_time_runs_command(Arena* arena, int argc, char** argv)
         }
         t.list_count += 1;
     }
+    t.executables = executables;
+    t.builds = builds;
+    t.placements = placements;
+    t.build_names = build_names;
     t.arguments = argv;
     t.starts = starts;
     t.counts = counts;
     int result = 1;
     if (!valid || t.list_count == 0)
     {
-        fprintf(stderr, "usage: time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...\n");
+        fprintf(stderr, "usage: time-runs [--runs N] [--warmups N] [--after-scalar MS] [--copies N] [--directory PATH] [--executable PATH | --build NAME PATH]... --list "
+                        "ARGUMENT... [--list ARGUMENT...]...\n");
     }
     else
     {

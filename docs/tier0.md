@@ -54,11 +54,10 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
-**Measured on `sqlite3.c`,** which compiles now: Tier 0's own costs on its functions ("Measurements", below), and the
-whole compile's time and the generated code's run time and size against clang -O0's and tcc's ([#136's
-measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)).
-
-**Still to do:** `speedtest1`, SQLite's own benchmark, which the frozen corpus doesn't have.
+**Measured on SQLite,** which compiles now: Tier 0's own costs on `sqlite3.c`'s functions ("Measurements", below),
+and the whole compile's time and the generated code's run time and size against clang -O0's and tcc's, on its shell
+([#136's measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)) and on `speedtest1`,
+SQLite's own benchmark ("Measurements", below).
 
 Generated programs (below) stand in for #142's random programs.
 
@@ -1198,6 +1197,39 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
 
+**SQLite's speedtest1 against clang -O0 and tcc**
+([record](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
+The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. They are built with SQLite's own
+`test/speedtest.tcl` options four ways:
+
+- by `-c` (main at `e04462c1`), linked by cc;
+- by the direct path, both files as one unit;
+- by clang -O0, linked by cc;
+- by tcc.
+
+Each build runs with that script's options at `--size 5`, from a database on tmpfs. On the 9700X, CPU 2, every build
+gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
+instructions and instructions per cycle medians of 3 rounds under `perf stat`:
+
+| | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
+| --- | --- | --- | --- | --- |
+| Run time | 294.4 ms | 295.7 ms | 293.3 ms | 271.5 ms |
+| User-space instructions | 6,866 M | 6,865 M | 3,922 M | 4,833 M |
+| Instructions per cycle | 4.47 | 4.46 | 2.59 | 3.45 |
+| `.text` of the executable | 1,331,336 B | 1,331,216 B | 1,024,342 B | 1,295,452 B |
+| `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
+
+- **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
+  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
+- **Code size:**
+  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
+    sizes known before writing.
+- **`switch`** is a chain of compares in case order:
+  - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
+  - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
+  - jump tables (#136's item 7) will change both, and the record's scripts can measure them again.
+
 ## Follow-ups
 
 - **Deep values' refusals:** a function with values of the memory classes past the depth tables, and a call with
@@ -1228,9 +1260,10 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
   is rax (its depth's), with templates keyed by them.
 - **Floating constants** from a per-unit pool (`GLOBAL` of a pool symbol, the front end's choice); and rbp-relative
   frame operands where they encode shorter.
-- **Real corpora:** with #133, the vector and scalar paths on every function of the corpora; contract 6 measured on
-  them; `sqlite3.c` and `speedtest1` (#146); #144's benchmark rows for real functions; the whole compile against
-  tcc. c-testsuite (#145) runs.
+- **Real corpora:** `sqlite3.c`'s functions are measured, both paths alike on each (`benchmark-backend-source`), and
+  SQLite's shell and `speedtest1` compile and run against clang -O0's and tcc's builds ("Measurements"); c-testsuite
+  (#145) runs. Still to do: the other corpora's functions, contract 6 measured on them, and #144's benchmark rows
+  for real functions.
 - **Unwind tables (#88):** done outside this file. #345's `unwind_tier0.c` derives each function's CFI from its sized
   records, the fixed prologue and epilogue (`docs/unwind.md`). It refuses a function with a frame pointer, whose body
   writes rsp (an allocation, or the epilogue's `mov rsp, rbp`): those functions' CFI would follow rbp. It also refuses a

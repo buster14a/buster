@@ -95,6 +95,7 @@ typedef enum CheckInputAttributeKind
     CHECK_ATTRIBUTE_NULLABILITY,
     CHECK_ATTRIBUTE_REGPARM,
     CHECK_ATTRIBUTE_ALIGN_VALUE,
+    CHECK_ATTRIBUTE_NO_BUILTIN,
 } CheckInputAttributeKind;
 
 typedef enum CheckInputAttributeError
@@ -294,6 +295,8 @@ static const CheckInputAttributeRule check_input_attribute_rules[] =
     { "no_sanitize_thread", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_sanitize_undefined", CHECK_ATTRIBUTE_NO_SANITIZE, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_instrument_function", CHECK_ATTRIBUTE_NO_INSTRUMENT_FUNCTION, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
+    // clang's: the library functions a definition's code may not become calls of, every one without arguments.
+    { "no_builtin", CHECK_ATTRIBUTE_NO_BUILTIN, CHECK_ATTRIBUTE_STRING_LIST, 0, 255 },
     { "naked", CHECK_ATTRIBUTE_NAKED, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "no_stack_protector", CHECK_ATTRIBUTE_NO_STACK_PROTECTOR, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
     { "fallthrough", CHECK_ATTRIBUTE_FALLTHROUGH, CHECK_ATTRIBUTE_NO_ARGUMENTS, 0, 0 },
@@ -1201,6 +1204,29 @@ static TypeId check_input_attribute_abi(CheckInputReader* reader, CheckInputAttr
         arena_pop_to(reader->scratch, mark);
     }
     return attributes == 0 || attributes->error == CHECK_ATTRIBUTE_ERROR_NONE ? result : 0;
+}
+
+// clang's no_builtin is permitted on a function's definition alone: on another function's declaration it is an error at
+// its name, and on anything else clang warns that it only applies to functions and ignores it. Its arguments are kept as
+// written, as an argument that names no library function is, which clang warns about and ignores: no code here makes a
+// call of a library function that the source doesn't. Whether the declaration's attributes are valid.
+static bool check_input_attribute_definition(CheckInputReader* reader, CheckInputAttributes* attributes, bool function, bool definition)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = &attributes->records[i];
+        if (attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN)
+        {
+            attribute->ignored |= !function;
+            valid = !function || definition;
+            if (!valid)
+            {
+                check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_SUBJECT);
+            }
+        }
+    }
+    return valid;
 }
 
 // Run after a full declarator is available, including a function-pointer typedef. Prefix attributes cannot perform
