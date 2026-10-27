@@ -144,19 +144,22 @@ static CheckProgramStatus check_program_helper_math(const CheckProgram* program,
 static CheckProgramStatus check_program_helper_atomic(const CheckBuiltinAtomicEffect* effect, CBuiltinId id, CheckProgramHelper* helper)
 {
     CheckProgramStatus status = CHECK_PROGRAM_OK;
+    const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(id);
     const bool memory = id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N;
     const bool load = id == CBUILTIN_ATOMIC_LOAD_N;
     const bool store = id == CBUILTIN_ATOMIC_STORE_N;
-    const uint32_t parameters = load ? 2 : store ? 3 : id == CBUILTIN_SYNC_SYNCHRONIZE ? 0 : 1;
-    if (check_builtin_atomic_rmw_rule(id) != NULL && effect->runtime_builtin == id && effect->compiler_barrier)
+    // A read/modify/write evaluates its rule's fixed arguments; a legacy release is a store, no read/modify/write.
+    const uint32_t parameters = rule != NULL ? rule->fixed_count : load ? 2 : store ? 3 : id == CBUILTIN_SYNC_SYNCHRONIZE ? 0 : 1;
+    const bool rmw = rule != NULL && rule->operation != CHECK_BUILTIN_ATOMIC_RMW_RELEASE;
+    if (effect->runtime_builtin != id || !effect->compiler_barrier ||
+        effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw != rmw)
+    {
+        status = CHECK_PROGRAM_INVALID;
+    }
+    else if (rule != NULL)
     {
         // The read/modify/write leaves (c_builtin_atomic_rmw_helpers.c) have no planned signature here yet.
         status = CHECK_PROGRAM_UNSUPPORTED;
-    }
-    else if (effect->runtime_builtin != id || !effect->compiler_barrier ||
-             effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw)
-    {
-        status = CHECK_PROGRAM_INVALID;
     }
     else if (effect->unsupported != 0 || check_program_helper_key(id, effect->object_size) == UINT32_MAX)
     {
