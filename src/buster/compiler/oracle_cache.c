@@ -37,13 +37,26 @@
 // finds it. The files a run writes are among what it looked at, as they were before it (their bytes read at its first
 // look at each, which a run that reads its output first depends on), and a file it changes after it read it isn't
 // kept; nor is a run that does what the tracing can't follow (openat2's resolution flags, chroot, the mount calls,
-// extended attributes: oracle_unfollowed_calls). The package manager's files and the kernel's are left out
-// (oracle_path_rule): the package database's identity stands for the first, and a run that follows a process's links
-// into the file system (/proc/self/cwd, /dev/fd/3) isn't kept; /dev's other paths are kept, /dev/shm's files among
-// them. A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH (oracle_run_key), which the key has and
-// its __DATE__ and __TIME__ follow, and clang's __TIMESTAMP__; the entries of a tool whose __TIMESTAMP__ doesn't
-// (oracle_tool_epoch) have their files' modification times. A test that compares with compilers fixes the epoch
-// (oracle_epoch_begin), and gives the files it writes for such a tool the epoch's time (oracle_epoch_file).
+// extended attributes: oracle_unfollowed_calls). The package manager's files are left out (oracle_path_rule): the
+// package database's identity stands for them. The kernel's (/proc and /sys) are looked at but never read, as their
+// bytes change with no file changing (a process's id in /proc/self/stat, the time in /proc/uptime): a run that opens,
+// lists or changes one of them, reads a link there (but its own process's links that name files, as LLVM reads its
+// files' real paths) or follows a process's link into the file system (/proc/self/cwd, /dev/fd/3) isn't kept. /dev's
+// other paths are kept, /dev/shm's files among them, but a run that opens a device (but /dev/null, /dev/zero and
+// /dev/full, whose data never change, and /dev/tty, which a run, without a controlling terminal, can't open), a FIFO, a
+// socket or, through any other path, a file of the kernel's isn't kept (oracle_opens_unseen). Its getrandom calls are
+// answered by the cache (oracle_trace_random), the same each time the run runs, and it inherits no descriptor but the
+// standard three (oracle_child). A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH
+// (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and clang's __TIMESTAMP__; the entries of a
+// tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files' modification times. A test that compares with
+// compilers fixes the epoch (oracle_epoch_begin), and gives the files it writes for such a tool the epoch's time
+// (oracle_epoch_file).
+//
+// What the tracing can't see, a tool's result must not depend on: the clocks (the vDSO's), its process and thread ids,
+// its addresses and the kernel's random bytes for its start (AT_RANDOM), the processor's (rdrand, rdtsc), the machine's
+// figures (uname, sysinfo, the CPUs it may run on) and what other processes send it (sockets, shared memory). A
+// compiler's doesn't: with SOURCE_DATE_EPOCH, clang's and gcc's outputs are the same from run to run, which check mode
+// verifies.
 //
 // A test makes its files in directories of mkdtemp's under $TMPDIR (or /tmp), whose names differ from one run to the
 // next. A root is such a name in a run's strings: $TMPDIR/NAME, NAME a run of letters, digits, '.', '_' and '-' whose
@@ -82,10 +95,13 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/uio.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 
@@ -108,6 +124,9 @@ extern char** environ;
 #define BUSTER_ORACLE_VARIANTS 32
 // The files outside the runs' roots whose bytes' digests a process keeps (oracle_file_digest), a power of two.
 #define BUSTER_ORACLE_MEMO 8192
+// The most bytes the cache gives a traced run's getrandom call (oracle_trace_random), as many as the kernel always gives
+// one call whole: a call for more goes to the kernel, and its run isn't kept.
+#define BUSTER_ORACLE_RANDOM_BYTES 256
 // The time oracle_epoch_begin fixes for a test, the preprocessor oracle's (c_preprocessor_oracle.c's
 // BUSTER_PP_ORACLE_EPOCH).
 #define BUSTER_ORACLE_EPOCH "1792454400"
@@ -733,7 +752,7 @@ static bool oracle_epoch_file(const char* path)
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
     oracle_sha256_begin(hash);
-    oracle_hash_text(hash, "buster oracle 7");
+    oracle_hash_text(hash, "buster oracle 8");
     oracle_hash_text(hash, purpose);
     oracle_hash_bytes(hash, cache->host, BUSTER_ORACLE_KEY_BYTES);
 }
@@ -940,8 +959,9 @@ struct OracleRun
     // group), a pidfd of it (or -1), when it started, the socket its child reports on (oracle_child) and whether the
     // child said its tool couldn't start, and its captures. Traced, also its filter's listener (or -1), whether no
     // process uses the filter any more, whether the tracing missed something (a call it can't follow, a path it can't
-    // read), and the paths the run looked at, each with its first look. In check mode, whether it found the entry it
-    // would have taken (oracle_entry_find, before it ran), and that entry's variant.
+    // read), how many getrandom calls the cache answered (oracle_trace_random), and the paths the run looked at, each
+    // with its first look. In check mode, whether it found the entry it would have taken (oracle_entry_find, before it
+    // ran), and that entry's variant.
     bool keyed;
     OracleKey key;
     OracleRoots roots;
@@ -957,6 +977,7 @@ struct OracleRun
     int listener;
     bool hung;
     bool untraced;
+    uint64_t randoms;
     OracleLooks looks;
     bool checking;
     OracleKey checked;
@@ -1520,7 +1541,7 @@ static void oracle_looks_release(OracleLooks* looks)
 // and each path whose making or removing its results depend on (an mkdir that finds its path there, or its directory
 // not there yet), with its directory. A compiler doesn't list directories to find its headers, but a directory a run
 // lists is part of what it looked at by its names. What the tracing can't follow makes the run unkept
-// (oracle_unfollowed_calls).
+// (oracle_unfollowed_calls). Its getrandom calls the cache answers itself (oracle_answered_calls).
 
 #ifndef SYS_openat2
 #define SYS_openat2 437
@@ -1588,14 +1609,34 @@ static void oracle_looks_release(OracleLooks* looks)
 #ifndef AT_REMOVEDIR
 #define AT_REMOVEDIR 0x200
 #endif
+#ifndef SYS_close_range
+#define SYS_close_range 436
+#endif
+#ifndef CLOSE_RANGE_CLOEXEC
+#define CLOSE_RANGE_CLOEXEC (1u << 2)
+#endif
+#ifndef GRND_INSECURE
+#define GRND_INSECURE 0x0004
+#endif
+
+// What a traced call does at its paths (oracle_path_rule): looks at them (what stat and access give, as a path's look
+// has it), opens one (a file's bytes, a directory's names, a device's data), reads one (a link's target, a directory's
+// names, a program's bytes), or makes, removes, renames or changes them.
+typedef enum OracleUse
+{
+    ORACLE_USE_LOOK,
+    ORACLE_USE_OPEN,
+    ORACLE_USE_READ,
+    ORACLE_USE_CHANGE,
+} OracleUse;
 
 // How the tracing reads a traced call's paths (oracle_trace_answer): up to two, each from the argument that holds its
 // name (-1: none) and the one that holds its directory's descriptor (-1: the working directory), or the descriptor's
 // own where it names none (a listing's, utimensat's null name, "" with AT_EMPTY_PATH); the argument with the call's AT_
 // flags (-1: none); whether it follows a symbolic link at its first path's end (AT_SYMLINK_NOFOLLOW stops it and
 // AT_SYMLINK_FOLLOW starts it; a second path is one it makes or replaces, which it doesn't follow); whether it lists
-// its path's directory (getdents); and whether its last path's directory's names count too, which must be none for it
-// to go (rmdir's, unlinkat's with AT_REMOVEDIR, and rename's target's).
+// its path's directory (getdents); whether its last path's directory's names count too, which must be none for it to
+// go (rmdir's, unlinkat's with AT_REMOVEDIR, and rename's target's); and what it does at them (OracleUse).
 typedef struct OracleCall OracleCall;
 struct OracleCall
 {
@@ -1606,57 +1647,58 @@ struct OracleCall
     bool follows;
     bool lists;
     bool empties;
+    uint8_t use;
 };
 
 static const OracleCall oracle_calls[] = {
     // Looking at a path, or at a descriptor's directory's names.
-    { SYS_open, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_creat, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_openat, { 1, -1 }, { 0, -1 }, -1, true, false, false },
-    { SYS_openat2, { 1, -1 }, { 0, -1 }, -1, true, false, false },
-    { SYS_stat, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_lstat, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_newfstatat, { 1, -1 }, { 0, -1 }, 3, true, false, false },
-    { SYS_statx, { 1, -1 }, { 0, -1 }, 2, true, false, false },
-    { SYS_access, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_faccessat, { 1, -1 }, { 0, -1 }, -1, true, false, false },
-    { SYS_faccessat2, { 1, -1 }, { 0, -1 }, 3, true, false, false },
-    { SYS_readlink, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_readlinkat, { 1, -1 }, { 0, -1 }, -1, false, false, false },
-    { SYS_execve, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_execveat, { 1, -1 }, { 0, -1 }, 4, true, false, false },
-    { SYS_chdir, { 0, -1 }, { -1, -1 }, -1, true, false, false },
+    { SYS_open, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_OPEN },
+    { SYS_creat, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_OPEN },
+    { SYS_openat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_OPEN },
+    { SYS_openat2, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_OPEN },
+    { SYS_stat, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
+    { SYS_lstat, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_LOOK },
+    { SYS_newfstatat, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_LOOK },
+    { SYS_statx, { 1, -1 }, { 0, -1 }, 2, true, false, false, ORACLE_USE_LOOK },
+    { SYS_access, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
+    { SYS_faccessat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
+    { SYS_faccessat2, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_LOOK },
+    { SYS_readlink, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_READ },
+    { SYS_readlinkat, { 1, -1 }, { 0, -1 }, -1, false, false, false, ORACLE_USE_READ },
+    { SYS_execve, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_READ },
+    { SYS_execveat, { 1, -1 }, { 0, -1 }, 4, true, false, false, ORACLE_USE_READ },
+    { SYS_chdir, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
     // libselinux's start in every program linked with it (statfs of /sys/fs/selinux, which the kernel's paths leave
     // out): a path like stat's, its file system's figures, which any file written changes, not part of it.
-    { SYS_statfs, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_getdents, { -1, -1 }, { 0, -1 }, -1, true, true, false },
-    { SYS_getdents64, { -1, -1 }, { 0, -1 }, -1, true, true, false },
+    { SYS_statfs, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
+    { SYS_getdents, { -1, -1 }, { 0, -1 }, -1, true, true, false, ORACLE_USE_READ },
+    { SYS_getdents64, { -1, -1 }, { 0, -1 }, -1, true, true, false, ORACLE_USE_READ },
     // Making, removing, renaming and changing a path, whose results read what is there and its directory.
-    { SYS_mkdir, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_mkdirat, { 1, -1 }, { 0, -1 }, -1, false, false, false },
-    { SYS_mknod, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_mknodat, { 1, -1 }, { 0, -1 }, -1, false, false, false },
-    { SYS_rmdir, { 0, -1 }, { -1, -1 }, -1, false, false, true },
-    { SYS_unlink, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_unlinkat, { 1, -1 }, { 0, -1 }, 2, false, false, false },
-    { SYS_rename, { 0, 1 }, { -1, -1 }, -1, false, false, true },
-    { SYS_renameat, { 1, 3 }, { 0, 2 }, -1, false, false, true },
-    { SYS_renameat2, { 1, 3 }, { 0, 2 }, -1, false, false, true },
-    { SYS_link, { 0, 1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_linkat, { 1, 3 }, { 0, 2 }, 4, false, false, false },
-    { SYS_symlink, { 1, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_symlinkat, { 2, -1 }, { 1, -1 }, -1, false, false, false },
-    { SYS_truncate, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_chmod, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_fchmodat, { 1, -1 }, { 0, -1 }, -1, true, false, false },
-    { SYS_fchmodat2, { 1, -1 }, { 0, -1 }, 3, true, false, false },
-    { SYS_chown, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_lchown, { 0, -1 }, { -1, -1 }, -1, false, false, false },
-    { SYS_fchownat, { 1, -1 }, { 0, -1 }, 4, true, false, false },
-    { SYS_utime, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_utimes, { 0, -1 }, { -1, -1 }, -1, true, false, false },
-    { SYS_utimensat, { 1, -1 }, { 0, -1 }, 3, true, false, false },
-    { SYS_futimesat, { 1, -1 }, { 0, -1 }, -1, true, false, false },
+    { SYS_mkdir, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_mkdirat, { 1, -1 }, { 0, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_mknod, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_mknodat, { 1, -1 }, { 0, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_rmdir, { 0, -1 }, { -1, -1 }, -1, false, false, true, ORACLE_USE_CHANGE },
+    { SYS_unlink, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_unlinkat, { 1, -1 }, { 0, -1 }, 2, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_rename, { 0, 1 }, { -1, -1 }, -1, false, false, true, ORACLE_USE_CHANGE },
+    { SYS_renameat, { 1, 3 }, { 0, 2 }, -1, false, false, true, ORACLE_USE_CHANGE },
+    { SYS_renameat2, { 1, 3 }, { 0, 2 }, -1, false, false, true, ORACLE_USE_CHANGE },
+    { SYS_link, { 0, 1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_linkat, { 1, 3 }, { 0, 2 }, 4, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_symlink, { 1, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_symlinkat, { 2, -1 }, { 1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_truncate, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_chmod, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_fchmodat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_fchmodat2, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_chown, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_lchown, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_CHANGE },
+    { SYS_fchownat, { 1, -1 }, { 0, -1 }, 4, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_utime, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_utimes, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_utimensat, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_CHANGE },
+    { SYS_futimesat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_CHANGE },
 };
 
 // The calls the filter stops that make their run unkept, as the tracing can't follow them: those that reach files it
@@ -1702,15 +1744,22 @@ static const uint32_t oracle_unfollowed_calls[] = {
     SYS_removexattrat,
 };
 
+// The calls the filter stops that the cache answers itself, rather than let them through: getrandom, whose bytes it
+// gives (oracle_trace_random).
+static const uint32_t oracle_answered_calls[] = {
+    SYS_getrandom,
+};
+
 #define BUSTER_ORACLE_CALLS (sizeof(oracle_calls) / sizeof(oracle_calls[0]))
-#define BUSTER_ORACLE_TRACED_CALLS (BUSTER_ORACLE_CALLS + sizeof(oracle_unfollowed_calls) / sizeof(oracle_unfollowed_calls[0]))
+#define BUSTER_ORACLE_UNFOLLOWED_CALLS (sizeof(oracle_unfollowed_calls) / sizeof(oracle_unfollowed_calls[0]))
+#define BUSTER_ORACLE_TRACED_CALLS (BUSTER_ORACLE_CALLS + BUSTER_ORACLE_UNFOLLOWED_CALLS + sizeof(oracle_answered_calls) / sizeof(oracle_answered_calls[0]))
 #define BUSTER_ORACLE_FILTER (BUSTER_ORACLE_TRACED_CALLS + 6)
 // The filter's jumps count the instructions they skip in a byte.
 _Static_assert(BUSTER_ORACLE_TRACED_CALLS + 3 <= 255, "oracle cache: too many traced calls for the filter's jumps");
 
 // The filter's program into `filter` (BUSTER_ORACLE_FILTER instructions): the architecture and x32's bit checked, then
-// each of oracle_calls and oracle_unfollowed_calls, stopped for the listener (SECCOMP_RET_USER_NOTIF), and any other
-// call let through.
+// each of oracle_calls, oracle_unfollowed_calls and oracle_answered_calls, stopped for the listener
+// (SECCOMP_RET_USER_NOTIF), and any other call let through.
 static void oracle_trace_filter(struct sock_filter* filter, struct sock_fprog* program)
 {
     const uint8_t calls = (uint8_t)BUSTER_ORACLE_TRACED_CALLS;
@@ -1721,7 +1770,9 @@ static void oracle_trace_filter(struct sock_filter* filter, struct sock_fprog* p
     filter[3] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, (uint8_t)(calls + 1), 0);
     for (uint8_t c = 0; c < calls; c += 1)
     {
-        const uint32_t number = c < BUSTER_ORACLE_CALLS ? oracle_calls[c].number : oracle_unfollowed_calls[c - BUSTER_ORACLE_CALLS];
+        const uint32_t number = c < BUSTER_ORACLE_CALLS                                    ? oracle_calls[c].number
+                                : c < BUSTER_ORACLE_CALLS + BUSTER_ORACLE_UNFOLLOWED_CALLS ? oracle_unfollowed_calls[c - BUSTER_ORACLE_CALLS]
+                                                                                           : oracle_answered_calls[c - BUSTER_ORACLE_CALLS - BUSTER_ORACLE_UNFOLLOWED_CALLS];
         filter[4 + c] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, number, (uint8_t)(calls - c), 0);
     }
     filter[4 + calls] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
@@ -1835,26 +1886,37 @@ static bool oracle_path_under(const char* path, const char* directory, const cha
 }
 
 // What follows a process's directory in `rest`, which follows /proc: "/PID", "/self" or "/thread-self", then a task's
-// "/task/TID" if it has one. Null if `rest` names no process.
-static const char* oracle_process_part(const char* rest)
+// "/task/TID" if it has one, with whether that process is the one `caller` (a thread's id, as a notification has it)
+// is in, into `own`: self and thread-self are, and a PID is if it is `caller`'s or that of the process whose tasks
+// `caller` is among. Null if `rest` names no process.
+static const char* oracle_process_part(const char* rest, pid_t caller, bool* own)
 {
     const char* name = rest[0] == '/' ? rest + 1 : "";
     const size_t digits = strspn(name, "0123456789");
     const size_t length = digits != 0 ? digits : strncmp(name, "thread-self", 11) == 0 ? 11 : strncmp(name, "self", 4) == 0 ? 4 : 0;
     const char* result = length != 0 && (name[length] == 0 || name[length] == '/') ? name + length : 0;
-    const size_t task = result != 0 && strncmp(result, "/task/", 6) == 0 ? strspn(result + 6, "0123456789") : 0;
-    result = task != 0 && (result[6 + task] == 0 || result[6 + task] == '/') ? result + 6 + task : result;
+    // A PID longer than any is no process's.
+    const long process = result != 0 && digits != 0 && digits < 10 ? strtol(name, 0, 10) : -1;
+    char task[64];
+    snprintf(task, sizeof(task), "/proc/%ld/task/%ld", process, (long)caller);
+    struct stat status;
+    *own = result != 0 && (digits == 0 || process == (long)caller || (process > 0 && stat(task, &status) == 0));
+    const size_t tasks = result != 0 && strncmp(result, "/task/", 6) == 0 ? strspn(result + 6, "0123456789") : 0;
+    result = tasks != 0 && (result[6 + tasks] == 0 || result[6 + tasks] == '/') ? result + 6 + tasks : result;
     return result;
 }
 
-// What the cache makes of `link` (a process's own path after its directory, as "/fd/3" or "/cwd/x.h"), which the run's
-// call follows to its end if `followed`. A process's links into the file system (cwd, root, exe, fd/N and
-// map_files/RANGE) lead to what that process sees, which the cache, another process, can't look at: a path past one of
-// them, or one that follows cwd, root, a mapping or a descriptor but the standard three (the key's input and the run's
-// captures), is refused. A link itself, which readlink reads, names what its process opened (as LLVM reads its files'
-// real paths), and following exe reaches the tool or what the run executed, which it traced: both are left out, as is
-// everything else the kernel has of a process.
-static OraclePath oracle_process_link(const char* link, bool followed)
+// What the cache makes of `link` (a process's path after its directory, as "/fd/3" or "/cwd/x.h"), at which the run's
+// call makes `use`, following it to its end if `followed`; `own` if the process is the caller's own. A process's links
+// into the file system (cwd, root, exe, fd/N and map_files/RANGE) lead to what that process sees, which the cache,
+// another process, can't look at: a path past one, or a call that follows one but the caller's own exe and standard
+// three descriptors (the tool or what it executed, which the tracing saw, and the key's input and the run's captures),
+// is refused. A link read names what its process opened: the caller's own are left out (as LLVM reads its files' real
+// paths), but a descriptor's that names a pipe's or a socket's inode ("pipe:[N]", read here as `caller` sees it),
+// which another run's differs from, and another process's are refused. What else the kernel has of processes (their
+// status, their descriptors' positions, which process /proc/self is) changes from one run to the next with no file
+// changing: a look at it is left out, and any other use refused.
+static OraclePath oracle_process_link(const char* link, bool followed, OracleUse use, bool own, pid_t caller)
 {
     const char* name = link[0] == '/' ? link + 1 : "";
     const size_t length = strcspn(name, "/");
@@ -1867,23 +1929,30 @@ static OraclePath oracle_process_link(const char* link, bool followed)
     const char* entry = after[0] == '/' ? after + 1 : "";
     const bool single = entry[0] != 0 && strchr(entry, '/') == 0;
     const bool standard = descriptors && single && (strcmp(entry, "0") == 0 || strcmp(entry, "1") == 0 || strcmp(entry, "2") == 0);
+    const bool linked = ((directory || executable) && after[0] == 0) || ((descriptors || mappings) && single);
     const bool past = (directory || executable) ? after[0] != 0 : (descriptors || mappings) && after[0] != 0 && !single;
-    const bool refused = past || (followed && ((directory && after[0] == 0) || (descriptors && single && !standard) || (mappings && single)));
+    char descriptor[64];
+    char target[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(descriptor, sizeof(descriptor), "/proc/%ld/fd/%s", (long)caller, entry);
+    const bool inode = descriptors && single && own && !followed && use == ORACLE_USE_READ && readlink(descriptor, target, sizeof(target)) > 0 && target[0] != '/';
+    const bool refused = past || inode || (linked && followed && !(own && (executable || standard))) ||
+                         (linked && !followed && !own && use != ORACLE_USE_LOOK) || (!linked && use != ORACLE_USE_LOOK);
     return refused ? ORACLE_PATH_REFUSED : ORACLE_PATH_LEFT_OUT;
 }
 
-// What the cache makes of `path`, which the run looked at with a call that follows a symbolic link at its end if
-// `followed` (all but lstat, readlink, readlinkat, and newfstatat and statx with AT_SYMLINK_NOFOLLOW):
+// What the cache makes of `path`, at which a call of `caller` (a thread's id) makes `use`, following a symbolic link at
+// its end if `followed` (all but lstat, readlink, readlinkat, and newfstatat and statx with AT_SYMLINK_NOFOLLOW):
 //   - a path in one of the run's roots is kept, wherever $TMPDIR is (/dev/shm, say);
 //   - the package manager's files (under /usr but /usr/local, and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which
 //     merged-usr systems link into /usr) are left out: the package database's identity in every key stands for them;
-//   - the kernel's (/proc and /sys), which describe the processes and the machine, are left out, but for a process's
+//   - the kernel's (/proc and /sys), which describe the processes and the machine and change with no file changing,
+//     are left out where they are looked at and refused where they are opened, read or changed; but for a process's
 //     links into the file system (oracle_process_link), which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to;
-//   - any other path is kept, the rest of /dev's among them: a device node by its kind and number, and /dev/shm's
-//     files, an ordinary tmpfs's, as any other directory's.
+//   - any other path is kept, the rest of /dev's among them: a device node by its kind and number (opened, it may be
+//     refused: oracle_opens_unseen), and /dev/shm's files, an ordinary tmpfs's, as any other directory's.
 // A path with ".." in it may lead out of where it starts, and isn't left out: it is kept, or refused where a process's
 // own paths may lead elsewhere (/proc, /sys and /dev/fd).
-static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool followed)
+static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool followed, OracleUse use, pid_t caller)
 {
     static const char* const packaged[] = { "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32" };
     static const char* const streams[] = { "/dev/stdin", "/dev/stdout", "/dev/stderr" };
@@ -1897,14 +1966,16 @@ static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool 
         package |= oracle_path_under(path, packaged[p], &rest);
     }
     package &= !oracle_path_under(path, "/usr/local", &rest);
-    // The process's own paths: /proc/PID's (and its task's), and /dev/fd's and the standard streams', which lead to
-    // /proc/self/fd's.
+    // A process's paths: /proc/PID's (and its task's), and /dev/fd's and the standard streams', which lead to the
+    // caller's /proc/self/fd's.
     char link[BUSTER_ORACLE_PATH_BYTES + 8];
-    const char* process = oracle_path_under(path, "/proc", &rest) ? oracle_process_part(rest) : 0;
+    bool own = false;
+    const char* process = oracle_path_under(path, "/proc", &rest) ? oracle_process_part(rest, caller, &own) : 0;
     if (oracle_path_under(path, "/dev/fd", &rest))
     {
         snprintf(link, sizeof(link), "/fd%s", rest);
         process = link;
+        own = true;
     }
     for (uint32_t s = 0; s < sizeof(streams) / sizeof(streams[0]); s += 1)
     {
@@ -1912,15 +1983,44 @@ static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool 
         {
             snprintf(link, sizeof(link), "%s%s", descriptors[s], rest);
             process = link;
+            own = true;
         }
     }
-    const OraclePath own = process != 0 ? oracle_process_link(process, followed) : ORACLE_PATH_LEFT_OUT;
+    const OraclePath kernel_rule = process != 0 ? oracle_process_link(process, followed, use, own, caller) : use == ORACLE_USE_LOOK ? ORACLE_PATH_LEFT_OUT : ORACLE_PATH_REFUSED;
     return oracle_run_rooted(run, path) ? ORACLE_PATH_KEPT
            : parent && (kernel || process != 0) ? ORACLE_PATH_REFUSED
            : parent                            ? ORACLE_PATH_KEPT
-           : kernel || process != 0            ? own
+           : kernel || process != 0            ? kernel_rule
            : package                           ? ORACLE_PATH_LEFT_OUT
                                                : ORACLE_PATH_KEPT;
+}
+
+// Whether an open of `path` reaches what the cache can't look at by its bytes: a device, whose data change with no file
+// changing (/dev/urandom's on every read), a FIFO, whose come from another process, or a socket; but /dev/null,
+// /dev/zero and /dev/full, whose data never change, and /dev/tty, which a run can't open, having no controlling
+// terminal (oracle_child). Or a file of the kernel's, which it makes as it is read, wherever a path leads there (a
+// symbolic link in a root to /proc/self/stat, a file system mounted elsewhere): procfs, sysfs, debugfs, tracefs,
+// securityfs, cgroup's and cgroup2's, bpf's, configfs, efivarfs, pstore, the POSIX message queues', selinuxfs,
+// binfmt_misc and fusectl, by their magic numbers (<linux/magic.h>), or one whose file system statfs can't give.
+static bool oracle_opens_unseen(const char* path)
+{
+    static const uint64_t kernels[] = {
+        0x9fa0,     0x62656572, 0x64626720, 0x74726163, 0x73636673, 0x27e0eb,   0x63677270, 0xcafe4a11,
+        0x62656570, 0xde5e81e4, 0x6165676c, 0x19800202, 0xf97cff8c, 0x42494e4d, 0x65735543,
+    };
+    struct stat status;
+    struct statfs system;
+    const bool found = stat(path, &status) == 0;
+    const bool measured = found && statfs(path, &system) == 0;
+    bool kernel = found && !measured;
+    for (uint32_t k = 0; measured && k < sizeof(kernels) / sizeof(kernels[0]); k += 1)
+    {
+        kernel |= (uint64_t)system.f_type == kernels[k];
+    }
+    const dev_t device = found ? status.st_rdev : 0;
+    const bool constant = found && S_ISCHR(status.st_mode) &&
+                          (device == makedev(1, 3) || device == makedev(1, 5) || device == makedev(1, 7) || device == makedev(5, 0));
+    return found && (kernel || (!S_ISREG(status.st_mode) && !S_ISDIR(status.st_mode) && !constant));
 }
 
 // The kernel's sizes of a notification and its response (SECCOMP_GET_NOTIF_SIZES), which may be larger than the
@@ -1967,11 +2067,108 @@ static int oracle_trace_path(pid_t pid, const struct seccomp_data* call, const O
     return found <= 0 ? found : length > 0 && (size_t)length < capacity ? 1 : -1;
 }
 
-// Answers one call the filter stopped on the run's listener: the paths it looks at, makes, removes or renames (or the
-// directory whose names it lists, or must find empty) looked at first, if the run hasn't before (oracle_looks_add),
-// then the call let through to the kernel. A call the tracing can't follow (oracle_unfollowed_calls, openat2's
-// resolution flags), a path it can't read or must refuse (oracle_path_rule) and a look it can't keep make the run
-// untraced; a listener that fails stops its answering (OracleRun.hung) and makes it untraced too.
+// The paths of a call the filter stopped (`request`) that it looks at, makes, removes or renames (or the directory whose
+// names it lists, or must find empty), looked at, if the run hasn't before (oracle_looks_add), before the call goes on
+// to the kernel. A call the tracing can't follow (oracle_unfollowed_calls, openat2's resolution flags), a path it can't
+// read or must refuse (oracle_path_rule, and what oracle_opens_unseen refuses an open) and a look it can't keep make the
+// run untraced.
+static void oracle_trace_paths(OracleRun* run, const struct seccomp_notif* request)
+{
+    const struct seccomp_data* call = &request->data;
+    const pid_t pid = (pid_t)request->pid;
+    // The call's description, none for another architecture's, x32's and oracle_unfollowed_calls.
+    const OracleCall* traced = 0;
+    for (uint32_t c = 0; call->arch == AUDIT_ARCH_X86_64 && c < BUSTER_ORACLE_CALLS; c += 1)
+    {
+        traced = oracle_calls[c].number == (uint32_t)call->nr ? &oracle_calls[c] : traced;
+    }
+    const uint64_t flags = traced != 0 && traced->flags >= 0 ? call->args[traced->flags] : 0;
+    // Whether it follows a symbolic link at its first path's end (oracle_path_rule): a listing's directory was opened,
+    // which does.
+    const bool followed = traced != 0 && (traced->follows ? (flags & AT_SYMLINK_NOFOLLOW) == 0 : (flags & AT_SYMLINK_FOLLOW) != 0);
+    // openat2's resolution flags change which file a path reaches (RESOLVE_IN_ROOT's absolute names, from the
+    // descriptor's directory), or whether it reaches one (RESOLVE_BENEATH's and the others' refusals), which the tracing
+    // doesn't model: a call with any is one it can't follow.
+    bool known = traced != 0 && (call->nr != SYS_openat2 || oracle_trace_resolve(pid, call->args[2], call->args[3]) == 0);
+    const bool empties = traced != 0 && (traced->empties || (call->nr == SYS_unlinkat && (flags & AT_REMOVEDIR) != 0));
+    char probes[2][BUSTER_ORACLE_PATH_BYTES + 1] = { { 0 } };
+    OraclePath rules[2] = { ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT };
+    for (uint32_t p = 0; known && p < 2; p += 1)
+    {
+        if (traced->paths[p] >= 0 || traced->directories[p] >= 0)
+        {
+            // The call's AT_ flags are its first path's.
+            const int found = oracle_trace_path(pid, call, traced, p, p == 0 ? flags : 0, probes[p] + 1, sizeof(probes[p]) - 1);
+            known = found >= 0;
+            rules[p] = found > 0 ? oracle_path_rule(run, probes[p] + 1, p == 0 && followed, (OracleUse)traced->use, pid) : ORACLE_PATH_LEFT_OUT;
+            rules[p] = rules[p] == ORACLE_PATH_KEPT && traced->use == ORACLE_USE_OPEN && oracle_opens_unseen(probes[p] + 1) ? ORACLE_PATH_REFUSED : rules[p];
+        }
+    }
+    // The process may have ended, and its pid gone to another, while the paths were read.
+    const bool valid = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request->id) == 0;
+    for (uint32_t p = 0; valid && known && p < 2; p += 1)
+    {
+        if (rules[p] == ORACLE_PATH_KEPT)
+        {
+            probes[p][0] = traced->lists ? 'l' : 'p';
+            oracle_looks_add(run, probes[p]);
+            // The last path's directory's names too, where the call needs it empty.
+            if (empties && (p == 1 || traced->paths[1] < 0))
+            {
+                probes[p][0] = 'l';
+                oracle_looks_add(run, probes[p]);
+            }
+        }
+    }
+    run->untraced |= valid && (!known || rules[0] == ORACLE_PATH_REFUSED || rules[1] == ORACLE_PATH_REFUSED);
+}
+
+// A getrandom call the filter stopped (`request`), given its bytes here: the run's nth given call
+// (OracleRun.randoms) gets SHA-256 of "buster oracle random 1", the run's key, n and each 32-byte block's number, so
+// that its bytes are the same each time the run runs, and its result can't depend on bytes that differ from one run
+// to the next (glibc's malloc and clang's temporary files' names take some; glibc's getrandom through the vDSO takes
+// its key from such a call, then makes its bytes itself, until the kernel's generator reseeds). They are written
+// through the process's memory file, opened before the notification is checked, so that a process that ended, whose
+// pid went to another, isn't written to. True if they were: the call returns their count. A call the kernel refuses
+// (unknown flags, or GRND_INSECURE with GRND_RANDOM) or that asks for no bytes isn't given any; one for more than
+// BUSTER_ORACLE_RANDOM_BYTES, or whose bytes can't be written, goes on to the kernel, and its run isn't kept.
+static bool oracle_trace_random(OracleRun* run, const struct seccomp_notif* request)
+{
+    const struct seccomp_data* call = &request->data;
+    const uint64_t address = call->args[0];
+    const uint64_t length = call->args[1];
+    const uint64_t flags = call->args[2];
+    const bool valid = (flags & ~(uint64_t)(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE)) == 0 && (flags & (GRND_INSECURE | GRND_RANDOM)) != (GRND_INSECURE | GRND_RANDOM);
+    const bool given = valid && length != 0 && length <= BUSTER_ORACLE_RANDOM_BYTES && address <= (uint64_t)INT64_MAX - length;
+    uint8_t bytes[BUSTER_ORACLE_RANDOM_BYTES];
+    for (uint32_t block = 0; given && (uint64_t)block * BUSTER_ORACLE_KEY_BYTES < length; block += 1)
+    {
+        OracleHash hash;
+        oracle_sha256_begin(&hash);
+        oracle_hash_text(&hash, "buster oracle random 1");
+        oracle_hash_bytes(&hash, run->key.bytes, sizeof(run->key.bytes));
+        oracle_hash_bytes(&hash, &run->randoms, sizeof(run->randoms));
+        oracle_hash_bytes(&hash, &block, sizeof(block));
+        const OracleKey key = oracle_hash_end(&hash);
+        memcpy(bytes + (size_t)block * BUSTER_ORACLE_KEY_BYTES, key.bytes, sizeof(key.bytes));
+    }
+    char memory[64];
+    snprintf(memory, sizeof(memory), "/proc/%ld/mem", (long)request->pid);
+    const int descriptor = given ? open(memory, O_RDWR | O_CLOEXEC) : -1;
+    const bool current = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request->id) == 0;
+    const bool written = descriptor >= 0 && current && pwrite(descriptor, bytes, (size_t)length, (off_t)address) == (ssize_t)length;
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    run->randoms += written ? 1 : 0;
+    run->untraced |= current && !written && valid && length != 0;
+    return written;
+}
+
+// Answers one call the filter stopped on the run's listener: getrandom's with its bytes (oracle_trace_random), any
+// other's with its paths looked at (oracle_trace_paths), let through to the kernel. A listener that fails stops its
+// answering (OracleRun.hung) and makes the run untraced.
 static void oracle_trace_answer(OracleRun* run)
 {
     const bool sized = oracle_trace_sizes.seccomp_notif != 0 || syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &oracle_trace_sizes) == 0;
@@ -1987,55 +2184,16 @@ static void oracle_trace_answer(OracleRun* run)
     run->untraced |= lost;
     if (received == 0)
     {
-        const struct seccomp_data* call = &request->data;
-        const pid_t pid = (pid_t)request->pid;
-        // The call's description, none for another architecture's, x32's and oracle_unfollowed_calls.
-        const OracleCall* traced = 0;
-        for (uint32_t c = 0; call->arch == AUDIT_ARCH_X86_64 && c < BUSTER_ORACLE_CALLS; c += 1)
+        const bool random = request->data.arch == AUDIT_ARCH_X86_64 && request->data.nr == SYS_getrandom;
+        const bool given = random && oracle_trace_random(run, request);
+        if (!random)
         {
-            traced = oracle_calls[c].number == (uint32_t)call->nr ? &oracle_calls[c] : traced;
+            oracle_trace_paths(run, request);
         }
-        const uint64_t flags = traced != 0 && traced->flags >= 0 ? call->args[traced->flags] : 0;
-        // Whether it follows a symbolic link at its first path's end (oracle_path_rule): a listing's directory was
-        // opened, which does.
-        const bool followed = traced != 0 && (traced->follows ? (flags & AT_SYMLINK_NOFOLLOW) == 0 : (flags & AT_SYMLINK_FOLLOW) != 0);
-        // openat2's resolution flags change which file a path reaches (RESOLVE_IN_ROOT's absolute names, from the
-        // descriptor's directory), or whether it reaches one (RESOLVE_BENEATH's and the others' refusals), which the
-        // tracing doesn't model: a call with any is one it can't follow.
-        bool known = traced != 0 && (call->nr != SYS_openat2 || oracle_trace_resolve(pid, call->args[2], call->args[3]) == 0);
-        const bool empties = traced != 0 && (traced->empties || (call->nr == SYS_unlinkat && (flags & AT_REMOVEDIR) != 0));
-        char probes[2][BUSTER_ORACLE_PATH_BYTES + 1] = { { 0 } };
-        OraclePath rules[2] = { ORACLE_PATH_LEFT_OUT, ORACLE_PATH_LEFT_OUT };
-        for (uint32_t p = 0; known && p < 2; p += 1)
-        {
-            if (traced->paths[p] >= 0 || traced->directories[p] >= 0)
-            {
-                // The call's AT_ flags are its first path's.
-                const int found = oracle_trace_path(pid, call, traced, p, p == 0 ? flags : 0, probes[p] + 1, sizeof(probes[p]) - 1);
-                known = found >= 0;
-                rules[p] = found > 0 ? oracle_path_rule(run, probes[p] + 1, p == 0 && followed) : ORACLE_PATH_LEFT_OUT;
-            }
-        }
-        // The process may have ended, and its pid gone to another, while the paths were read.
-        const bool valid = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request->id) == 0;
-        for (uint32_t p = 0; valid && known && p < 2; p += 1)
-        {
-            if (rules[p] == ORACLE_PATH_KEPT)
-            {
-                probes[p][0] = traced->lists ? 'l' : 'p';
-                oracle_looks_add(run, probes[p]);
-                // The last path's directory's names too, where the call needs it empty.
-                if (empties && (p == 1 || traced->paths[1] < 0))
-                {
-                    probes[p][0] = 'l';
-                    oracle_looks_add(run, probes[p]);
-                }
-            }
-        }
-        run->untraced |= valid && (!known || rules[0] == ORACLE_PATH_REFUSED || rules[1] == ORACLE_PATH_REFUSED);
         struct seccomp_notif_resp* response = (struct seccomp_notif_resp*)response_bytes;
         response->id = request->id;
-        response->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+        response->val = given ? (int64_t)request->data.args[1] : 0;
+        response->flags = given ? 0 : SECCOMP_USER_NOTIF_FLAG_CONTINUE;
         const bool answered = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_SEND, response) == 0 || errno == ENOENT;
         run->hung |= !answered;
         run->untraced |= !answered;
@@ -2114,9 +2272,19 @@ static void oracle_child(const OracleRun* run, int input, int report, const stru
     setpgid(0, 0);
     bool ready = dup2(input, 0) == 0 && dup2(run->output_descriptor, 1) == 1 && dup2(run->errors_descriptor, 2) == 2 &&
                  (run->directory == 0 || chdir(run->directory) == 0);
+    // What the tool reads comes through the paths the filter stops and from its key's input: it keeps no descriptor
+    // but the standard three past exec (close_range's CLOSE_RANGE_CLOEXEC), and no controlling terminal, which
+    // /dev/tty would read: given up (TIOCNOTTY), /dev/tty's open fails (ENXIO), as oracle_opens_unseen counts on. A
+    // traced child that can't give both up installs no filter, so that its run isn't kept.
+    const int terminal = ready ? open("/dev/tty", O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC) : -1;
+    const bool alone = ready && syscall(SYS_close_range, 3u, ~0u, CLOSE_RANGE_CLOEXEC) == 0 && (terminal < 0 || ioctl(terminal, TIOCNOTTY) == 0);
+    if (terminal >= 0)
+    {
+        close(terminal);
+    }
     if (ready && filter != 0)
     {
-        const int listener = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 ? (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, filter) : -1;
+        const int listener = alone && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 ? (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, filter) : -1;
         ready = oracle_send_listener(report, listener);
         if (listener >= 0)
         {
@@ -2359,6 +2527,7 @@ static void oracle_run_reset(OracleRun* run)
     run->listener = -1;
     run->hung = false;
     run->untraced = false;
+    run->randoms = 0;
     run->looks = (OracleLooks){ 0 };
     run->checking = false;
     run->checked = (OracleKey){ 0 };
@@ -3063,8 +3232,8 @@ static bool oracle_run_keep(OracleRun* run)
         }
         fprintf(stderr, "%s%s\n", run->input != 0 ? " < " : "", run->input != 0 ? run->input : "");
         oracle_count(&run->cache->counts->stale);
-        // Removed: the run's own entry, written next, may be another variant, which wouldn't replace it (a temporary
-        // file named apart each time it runs, as clang's outputs are written, is among what it looked at).
+        // Removed: the run's own entry, written next, may be another variant, which wouldn't replace it (a file it
+        // names apart each time, by its pid, is among what it looked at).
         unlink(checked);
     }
     const bool written = keep && oracle_entry_write(run, &probes, flags, files, oracle_entry_variant(run, &probes, flags));

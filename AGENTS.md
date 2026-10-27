@@ -1778,20 +1778,62 @@ their bytes are read at the run's first look at each, while its call waits,
 so that a run that reads its output before it writes it (an `#embed` of it)
 runs again when those bytes change, and a compile into the path the last one
 wrote is taken when the object there is the one that compile left. What the
-cache leaves out (`oracle_path_rule`): the package manager's files (under `/usr` but
-`/usr/local`, and `/bin`, `/sbin` and `/lib*`), the package database's
-identity standing for them, and the kernel's (`/proc`, `/sys`), which describe
-the processes and the machine. A path in one of the run's roots is kept
-wherever `$TMPDIR` is, and so is the rest of `/dev`: its device nodes, and
-`/dev/shm`'s files, an ordinary tmpfs's. A process's links into the file
-system (`/proc/PID`'s `cwd`, `root`, `exe`, `fd/N` and `map_files`, which
-`/dev/fd` and `/dev/stdin` lead to) are what that process sees, which the
-cache, another process, can't look at: read as links (`readlink`, which LLVM
-reads its files' real paths through), they are left out, and so is following
-`exe` or a standard descriptor; a run that follows another one, or a path past
-one (`/proc/self/cwd/x.h`), isn't kept (`oracle_process_link`). A
-process answers its traced runs' calls while it waits for any of them, so that
-runs under way at once all go on. A call the tracing can't follow makes its run
+cache leaves out (`oracle_path_rule`, by what each call does at a path,
+`OracleUse`): the package manager's files (under `/usr` but `/usr/local`, and
+`/bin`, `/sbin` and `/lib*`), the package database's identity standing for
+them. The kernel's (`/proc`, `/sys`), which describe the processes and the
+machine, change with no file changing (a process's id in `/proc/self/stat`,
+the time in `/proc/uptime`): a look at one (`stat`, `access`, `statfs`, as
+libselinux's start makes) is left out, and a run that opens, lists or changes
+one, or reads a link there, isn't kept. A path in one of the run's roots is
+kept wherever `$TMPDIR` is, and so is the rest of `/dev`: its device nodes, and
+`/dev/shm`'s files, an ordinary tmpfs's. But a run that opens a device, whose
+data change with no file changing (`/dev/urandom`'s), a FIFO or a socket
+isn't kept (`oracle_opens_unseen`), but for `/dev/null`, `/dev/zero` and
+`/dev/full`, whose data never change, and `/dev/tty`, which bash opens as it
+starts: a run has no controlling terminal (below), so its open fails. Nor is
+a run that opens a file of the kernel's through another path (a symbolic link
+in a root to `/proc/self/stat`), whose file system `statfs` gives (procfs,
+sysfs and the other file systems whose files the kernel makes as they are
+read). A
+process's links into the file system (`/proc/PID`'s `cwd`, `root`, `exe`,
+`fd/N` and `map_files`, which `/dev/fd` and `/dev/stdin` lead to) are what that
+process sees, which the cache, another process, can't look at: its own read as
+links (`readlink`, which LLVM reads its files' real paths through) are left
+out, but a descriptor's that names a pipe's or a socket's inode (`pipe:[N]`,
+another in every run), and so is following its own `exe` or a standard
+descriptor; a run that reads another process's, follows another one, or reads
+a path past one (`/proc/self/cwd/x.h`), isn't kept (`oracle_process_link`: a
+process's own are `self`'s, `thread-self`'s and its pid's, or its process's,
+whose tasks it is among).
+
+The cache answers a traced run's `getrandom` calls itself
+(`oracle_trace_random`): its nth answered call gets SHA-256 of the run's key,
+n and each 32-byte block's number, written into the process's memory (through
+`/proc/PID/mem`, opened before the notification is checked, so that a pid that
+went to another process isn't written to), so that its bytes are the same
+each time the run runs, and its result can't depend on bytes that differ from
+one run to the next. Every glibc process takes 8 bytes for malloc's tcache key
+as it starts, and clang 8 per output file for its temporary file's name, so a
+run that called it couldn't otherwise be kept; glibc's `getrandom` through the
+vDSO takes its key from such a call. A call for more than 256 bytes
+(`BUSTER_ORACLE_RANDOM_BYTES`), or whose bytes can't be written, goes on to the
+kernel, and its run isn't kept. A run's random bytes are thus the cache's,
+the same each time: a tool that needs them to differ from one run to the next
+isn't one to run traced. The tool's child keeps no descriptor past exec but
+the standard three (`close_range`'s `CLOSE_RANGE_CLOEXEC`) and gives up its
+controlling terminal (`TIOCNOTTY`), so that what it reads comes through the
+paths the filter stops and its key's input; a child that can't installs no
+filter, and its run isn't kept. What the tracing can't see, a tool's result
+must not depend on: the clocks (the vDSO's), its process and thread ids, its
+addresses and the kernel's random bytes for its start (`AT_RANDOM`), the
+processor's (`rdrand`, `rdtsc`), the machine's figures (`uname`, `sysinfo`,
+the CPUs it may run on) and what other processes send it (sockets, shared
+memory: bash, with no `SHELL` in its environment, connects to nscd's socket as
+it starts, so a socket can't make a run unkept). A compiler's doesn't: with
+`SOURCE_DATE_EPOCH`, clang's and gcc's outputs are the same from run to run,
+which check mode verifies. A process answers its traced runs' calls while it
+waits for any of them, so that runs under way at once all go on. A call the tracing can't follow makes its run
 unkept (`oracle_unfollowed_calls`): one that reaches files it can't name
 (io_uring's, files opened by handle), that changes how its process resolves
 paths (`chroot`, `pivot_root`, the mount calls, `unshare`, `setns`, and
@@ -1880,9 +1922,12 @@ Its users:
 
 Each of these tests prints a line of what its runs did (`oracle_cache_report`).
 
-`./build/compiler test-oracle-cache` (about 7 s, 5 s of it the process
-groups' waits) checks it with sh and clang as the tools, in a directory of its
-own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
+`./build/compiler test-oracle-cache` (about 8 s, 5 s of it the process
+groups' waits) checks it with sh, clang and a program of its own as the tools
+(`oracle_test_helper`, which clang builds, for the calls sh doesn't make and
+for what coreutils' programs do that read the kernel's files as they start,
+libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
+`$TMPDIR` (or `/tmp`) and two of one template beside it, with
 `SOURCE_DATE_EPOCH` fixed where it isn't set:
 
 - SHA-256 against FIPS 180-4's examples, and every length to 300 bytes whole
@@ -1921,7 +1966,8 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   taken while it isn't there and run again when it is; a file the run changes
   after it read it, not kept; two runs at once, each waiting on a file the
   other writes, finished in the other order; clang's `__TIMESTAMP__` following
-  the epoch and sh's not, whose run of `stat` has its file's time in its entry;
+  the epoch and sh's not, so that a run of such a tool (the test's program)
+  that prints a file's time has the time in its entry;
   a file given the epoch's time (`oracle_epoch_file`), written anew with its
   bytes, taken once given it again;
 - variants (traced sh): a file with other bytes for each run of one key, each
@@ -1930,22 +1976,37 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
 - permissions (traced sh): a directory's mode, which `test -x` reads, and a
   script's in a root made 0644 from 0755 with the same bytes, each run again
   when they change; and as root, a file given another owner;
-- the kernel's paths: `oracle_path_rule`'s answers for 42 paths, followed to
-  their ends and not (a path in a root under `/usr` among them); a source in a
+- the kernel's paths: `oracle_path_rule`'s answers for 61 paths by five uses
+  (`stat`, `lstat`, `readlink`, `open` and a change), for a process of the
+  test's whose descriptors it knows (a pipe's among them), its paths by its pid
+  and the test's, another process's, among them (and a path in a root under
+  `/usr`); a source in a
   root in `/dev/shm` (`$TMPDIR` there), changed to give another object, and a
   header in `/dev/shm` in no root, each compiled again; runs that follow
   `/proc/self/cwd` and `/dev/fd/3` to a file, not kept; and one that reads
   `/proc/self/fd/3`'s link and `/dev/stdin` and writes `/dev/null`, kept;
+- random bytes, devices and the kernel's files (#550's fifth review): the
+  test's program's `getrandom` bytes, run, taken, and the same in another
+  cache's run; two programs' calls in one run, each its own bytes, the same in
+  another cache's; another key's, others; a call for 300 bytes, the kernel's,
+  never taken; `/dev/urandom`'s and `/dev/random`'s bytes and a FIFO's, never
+  taken; `/dev/zero`, `/dev/null` and `/dev/tty`, kept, `/dev/tty` too where the
+  test has a controlling terminal (a pseudo-terminal's, in a session of its
+  own), which the run can't open; `/proc/self/stat`, `/proc/uptime`,
+  `/proc/self`'s link, another process's (`/proc/$PPID/cwd`), a `/sys`
+  attribute, `/proc/self/fd`'s names, a pipe's link and `/proc/self/stat`
+  through a symbolic link in a root, never taken; a look at `/proc/self/stat`,
+  kept; and a descriptor the test has open, which the run doesn't inherit;
 - outputs: a run that reads its output before it writes it (traced sh), run
   again when those bytes differ and taken when they are an entry's; clang's
   object where the last compile left one, run again once, then taken, and in
   the other directory, without one, taken;
-- listings (traced sh's `ls -i`): a file made anew with the same name and
-  bytes, its inode another, run again;
-- changes (traced sh): `mkdir`'s path, which the run made, there the next time;
-  `mkdir` in a directory made since; and `rmdir` of a directory whose file
-  goes; each run again;
-- what the tracing can't follow, with a program the test compiles: `openat2`
+- listings (the test's program's `getdents64`, as `ls -i` lists): a file made
+  anew with the same name and bytes, its inode another, run again;
+- changes (the test's program's `mkdir`, and traced sh's `rmdir`): `mkdir`'s
+  path, which the run made, there the next time; `mkdir` in a directory made
+  since; and `rmdir` of a directory whose file goes; each run again;
+- what the tracing can't follow, with the test's program: `openat2`
   with `RESOLVE_IN_ROOT`, not kept, and without resolution flags kept and run
   again when its file changes; `chroot`, `unshare` and `getxattr`, not kept;
   `statfs`, kept, and run again once its path is there;
@@ -1955,8 +2016,9 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   run kept without a limit, killed at a limit given later;
 - check mode: an entry made stale fails its run and is written again (the test
   prints that it makes one on purpose), one whose run read other bytes isn't
-  stale, and of a key's two entries, the one the run would have taken is
-  checked;
+  stale, of a key's two entries, the one the run would have taken is checked,
+  and a stale entry another variant's wouldn't replace (a file named apart by
+  the shell's pid), removed;
 - damaged entries: another magic, key, body length, root or dependency count,
   a flag it doesn't know, cut short, cut inside its header or a byte longer,
   each run again and written whole;
