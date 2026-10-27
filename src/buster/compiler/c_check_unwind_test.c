@@ -7,12 +7,14 @@
 // body) that each of a computed goto's labels calls, from one with values live across the call, called with a
 // positive and a negative argument so that both arms of its last ?: run, and from one of 128-bit integers (Tier 0's
 // I128 and U128, in their frame slots), four of them live across the call, its division and remainder libgcc's calls,
-// called with shifts of 3 and of 64 so that its shifts' cmovne takes both values:
+// called with shifts of 3 and of 64 so that its shifts' cmovne takes both values, from one with an array aligned to 64
+// (a realigned frame) and from one with an array aligned to 4096 and a variable-length array (a realigned frame with a
+// base, r15, rsp moved in its body):
 //
 // - The driver's executable by each path, the same bytes: by default, and with -funwind-tables or -g after
 //   -fno-asynchronous-unwind-tables, the unwinder walks through every function to main and libc's start, which the
-//   program checks (it prints the seven depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
-//   the first of them, and the program prints 1 1 1 1 -1 1 1.
+//   program checks (it prints the nine depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
+//   the first of them, and the program prints 1 1 1 1 -1 1 1 1 1.
 // - Its object (-c) by each path, the same bytes: an .eh_frame of one CIE and an FDE per function the object defines,
 //   each a relocation; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's line, into
 //   programs that walk alike. With -fno-asynchronous-unwind-tables, no .eh_frame.
@@ -92,6 +94,24 @@ static const char check_unwind_test_text[] =
     "    return vla(5);\n"
     "}\n"
     "\n"
+    "int aligned(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "}\n"
+    "\n"
+    "int based(int n)\n"
+    "{\n"
+    "    _Alignas(4096) char page[16];\n"
+    "    int values[n];\n"
+    "    page[0] = (char)n;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        values[i] = i;\n"
+    "    }\n"
+    "    return depth() + values[n - 1] - (n - 1) + page[0] - n + (int)((unsigned long)page & 4095);\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
     "    int baseline = depth();\n"
@@ -101,9 +121,11 @@ static const char check_unwind_test_text[] =
     "    long negative = pressure(-5);\n"
     "    __int128 short_shift = wide(5, 3);\n"
     "    __int128 long_shift = wide(7, 64);\n"
-    "    printf(\"%d %d %d %ld %ld %ld %ld\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift);\n"
+    "    int realigned = aligned(7);\n"
+    "    int rebased = based(4);\n"
+    "    printf(\"%d %d %d %ld %ld %ld %ld %d %d\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift, realigned, rebased);\n"
     "    return baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&\n"
-    "           short_shift == baseline + 1 && long_shift == baseline + 1 ? 0 : 1;\n"
+    "           short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1 ? 0 : 1;\n"
     "}\n";
 
 // The terminal builtins' helper (#523): __builtin_trap's and __builtin_unreachable's calls reach a helper of a ud2
@@ -285,7 +307,7 @@ static bool check_unwind_test_compile(const char* compiler, const char* source, 
 }
 
 // Whether the program runs as its unwind tables (or their absence) make it: with them, it returns 0 having printed
-// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1.
+// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1.
 static bool check_unwind_test_run(const char* program, bool tables, Arena* arena)
 {
     char report[PATH_MAX + 8];
@@ -300,11 +322,14 @@ static bool check_unwind_test_run(const char* program, bool tables, Arena* arena
     long negative = 0;
     long short_shift = 0;
     long long_shift = 0;
-    const bool read = printed.pointer != 0 &&
-                      sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld", &baseline, &deep, &shallow, &pressed, &negative, &short_shift, &long_shift) == 7;
+    int realigned = 0;
+    int rebased = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld %d %d", &baseline, &deep, &shallow, &pressed, &negative, &short_shift,
+                                                     &long_shift, &realigned, &rebased) == 9;
     const bool walked = status == 0 && baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&
-                        short_shift == baseline + 1 && long_shift == baseline + 1;
-    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1;
+                        short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1;
+    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1 &&
+                         realigned == 1 && rebased == 1;
     return read && (tables ? walked : stopped);
 }
 
@@ -645,6 +670,8 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
     static const char* const wide[] = { "wide", "main" };
     static const char* const vla[] = { "vla", "jump", "main" };
     static const char* const jump[] = { "jump", "main" };
+    static const char* const aligned[] = { "aligned", "main" };
+    static const char* const based[] = { "based", "main" };
     if (file.pointer != 0)
     {
         check_unwind_test_gdb(tally, debug_program, file, depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
@@ -652,6 +679,8 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
         check_unwind_test_gdb(tally, debug_program, file, wide, BUSTER_ARRAY_LENGTH(wide), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, vla, BUSTER_ARRAY_LENGTH(vla), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, jump, BUSTER_ARRAY_LENGTH(jump), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);
+        check_unwind_test_gdb(tally, debug_program, file, based, BUSTER_ARRAY_LENGTH(based), 1, arena);
     }
     check_unwind_test_trap(tally, directory, arena);
 }

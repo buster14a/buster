@@ -45,6 +45,28 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3",
 };
 
+// A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
+// program's controls, by which the lowering finds it (check_lower_table_of), and for each value from its cases' lowest up
+// the index of the label it goes to among the tables' labels (its default's, or the switch's end, where no case has it).
+// Its labels are `label_count` from `first_label` of the tables', `labels` their control entries: the default's or the
+// end's first, then each run of neighboring cases' that go to one place, in value order.
+typedef struct CheckLowerTable CheckLowerTable;
+struct CheckLowerTable
+{
+    uint32_t* entries;
+    uint32_t count;
+    uint32_t function;
+    uint32_t control;
+    uint32_t* labels;
+    uint32_t label_count;
+    uint32_t first_label;
+    // The dispatch's two GLOBAL_ADDRESS entries in the function, which check_lower_finish gives the table's symbol.
+    uint32_t addresses[2];
+    // The lowest value, in its class's bits, and the label of the switch's default or end (a control entry's index).
+    uint64_t lower;
+    uint32_t fallback;
+};
+
 typedef struct CheckProgramLowered CheckProgramLowered;
 struct CheckProgramLowered
 {
@@ -75,9 +97,18 @@ struct CheckProgramLowered
     uint64_t output_bytes;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
-    // (Tier0Code.label_records).
+    // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
     SymbolId* label_symbols;
     uint32_t label_symbol_count;
+    // The switches' jump tables, `table_count` of them in source order, and their labels, `case_symbol_count`. The tables'
+    // symbols and their labels' are the lowering's own, local, after the runtime's functions': table t's is
+    // case_symbol_base + t, and label k's case_symbol_base + table_count + k (the emission names them .Lbuster_switch_N and
+    // .Lbuster_case_N). While the bodies compile, table t's address is the provisional symbol
+    // CheckLowerShared.provisional_tables + t, which the access column has.
+    CheckLowerTable* tables;
+    uint32_t table_count;
+    uint32_t case_symbol_count;
+    SymbolId case_symbol_base;
 };
 
 typedef enum CheckLowerTaskKind
@@ -148,6 +179,23 @@ struct CheckLowerAbi
     uint32_t argument_capacity;
 };
 
+// A jump table's most entries (check_lower_switch_table). clang -O0 builds one of any size (LLVM's limit is UINT_MAX
+// entries); a range wider than this one would take more space than its cases' compares.
+#define BUSTER_CHECK_LOWER_MAX_TABLE (UINT32_C(1) << 16)
+// A jump table's label's symbol in label_symbols while the bodies compile: its index among the tables' labels with the
+// flag, which check_lower_finish numbers after the tables' (CheckProgramLowered.case_symbol_base).
+#define BUSTER_CHECK_LOWER_CASE_SYMBOL UINT32_C(0x40000000)
+
+// One of a switch's cases while its jump table is decided: its first and last values as keys in unsigned order (a signed
+// class's sign bit flipped), and its label (a control entry's index).
+typedef struct CheckLowerCaseRange CheckLowerCaseRange;
+struct CheckLowerCaseRange
+{
+    uint64_t lower;
+    uint64_t upper;
+    uint32_t label;
+};
+
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
@@ -170,6 +218,16 @@ struct CheckLowerWriter
     uint8_t* stack_classes;
     uint32_t* local_map;
     uint32_t* switch_locals;
+    // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
+    // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
+    // still to write the table's dispatch (check_lower_switch_dispatch); the tables, `table_count` of them, and the
+    // provisional symbols of their addresses.
+    uint32_t table_switch;
+    uint32_t table_current;
+    bool table_pending;
+    CheckLowerTable* tables;
+    uint32_t table_count;
+    SymbolId provisional_tables;
     uint32_t* extent_locals;
     // Each variable-length array's identity plus one, by its bound's first token (0 for none), for its extent's local;
     // each block's local that holds the stack's position its arrays came after (CHECK_CONTROL_STACK_SAVE's), by its
@@ -456,8 +514,9 @@ static const char* check_lower_type_feature(const TypeTable* types, TypeId type)
 }
 
 // Why a struct or union can't be passed or returned by value, or NULL. Tier 0 takes every location abi_assign gives one
-// as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 16 at most, and every result in
-// registers that tier0_aggregate_result_valid takes: eightbytes, or one or two long doubles in st0 and st1.
+// as an argument or a parameter, of up to BUSTER_TIER0_MAX_ARGUMENT_BYTES aligned to 1 GB at most (past 16 bytes, its
+// calls' outgoing areas and its objects realign their function's frame), and every result in registers that
+// tier0_aggregate_result_valid takes: eightbytes, or one or two long doubles in st0 and st1.
 static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId type, bool result)
 {
     const TypeTable* types = writer->program->types;
@@ -466,7 +525,7 @@ static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId t
     const char* feature = NULL;
     if (type_alignment_log2(types, type) > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
-        feature = "structs and unions aligned past 16 bytes, by value";
+        feature = "structs and unions aligned past 1 GB, by value";
     }
     else if (type_size(types, type) > BUSTER_TIER0_MAX_ARGUMENT_BYTES)
     {
@@ -851,14 +910,15 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
 }
 
 // A frame object (an array, a struct or a union, or a value that must live in memory): a local of class VOID, reached
-// only through LOCAL_ADDRESS, but a memory class's value, which LOCAL, STORE_LOCAL and SET_LOCAL of it reach too. One of
-// no size (a GNU empty struct, a zero-length array) still takes a byte of its own.
+// through LOCAL_ADDRESS, but a value's, which LOCAL, STORE_LOCAL and SET_LOCAL of its class reach too
+// (tier0_value_object): a memory class's, and one aligned past 8 bytes. One of no size (a GNU empty struct, a
+// zero-length array) still takes a byte of its own. Aligned past 16 bytes, it realigns its function's frame.
 static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint32_t alignment_log2)
 {
     const uint32_t local = writer->local_count;
     if (size > BUSTER_TIER0_MAX_OBJECT_BYTES || alignment_log2 > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
-        check_lower_unsupported(writer, "local objects aligned past 16 bytes or larger than 1 GB");
+        check_lower_unsupported(writer, "local objects aligned past 1 GB or larger than 1 GB");
     }
     else if (local < writer->local_capacity && local < BUSTER_TIER0_MAX_LOCALS)
     {
@@ -3976,6 +4036,239 @@ static void check_lower_case(CheckLowerWriter* writer, const CheckProgramCase* i
     }
 }
 
+// The cases sorted by their first values' keys, bottom up, between `cases` and `room`: whichever holds them at the end.
+static CheckLowerCaseRange* check_lower_sort_cases(CheckLowerCaseRange* cases, CheckLowerCaseRange* room, uint32_t count)
+{
+    CheckLowerCaseRange* from = cases;
+    CheckLowerCaseRange* to = room;
+    for (uint64_t width = 1; width < count; width *= 2)
+    {
+        for (uint64_t begin = 0; begin < count; begin += width * 2)
+        {
+            const uint32_t middle = begin + width < count ? (uint32_t)(begin + width) : count;
+            const uint32_t end = begin + width * 2 < count ? (uint32_t)(begin + width * 2) : count;
+            uint32_t a = (uint32_t)begin;
+            uint32_t b = middle;
+            for (uint32_t at = (uint32_t)begin; at < end; at += 1)
+            {
+                const bool take_a = a < middle && (b == end || from[a].lower <= from[b].lower);
+                to[at] = take_a ? from[a++] : from[b++];
+            }
+        }
+        CheckLowerCaseRange* swap = from;
+        from = to;
+        to = swap;
+    }
+    return from;
+}
+
+// Whether the switch at control `index` of body `b`, of class `class`, dispatches through a jump table, as clang -O0 makes
+// one: LLVM's SwitchLowering::findJumpTables, which at -O0 takes a switch's whole range or nothing, makes one of four
+// clusters or more (runs of cases of consecutive values that go to one label) whose cases hold at least a tenth of the
+// range's values (its jump-table density, 10%); here of a class of 32 or 64 bits and a range of at most
+// BUSTER_CHECK_LOWER_MAX_TABLE values. The switch's CASE controls follow it, then its JUMP to its default or its end;
+// an empty GNU range among them (`case 5 ... 3`) counts for nothing. A table joins `lowered`'s (room for `capacity`),
+// its entries and labels from `output` and its labels numbered after the tables' before it. `cases` and `sorted` are room
+// for the program's cases. Returns false only when `output` has no room. This is per switch, with the cases sorted: a
+// scalar pass over a few cases.
+static bool check_lower_switch_table(CheckProgramLowered* lowered, uint32_t capacity, const CheckProgram* program, uint32_t b, uint32_t index, uint8_t class,
+                                     CheckLowerCaseRange* cases_room, CheckLowerCaseRange* sorted_room, Arena* output)
+{
+    const CheckProgramBody* body = program->bodies + b;
+    const CheckControl* controls = program->controls + body->first;
+    uint32_t count = 0;
+    while (index + 1 + count < body->count && controls[index + 1 + count].kind == CHECK_CONTROL_CASE)
+    {
+        count += 1;
+    }
+    const uint32_t end = index + 1 + count;
+    const bool narrow = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32;
+    const bool wide = class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_U64;
+    const uint64_t mask = narrow ? UINT32_MAX : UINT64_MAX;
+    const uint64_t sign = class == BUSTER_TYPED_CLASS_I32 ? UINT64_C(1) << 31 : class == BUSTER_TYPED_CLASS_I64 ? UINT64_C(1) << 63 : 0;
+    bool valid = true;
+    uint32_t cases = 0;
+    if ((narrow || wide) && count >= 4 && end < body->count && controls[end].kind == CHECK_CONTROL_JUMP && lowered->table_count < capacity)
+    {
+        // A GNU range whose upper value is below its lower one matches nothing, and clang's Sema drops it before LLVM
+        // sees the switch (#536's review): it takes no part in the table, its values, its range or its clusters.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const CheckProgramCase* item = program->cases + controls[index + 1 + i].target;
+            cases_room[cases] = (CheckLowerCaseRange){
+                .lower = ((uint64_t)item->lower & mask) ^ sign,
+                .upper = ((uint64_t)item->upper & mask) ^ sign,
+                .label = item->target,
+            };
+            cases += cases_room[cases].upper >= cases_room[cases].lower;
+        }
+    }
+    if (cases >= 4)
+    {
+        const CheckLowerCaseRange* sorted = check_lower_sort_cases(cases_room, sorted_room, cases);
+        unsigned __int128 values = 0;
+        uint32_t clusters = 0;
+        for (uint32_t i = 0; i < cases; i += 1)
+        {
+            values += (unsigned __int128)(sorted[i].upper - sorted[i].lower) + 1;
+            clusters += i == 0 || sorted[i].label != sorted[i - 1].label || sorted[i].lower != sorted[i - 1].upper + 1;
+        }
+        const unsigned __int128 range = (unsigned __int128)(sorted[cases - 1].upper - sorted[0].lower) + 1;
+        if (clusters >= 4 && range <= BUSTER_CHECK_LOWER_MAX_TABLE && values * 100 >= range * 10)
+        {
+            const uint32_t length = (uint32_t)range;
+            uint32_t* entries = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, length);
+            uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)cases + 1);
+            valid = entries != 0 && labels != 0;
+            if (valid)
+            {
+                // The default's or the end's label first, then one per run of neighbors in value order that go to one
+                // place, as they share LLVM's block: a label that two cases apart take gets one for each.
+                const uint32_t first = lowered->case_symbol_count;
+                uint32_t label_count = 1;
+                labels[0] = controls[end].target;
+                for (uint32_t v = 0; v < length; v += 1)
+                {
+                    entries[v] = first;
+                }
+                for (uint32_t i = 0; i < cases; i += 1)
+                {
+                    labels[label_count] = sorted[i].label;
+                    label_count += i == 0 || sorted[i].label != sorted[i - 1].label;
+                    for (uint64_t v = sorted[i].lower - sorted[0].lower; v <= sorted[i].upper - sorted[0].lower; v += 1)
+                    {
+                        entries[v] = first + label_count - 1;
+                    }
+                }
+                lowered->tables[lowered->table_count] = (CheckLowerTable){
+                    .entries = entries,
+                    .count = length,
+                    .function = b,
+                    .control = body->first + index,
+                    .labels = labels,
+                    .label_count = label_count,
+                    .first_label = first,
+                    .addresses = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
+                    .lower = (sorted[0].lower ^ sign) & mask,
+                    .fallback = controls[end].target,
+                };
+                lowered->table_count += 1;
+                lowered->case_symbol_count += label_count;
+            }
+        }
+    }
+    return valid;
+}
+
+// Every switch's jump table or none (check_lower_switch_table), before any body is lowered, so that whatever lane lowers
+// a body, the tables and their labels are numbered in source order (#151), the tables in `lowered` from `output`, the
+// cases' room from `scratch`. Only a switch of four cases or more may have one, and the program lists those
+// (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are some
+// of the checked program's, with its controls). Returns false when an arena has no room.
+static bool check_lower_switch_tables(CheckProgramLowered* lowered, const CheckProgram* program, Arena* output, Arena* scratch)
+{
+    const uint32_t capacity = program->case_count / 4;
+    bool valid = true;
+    if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
+    {
+        lowered->tables = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, capacity);
+        CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
+        CheckLowerCaseRange* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
+        valid = lowered->tables != 0 && cases != 0 && sorted != 0;
+        uint32_t s = 0;
+        for (uint32_t b = 0; valid && b < program->body_count; b += 1)
+        {
+            const CheckProgramBody* body = program->bodies + b;
+            while (s < program->switch_count && program->switches[s] < body->first)
+            {
+                s += 1;
+            }
+            for (; valid && s < program->switch_count && program->switches[s] - body->first < body->count; s += 1)
+            {
+                const CheckControl control = program->controls[program->switches[s]];
+                const uint8_t class = check_lower_class(program->types, program->stream->values[control.node].type);
+                valid = check_lower_switch_table(lowered, capacity, program, b, program->switches[s] - body->first, class, cases, sorted, output);
+            }
+        }
+    }
+    return valid;
+}
+
+// The jump table of the SWITCH control at `control`, an index in the program's controls, or BUSTER_CHECK_NONE: a search
+// of the `count` tables, which check_lower_switch_tables made in the controls' order.
+static uint32_t check_lower_table_of(const CheckLowerTable* tables, uint32_t count, uint32_t control)
+{
+    uint32_t first = 0;
+    uint32_t end = count;
+    while (first < end)
+    {
+        const uint32_t middle = first + (end - first) / 2;
+        const bool before = tables[middle].control < control;
+        first = before ? middle + 1 : first;
+        end = before ? end : middle;
+    }
+    return first < count && tables[first].control == control ? first : BUSTER_CHECK_NONE;
+}
+
+// The index of a jump table's entry: the switch's value (in `local`, of `class`) less the table's lowest, unsigned.
+static void check_lower_table_index(CheckLowerWriter* writer, const CheckLowerTable* table, uint32_t local, uint8_t class, uint8_t index_class)
+{
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, local);
+    if (class != index_class)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, index_class, 0);
+    }
+    if (table->lower != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, index_class, table->lower);
+        check_lower_emit(writer, BUSTER_TYPED_SUB, index_class, 0);
+    }
+}
+
+// Jump table `table`'s dispatch, at its switch's first CASE control, the switch's value in `local` of class `class`: its
+// labels, which JUMP_INDIRECT may reach (Tier0Function.label_entries), with their places among the tables' labels in the
+// part's label symbols; then to the default (or the switch's end) when the index (check_lower_table_index) is past the
+// table's last entry, and otherwise to the table's address (its provisional symbol, which check_lower_finish and the
+// emission's merge replace) plus the entry's 32-bit offset of its label from it, as clang -O0's code goes. Its entries
+// are the switch statement's, for -g's rows, as clang's code is.
+static void check_lower_switch_dispatch(CheckLowerWriter* writer, uint32_t table, uint32_t local, uint8_t class)
+{
+    CheckLowerTable* item = writer->tables + table;
+    CheckProgramLowered* status = writer->output;
+    check_lower_source(writer, writer->table_switch);
+    for (uint32_t j = 0; j < item->label_count; j += 1)
+    {
+        if (status->label_symbol_count < writer->label_symbol_capacity && writer->label_entry_count <= writer->program->control_count)
+        {
+            writer->label_entries[writer->label_entry_count++] = item->labels[j];
+            status->label_symbols[status->label_symbol_count++] = BUSTER_CHECK_LOWER_CASE_SYMBOL | (item->first_label + j);
+        }
+        else
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+    const uint8_t index_class = class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+    check_lower_table_index(writer, item, local, class, index_class);
+    check_lower_emit(writer, BUSTER_TYPED_CONST, index_class, (uint64_t)item->count - 1);
+    check_lower_emit(writer, BUSTER_TYPED_GT, BUSTER_TYPED_CLASS_I32, 0);
+    check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, item->fallback);
+    check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
+    item->addresses[0] = writer->count - 1;
+    check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, (uint64_t)writer->provisional_tables + table);
+    item->addresses[1] = writer->count - 1;
+    check_lower_table_index(writer, item, local, class, index_class);
+    if (index_class == BUSTER_TYPED_CLASS_U32)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 4);
+    check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_I32, 0);
+    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+    check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+    check_lower_emit(writer, BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TYPED_CLASS_U64, 0);
+}
+
 // A return of a struct or a union (`node` its value, the bytes' address; or none, for the end of the function): through
 // the hidden pointer, its bytes copied where parameter 0 points and that address returned; in registers, the bytes'
 // address, which Tier 0's epilogue loads them from (a frame object's of its own at the end); and an empty one's
@@ -4048,8 +4341,10 @@ static void check_lower_stack(CheckLowerWriter* writer, CheckControl control)
 }
 
 // A variable-length array's object at its declaration (CHECK_CONTROL_ALLOCATE): its size from its type's extents,
-// taken from the stack (ALLOCA) into its local. Refused in a block whose end has no control entry of its own (a for
-// statement's declaration, a statement expression's block), aligned past 16 bytes, or initialized (C23's = {}).
+// taken from the stack (ALLOCA) into its local. Aligned past 16 bytes, whose multiple ALLOCA's address is, it takes its
+// alignment less 16 more and its address rounds up to its alignment, (address + alignment - 1) & -alignment, where
+// clang's code rounds rsp down. Refused in a block whose end has no control entry of its own (a for statement's
+// declaration, a statement expression's block), or initialized (C23's = {}).
 static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -4061,7 +4356,11 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
     const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? input->attributes[declaration] : 0;
-    const bool aligned = type != 0 && (type_alignment_log2(program->types, type) > 4 || (attributes != 0 && attributes->alignment_log2 > 5));
+    // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
+    const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
+    const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
+    const uint32_t alignment_log2 = declared_alignment > type_alignment ? declared_alignment : type_alignment;
+    const uint64_t alignment = UINT64_C(1) << (alignment_log2 & 63);
     const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
     if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
     {
@@ -4071,10 +4370,6 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     {
         check_lower_unsupported(writer, "variable-length arrays declared in a for statement or in a statement expression's block");
     }
-    else if (aligned)
-    {
-        check_lower_unsupported(writer, "variable-length arrays aligned past 16 bytes");
-    }
     else if (initialized)
     {
         check_lower_unsupported(writer, "initialized variable-length arrays");
@@ -4082,7 +4377,19 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     else
     {
         check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_U64);
+        if (alignment_log2 > 4)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, alignment - 16);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        }
         check_lower_emit(writer, BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, 0);
+        if (alignment_log2 > 4)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, alignment - 1);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, ~(alignment - 1));
+            check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        }
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
         writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_ALLOCATED;
     }
@@ -4234,9 +4541,14 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     const CheckControl control = program->controls[writer->body->first + index];
     check_lower_place(writer, index);
     writer->token = control.token;
-    if (control.kind == CHECK_CONTROL_JUMP)
+    if (control.kind == CHECK_CONTROL_JUMP && (writer->table_current == BUSTER_CHECK_NONE || control.token != writer->table_switch))
     {
         check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
+    }
+    else if (control.kind == CHECK_CONTROL_JUMP)
+    {
+        // A table switch's jump to its default or its end, after its cases: the dispatch goes there itself.
+        writer->table_current = BUSTER_CHECK_NONE;
     }
     else if (control.kind == CHECK_CONTROL_LABEL)
     {
@@ -4285,10 +4597,24 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
         writer->switch_locals[control.token] = local;
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
         check_lower_expression(writer, control.node, false, type);
+        // Its CASE controls come next: through its jump table (check_lower_switch_tables decided it), its first one
+        // writes the dispatch, and none compares.
+        writer->table_switch = control.token;
+        writer->table_current = check_lower_table_of(writer->tables, writer->table_count, writer->body->first + index);
+        writer->table_pending = writer->table_current != BUSTER_CHECK_NONE;
     }
     else if (control.kind == CHECK_CONTROL_CASE)
     {
-        check_lower_case(writer, program->cases + control.target);
+        const CheckProgramCase* item = program->cases + control.target;
+        if (writer->table_current == BUSTER_CHECK_NONE || item->owner != writer->table_switch)
+        {
+            check_lower_case(writer, item);
+        }
+        else if (writer->table_pending)
+        {
+            check_lower_switch_dispatch(writer, writer->table_current, writer->switch_locals[item->owner], check_lower_class(program->types, item->type));
+            writer->table_pending = false;
+        }
     }
     else if (control.kind == CHECK_CONTROL_RETURN && check_lower_aggregate(program->types, writer->result))
     {
@@ -4477,6 +4803,9 @@ struct CheckLowerShared
     // first of the provisional symbols the lowering's own take until check_lower_finish numbers them, the helpers' end.
     SymbolId declared_runtimes[CHECK_LOWER_RUNTIMES];
     SymbolId provisional_runtimes;
+    // The first of the jump tables' provisional symbols (check_lower_switch_tables decided the tables), after the runtime
+    // functions': table t's address is provisional_tables + t while the bodies compile.
+    SymbolId provisional_tables;
 };
 
 // The steps of a part's lowering (check_lower_part) that can fail, in the order source order's lowering takes them for
@@ -4617,6 +4946,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->abi_capacity = valid ? (uint32_t)abi_capacity64 : 0;
     shared->argument_capacity = valid ? (uint32_t)argument_capacity64 : 0;
     shared->provisional_runtimes = valid ? (SymbolId)provisional64 : 0;
+    shared->provisional_tables = valid ? (SymbolId)(provisional64 + CHECK_LOWER_RUNTIMES) : 0;
 #define BUSTER_CHECK_LOWER_TABLE(field, type, length) shared->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= shared->field != 0
     BUSTER_CHECK_LOWER_TABLE(local_map, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_TABLE(switch_locals, uint32_t, (uint64_t)count + 1);
@@ -4630,8 +4960,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         const uint32_t object = program->symbol_objects[s];
         shared->label_symbol_capacity += object != 0 && object - 1 < count && program->parser->tree.roles[object - 1] == PARSE_ROLE_LABEL;
     }
-    lowered->label_symbols = valid && shared->label_symbol_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, shared->label_symbol_capacity) : 0;
-    valid &= shared->label_symbol_capacity == 0 || lowered->label_symbols != 0;
+    // Every switch's jump table, decided before the bodies; the label symbols' room holds the tables' labels too.
+    valid = valid && check_lower_switch_tables(lowered, program, output, scratch);
+    valid = valid && (uint64_t)shared->provisional_tables + lowered->table_count < UINT32_MAX;
+    const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + lowered->case_symbol_count : 0;
+    lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
+    valid &= label_room == 0 || lowered->label_symbols != 0;
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
     valid = valid && abi_initialize(&shared->table, scratch, types, 16);
@@ -4784,6 +5118,10 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .initializer_declarations = shared->initializer_declarations,
         .declared_runtimes = shared->declared_runtimes,
         .provisional_runtimes = shared->provisional_runtimes,
+        .table_current = BUSTER_CHECK_NONE,
+        .tables = shared->lowered->tables,
+        .table_count = shared->lowered->table_count,
+        .provisional_tables = shared->provisional_tables,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
     BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
@@ -4817,8 +5155,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * (uint64_t)shared->x87_constant_capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
-    writer->label_symbol_room = valid && shared->label_symbol_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, shared->label_symbol_capacity) : 0;
-    valid &= shared->label_symbol_capacity == 0 || writer->label_symbol_room != 0;
+    const uint64_t label_room = (uint64_t)shared->label_symbol_capacity + shared->lowered->case_symbol_count;
+    writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
+    valid &= label_room == 0 || writer->label_symbol_room != 0;
     return valid;
 }
 
@@ -4846,7 +5185,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     // The part's label symbols follow the ones the writer's parts before it kept, in its room for the program's.
     status->label_symbols = writer->label_symbol_room != 0 ? writer->label_symbol_room + writer->label_symbol_used : 0;
     status->label_symbol_count = 0;
-    writer->label_symbol_capacity = shared->label_symbol_capacity - writer->label_symbol_used;
+    writer->label_symbol_capacity = shared->label_symbol_capacity + lowered->case_symbol_count - writer->label_symbol_used;
     abi->count = 0;
     abi->argument_count = 0;
     writer->runtime_mask = 0;
@@ -4862,6 +5201,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         *function = (Tier0Function){ 0 };
         writer->count = 0;
         writer->label_entry_count = 0;
+        writer->table_current = BUSTER_CHECK_NONE;
+        writer->table_pending = false;
         writer->depth = 0;
         if (sources)
         {
@@ -4938,18 +5279,20 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         {
             const TypeId parameter_type = input->declared_types[parameter];
             const CheckInputAttributes* attributes = input->attributes[parameter];
-            // A struct or union parameter is a frame object, at most aligned to 16, whose bytes the prologue places.
+            // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
+            // realigned frame, or where they arrive).
             const bool aggregate = check_lower_aggregate(types, parameter_type);
             const uint32_t declared_alignment = attributes != 0 && attributes->alignment_log2 != 0 ? attributes->alignment_log2 - 1u : 0;
             const uint32_t alignment = type_alignment_log2(types, parameter_type) > declared_alignment ? type_alignment_log2(types, parameter_type) : declared_alignment;
             const char* passed = check_lower_passed(writer, parameter_type);
             // So is a memory class's (check_lower_memory_class): a long double's, from its 16 bytes on the stack, and a
-            // 128-bit integer's, from its two eightbytes, as a struct of them.
-            const bool object = aggregate || check_lower_memory(types, parameter_type);
+            // 128-bit integer's, from its two eightbytes, as a struct of them; and a value's aligned past 8 bytes, whose
+            // slot would be aligned to 8, from its register's part or its slot, as a struct of it.
+            const bool object = aggregate || check_lower_memory(types, parameter_type) || alignment > 3;
             writer->token = parameter;
-            if (alignment > (object ? BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 : 3u))
+            if (alignment > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
             {
-                check_lower_unsupported(writer, object ? "parameters aligned past 16 bytes" : "parameters aligned past 8 bytes");
+                check_lower_unsupported(writer, "parameters aligned past 1 GB");
             }
             if (passed != NULL)
             {
@@ -5025,8 +5368,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
                 else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || check_lower_complex(types, local_type))
                 {
-                    // Arrays, structs, unions and complex values are frame objects, at most aligned to 16 (a frame pointer
-                    // would take more). An incomplete type has no size at all.
+                    // Arrays, structs, unions and complex values are frame objects (aligned past 16 bytes, in a realigned
+                    // frame). An incomplete type has no size at all.
                     if (!type_is_complete(types, local_type))
                     {
                         check_lower_unsupported(writer, "local objects of incomplete type");
@@ -5043,9 +5386,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     // A type no class holds and that isn't an object's: what its values need (check_lower_type_feature).
                     check_lower_unsupported(writer, check_lower_type_feature(types, local_type));
                 }
-                else if (type_kind_is_array(kind) || alignment > 3)
+                else if (type_kind_is_array(kind))
                 {
                     check_lower_unsupported(writer, "local values aligned past 8 bytes");
+                }
+                else if (alignment > 3)
+                {
+                    // A value aligned past 8 bytes, whose slot would be aligned to 8: a frame object of its alignment, which
+                    // LOCAL, STORE_LOCAL and SET_LOCAL of its class read and write (tier0_value_object).
+                    local = check_lower_object(writer, type_size(types, local_type), alignment);
                 }
                 else
                 {
@@ -5345,7 +5694,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             {
                 label_symbols += parts[p].label_symbol_count;
             }
-            if (label_symbols != shared->label_symbol_capacity)
+            if (label_symbols != shared->label_symbol_capacity + lowered->case_symbol_count)
             {
                 lowered->status = CHECK_PROGRAM_INVALID;
                 lowered->token = count != 0 ? parts[count - 1].final_token : BUSTER_CHECK_NONE;
@@ -5392,6 +5741,32 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         {
             const uint64_t runtime = (uint64_t)targets[c] - shared->provisional_runtimes;
             targets[c] = runtime < CHECK_LOWER_RUNTIMES ? lowered->runtime_symbols[runtime] : targets[c];
+        }
+    }
+    // The jump tables' symbols and their labels', now that the runtime's functions are all known: the lowering's own, after
+    // theirs. The labels' are numbered in label_symbols, and the tables' in their dispatches' GLOBAL_ADDRESS entries (the
+    // emission's merge replaces the provisional symbols in the code's references).
+    const uint64_t case_symbol_base = (uint64_t)program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    if (valid && lowered->table_count != 0 && case_symbol_base + lowered->table_count + lowered->case_symbol_count >= BUSTER_CHECK_LOWER_CASE_SYMBOL)
+    {
+        lowered->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
+    }
+    else if (valid && lowered->table_count != 0)
+    {
+        lowered->case_symbol_base = (SymbolId)case_symbol_base;
+        for (uint32_t k = 0; k < lowered->label_symbol_count; k += 1)
+        {
+            const SymbolId symbol = lowered->label_symbols[k];
+            const bool table_label = (symbol & BUSTER_CHECK_LOWER_CASE_SYMBOL) != 0;
+            lowered->label_symbols[k] = table_label ? lowered->case_symbol_base + lowered->table_count + (symbol & ~BUSTER_CHECK_LOWER_CASE_SYMBOL) : symbol;
+        }
+        for (uint32_t t = 0; t < lowered->table_count; t += 1)
+        {
+            const CheckLowerTable* table = lowered->tables + t;
+            uint64_t* values = (uint64_t*)lowered->functions[table->function].values;
+            values[table->addresses[0]] = lowered->case_symbol_base + t;
+            values[table->addresses[1]] = lowered->case_symbol_base + t;
         }
     }
     return valid;
