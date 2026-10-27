@@ -1796,6 +1796,22 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "return (int)__builtin_strlen(b)+(__builtin_memcmp(a,b,k)>0)-(__builtin_memcmp(a,b,k)<0)+b[2];}",
         "memory-builtin-runtime-loops", clang);
     check_test_program_source(test,
+        "unsigned char a[512],b[512];int tested(int n){unsigned k=(unsigned)n%300;"
+        "for(unsigned i=0;i<512;i++)a[i]=(unsigned char)(1+i%255);"
+        "__builtin_memset(b,0x180,512);__builtin_memcpy(b+3,a+1,k);__builtin_memmove(b+4,b+3,k);"
+        "__builtin_memmove(b+2,b+4,k);b[k+2]=0;"
+        "return (int)__builtin_strlen((char*)b+2)+__builtin_memcmp(a+1,b+2,k)+b[400];}",
+        "memory-builtin-wide-runtime", clang);
+    check_test_program_source(test,
+        "unsigned char a[128],b[128];int effects[3];int tested(int n){effects[0]=effects[1]=effects[2]=0;"
+        "for(unsigned i=0;i<128;i++)a[i]=(unsigned char)(i+n);"
+        "__builtin_memset(b,0x1a5,33);__builtin_memcpy(b,a,32);"
+        "__builtin_memmove(b+1,b,15);__builtin_memmove(b,b+1,16);"
+        "__builtin_memcpy((effects[0]++,b+40),(effects[1]++,a+40),(effects[2]++,8));"
+        "int r=__builtin_memcmp(a+40,b+40,8);__builtin_memset((effects[0]++,b),7,(0));"
+        "return r+effects[0]+effects[1]*10+effects[2]*100+b[7]+b[15]+b[32]+__builtin_memcmp(a,b,1)+__builtin_memcmp(a,b,0);}",
+        "memory-builtin-small-constants-and-effects", clang);
+    check_test_program_source(test,
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
         "return (int)y+x+__builtin_constant_p(n++);}", "builtin-hints-and-unevaluated-query", clang);

@@ -3105,6 +3105,15 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = stream->misc[selected].runtime_builtin, .argument_count = count };
+        if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
+        {
+            const CheckValue* size = stream->values + graph->argument_nodes[first + 2];
+            if (size->constant_kind == CHECK_CONSTANT_INTEGER && (uint64_t)size->integer <= BUSTER_CBUILTIN_MISC_SMALL_BYTES)
+            {
+                call->constant_size_known = true;
+                call->constant_size = (uint32_t)(uint64_t)size->integer;
+            }
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const TypeId type = stream->argument_conversions[first + i].type;
