@@ -7635,10 +7635,14 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
             i += group_instructions;
         }
     }
-    while (i + group_instructions <= count)
+    // With one group the first loop has already exhausted this identical predicate.
+    if (groups > 1)
     {
-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
-        i += group_instructions;
+        while (i + group_instructions <= count)
+        {
+            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
+            i += group_instructions;
+        }
     }
     if (i < count)
     {

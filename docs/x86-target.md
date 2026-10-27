@@ -89,8 +89,12 @@ admitted rows. ISA filtering and final record validation still apply per form.
 The default 64-bit encoder initializer reuses FS templates for GS: their layouts,
 checks and fallback choices are identical, with only the optional segment byte
 changing. It checks that byte before patching both template halves and uses the
-direct builder if the expected location changes. Existing storage and encoding
-loops are unchanged.
+direct builder if the expected location changes. Existing storage, per-record
+packing and the instruction record format are unchanged. Single-group encoder
+variants omit the redundant second full-group loop: the first loop has already
+exhausted the same condition. Multi-group variants retain their remainder loop.
+The existing five-mode scalar/vector, offset/fixup, random and page-edge tests
+cover complete groups and tails through the same entry points.
 
 Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
 home. The caller supplies its immutable form descriptions and keeps its own
