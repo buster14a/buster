@@ -433,7 +433,12 @@ typedef enum Tier0Error
 // entry_records is null and entry_count 0. `deferred` counts the entries the vector path left to tier0_emit_deferred
 // (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
 // (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
-// in their order (0 for a function without them): the label's first record.
+// in their order (0 for a function without them): the label's first record. The frame is the one tier0_emit_prologue
+// made, for its unwind tables (unwind_tier0_frame, #395): the callee-saved registers it pushed (Tier0Frame.saved's
+// bits, in tier0_callee_saved's order), whether it pushed rbp first and pointed it at the push (a frame pointer, which
+// a function that moves rsp as it runs has), and the bytes it reserved below the pushes. The prologue's pushes, the
+// frame pointer's mov and the reservation are the code's first records, and the epilogue's release (an add, or with a
+// frame pointer the lea or mov), pops and ret its last.
 typedef struct Tier0Code Tier0Code;
 struct Tier0Code
 {
@@ -450,6 +455,9 @@ struct Tier0Code
     uint32_t label_count;
     uint32_t deferred;
     uint32_t deep;
+    uint32_t frame_saved;
+    uint32_t frame_size;
+    bool frame_pointer;
     Tier0Error error;
     uint32_t node;
 };
@@ -7282,6 +7290,9 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
                 tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
             }
         }
+        code->frame_saved = frame.saved;
+        code->frame_size = frame.size;
+        code->frame_pointer = frame.pointer;
     }
     return error;
 }

@@ -151,6 +151,64 @@ applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
+What this compiler's own `main.c` needed (#129) the checker takes as clang 23
+does, each rule checked against clang's answers on probes of it:
+
+- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its
+  eleven options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
+  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories, read in
+  clang's three steps. Its pragma handler lexes the options' names and their
+  arguments in parentheses: an unknown name, a missing `(` and an unclosed
+  argument are errors, and a token after the options that isn't another one's
+  name drops the pragma, with a warning (`unroll_count(4))`), so that nothing
+  in it is placed or checked. Then each argument: a state takes its own words
+  (`licm` only `disable`, `vectorize_predicate` `assume_safety` too), and a
+  count must be a positive integer constant that fits an `int`
+  (`vectorize_width` also `fixed` or `scalable`, alone or after the count).
+  What follows the word or the constant expression clang reads is ignored,
+  with a warning (`vectorize(enable x)`, `vectorize_width(scalable, 4)`); an
+  empty argument is an error, and so is one no expression starts with
+  (`unroll_count(;)`, `unroll return`). Last, no hint may come twice in one
+  category, across the pragmas before one loop too, nor a count beside a state
+  that rules it out (`unroll`'s every state, the others' `disable`), and a
+  `for`, `while` or `do`-`while` loop must follow, in a function. Errors are
+  reported on the pragma's line, but a misplaced one's at the statement after
+  it, as clang reports them. `GCC unroll` is `unroll` (#480's review), whose
+  count may be left out, in parentheses or the rest of the line, as clang's
+  `ParseLoopHintValue` reads it; a pragma clang drops with a warning
+  (`nounroll 4`, `unroll (4) x`) is no hint. A count here is an integer
+  literal, alone or before a token no expression goes on with (`unroll 4)`,
+  `unroll_count(4, x)`, as clang reads them): another constant expression
+  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed. In a
+  function, clang checks a count before it reads the next option or pragma,
+  and places the hints and checks them against each other only after the
+  statement they precede, so the first error is the count's when it isn't a
+  valid one (`int N`, `4 / 0`, an enumerator of 0), and a later pragma's or
+  the place's only when it is (#480's fourth review): such a count leaves the
+  loop's pragmas unsupported. Where both errors would be on its own pragma (a
+  second count of its category, or one that a state before it rules out), and
+  at file scope, where clang reads no count, the answer is the error. An error
+  in the statement comes before the places' and the conflicts' in clang's
+  output, which these reports at the pragma don't follow yet (#503). Tier 0
+  has no loop transformation for the hints to steer, so nothing keeps them.
+- **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
+  or a compound statement's start. Its state changes nothing, since nothing
+  here contracts `a * b + c` into a fused operation.
+- **`no_builtin`**, on a function's definition only: on another declaration of
+  a function it is an error, and on anything else it is ignored, as clang has
+  it.
+- **`unsigned _BitInt(1)`:** the declaration's specifiers read a `_BitInt`'s
+  width alone, so that their own `unsigned` decides its signedness. A typedef
+  of an unsigned `_BitInt` stays unsigned where it is used, which main didn't
+  have (`U8` of `typedef unsigned _BitInt(8) U8` was signed).
+- **An array of unknown size with struct elements:** the reader infers its size
+  before expressions have types, so whether an element initializes a whole
+  struct, or starts brace elision, comes from the tree: the element's root's
+  type, from an identifier's declaration, a compound literal's type, a `?:`'s
+  third operand, a parenthesized expression or a call of a function by its name.
+  It came from the last typed token in the element, and so a compound literal
+  with a member's value, `(struct L){ .target = n }`, read as `n`'s type.
+
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
 records declare/use/restore events as it elaborates, and each use's event
@@ -617,6 +675,40 @@ What the lowering covers past scalars (#145's programs):
   by a 128-bit count shifts by its low 64 bits. A bit-field of the type is read
   and written as any other (below), its bits within 8 bytes. A `_BitInt(128)`
   and a builtin of 128-bit operands are refused by name.
+- **Complex values (#133).** `_Complex float`, `double` and `long double` are
+  aggregates of their two elements, the real part then the imaginary one
+  (`check_lower_complex`): their locals, parameters and temporaries are frame
+  objects, the stream carries a value by its object's address, and copies,
+  calls, returns, `va_arg` and static data take it as the convention classifies
+  it (`float`'s and `double`'s in SSE eightbytes, `long double`'s in memory
+  and returned in st0 and st1). An operation computes into a frame object of
+  its own from its operands' parts (`check_lower_complex_compute`), each
+  operand set into a temporary as soon as it is evaluated, since Tier 0 reads
+  an entry's last operand as the class of the entry before it. A real operand
+  keeps its type domain, as clang computes it: no imaginary part joins a sum, a
+  difference or a product with it, so that signed zeros and infinities come
+  out as clang's (`x - z`'s imaginary part is `-z`'s). A product or a quotient
+  of two complex values, and a real dividend's over a complex divisor, call
+  libgcc's `__mulsc3`, `__muldc3`, `__mulxc3`, `__divsc3`, `__divdc3` and
+  `__divxc3`, runtime functions as the 128-bit integers' are, which give the
+  values clang -O0's inline product and its NaN recovery give. `==` and `!=`
+  compare both parts; a value's truth is either part's; a conversion converts
+  each part (to a real type the real part, to `_Bool` the truth); a compound
+  assignment reads its destination in the calculation's type through its
+  address, computes and stores the result back converted; `__real__` and
+  `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
+  parts are a floating constant's (a `long double`'s in the function's table).
+  The direct path's executables take the libgcc functions from `libgcc.a`'s
+  members (#483): `test-checker-driver --executable` links products and
+  quotients of each type by both paths into the same bytes, which need
+  `libc.so.6` alone and print every part's bits as clang's code computes them.
+  The complex types it doesn't take are refused by what they need: GNU's
+  complex integer types ("complex integer types") and the complex types of
+  the other floating types, `_Complex _Float16` and `_Complex __float128`
+  ("complex types other than _Complex float, double and long double"). A
+  local of a type that no class holds is refused by what its type needs, as
+  its values are (`check_lower_type_feature`), rather than as "values of this
+  type".
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -704,8 +796,8 @@ What the lowering covers past scalars (#145's programs):
   (`check_program_emit_made_name`).
 
 Everything else the lowering can't express is refused with
-`error: unsupported: FEATURE`, naming the feature: `_Complex`, `_BitInt`,
-inline assembly and so on. The c-testsuite harness counts such a
+`error: unsupported: FEATURE`, naming the feature: complex integer types,
+`_BitInt`, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
@@ -772,6 +864,20 @@ The test command fails if the oracle cannot run. It covers:
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
   (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- Executable programs (`c_check_program_test.c`): each source's checked
+  object, from both paths, linked with clang's build of the same source (its
+  oracle, each global renamed `oracle_NAME`) and a harness that runs both on
+  the same inputs. The harness is compiled once per run and each oracle once
+  per distinct text, with `-c` and the flags of the one-step build they
+  replaced, and a path whose checked object and oracle are byte for byte the
+  last linked program's takes that program's run: the same files would link
+  into the same executable (#465). A program that fails is linked and run, and
+  its directory kept with `driver.c` and `oracle.c`.
+
+The fixtures that ask clang for acceptance and first errors go to it many at a
+time (`parse_test_clang`), split in order among up to eight processes that run
+at once, each process's output read for its own files: clang checks each file
+on its own, so the results are those of one process (#465).
 
 Where clang accepts a constraint violation with a warning, the checker accepts
 it with clang's warning, as the semantic mutants require: an assignment that
