@@ -59,24 +59,23 @@ static CheckDataInputStatus check_data_input_status(CheckDataStatus status)
 }
 
 // Where `object` is among prepared's declared objects (check_data_prepare's, in object order), or declared_count where it
-// isn't one (a string literal's, or a non-object).
+// isn't one (a string literal's, or a non-object). The search halves its range without a branch, each step a select of
+// the half: its callers ask of objects in an order the branch predictor can't learn (the selection's definitions, in
+// token order).
 static uint32_t check_data_declared_index(const CheckDataPrepared* prepared, uint32_t object)
 {
-    uint32_t low = 0;
-    uint32_t high = prepared->declared_count;
-    while (low < high)
+    const uint32_t* objects = prepared->declared_objects;
+    uint32_t base = 0;
+    uint32_t length = prepared->declared_count;
+    while (length > 1)
     {
-        const uint32_t middle = low + (high - low) / 2;
-        if (prepared->declared_objects[middle] < object)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
+        const uint32_t half = length / 2;
+        base = objects[base + half] < object ? base + half : base;
+        length -= half;
     }
-    const uint32_t index = low < prepared->declared_count && prepared->declared_objects[low] == object ? low : prepared->declared_count;
+    // The first declared object not below `object`.
+    const uint32_t lower = length != 0 ? base + (objects[base] < object) : 0;
+    const uint32_t index = lower < prepared->declared_count && objects[lower] == object ? lower : prepared->declared_count;
     return index;
 }
 
