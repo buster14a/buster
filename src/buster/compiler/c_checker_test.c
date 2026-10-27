@@ -3668,6 +3668,58 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // Operators' values: pointer arithmetic under an indirection, GNU's vector operators with a cast's or a negated
+        // operand, vectors past a difference and compares of pointers, which are scalars (#555's review), and scalars,
+        // which brace elision takes into the vector.
+        {
+            "operators' values in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef short v16hi __attribute__((vector_size(32)));\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, int n, v16hi h, v16hi k, long* l, long* m, v4di d)\n{\n    S a[] = { *(p + 1), *(1 + p), p[0], *(p - n), *(p + (l - m)), p[l == m] };\n    _Static_assert(sizeof a == 6 * sizeof(S), \"six\");\n    v16hi b[] = { h + (short)n, -h, ~k, h * k + (short)1, (short)n * h, -h + (short)n, h << 2 };\n    _Static_assert(sizeof b == 7 * sizeof(v16hi), \"seven\");\n    v16hi c[] = { (short)n + (short)1, 2 };\n    _Static_assert(sizeof c == sizeof(v16hi), \"one\");\n    v4di e[] = { (l - m) * d, d, (l == m) * d, (l < m) + d };\n    _Static_assert(sizeof e == 4 * sizeof(v4di), \"four vectors past pointers' differences and compares\");\n    return a[5].b + b[6][0] + c[0][1] + (int)e[3][0];\n}\n",
+            false,
+            false
+        },
+        // Casts' types (the reader's, at their `)`s), on either side; an operand the walk has no type for (a call through a
+        // pointer's expression), which leaves a difference with a pointer open, not a pointer (#555's second review); and
+        // constants, `sizeof` and `!`, scalars on a difference's right.
+        {
+            "casts and operands of no type in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, S* q, long* l, long* m, v4di d, long* (*get)(void))\n{\n    S x[] = { *(p + (p - (S*)q)), p[0], *((S*)q + (l - m)), *(p + (l - (*get)())), *((S*)l + 1), *(p - 1), *(p - sizeof(S)), *(p - !m), *(p - 'a') };\n    _Static_assert(sizeof x == 9 * sizeof(S), \"nine\");\n    v4di e[] = { (v4di)d * (l - m), (l - (long*)q) * d, d };\n    _Static_assert(sizeof e == 3 * sizeof(v4di), \"three\");\n    return x[8].a + (int)e[2][0];\n}\n",
+            false,
+            false
+        },
+        // A ?:'s value from both of its arms (#555's third review): a vector where either arm is one, a scalar arm
+        // converted to it; a scalar where both are; a pointer or a record where either is, a null pointer constant or
+        // GNU's `a ?: b` the other.
+        {
+            "a conditional's arms in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef int v4si __attribute__((vector_size(16)));\nint f(int n, v4si v, v4si w, S* p, S* q, S s, S t)\n{\n    v4si a[] = { n ? v : 0, n ? 0 : v, n ? v : w, n ? (v + w) : 1, v };\n    _Static_assert(sizeof a == 5 * sizeof(v4si), \"five\");\n    v4si b[] = { n ? 1 : 2, 3 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one\");\n    S x[] = { *(n ? p : 0), *(n ? 0 : q), n ? s : t, *(p ?: q), s };\n    _Static_assert(sizeof x == 5 * sizeof(S), \"five\");\n    return a[4][0] + b[0][1] + x[4].a;\n}\n",
+            false,
+            false
+        },
+        // A vector's lane, its element type's scalar (#555's fourth review): under a ?: beside a scalar, in a binary
+        // operator's operand, through a member and of an operator's value.
+        {
+            "vector lanes in an inferred array",
+            "typedef int v4si __attribute__((vector_size(16)));\ntypedef struct { v4si v; int k; } H;\nint f(int n, v4si v, H h)\n{\n    v4si a[] = { n ? v[0] : 2, 3 };\n    _Static_assert(sizeof a == sizeof(v4si), \"one\");\n    v4si b[] = { v[0] + 1, 2 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one too\");\n    v4si c[] = { h.v[1], (v + v)[2], n ? 1 : v[3], 4, v };\n    _Static_assert(sizeof c == 2 * sizeof(v4si), \"four lanes, then a vector\");\n    return a[0][1] + b[0][0] + c[1][3];\n}\n",
+            false,
+            false
+        },
+        // A ?: of an extension vector's condition, element by element a vector whatever its arms (#555's fifth review):
+        // the condition a vector, a vector's compare, and a lane of one beside pointer arms.
+        {
+            "a vector condition's ?: in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef struct { int a, b; } S;\nint f(int n, e4 mask, g4 x, S* p, S* q)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(mask ? 1 : 2), e4), \"vector-valued conditional\");\n    g4 a[] = { mask ? 1 : 2, x };\n    _Static_assert(sizeof a == 2 * sizeof(g4), \"two elements\");\n    g4 d[] = { (mask < 2) ? 3 : 4, x, n ? 5 : 6, 7 };\n    _Static_assert(sizeof d == 3 * sizeof(g4), \"a compare's mask, a vector, then two scalars braced into one\");\n    S c[] = { *(n ? p : q), *(mask[0] ? p : q) };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"two records\");\n    return a[1][0] + d[2][1] + c[1].a;\n}\n",
+            false,
+            false
+        },
+        // An extension vector's !, && and ||, vectors element by element, and its swizzles: one lane a scalar, more a
+        // vector, an odd-length vector's halves rounded up, and swizzles of swizzles by their own lanes (#555's sixth to
+        // eighth reviews).
+        {
+            "an extension vector's logic and swizzles in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int e2 __attribute__((ext_vector_type(2)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef int e3 __attribute__((ext_vector_type(3)));\ntypedef int g2 __attribute__((vector_size(8)));\nint f(int n, e4 v, e4 w, e2 t, g4 x, e3 u, g2 z)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(!v), e4), \"not vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v && w), e4), \"and vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v || w), e4), \"or vector\");\n    g4 a[] = { !v, v && w, v || w, x };\n    _Static_assert(sizeof a == 4 * sizeof(g4), \"four\");\n    g4 b[] = { v.x, 2, 3, 4, x, v.s3, t.lo, !v.x, n && v.y };\n    _Static_assert(sizeof b == 3 * sizeof(g4), \"lanes braced into vectors\");\n    g4 c[] = { v.xyzw, v.wzyx, x, !n };\n    _Static_assert(sizeof c == 4 * sizeof(g4), \"two swizzled vectors, a vector, then a scalar\");\n    g2 d[] = { u.lo, u.hi, u.even, u.odd, z };\n    _Static_assert(sizeof d == 5 * sizeof(g2), \"odd lanes' halves round up\");\n    g4 e[] = { v.xy.lo, 2, 3, 4, x, v.xy.hi, v.zw.lo, v.xyz.lo.x, 0 };\n    _Static_assert(sizeof e == 3 * sizeof(g4), \"nested swizzles' lanes braced into vectors\");\n    g2 h[] = { v.xyzw.lo, z, v.wzyx.hi };\n    _Static_assert(sizeof h == 3 * sizeof(g2), \"nested swizzles' vectors whole\");\n    return a[3][0] + b[2][1] + c[3][0] + d[4][0] + e[2][0] + h[2][0];\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
@@ -4179,6 +4231,7 @@ static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_backend_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
 static void check_test_mutations(CheckTest* test, const char* clang);
+static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
@@ -4275,6 +4328,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_diagnostic_policy(&test);
             check_test_lazy(&test);
             check_test_intrinsic_inputs(&test, clang);
+            check_test_x86_diagnostics(&test, clang);
             check_test_initializers(&test, clang);
             check_test_data_sources(&test);
             check_test_attributes(&test, clang);

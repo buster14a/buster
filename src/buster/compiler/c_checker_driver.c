@@ -168,6 +168,47 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
     }
 }
 
+static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                      const TypeTable* types, bool quiet)
+{
+    for (uint32_t i = 0; !quiet && !pp->fatal && i < stream->x86_count; i += 1)
+    {
+        const CheckBuiltinX86Effect* effect = stream->x86 + i;
+        for (uint32_t e = 0; !pp->fatal && e < effect->range_event_count; e += 1)
+        {
+            const uint32_t token = check_diagnostic_x86_token(input, effect->node);
+            const CheckWarningSeverity severity = check_diagnostic_severity(input, token, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE);
+            const CheckBuiltinX86RangeEvent* event = effect->range_events + e;
+            // A failed/incomplete program cannot prove deadness. Report any still-deferred event conservatively.
+            if (event->disposition != CHECK_BUILTIN_X86_SUPPRESSED && severity != CHECK_WARNING_IGNORE && token < parser->tokens.count)
+            {
+                uint32_t width = 0;
+                bool sign = false;
+                check_action_integer_type(types, event->value.type, &width, &sign);
+                const bool negative = sign && (event->value.integer >> (width - 1)) != 0;
+                unsigned __int128 magnitude = negative ? (0 - event->value.integer) & check_action_mask(width) : event->value.integer;
+                char digits[42];
+                char* text = digits + sizeof(digits) - 1;
+                *text = 0;
+                do
+                {
+                    *--text = '0' + magnitude % 10;
+                    magnitude /= 10;
+                }
+                while (magnitude != 0);
+                if (negative)
+                {
+                    *--text = '-';
+                }
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token],
+                                   "argument value %s is outside the valid range [%u, %u]", text, event->low, event->high);
+            }
+        }
+    }
+}
+
 static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                   const CheckRepair* repair, const CheckInput* original_pragmas, const CheckDriverDiagnostic* extra, uint32_t extra_count,
                                   const uint32_t* excess_tokens, uint32_t excess_count, bool quiet, Arena* scratch)
@@ -1361,6 +1402,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             check_driver_diagnose(checking, &pp, program.token, message);
                             result = 1;
                         }
+                        check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
+                        result = pp.errors != 0 ? 1 : result;
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                         if (result == 0 && emit_object && !prefix_only)
                         {
