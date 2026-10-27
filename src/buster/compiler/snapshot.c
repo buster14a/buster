@@ -42,8 +42,9 @@
 //     old one mapped keeps it whole, and two compilers that rebuild it at once write the same bytes, the last rename
 //     winning.
 //
-// main.c includes this file after executable.c, whose hash it uses. runtime_open takes BUSTER_LINKER_ENTRY rather than
-// static: main.c's units compile it in one unit alone (link.c). Layout, in this order:
+// main.c includes this file after executable.c, whose hash it uses. runtime_open and its other kinds'
+// (runtime_open_static, runtime_open_static_pie, runtime_open_shared) take BUSTER_LINKER_ENTRY rather than static:
+// main.c's units compile them in one unit alone (link.c). Layout, in this order:
 //   - API: SnapshotStatus, SnapshotResult and the entry points' prototypes.
 //   - The file: its header, regions and columns.
 //   - Writing.
@@ -114,9 +115,9 @@ static __attribute__((unused)) bool snapshot_directory(char* path, uint64_t capa
 // doesn't fail the import. runtime_release frees the runtime either way. runtime_open_static, runtime_open_static_pie
 // and runtime_open_shared do the same for a static executable's runtime, a static PIE's and a shared library's.
 BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open(Runtime* runtime, const char* directory);
-static __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
-static __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
-static __attribute__((unused)) SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory);
+BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_static(Runtime* runtime, const char* directory);
+BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory);
+BUSTER_LINKER_ENTRY __attribute__((unused)) SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory);
 // Removes a kind's snapshot from `directory`, as the caller of a link whose binding found a piece of a loaded runtime
 // damaged does (BIND_ERROR_SNAPSHOT), before it releases the runtime and opens it again, which then imports it and
 // writes a new snapshot: whether no snapshot of the kind is there now.
@@ -1326,21 +1327,21 @@ BUSTER_LINKER_ENTRY SnapshotResult runtime_open(Runtime* runtime, const char* di
     return runtime_open_as(runtime, directory, RUNTIME_KIND_DYNAMIC, identified ? &compiler : 0);
 }
 
-static SnapshotResult runtime_open_static(Runtime* runtime, const char* directory)
+BUSTER_LINKER_ENTRY SnapshotResult runtime_open_static(Runtime* runtime, const char* directory)
 {
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);
     return runtime_open_as(runtime, directory, RUNTIME_KIND_STATIC, identified ? &compiler : 0);
 }
 
-static SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory)
+BUSTER_LINKER_ENTRY SnapshotResult runtime_open_static_pie(Runtime* runtime, const char* directory)
 {
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);
     return runtime_open_as(runtime, directory, RUNTIME_KIND_STATIC_PIE, identified ? &compiler : 0);
 }
 
-static SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory)
+BUSTER_LINKER_ENTRY SnapshotResult runtime_open_shared(Runtime* runtime, const char* directory)
 {
     RuntimeProbe compiler;
     const bool identified = snapshot_compiler(&compiler);

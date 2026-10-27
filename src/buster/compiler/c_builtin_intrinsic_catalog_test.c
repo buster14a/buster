@@ -89,7 +89,7 @@ static bool builtin_intrinsic_catalog_test_record_equal(const BuiltinIntrinsicIn
 
 static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest* test)
 {
-    builtin_intrinsic_catalog_test_expect(test, BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT == 1506, "frozen own-main scope contains exactly 1,506 requested names");
+    builtin_intrinsic_catalog_test_expect(test, BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT == 1534, "frozen own-main scope contains exactly 1,534 requested names");
     uint32_t x86 = 0;
     uint32_t generic = 0;
     uint32_t gaps = 0;
@@ -126,8 +126,8 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
                 "only bit-cast syntax and va-list type gaps remain explicit non-prototypes outside the x86 scope");
         }
     }
-    builtin_intrinsic_catalog_test_expect(test, x86 == 1457 && generic == 47 && gaps == 2,
-        "own-main attestation is exactly 1,457 target records, 47 generic records and two explicit gaps");
+    builtin_intrinsic_catalog_test_expect(test, x86 == 1483 && generic == 49 && gaps == 2,
+        "own-main attestation is exactly 1,483 target records, 49 generic records and two explicit gaps");
 
     // A merge join supplies independent membership expectations for every full-catalog row, including rows that
     // share the ia32 spelling prefix but never appeared in the frozen workload's requested-name inventory.
@@ -153,15 +153,15 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
             builtin_intrinsic_own_main_x86_in_scope(full->name, full->name_length) == (expected != NULL && target),
             "full-catalog lookup never admits a target name absent from the exact frozen scope join");
     }
-    builtin_intrinsic_catalog_test_expect(test, joined_targets == 1457 && outside_targets != 0 && full_ia32 == 2029,
-        "1,457 attested target names remain narrower than the full catalogue's 2,029 ia32 spellings");
+    builtin_intrinsic_catalog_test_expect(test, joined_targets == 1483 && outside_targets != 0 && full_ia32 == 2029,
+        "1,483 attested target names remain narrower than the full catalogue's 2,029 ia32 spellings");
 
     const char positive[] = "__builtin_ia32_enqcmd";
     const char positive64[] = "__builtin_ia32_prefetchi";
     const char generic_name[] = "__builtin_bswap32";
     const char bit_cast_name[] = "__builtin_bit_cast";
     const char va_list_name[] = "__builtin_va_list";
-    const char outside[] = "__builtin_ia32_pause";
+    const char outside[] = "__builtin_ia32_lfence";
     const char suffix[] = "__builtin_ia32_enqcmdtail";
     const char prefix[] = "x__builtin_ia32_enqcmd";
     const BuiltinIntrinsicInfo* positive_info = builtin_intrinsic_own_main_lookup(positive, sizeof(positive) - 1);
@@ -174,9 +174,27 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
     builtin_intrinsic_catalog_test_expect(test, generic_info != NULL && !builtin_intrinsic_own_main_x86_in_scope(generic_name, sizeof(generic_name) - 1) &&
         bit_cast_info != NULL && va_list_info != NULL && !builtin_intrinsic_own_main_x86_in_scope(bit_cast_name, sizeof(bit_cast_name) - 1) &&
         !builtin_intrinsic_own_main_x86_in_scope(va_list_name, sizeof(va_list_name) - 1), "generic membership and both explicit gaps never attest x86 call support");
+    // The prototype scope: the x86 records and the ten generic names no checker module owns, never another generic one.
+    uint32_t prototypes = 0;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_own_main_infos + i;
+        const bool in_scope = builtin_intrinsic_own_main_prototype_in_scope(info->name, info->name_length);
+        const bool target = builtin_intrinsic_own_main_x86_in_scope(info->name, info->name_length);
+        prototypes += in_scope && !target;
+        builtin_intrinsic_catalog_test_expect(test, !in_scope || target || cbuiltin_resolve(info->name, info->name_length) == CBUILTIN_NONE,
+            "a generic prototype-scope name is no builtin a checker module owns");
+    }
+    const char rotate[] = "__builtin_rotateleft8";
+    const char unpredictable[] = "__builtin_unpredictable";
+    builtin_intrinsic_catalog_test_expect(test, prototypes == 10 && builtin_intrinsic_own_main_prototype_in_scope(rotate, sizeof(rotate) - 1) &&
+        builtin_intrinsic_own_main_prototype_in_scope(unpredictable, sizeof(unpredictable) - 1) && !builtin_intrinsic_own_main_prototype_in_scope(generic_name, sizeof(generic_name) - 1) &&
+        !builtin_intrinsic_own_main_prototype_in_scope(bit_cast_name, sizeof(bit_cast_name) - 1) && !builtin_intrinsic_own_main_prototype_in_scope(va_list_name, sizeof(va_list_name) - 1) &&
+        !builtin_intrinsic_own_main_prototype_in_scope(rotate, sizeof(rotate) - 2) && builtin_intrinsic_own_main_prototype_in_scope(positive, sizeof(positive) - 1),
+        "the prototype scope is the x86 records and exactly the ten generic prototype-only names");
     builtin_intrinsic_catalog_test_expect(test, outside_info != NULL && strcmp(outside_info->shard, "x86") == 0 &&
         builtin_intrinsic_own_main_lookup(outside, sizeof(outside) - 1) == NULL && !builtin_intrinsic_own_main_x86_in_scope(outside, sizeof(outside) - 1),
-        "valid full-catalog pause target is rejected because it is absent from the frozen workload");
+        "valid full-catalog lfence target is rejected because it is absent from the frozen workload");
     builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_own_main_lookup(suffix, sizeof(positive) - 1) == positive_info &&
         builtin_intrinsic_own_main_x86_in_scope(suffix, sizeof(positive) - 1) &&
         builtin_intrinsic_own_main_lookup(prefix + 1, sizeof(positive) - 1) == positive_info,
@@ -398,7 +416,7 @@ static void builtin_intrinsic_catalog_test_pages(BuiltinIntrinsicCatalogTest* te
             }
         }
         const char scope_positive[] = "__builtin_ia32_enqcmd";
-        const char scope_outside[] = "__builtin_ia32_pause";
+        const char scope_outside[] = "__builtin_ia32_lfence";
         const char scope_prefix[] = "__builtin_ia32_";
         char* scope_payload = (char*)name_end - sizeof(scope_positive);
         memcpy(scope_payload, scope_positive, sizeof(scope_positive));
