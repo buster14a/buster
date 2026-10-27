@@ -13,16 +13,17 @@ struct CheckX86TestDiagnostic
     char message[256];
 };
 
-static CheckX86TestDiagnostic check_test_x86_diagnostic_read(const char* path)
+static CheckX86TestDiagnostic check_test_x86_diagnostic_read(const char* path, bool range_only)
 {
     CheckX86TestDiagnostic result = { 0 };
     FILE* file = fopen(path, "r");
     char line[2048];
     while (file != NULL && fgets(line, sizeof(line), file) != NULL)
     {
-        const char* message = strstr(line, "argument value ");
-        if (message != NULL && strstr(message, "outside the valid range") != NULL)
+        const char* message = strstr(line, range_only ? "argument value " : ": error: ");
+        if (message != NULL && (!range_only || strstr(message, "outside the valid range") != NULL))
         {
+            message += range_only ? 0 : sizeof(": error: ") - 1;
             result.count += 1;
             result.error = strstr(line, "error: ") != NULL;
             sscanf(line, "%*[^:]:%u:%u:", &result.line, &result.column);
@@ -41,6 +42,20 @@ static CheckX86TestDiagnostic check_test_x86_diagnostic_read(const char* path)
         result.count = UINT32_MAX;
     }
     return result;
+}
+
+static void check_test_x86_hard_diagnostic(CheckTest* test, const char* path, const char* name, const char* mode, uint32_t column)
+{
+    const CheckX86TestDiagnostic diagnostic = check_test_x86_diagnostic_read(path, false);
+    const char* expected = strcmp(mode, "Clang") == 0 ?
+                           "argument to '__builtin_ia32_cmpb128_mask' must be a constant integer" :
+                           "incompatible operand or conversion types";
+    char description[512];
+    snprintf(description, sizeof(description), "x86 %s, %s: hard diagnostic count %u at %u:%u: %.200s",
+             name, mode, diagnostic.count, diagnostic.line, diagnostic.column, diagnostic.message);
+    // These fixtures each have one source line after the common three-line prefix.
+    check_test_expect(test, diagnostic.count == 1 && diagnostic.error && diagnostic.line == 4 &&
+                           diagnostic.column == column && strcmp(diagnostic.message, expected) == 0, description);
 }
 
 static void check_test_x86_diagnostic_storage(CheckTest* test)
@@ -151,6 +166,7 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         uint32_t diagnostics;
         bool rejected;
         bool quiet;
+        uint32_t hard_columns[2]; // Clang and Buster locations for an expected hard-constraint error.
     } fixtures[] =
     {
         { "issue 487", "unsigned long long f(W a){return __builtin_ia32_ucmpb512_mask(a,a,8,~0ull);}", 1, true },
@@ -230,11 +246,11 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         { "warning policy", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 1, false },
         { "ignored policy", "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}", 0, false },
         { "push pop policy", "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return BAD;}\n#pragma GCC diagnostic pop\nunsigned g(V a){return BAD;}", 1, true },
-        { "ICE stays hard in dead code", "unsigned f(V a,int n){if(0)return __builtin_ia32_cmpb128_mask(a,a,n,65535);return 0;}", 0, true },
-        { "ICE stays hard in sizeof", "unsigned f(V a,int n){return sizeof(__builtin_ia32_cmpb128_mask(a,a,n,65535));}", 0, true },
+        { "ICE stays hard in dead code", "unsigned f(V a,int n){if(0)return __builtin_ia32_cmpb128_mask(a,a,n,65535);return 0;}", 0, true, false, { 35, 74 } },
+        { "ICE stays hard in sizeof", "unsigned f(V a,int n){return sizeof(__builtin_ia32_cmpb128_mask(a,a,n,65535));}", 0, true, false, { 37, 76 } },
         { "-w suppresses range", "unsigned f(V a){return BAD;}", 0, false, true },
         { "-w suppresses compound literal range", "unsigned f(V a){return (unsigned){BAD};}", 0, false, true },
-        { "ICE stays hard with -w", "unsigned f(V a,int n){return __builtin_ia32_cmpb128_mask(a,a,n,65535);}", 0, true, true },
+        { "ICE stays hard with -w", "unsigned f(V a,int n){return __builtin_ia32_cmpb128_mask(a,a,n,65535);}", 0, true, true, { 30, 69 } },
     };
     char directory[] = "/tmp/buster-x86-diagnostic-XXXXXX";
     const bool ready = mkdtemp(directory) != NULL;
@@ -255,15 +271,19 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         const bool written = length > 0 && (size_t)length < sizeof(source) && parse_test_write(path, source, (size_t)length);
         char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", fixtures[i].quiet ? "-w" : "-fsyntax-only", path, NULL };
         const int oracle_status = written ? object_test_run(arguments, output, errors) : -1;
-        const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors);
+        const CheckX86TestDiagnostic oracle = check_test_x86_diagnostic_read(errors, true);
         char description[512];
         snprintf(description, sizeof(description), "x86 %s: Clang status %d/ranges %u, expected %u/%u", fixtures[i].name,
                  oracle_status, oracle.count, fixtures[i].rejected, fixtures[i].diagnostics);
         check_test_expect(test, oracle_status == (fixtures[i].rejected ? 1 : 0) && oracle.count == fixtures[i].diagnostics, description);
+        if (fixtures[i].hard_columns[0] != 0)
+        {
+            check_test_x86_hard_diagnostic(test, errors, fixtures[i].name, "Clang", fixtures[i].hard_columns[0]);
+        }
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
         {
             const int status = written ? check_test_packed_run(NULL, path, output, errors, scalar != 0, fixtures[i].quiet) : -1;
-            const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors);
+            const CheckX86TestDiagnostic actual = check_test_x86_diagnostic_read(errors, true);
             const bool same = status == oracle_status && actual.count == oracle.count &&
                               (actual.count == 0 || (actual.line == oracle.line && actual.column == oracle.column &&
                                actual.error == oracle.error && strcmp(actual.message, oracle.message) == 0));
@@ -271,6 +291,10 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
                      fixtures[i].name, scalar, status, actual.count, actual.line, actual.column, oracle_status, oracle.count,
                      oracle.line, oracle.column, actual.message);
             check_test_expect(test, same, description);
+            if (fixtures[i].hard_columns[1] != 0)
+            {
+                check_test_x86_hard_diagnostic(test, errors, fixtures[i].name, scalar ? "scalar" : "vector", fixtures[i].hard_columns[1]);
+            }
         }
     }
     if (ready)
