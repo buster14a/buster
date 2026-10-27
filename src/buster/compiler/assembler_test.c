@@ -101,10 +101,10 @@ static const char asm_test_function[] =
 
 // High bases or XMM registers make both movq encodings equally long; segment offsets must not hide their row.
 static const char asm_test_segmented_movq[] =
-    "movq %fs:(%r8),%xmm0\\nmovq %gs:(%r8),%xmm0\\n"
-    "movq %fs:(%rax),%xmm8\\nmovq %gs:(%rax),%xmm8\\n"
-    "movq %xmm0,%fs:(%r8)\\nmovq %xmm0,%gs:(%r8)\\n"
-    "movq %xmm8,%fs:(%rax)\\nmovq %xmm8,%gs:(%rax)\\n";
+    "movq %fs:(%r8),%xmm0\nmovq %gs:(%r8),%xmm0\n"
+    "movq %fs:(%rax),%xmm8\nmovq %gs:(%rax),%xmm8\n"
+    "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
+    "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
 static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
 {
