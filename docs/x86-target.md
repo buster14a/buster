@@ -84,8 +84,10 @@ final resolved records pass `x86_target_validate` at the external-input
 boundary. Tests cover every indexed form, all six profiles, `.S` macro-driven
 instruction choices, option order and independent tuning.
 Initialization reuses syntax results only when the spelling pointer, family,
-vector length and encoding are identical, and computes operand roles only for
+vector length, encoding, register class, r/m class and syntax are identical, and computes operand roles only for
 admitted rows. ISA filtering and final record validation still apply per form.
+The canonical policy retains #565's baseline string instructions and 512-bit
+quadword moves; the latter require AVX512F, independently of AVX512DQ.
 The default 64-bit encoder initializer reuses FS templates for GS: their layouts,
 checks and fallback choices are identical, with only the optional segment byte
 changing. It checks that byte before patching both template halves and uses the

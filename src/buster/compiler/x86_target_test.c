@@ -102,6 +102,12 @@ static bool x86_target_test_forms(void)
         { X86_FORM_LOCK_CMPXCHG_M16_R16, 0 },
         { X86_FORM_LOCK_CMPXCHG_M32_R32, 0 },
         { X86_FORM_LOCK_CMPXCHG_M64_R64, 0 },
+        { X86_FORM_MOVS_Q, 0 },
+        { X86_FORM_REP_MOVS_B, 0 },
+        { X86_FORM_REP_STOS_D, 0 },
+        { X86_FORM_REP_LODS_W, 0 },
+        { X86_FORM_REPE_CMPS_D, 0 },
+        { X86_FORM_REPNE_SCAS_Q, 0 },
         { X86_FORM_POPCNT_R64_RM64, 1 },
         { X86_FORM_LAHF, 1 },
         { X86_FORM_PSHUFB_X_XM128, 1 },
@@ -121,6 +127,8 @@ static bool x86_target_test_forms(void)
         { X86_FORM_VFMADDSUB132PS_Z_Z_ZM512, 3 },
         { X86_FORM_VPADDD_Y_Y_YM256, 2 },
         { X86_FORM_KMOVW_K_K, 3 },
+        { X86_FORM_VMOVDQA64_Z_ZM512, 3 },
+        { X86_FORM_VMOVDQU64_ZM512_Z, 3 },
         { X86_FORM_KMOVB_K_K, 3 },
         { X86_FORM_KMOVD_K_K, 3 },
         { X86_FORM_KMOVQ_K_K, 3 },
@@ -212,7 +220,13 @@ static bool x86_target_test_forms(void)
     partial.features = BUSTER_X86_FEATURE(AVX512F);
     x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVW_K_K] && !vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVQ_K_K];
-    partial.features |= BUSTER_X86_FEATURE(AVX512DQ);
+    passed &= vector[X86_FORM_VMOVDQA64_Z_ZM512] && vector[X86_FORM_VMOVDQA64_ZM512_Z];
+    passed &= vector[X86_FORM_VMOVDQU64_Z_ZM512] && vector[X86_FORM_VMOVDQU64_ZM512_Z];
+    partial.features = BUSTER_X86_FEATURE(AVX512DQ);
+    x86_target_forms(&partial, vector);
+    passed &= !vector[X86_FORM_VMOVDQA64_Z_ZM512] && !vector[X86_FORM_VMOVDQA64_ZM512_Z];
+    passed &= !vector[X86_FORM_VMOVDQU64_Z_ZM512] && !vector[X86_FORM_VMOVDQU64_ZM512_Z];
+    partial.features |= BUSTER_X86_FEATURE(AVX512F);
     x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVD_K_K];
     passed &= vector[X86_FORM_VADDSS_X_X_XM32_EVEX] && !vector[X86_FORM_VADDPS_X_X_XM128_EVEX];

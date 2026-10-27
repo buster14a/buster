@@ -307,16 +307,20 @@ designs and the compilers already built this way.
 - `src/buster/compiler/c_check_program_asm.c` lowers GNU C's `asm` statements
   (#147). It places each operand by its constraint and substitutes the template
   as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
-  assembles it, by the checker's path, into records, branch columns and
-  references. The statement's code calls the result, a per-unit helper; a
-  template of no instructions, a barrier's, is no code at all.
+  assembles it, by the checker's path, into records, branch columns,
+  references and labels. The statement's code calls the result, a per-unit
+  helper; a template of no instructions, a barrier's, is no code at all. A
+  naked function's templates are its whole code. Templates' labels are local
+  symbols, and the other names they refer to are the unit's symbols of those
+  link names or undefined globals (`check_program_emit_asm_symbols`).
   `test-checker` runs each shape natively against clang -O0's build on both
-  paths and checks each refusal by name (`c_check_program_asm_test.c`).
-  `test-assembler` checks `asm_assemble_code`, and with `--cross-check` compares
-  the instructions it admits for templates with GNU as.
-  [The inline assembly guide](docs/c-inline-assembly.md) has the placement, the
-  substitution, the helper's frame, the refusals and what is pending: naked
-  functions and templates that refer to symbols.
+  paths and checks each refusal by name (`c_check_program_asm_test.c`);
+  `test-checker-driver` links and runs naked functions' labels and a template's
+  call of `puts` by the direct path. `test-assembler` checks
+  `asm_assemble_code`, and with `--cross-check` compares the instructions it
+  admits for templates with GNU as. [The inline assembly
+  guide](docs/c-inline-assembly.md) has the placement, the substitution, the
+  helper's frame, naked functions, names, the refusals and what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
   [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's

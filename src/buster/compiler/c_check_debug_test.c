@@ -231,7 +231,8 @@ static void check_debug_test_keep(CheckDebugTestTally* tally)
 
 // The fixtures: a header's function, a macro whose definition is lines above its use, a call across two lines, an
 // untaken branch, macros nested past the vector path's walk, an #include and a #line inside a body, a #line before a
-// function, and a computed goto through a static table of its labels' addresses (#431, #426's review). main returns 0.
+// function, a computed goto through a static table of its labels' addresses (#431, #426's review), and a naked function,
+// whose one row is its asm statement's, as clang's (#147). main returns 0.
 typedef struct CheckDebugTestFile CheckDebugTestFile;
 struct CheckDebugTestFile
 {
@@ -329,7 +330,14 @@ static const CheckDebugTestFile check_debug_test_files[] = {
         "    v = -v;\n"                                             // 7
         "high:\n"                                                   // 8
         "    return v;\n"                                           // 9
-        "}\n",                                                      // 10
+        "}\n"                                                       // 10
+        "#line 1 \"dbg_naked.c\"\n"
+        "__attribute__((naked)) int naked_seven(void)\n"            // dbg_naked.c:1
+        "{\n"                                                       // 2
+        "    __asm__(\n"                                            // 3
+        "        \"movl $7, %eax\\n\"\n"                             // 4
+        "        \"ret\\n\");\n"                                     // 5
+        "}\n",                                                      // 6
     },
 };
 
@@ -356,6 +364,7 @@ static const CheckDebugTestExpected check_debug_test_expected[] = {
     { "renamed", "dbg_renamed.c", 1, { 3, 4 }, { 2 } },
     { "same_named", "dbg_same.c", 10, { 12, 100, 101 }, { 11 } },
     { "dispatch", "dbg_goto.c", 1, { 4, 5, 7, 9, 10 }, { 2, 3, 6, 8 } },
+    { "naked_seven", "dbg_naked.c", 1, { 3 }, { 2, 4, 5, 6 } },
 };
 
 // One compilation through the pipeline, with source rows (the driver's steps to check_program_emit): everything the

@@ -3009,7 +3009,6 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
-#include "c_check_intrinsic_input.c"
 #include "c_check_asm_input.c"
 
 // A GNU attribute's items are never expressions of the graph: the attribute reader takes them by range. Marking

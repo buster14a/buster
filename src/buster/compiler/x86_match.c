@@ -308,7 +308,18 @@ static bool x86_match_supported(const X86FormDescription* form)
             "stmxcsr",
             "ldmxcsr",
             "pcmpeqd",
+            // And naked functions' (#147): the flags pushed and popped, SSE2's movq to and from an XMM register (which
+            // the AT&T parser chooses over mov's suffix by its operands), and the x87's loads and stores.
+            "pushfq",
+            "popfq",
+            "movq",
+            "fld",
+            "fstp",
     };
+    // The string instructions, which take no operands, alone or with the prefixes the catalogue spells with them: rep
+    // for the moves, stores and loads, repe and repne for the compares and scans. Each takes a size letter (b, w, d or
+    // q; the AT&T parser spells GNU as's l so).
+    static const char* const strings[] = { "movs", "stos", "lods", "cmps", "scas", "rep movs", "rep stos", "rep lods", "repe cmps", "repne cmps", "repe scas", "repne scas" };
     static const char* const sse[] =
         {
             "movaps",
@@ -358,6 +369,10 @@ static bool x86_match_supported(const X86FormDescription* form)
         {
             allowed = name[0] == integer[i][0] && strcmp(name, integer[i]) == 0;
         }
+        // Of movq, SSE2's forms alone, and of fld and fstp the memory ones: MMX's registers and the x87's stack aren't
+        // the parser's.
+        allowed &= strcmp(name, "movq") != 0 || form->reg == BUSTER_X86_OPERAND_V;
+        allowed &= (strcmp(name, "fld") != 0 && strcmp(name, "fstp") != 0) || form->rm == BUSTER_X86_OPERAND_M;
         for (uint32_t i = 0; !allowed && i < BUSTER_ARRAY_LENGTH(sse); i += 1)
         {
             allowed = name[0] == sse[i][0] && strcmp(name, sse[i]) == 0;
@@ -368,6 +383,12 @@ static bool x86_match_supported(const X86FormDescription* form)
         for (uint32_t i = 0; !allowed && suffix[0] != 0 && i < BUSTER_ARRAY_LENGTH(conditions); i += 1)
         {
             allowed |= strcmp(suffix, conditions[i]) == 0;
+        }
+        const uint64_t length = strlen(name);
+        for (uint32_t i = 0; !allowed && form->syntax == X86_SYNTAX_NONE && length > 1 && i < BUSTER_ARRAY_LENGTH(strings); i += 1)
+        {
+            const char size = name[length - 1];
+            allowed = length == strlen(strings[i]) + 1 && strncmp(name, strings[i], length - 1) == 0 && (size == 'b' || size == 'w' || size == 'd' || size == 'q');
         }
     }
     else if (form->family == BUSTER_X86_FAMILY_VEX && name[0] == 'v')
@@ -386,7 +407,7 @@ static bool x86_match_supported(const X86FormDescription* form)
             allowed |= i != 4 && i != 5 && name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vpaddd") == 0 || strcmp(name, "vpsubd") == 0 || strcmp(name, "vpxord") == 0;
-        allowed |= strcmp(name, "vmovdqa32") == 0 || strcmp(name, "vmovdqu32") == 0;
+        allowed |= strcmp(name, "vmovdqa32") == 0 || strcmp(name, "vmovdqu32") == 0 || strcmp(name, "vmovdqa64") == 0 || strcmp(name, "vmovdqu64") == 0;
     }
     // Near call/jump syntax must never select a far-pointer memory form merely because its memory width fits.
     allowed &= !((strcmp(name, "call") == 0 || strcmp(name, "jmp") == 0) && (form->encoding == BUSTER_X86_ENCODING_D3 || form->encoding == BUSTER_X86_ENCODING_D5));
@@ -419,7 +440,7 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
         {
             // Reuse only identical syntax inputs; keep this key in step with x86_match_supported.
             // Different spelling pointers recompute, even when their string contents are equal.
-            if (previous == 0 || previous->mnemonic != form->mnemonic || previous->family != form->family || previous->vector_length != form->vector_length || previous->encoding != form->encoding)
+            if (previous == 0 || previous->mnemonic != form->mnemonic || previous->family != form->family || previous->vector_length != form->vector_length || previous->encoding != form->encoding || previous->reg != form->reg || previous->rm != form->rm || previous->syntax != form->syntax)
             {
                 supported = x86_match_supported(form);
                 previous = form;
@@ -773,7 +794,12 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 // Both candidate builders have crossed the complete x86_validate boundary. The scalar API would
                 // repeat that validation merely to get this length; no record changes between the two boundaries.
                 const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
-                if (length > 0 && (!result.found || length < result.length))
+                // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
+                // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
+                const uint32_t chosen = result.instruction.form & BUSTER_X86_FORM_NUMBER;
+                const uint32_t number = instruction.form & BUSTER_X86_FORM_NUMBER;
+                const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
+                if (length > 0 && (!result.found || length < result.length || (length == result.length && movq)))
                 {
                     result.instruction = instruction;
                     result.length = (uint32_t)length;

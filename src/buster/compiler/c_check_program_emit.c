@@ -254,10 +254,10 @@ static void check_program_lanes_release(CheckProgramLanes* lanes)
 }
 
 // A body's code, as its lane made it (check_program_emit_code): its bytes, encoded after branch sizing; each marked
-// instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), for the
-// merge's link; with -g its raw rows, with room for its entries, its prologue's, its epilogue's and the slack; and its
-// failure after Tier 0, as source order's emission reports it (CHECK_PROGRAM_OK for none): at its declaration but for a
-// resource's.
+// instruction's end (x86_encode's fixup ends) and each label's offset (or UINT32_MAX for a record past the code), and a
+// naked function's, each of its templates' labels' (CheckProgramNaked.labels), for the merge's link; with -g its raw
+// rows, with room for its entries, its prologue's, its epilogue's and the slack; and its failure after Tier 0, as source
+// order's emission reports it (CHECK_PROGRAM_OK for none): at its declaration but for a resource's.
 typedef struct CheckEmitBody CheckEmitBody;
 struct CheckEmitBody
 {
@@ -265,6 +265,7 @@ struct CheckEmitBody
     uint64_t length;
     uint32_t* fixup_ends;
     uint32_t* label_offsets;
+    uint32_t* asm_offsets;
     uint32_t* row_offsets;
     uint32_t* row_tokens;
     uint32_t row_count;
@@ -367,10 +368,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     CheckEmitBody* body = run->bodies + b;
     Arena* scratch = lane->scratch;
     Arena* bytes = lane->bytes;
+    const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
     *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
     // What the merge reads stays on the lane's scratch; the offsets don't.
     body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
+    body->asm_offsets = naked != 0 && naked->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, naked->label_count) : 0;
     const uint64_t rows = run->sources ? (uint64_t)code->entry_count + 2 + BUSTER_CHECK_DEBUG_SLACK : 0;
     body->row_offsets = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
     body->row_tokens = run->sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, rows) : 0;
@@ -380,7 +383,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity, 16);
     bool valid = offsets != 0 && body->fixup_ends != 0 && encoded != 0 && (code->label_count == 0 || body->label_offsets != 0) &&
-                 (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0));
+                 (naked == 0 || naked->label_count == 0 || body->asm_offsets != 0) && (!run->sources || (body->row_offsets != 0 && body->row_tokens != 0));
     body->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_RESOURCE;
     if (valid && run->verify && x86_validate(code->records, code->count) != code->count)
     {
@@ -407,7 +410,14 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             check_program_emit_body_rows(body, program, run->parser, run->lowered->entry_tokens[b], code, b, offsets, (uint32_t)length, run->scalar);
             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
         }
-        if (valid && run->unwind)
+        if (valid && run->unwind && naked != 0)
+        {
+            // A naked function's code is its templates', which say nothing of its frame: its unwind entry, as clang's, has
+            // the call's rule alone, whatever they push.
+            valid = length <= INT32_MAX;
+            run->frames[b] = (UnwindFunction){ .size = (uint32_t)length };
+        }
+        else if (valid && run->unwind)
         {
             // A prologue or epilogue that isn't the frame Tier 0 published is the compiler's own failure; and with --verify,
             // so is a frame the analyzer proves otherwise from the records, where it takes the function (a fixed frame's,
@@ -430,6 +440,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             for (uint32_t k = 0; k < code->label_count; k += 1)
             {
                 body->label_offsets[k] = code->label_records[k] < code->count ? offsets[code->label_records[k]] : UINT32_MAX;
+            }
+            // A template's label may be its code's end.
+            for (uint32_t k = 0; naked != 0 && k < naked->label_count; k += 1)
+            {
+                const uint32_t record = naked->labels[k].record;
+                body->asm_offsets[k] = record < code->count ? offsets[record] : record == code->count ? (uint32_t)length : UINT32_MAX;
             }
         }
         else
@@ -470,7 +486,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
         function->symbol_count = run->access_count;
         // The entries' first records only for source rows.
         function->entry_records = run->sources;
-        run->codes[b] = run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
+        // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's.
+        const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+        run->codes[b] = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(function, lane->scratch) : tier0_compile(function, lane->scratch);
         check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
         if (run->codes[b].error != TIER0_OK)
         {
@@ -643,6 +661,106 @@ static void check_program_emit_alone(CheckEmitRun* run)
     {
         check_program_emit_part_refused(part);
     }
+}
+
+// The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: a label's a local symbol of its
+// own, which the merge defines where its template's code puts it; another name's the program's symbol of that link name
+// (its asm label or its identifier: a name the emission makes is no template's to know), found in one pass over the
+// program's symbols; or else an undefined global symbol of its own, as GNU as and clang make one for a name the unit
+// doesn't define. The symbols of its own are numbered from `first` in the names' order, `*own` of them, and `externals`
+// (with binding, or 0) gets each undefined one's spelling. A label with one of the program's symbols' names is refused
+// (`*reason`), as GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is
+// scalar: a unit's templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
+static bool check_program_emit_asm_symbols(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, const String8* symbol_names,
+                                           const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own, String8* externals,
+                                           uint32_t* external_count, const char** reason, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = asms->name_count;
+    uint32_t slots = 2;
+    while (slots < 2 * (uint64_t)count)
+    {
+        slots *= 2;
+    }
+    const uint64_t mark = scratch->length;
+    uint32_t* table = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    bool valid = table != 0;
+    // Bit i: a name of i bytes (63 for 63 and more), as a symbol's must be to be looked up.
+    uint64_t lengths = 0;
+    if (valid)
+    {
+        memset(table, 0, (uint64_t)slots * sizeof(uint32_t));
+        for (uint32_t n = 0; n < count; n += 1)
+        {
+            const String8 spelling = asms->names[n].spelling;
+            uint32_t slot = (uint32_t)link_hash((const uint8_t*)spelling.pointer, (uint32_t)spelling.length) & (slots - 1);
+            while (table[slot] != 0)
+            {
+                slot = (slot + 1) & (slots - 1);
+            }
+            table[slot] = n + 1;
+            symbols[n] = 0;
+            lengths |= UINT64_C(1) << (spelling.length < 63 ? spelling.length : 63);
+        }
+    }
+    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        const String8 renamed = symbol_names[s + 1];
+        // The names the source gives (check_program_emit_given_name's): not a literal's, a compound literal's or a
+        // block-scope static's, which the emission makes.
+        const bool given = declaration != BUSTER_CHECK_NONE && !input->compound_objects[declaration] &&
+                           !(renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
+        const uint32_t identifier = given ? parser->tokens.names[declaration] : 0;
+        const String8 spelling = !given ? (String8){ 0 } : renamed.length != 0 ? renamed :
+                                 (String8){ .pointer = (char*)intern_bytes(identifiers, identifier), .length = intern_length(identifiers, identifier) };
+        if (given && (lengths >> (spelling.length < 63 ? spelling.length : 63) & 1) != 0)
+        {
+            uint32_t slot = (uint32_t)link_hash((const uint8_t*)spelling.pointer, (uint32_t)spelling.length) & (slots - 1);
+            while (table[slot] != 0 && (asms->names[table[slot] - 1].spelling.length != spelling.length ||
+                                        memcmp(asms->names[table[slot] - 1].spelling.pointer, spelling.pointer, spelling.length) != 0))
+            {
+                slot = (slot + 1) & (slots - 1);
+            }
+            const uint32_t n = table[slot] != 0 ? table[slot] - 1 : BUSTER_CHECK_NONE;
+            if (n != BUSTER_CHECK_NONE && asms->names[n].label)
+            {
+                *reason = "inline assembly labels named as the unit's symbols";
+                valid = false;
+            }
+            else if (n != BUSTER_CHECK_NONE)
+            {
+                symbols[n] = s + 1;
+            }
+        }
+    }
+    for (uint32_t n = 0; valid && n < count; n += 1)
+    {
+        if (asms->names[n].label || symbols[n] == 0)
+        {
+            symbols[n] = first + *own;
+            *own += 1;
+            if (!asms->names[n].label && externals != 0)
+            {
+                externals[*external_count] = asms->names[n].spelling;
+                *external_count += 1;
+            }
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
+// The instructions of `code` that have references (x86_encode's marked ones): its references' distinct instructions. A
+// template's may have two, a displacement's and an immediate's; Tier 0's have one each.
+static uint64_t check_program_emit_marked(const Tier0Code* code)
+{
+    uint64_t marked = 0;
+    for (uint32_t i = 0; i < code->reference_count; i += 1)
+    {
+        marked += i == 0 || code->references[i].instruction != code->references[i - 1].instruction;
+    }
+    return marked;
 }
 
 // The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
@@ -1070,7 +1188,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // functions' the lowering calls. With unwind tables, it has room for their EH_FRAME atom and a fixup per function.
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
-    String8* externals = binding != NULL && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + result->lowered.runtime_symbol_count + 1) : 0;
+    const CheckProgramAsms* asms = &result->lowered.asms;
+    String8* externals = binding != NULL && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + result->lowered.runtime_symbol_count +
+                                                                                                    asms->name_count + 1) : 0;
     uint32_t external_count = 0;
     valid = valid && (binding == NULL || externals != 0);
     for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
@@ -1090,8 +1210,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
         externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
     }
-    const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
-                                                            (LinkCapacity){ 0 };
     // The jump tables: an atom each, a fixup per entry, and their symbols and their labels'.
     uint64_t table_entries = 0;
     for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
@@ -1099,11 +1217,28 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         table_entries += result->lowered.tables[t].count;
     }
     const uint64_t switch_symbols = valid ? (uint64_t)result->lowered.table_count + result->lowered.case_symbol_count : 0;
+    // The asm templates' names' symbols (check_program_emit_asm_symbols), their own after the runtime's and the jump
+    // tables' (CheckProgramLowered.case_symbol_base): its undefined globals among the names the unit refers to without
+    // defining.
+    const SymbolId asm_first = (SymbolId)(program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + 1 + switch_symbols);
+    SymbolId* asm_symbols = valid && asms->name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, asms->name_count) : 0;
+    uint32_t asm_own = 0;
+    valid = valid && (asms->name_count == 0 || asm_symbols != 0);
+    if (valid && asms->name_count != 0)
+    {
+        const char* reason = NULL;
+        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, asms, asm_first, asm_symbols, &asm_own, externals, &external_count,
+                                               &reason, scratch);
+        result->status = valid ? result->status : reason != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
+        result->reason = reason != NULL ? reason : result->reason;
+    }
+    const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
+                                                            (LinkCapacity){ 0 };
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + runtime.atoms + (frames != 0 ? 1 : 0) + (valid ? result->lowered.table_count : 0);
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
-    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.symbols;
-    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + runtime.names;
+    const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
+    const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
             name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
     const LinkCapacity capacity = {
@@ -1260,6 +1395,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint8_t flags = BUSTER_LINK_SYMBOL_LOCAL | (table ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_NOTYPE);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == result->lowered.case_symbol_base + k;
     }
+    // The asm templates' own symbols, in their names' order, neither typed: a label local, the program's definition
+    // (bind.c's), and an undefined name global.
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        if (asm_symbols[n] >= asm_first)
+        {
+            const String8 spelling = asms->names[n].spelling;
+            const NameId name = link_add_name(&result->link, (const uint8_t*)spelling.pointer, (uint32_t)spelling.length);
+            const uint8_t flags = BUSTER_LINK_SYMBOL_NOTYPE | (asms->names[n].label ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_GLOBAL);
+            valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == asm_symbols[n];
+            if (valid && binding != NULL && asms->names[n].label)
+            {
+                result->link.symbols.source[asm_symbols[n]] = BUSTER_LINK_SOURCE_PROGRAM;
+            }
+        }
+    }
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -1298,8 +1449,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         for (uint32_t b = run.parts[p].lower.first; run.parts[p].lower.runtime_count != 0 && b < run.parts[p].lower.end; b += 1)
         {
+            // A naked function's references are its templates' names (mapped below), which no runtime function's are.
             const Tier0Code* code = run.codes + b;
-            for (uint32_t i = 0; i < code->reference_count; i += 1)
+            const bool naked = asms->naked != 0 && asms->naked[b].planned;
+            for (uint32_t i = 0; !naked && i < code->reference_count; i += 1)
             {
                 const uint64_t provisional = (uint64_t)code->references[i].target - shared.provisional_runtimes;
                 code->references[i].target = provisional < CHECK_LOWER_RUNTIMES ? result->lowered.runtime_symbols[provisional] : code->references[i].target;
@@ -1319,6 +1472,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             code->references[i].target = table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : code->references[i].target;
         }
     }
+    // Every reference of an asm template's (an asm helper's or a naked function's) takes its name's symbol: its target is
+    // the name's index (check_program_asm_names).
+    for (uint32_t f = 0; valid && asms->name_count != 0 && f < count + helpers->count; f += 1)
+    {
+        const bool assembly = f < count ? asms->naked != 0 && asms->naked[f].planned : helpers->items[f - count].assembly != 0;
+        const Tier0Code* code = f < count ? run.codes + f : &helpers->items[f - count].code;
+        for (uint32_t i = 0; valid && assembly && i < code->reference_count; i += 1)
+        {
+            valid = code->references[i].target < asms->name_count;
+            code->references[i].target = valid ? asm_symbols[code->references[i].target] : 0;
+        }
+    }
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
@@ -1333,11 +1498,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint8_t alignment = source_body && alignments[symbol] > 5 ? alignments[symbol] - 1 : 4;
         const uint64_t work_mark = scratch->length;
         CheckEmitBody* body = source_body ? run.bodies + b : &helper_body;
+        // An asm template's code: a naked function's or an asm statement's helper's, whose labels are defined below.
+        const bool assembly = source_body ? asms->naked != 0 && asms->naked[b].planned : helpers->items[b - count].assembly != 0;
+        uint32_t* offsets = 0;
         if (!source_body)
         {
             // A helper's code, encoded on the calling thread as a body's is on its lane, its frame after the bodies'.
             helper_body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK };
-            uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
+            offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)code->count + 1);
             body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
             const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
             const uint64_t before = bytes->length;
@@ -1394,7 +1562,23 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
             valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, 0, body->length) &&
-                    link_add_code_fixups(&result->link, atom, code->records, code->count, body->fixup_ends, code->reference_count, code->references, code->reference_count);
+                    link_add_code_fixups(&result->link, atom, code->records, code->count, body->fixup_ends,
+                                         assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
+            // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
+            // program's definitions.
+            const CheckProgramAsmLabel* asm_labels = !assembly ? 0 : source_body ? asms->naked[b].labels : asms->plans[helpers->items[b - count].assembly - 1].labels;
+            const uint32_t asm_label_count = !assembly ? 0 : source_body ? asms->naked[b].label_count : asms->plans[helpers->items[b - count].assembly - 1].label_count;
+            for (uint32_t k = 0; valid && k < asm_label_count; k += 1)
+            {
+                const uint32_t record = asm_labels[k].record;
+                const uint32_t offset = source_body ? body->asm_offsets[k] : record < code->count ? offsets[record] : record == code->count ? (uint32_t)body->length : UINT32_MAX;
+                const SymbolId label = asm_symbols[asm_labels[k].name];
+                valid = offset != UINT32_MAX && link_define_symbol(&result->link, label, atom, offset, 0);
+                if (valid)
+                {
+                    result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
+                }
+            }
             // Each label at its first record's offset, after branch sizing: the program's definition.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)
             {

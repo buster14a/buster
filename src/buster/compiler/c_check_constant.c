@@ -961,6 +961,29 @@ static uint32_t check_constant_separator(CheckConstantInput* input, uint32_t fir
     return check_constant_punctuation(input->reader->parser, first, end, PARSE_KIND_COMMA);
 }
 
+#include "c_check_intrinsic_input.c"
+
+// Only a direct call captured by the intrinsic adapter supplies a prototype. During source-order declaration
+// queries prepare that same record; after binding replay use the captured record, since its scope has closed.
+// The constant reader checks it as an ordinary call, retaining a nonconstant result with the exact return type.
+static TypeId check_constant_intrinsic_type(CheckConstantInput* input, uint32_t token, uint32_t handle)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    TypeId type = 0;
+    if (handle == 0 && parser->tree.parents[token] < input->end && check_input_intrinsic_call_shape(parser, token))
+    {
+        const uint32_t close = parser->tree.parents[token];
+        const bool prepared = input->cached ? reader->output->intrinsic_ids != 0 && reader->output->intrinsic_ids[close] != 0 :
+                              check_input_intrinsic_prepare(reader, token) == CHECK_INPUT_INTRINSIC_PREPARED;
+        if (prepared)
+        {
+            type = check_input_intrinsic_type(reader, token);
+        }
+    }
+    return type;
+}
+
 static bool check_constant_type_start(const Parser* parser, uint32_t token)
 {
     const uint8_t kind = parser->tokens.kinds[token];
@@ -1392,13 +1415,14 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
         {
             const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
             if (builtin != CBUILTIN_NONE)
             {
                 input->syntax[index] = true;
             }
-            else if (input->cached)
+            else if (input->cached || intrinsic != 0)
             {
-                valid = reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND;
+                valid = intrinsic != 0 || reader->declared_types[token] != 0 || role == PARSE_ROLE_OPERAND;
             }
             else if (handle != 0)
             {
@@ -1783,7 +1807,37 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         pending_arguments |= action->arguments[i].overload_head != 0;
     }
-    if (head != 0 || pending_arguments)
+    const TypeId intrinsic = action->op == CHECK_OP_CALL ? check_input_intrinsic_type(reader, callee) : 0;
+    if (intrinsic != 0)
+    {
+        const uint32_t close = reader->parser->tree.parents[callee];
+        const CheckInputIntrinsicCall* source = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;
+        const CheckInputIntrinsicDeclaration* declaration = reader->output->intrinsic_declarations + source->declaration;
+        uint64_t ice_arguments = 0;
+        for (uint32_t i = 0; i < action->argument_count && i < BUSTER_CHECK_BUILTIN_X86_ARGUMENTS; i += 1)
+        {
+            if (check_input_integer_ice(reader, action->arguments + i))
+            {
+                ice_arguments |= UINT64_C(1) << i;
+            }
+        }
+        const CheckX86Call call =
+        {
+            .info = declaration->info,
+            .required_ice_arguments = declaration->types.ice_parameters,
+            .ice_arguments = ice_arguments,
+            // Type-only queries still check hard ICE/SAE/scale constraints. Runtime range events belong to
+            // the retained graph, including when this query finishes a declaration before graph construction.
+            .constant_evaluated_context = true,
+            .runtime_diagnostic_suppressed = true,
+        };
+        CheckAction typed = *action;
+        typed.type = intrinsic;
+        CheckBuiltinX86Result result;
+        check_x86_action(reader->types, &call, &typed, &result);
+        *checked = result.action;
+    }
+    else if (head != 0 || pending_arguments)
     {
         const CheckGraph* graph = &reader->output->graph;
         check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
@@ -1905,6 +1959,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             continue;
         }
         const uint8_t kind = parser->tokens.kinds[token];
+        const TypeId intrinsic = role == PARSE_ROLE_OPERAND && kind == PARSE_KIND_IDENTIFIER ? check_input_intrinsic_type(reader, token) : 0;
         CheckValue proof = { 0 };
         uint32_t first = BUSTER_CHECK_NONE;
         uint32_t last = BUSTER_CHECK_NONE;
@@ -1981,6 +2036,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 };
                 produced = true;
             }
+        }
+        else if (intrinsic != 0)
+        {
+            input->values[index] = (CheckValue){ .type = intrinsic, .category = CHECK_FUNCTION };
+            produced = true;
         }
         else if (role == PARSE_ROLE_OPERAND && kind == PARSE_KIND_IDENTIFIER)
         {
@@ -2636,6 +2696,17 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
             }
             token = builtin == CBUILTIN_BIT_CAST ? check_constant_punctuation(parser, open + 1, close, PARSE_KIND_COMMA) + 1 : open + 1;
         }
+        else if (operand && kind == PARSE_KIND_IDENTIFIER && check_input_intrinsic_type(reader, token) != 0)
+        {
+            ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
+            values[value_count++] = (CheckValue){ .type = check_input_intrinsic_type(reader, token), .category = CHECK_FUNCTION };
+            if (proofs != 0)
+            {
+                proofs[value_count - 1] = values[value_count - 1];
+            }
+            operand = false;
+            token += 1;
+        }
         else if (operand && kind == PARSE_KIND_IDENTIFIER)
         {
             const uint32_t declaration = reader->output->declarations[token];
@@ -3003,14 +3074,15 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
             const uint32_t handle = input->cached ? 0 : c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
             const bool type = handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF;
             const uint16_t builtin = !input->syntax[index] ? check_constant_integer_builtin(input, token, handle) : CBUILTIN_NONE;
+            const TypeId intrinsic = !input->syntax[index] && builtin == CBUILTIN_NONE ? check_constant_intrinsic_type(input, token, handle) : 0;
             if (builtin != CBUILTIN_NONE)
             {
                 input->syntax[index] = true;
             }
             else
             {
-                valid = input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
-                        handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index];
+                valid = intrinsic != 0 || (input->cached ? reader->declared_types[token] != 0 || !input->syntax[index] :
+                        handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {
