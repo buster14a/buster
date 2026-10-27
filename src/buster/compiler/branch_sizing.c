@@ -33,19 +33,24 @@
 // takes time linear in the branches whatever the function's shape.
 //
 // Entry points: size_branches (the vector path), size_branches_scalar (the scalar path: the same phases, a branch or a
-// record at a time, its twin and the tests' oracle; both give identical results, rounds included) and
-// branch_sizing_validate. Like x86_encode, the two paths are the code generator's, internal functions: they take
-// records and branch columns that branch_sizing_validate accepts, which the code generator makes so, and check nothing
-// about them in their loops (#182's rule for the encoder: validation belongs to the tests and to debugging). They
+// record at a time, its twin and the tests' oracle; both give identical results, rounds included),
+// branch_sizing_validate, and branch_sizing_validate_branches with its twin branch_sizing_validate_branches_scalar.
+// Like x86_encode, the two paths are the code generator's, internal functions: they take records and branch columns
+// that branch_sizing_validate accepts, which the code generator makes so, and check nothing about them in their loops
+// (#182's rule for the encoder: validation belongs to the tests and to debugging). branch_sizing_validate_branches is
+// the part of that check a code generator whose records are valid by construction still needs: the branch columns,
+// which the two paths read and write by, without x86_validate (the C driver's emission of Tier 0's code, #532). They
 // require x86_encoder_initialize and take their memory from the thread's scratch arenas (lane.c). Files that use them
 // include this file after x86_64_encoder.c and lane.c; every function in it is static.
 //
 // Layout, in this order:
-//   - API: BranchSizingError, BranchSizing, BranchSizingCheck, size_branches, size_branches_scalar and
-//     branch_sizing_validate.
-//   - Forms: the branches' rel8 forms (branch_sizing_forms), branch_sizing_growth and the rel8 range.
+//   - API: BranchSizingError, BranchSizing, BranchSizingCheck, size_branches, size_branches_scalar,
+//     branch_sizing_validate, branch_sizing_validate_branches and branch_sizing_validate_branches_scalar.
+//   - Forms: the branches' rel8 forms (branch_sizing_forms, and as a bitmap branch_sizing_form_words),
+//     branch_sizing_growth and the rel8 range.
 //   - Columns: BranchSizingColumns and branch_sizing_allocate.
-//   - Validation: branch_sizing_check and branch_sizing_validate.
+//   - Validation: branch_sizing_check, branch_sizing_validate_branches_scalar, branch_sizing_validate_branches and
+//     branch_sizing_validate.
 //   - The phases, each a vector function and a scalar one: lengths (x86_measure's offsets: the first round), setup (D0,
 //     each branch's growth if it's long, and the first round's growths), ranks (only when a branch grew), round, prefix,
 //     the worklist's marks (branch_sizing_mark_vector and branch_sizing_mark_scalar) and offsets; then the shared ones,
@@ -65,13 +70,13 @@ typedef enum BranchSizingError
     BRANCH_SIZING_OK,
     // More records than x86_encode takes in one call (BUSTER_X86_ENCODER_MAX_INSTRUCTIONS).
     BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS,
-    // branch_sizing_validate's alone: a branch's record index isn't below the record count, or isn't above the branch
-    // before it's (`index` is the branch's).
+    // The validation's alone (branch_sizing_validate's and branch_sizing_validate_branches'): a branch's record index
+    // isn't below the record count, or isn't above the branch before it's (`index` is the branch's).
     BRANCH_SIZING_ERROR_BRANCH_INDEX,
-    // branch_sizing_validate's alone: a branch's target is past the record count (`index` is the branch's).
+    // The validation's alone: a branch's target is past the record count (`index` is the branch's).
     BRANCH_SIZING_ERROR_TARGET,
-    // branch_sizing_validate's alone: a branch's record isn't JMP_REL8 or a Jcc_REL8, without a segment override or the
-    // fixup flag (`index` is the branch's).
+    // The validation's alone: a branch's record isn't JMP_REL8 or a Jcc_REL8, without a segment override or the fixup
+    // flag (`index` is the branch's).
     BRANCH_SIZING_ERROR_FORM,
     // branch_sizing_validate's alone: x86_validate rejects a record (`index` is the record's).
     BRANCH_SIZING_ERROR_INVALID_INSTRUCTION,
@@ -123,6 +128,16 @@ static __attribute__((unused)) BranchSizing size_branches_scalar(X86Instruction*
 // (x86_validate). Returns the first error, or BRANCH_SIZING_OK. Requires x86_encoder_initialize.
 static __attribute__((unused)) BranchSizingCheck branch_sizing_validate(const X86Instruction* records, uint64_t count, const uint32_t* branches,
                                                                         const uint32_t* targets, uint64_t branch_count);
+// branch_sizing_validate without x86_validate: the record count, then each branch in order, with the same first error,
+// but it takes records x86_validate would reject. For a code generator whose records are valid by construction, which
+// still owes size_branches branch columns inside the function: past them, the paths would read and write outside the
+// records and their offsets. 16 branches at a time, with the branch records' forms gathered.
+static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* records, uint64_t count, const uint32_t* branches,
+                                                                                 const uint32_t* targets, uint64_t branch_count);
+// The same, a branch at a time: the vector path's twin and oracle, and branch_sizing_validate's first part.
+static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches_scalar(const X86Instruction* records, uint64_t count,
+                                                                                        const uint32_t* branches, const uint32_t* targets,
+                                                                                        uint64_t branch_count);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Forms
@@ -189,6 +204,59 @@ BUSTER_BRANCH_SIZING_FOLLOWS(GE)
 BUSTER_BRANCH_SIZING_FOLLOWS(LE)
 BUSTER_BRANCH_SIZING_FOLLOWS(G)
 #undef BUSTER_BRANCH_SIZING_FOLLOWS
+
+// The same forms as a bitmap of the BUSTER_BRANCH_SIZING_FORM_WINDOW form numbers from JMP_REL8's, a dword per 32 of
+// them, in which branch_sizing_validate_branches looks a form up with vpermd: bit f - JMP_REL8 is set for each form f
+// of branch_sizing_forms (which test-branch-sizing compares form by form).
+#define BUSTER_BRANCH_SIZING_FORM_WINDOW 512
+#define BUSTER_BRANCH_SIZING_FORM_BIT(name, word) \
+    ((X86_FORM_##name##_REL8 - X86_FORM_JMP_REL8) / 32 == (word) ? 1u << (X86_FORM_##name##_REL8 - X86_FORM_JMP_REL8) % 32 : 0u)
+#define BUSTER_BRANCH_SIZING_FORM_WORD(word)                                                                                                         \
+    (BUSTER_BRANCH_SIZING_FORM_BIT(JMP, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JO, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JNO, word) |                 \
+     BUSTER_BRANCH_SIZING_FORM_BIT(JB, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JAE, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JE, word) |                  \
+     BUSTER_BRANCH_SIZING_FORM_BIT(JNE, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JBE, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JA, word) |                 \
+     BUSTER_BRANCH_SIZING_FORM_BIT(JS, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JNS, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JP, word) |                  \
+     BUSTER_BRANCH_SIZING_FORM_BIT(JNP, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JL, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JGE, word) |                 \
+     BUSTER_BRANCH_SIZING_FORM_BIT(JLE, word) | BUSTER_BRANCH_SIZING_FORM_BIT(JG, word))
+// Each jcc's rel8 form is in the bitmap's window, past JMP_REL8 (whose bit is the first).
+#define BUSTER_BRANCH_SIZING_WINDOWED(CC) _Static_assert((unsigned)(X86_FORM_J##CC##_REL8 - X86_FORM_JMP_REL8) < BUSTER_BRANCH_SIZING_FORM_WINDOW, "a jcc's rel8 form is in the bitmap");
+static const uint32_t branch_sizing_form_words[BUSTER_BRANCH_SIZING_FORM_WINDOW / 32] __attribute__((aligned(64))) = {
+    BUSTER_BRANCH_SIZING_FORM_WORD(0),
+    BUSTER_BRANCH_SIZING_FORM_WORD(1),
+    BUSTER_BRANCH_SIZING_FORM_WORD(2),
+    BUSTER_BRANCH_SIZING_FORM_WORD(3),
+    BUSTER_BRANCH_SIZING_FORM_WORD(4),
+    BUSTER_BRANCH_SIZING_FORM_WORD(5),
+    BUSTER_BRANCH_SIZING_FORM_WORD(6),
+    BUSTER_BRANCH_SIZING_FORM_WORD(7),
+    BUSTER_BRANCH_SIZING_FORM_WORD(8),
+    BUSTER_BRANCH_SIZING_FORM_WORD(9),
+    BUSTER_BRANCH_SIZING_FORM_WORD(10),
+    BUSTER_BRANCH_SIZING_FORM_WORD(11),
+    BUSTER_BRANCH_SIZING_FORM_WORD(12),
+    BUSTER_BRANCH_SIZING_FORM_WORD(13),
+    BUSTER_BRANCH_SIZING_FORM_WORD(14),
+    BUSTER_BRANCH_SIZING_FORM_WORD(15),
+};
+BUSTER_BRANCH_SIZING_WINDOWED(O)
+BUSTER_BRANCH_SIZING_WINDOWED(NO)
+BUSTER_BRANCH_SIZING_WINDOWED(B)
+BUSTER_BRANCH_SIZING_WINDOWED(AE)
+BUSTER_BRANCH_SIZING_WINDOWED(E)
+BUSTER_BRANCH_SIZING_WINDOWED(NE)
+BUSTER_BRANCH_SIZING_WINDOWED(BE)
+BUSTER_BRANCH_SIZING_WINDOWED(A)
+BUSTER_BRANCH_SIZING_WINDOWED(S)
+BUSTER_BRANCH_SIZING_WINDOWED(NS)
+BUSTER_BRANCH_SIZING_WINDOWED(P)
+BUSTER_BRANCH_SIZING_WINDOWED(NP)
+BUSTER_BRANCH_SIZING_WINDOWED(L)
+BUSTER_BRANCH_SIZING_WINDOWED(GE)
+BUSTER_BRANCH_SIZING_WINDOWED(LE)
+BUSTER_BRANCH_SIZING_WINDOWED(G)
+#undef BUSTER_BRANCH_SIZING_WINDOWED
+#undef BUSTER_BRANCH_SIZING_FORM_WORD
+#undef BUSTER_BRANCH_SIZING_FORM_BIT
 _Static_assert(__builtin_offsetof(X86Instruction, form) == 12, "the vector path gathers a record's form as its fourth dword");
 _Static_assert(BUSTER_X86_ENCODER_MAX_INSTRUCTIONS < (1u << 30), "a record's index, doubled for the form's gather, fits in a signed dword");
 
@@ -308,7 +376,8 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Validation: the tests' and debugging's, which the two paths leave to the code generator.
+// Validation: the tests' and debugging's, which the two paths leave to the code generator; and its branch columns'
+// part, which a code generator of valid records runs.
 
 // Branch k's error, or BRANCH_SIZING_OK: its record must be below `count` and above the branch before it's, its
 // target at most `count`, and its record's form one of the branches' rel8 forms.
@@ -336,27 +405,84 @@ static BranchSizingError branch_sizing_check(const X86Instruction* records, uint
     return result;
 }
 
-static BranchSizingCheck branch_sizing_validate(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
-                                                uint64_t branch_count)
+static BranchSizingCheck branch_sizing_validate_branches_scalar(const X86Instruction* records, uint64_t count, const uint32_t* branches,
+                                                                const uint32_t* targets, uint64_t branch_count)
 {
     BranchSizingCheck result = {
-        .error = BRANCH_SIZING_OK,
+        .error = count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ? BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS : BRANCH_SIZING_OK,
     };
-    if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
-    {
-        result.error = BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS;
-    }
     for (uint64_t k = 0; result.error == BRANCH_SIZING_OK && k < branch_count; k += 1)
     {
         result.error = branch_sizing_check(records, count, branches, targets, k);
         result.index = k;
     }
+    result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
+    return result;
+}
+
+// 16 branches at a time: each lane's errors as masks, and the first lane with one, its error the first of the scalar
+// check's order (the index's, the target's, the form's). The forms are gathered only for records below the count, and
+// looked up in branch_sizing_form_words.
+static BranchSizingCheck branch_sizing_validate_branches(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
+                                                         uint64_t branch_count)
+{
+    BranchSizingCheck result = {
+        .error = count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS ? BRANCH_SIZING_ERROR_TOO_MANY_INSTRUCTIONS : BRANCH_SIZING_OK,
+    };
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i count_vector = _mm512_set1_epi32((int32_t)count);
+    const __m512i form_bits = _mm512_set1_epi32(0xffff);
+    const __m512i first_form = _mm512_set1_epi32(X86_FORM_JMP_REL8);
+    const __m512i window = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_FORM_WINDOW);
+    const __m512i form_words = _mm512_load_si512(branch_sizing_form_words);
+    const uint8_t* forms = (const uint8_t*)records + __builtin_offsetof(X86Instruction, form);
+    // The vector before's branch records: its last lane is the branch before this vector's first.
+    __m512i previous = zero;
+    for (uint64_t k = 0; result.error == BRANCH_SIZING_OK && k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
+    {
+        const __mmask16 lanes = branch_sizing_lanes(k, branch_count);
+        const __m512i record = _mm512_maskz_loadu_epi32(lanes, branches + k);
+        const __m512i target = _mm512_maskz_loadu_epi32(lanes, targets + k);
+        // Each branch's record must be above the one before it, which the function's first branch hasn't.
+        const __m512i before = _mm512_alignr_epi32(record, previous, BUSTER_BRANCH_SIZING_LANES - 1);
+        const __mmask16 ordered = k != 0 ? lanes : (__mmask16)(lanes & ~1u);
+        const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(lanes, record, count_vector);
+        const __mmask16 index_errors = (__mmask16)((lanes & ~inside) | _mm512_mask_cmple_epu32_mask(ordered, record, before));
+        const __mmask16 target_errors = _mm512_mask_cmpgt_epu32_mask(lanes, target, count_vector);
+        // A record's form is its fourth dword's low half (record * 16 bytes: twice the index, scaled by 8), a branch's
+        // when it's in the bitmap's window and its bit is set: vpermd takes the window's dword (the low four bits of
+        // the form's offset over 32), and vprorvd rotates the form's bit (its offset's low five bits) to bit 0.
+        const __m512i form = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, inside, _mm512_slli_epi32(record, 1), forms, 8), form_bits);
+        const __m512i offset = _mm512_sub_epi32(form, first_form);
+        const __mmask16 windowed = _mm512_mask_cmplt_epu32_mask(inside, offset, window);
+        const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(offset, 5), form_words);
+        const __mmask16 branch = _mm512_mask_test_epi32_mask(windowed, _mm512_rorv_epi32(word, offset), one);
+        const __mmask16 form_errors = (__mmask16)(inside & ~branch);
+        // The first lane with an error (16 without one, whose bit no mask has).
+        const uint32_t lane = (uint32_t)__builtin_ctz((uint32_t)(index_errors | target_errors | form_errors) | (1u << BUSTER_BRANCH_SIZING_LANES));
+        const uint32_t bit = 1u << lane;
+        result.error = (index_errors & bit) != 0  ? BRANCH_SIZING_ERROR_BRANCH_INDEX :
+                       (target_errors & bit) != 0 ? BRANCH_SIZING_ERROR_TARGET :
+                       (form_errors & bit) != 0   ? BRANCH_SIZING_ERROR_FORM :
+                                                    BRANCH_SIZING_OK;
+        result.index = k + lane;
+        previous = record;
+    }
+    result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
+    return result;
+}
+
+static BranchSizingCheck branch_sizing_validate(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets,
+                                                uint64_t branch_count)
+{
+    BranchSizingCheck result = branch_sizing_validate_branches_scalar(records, count, branches, targets, branch_count);
     if (result.error == BRANCH_SIZING_OK)
     {
         result.index = x86_validate(records, count);
         result.error = result.index != count ? BRANCH_SIZING_ERROR_INVALID_INSTRUCTION : BRANCH_SIZING_OK;
+        result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
     }
-    result.index = result.error != BRANCH_SIZING_OK ? result.index : 0;
     return result;
 }
 
