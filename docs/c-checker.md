@@ -644,6 +644,23 @@ an independent bitwise reference at guarded allocation edges, larger clears,
 ordered overlapping plans and adjacent relocations. Source fixtures also pass
 packed 128-bit fields and replacements through the ELF writer and Clang.
 
+The locked [9700X comparison for #601](https://github.com/buster14a/buster-performance/tree/960c8cd2fd82c707f89296ef386352e7b28edee5/docs/measurements/static-bitfields-601-2026-10-27)
+compares `92c025e7` with `268c6a85`, Clang 23.1.1, `-O3 -march=native`,
+without debug information, on CPU 2 with one lane. Each whole-process case has
+24 samples per variant, warmed case-specific output files, two fresh tmpfs
+executable copies and a second baseline as its A/A control. Eleven paired
+stage-clock samples measure publication independently of parsing and checking.
+
+For 65,536 records with two 31-bit fields, whole compilation takes
+47.473 → 42.322 ms (10.85% less time), with 13.38% fewer user instructions;
+publication takes 8.535 → 3.423 ms (59.90% less time). For 16,384 packed
+128-bit records, whole time falls 13.37% and publication time 72.19%.
+Peak RSS is essentially unchanged. SQLite and the configured Lua sources'
+whole-time changes lie within their A/A copy ranges; this is no claim of an
+ordinary-corpus, cold-cache or multicore speedup. The record retains all
+identities, commands, raw reports, guarded tests and disassembly, and separates
+an excluded pilot whose shared output file biased some whole-process timings.
+
 ## Backend handoff
 
 `c_check_program.c` consumes the typed stream, source control records, asm
