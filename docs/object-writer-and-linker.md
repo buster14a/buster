@@ -3005,7 +3005,10 @@ and lld do in an executable (lld's `handleTlsRelocation` with its
 - **Producers that don't name it**: `link-foreign`'s dynamic PIEs, whose
   conversion doesn't yet give the writer its `__tls_get_addr`
   (`foreign_link.c`'s `ExecutableDynamic`), relax nothing and refuse their
-  accesses as before (`ExecutableShared.relaxes_tls` is false for them).
+  accesses as before (`ExecutableShared.relaxes_tls` is false for them): a
+  general-dynamic access to an import gets no slot and is refused by the
+  relocations' check (`EXECUTABLE_ERROR_RELOCATION`), before the patch
+  (#521's review).
 
 The relaxation rewrites the atoms' bytes, so a link with such accesses can't
 be written twice from the same bytes: the tests write it each time from the
@@ -3021,7 +3024,12 @@ status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
 bytes, and without RELR; every access's bytes in the file must be the
 relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
 are compared with lld's links with `--cross-check`, and both run.
-`test-checker-driver` links a call of `__splitstack_getcontext` by both
+`dynamic_test_tls_refusals` writes what a PIE refuses, by every lane count
+and the exact twins, without an output: the fixture without `__tls_get_addr`
+named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`), a
+local-dynamic access to `errno` (the same, at the access) and a call of
+`__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`, naming
+it). `test-checker-driver` links a call of `__splitstack_getcontext` by both
 paths into the same bytes, which name `libgcc_s.so.1` and run.
 
 **The cost.** A dynamic PIE that doesn't refer to `__tls_get_addr` (every

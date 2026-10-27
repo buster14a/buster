@@ -3661,8 +3661,10 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
         const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
         const bool module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0;
         const bool missing_module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0;
-        // A shared library's count leaves its TLSGD fixups out, and a static PIE has no dynamic symbols.
-        const bool initial_exec = dynamic && kind == BUSTER_LINK_FIXUP_TLSGD;
+        // A shared library's count leaves its TLSGD fixups out, and a static PIE has no dynamic symbols. Only a PIE
+        // that relaxes its accesses (ExecutableShared.relaxes_tls) takes one to an import: without __tls_get_addr
+        // named, the access is refused here, as before #515, rather than once the patch can't relax it.
+        const bool initial_exec = dynamic && kind == BUSTER_LINK_FIXUP_TLSGD && shared->relaxes_tls;
         const uint64_t word = lane * shared->words_per_lane + target / 64;
         const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
         shared->got_marks[word] |= bit | (initial_exec ? 1ull << (target % 64) : 0);
@@ -4598,10 +4600,10 @@ static bool executable_shared_refuses(uint8_t kind)
 // Whether a PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that needs a
 // relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load
 // address fits it), a fixup of another kind to a dynamic symbol, but for a GOT kind, a CALL, which goes to the symbol's
-// stub, and a dynamic PIE's TLSGD, which relaxes to initial-exec, a PC32 or PC64 to address 0
-// (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute symbol (executable_refuses_absolute). Every
-// other fixup to an absolute symbol is its value, which needs no relocation.
-static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope)
+// stub, and a TLSGD of a dynamic PIE that relaxes its accesses (`relaxes_tls`), which becomes initial-exec, a PC32 or
+// PC64 to address 0 (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute symbol
+// (executable_refuses_absolute). Every other fixup to an absolute symbol is its value, which needs no relocation.
+static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope, bool relaxes_tls)
 {
     const uint8_t class = executable_relocation_class(link, target, scope);
     const bool relocated = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE || class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
@@ -4609,8 +4611,9 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
     const bool dynamic_tls = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
                                                                        (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0));
-    // A dynamic PIE's general-dynamic access to an import relaxes to initial-exec through its GOT slot.
-    const bool initial_exec = scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS && kind == BUSTER_LINK_FIXUP_TLSGD;
+    // A dynamic PIE's general-dynamic access to an import relaxes to initial-exec through its GOT slot, when the PIE
+    // relaxes its accesses (executable_check_direct's rule).
+    const bool initial_exec = scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS && kind == BUSTER_LINK_FIXUP_TLSGD && relaxes_tls;
     const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL && !dynamic_tls && !initial_exec;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
@@ -4646,7 +4649,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
         {
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool smaller = failed == 0 || fixup < failed;
-            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope) ? fixup : failed;
+            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope, shared->relaxes_tls) ? fixup : failed;
         }
     }
     if (failed != 0)
