@@ -291,6 +291,76 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     const CheckSourceFixture fixtures[] =
     {
         {
+            "generic controls use intrinsic result types",
+            "_Static_assert(_Generic(__builtin_ia32_rdpid(),unsigned:1,default:0),\"rdpid type\");\n"
+            "int g(unsigned char x){return _Generic(__builtin_rotateleft8(x,1),unsigned char:1,default:0);}\n",
+            false,
+        },
+        {
+            "generic intrinsic controls retain narrow types and nested calls",
+            "#define T(e,t) _Static_assert(_Generic((e),t:1,default:0),\"intrinsic type\")\n"
+            "T(__builtin_rotateright8(1,1),unsigned char);T(__builtin_rotateleft16(1,1),unsigned short);\n"
+            "T(__builtin_rotateright32(1,1),unsigned);T(__builtin_rotateleft64(1,1),unsigned long);\n"
+            "T(__builtin_rotateleft8(__builtin_rotateright16(1,1),1),unsigned char);\n"
+            "T(+__builtin_rotateleft8(1,1),int);\n",
+            false,
+        },
+        {
+            "generic intrinsic controls select vector and void results",
+            "typedef int V __attribute__((vector_size(64)));\n"
+            "int f(V x){return _Generic(__builtin_ia32_pshufd512(x,255),V:1,default:0)+"
+            "_Generic(__builtin_ia32_pause(),int:0,default:1);}\n",
+            false,
+        },
+        {
+            "intrinsic generic types are available in declaration bounds",
+            "enum { N=_Generic(__builtin_ia32_rdpid(),unsigned:3,default:1) };\n"
+            "int a[_Generic(__builtin_rotateleft8(1,1),unsigned char:4,default:1)];\n"
+            "_Static_assert(N==3 && sizeof(a)==4*sizeof(int),\"declaration bounds\");\n",
+            false,
+        },
+        {
+            "intrinsic generic types are available in raw attribute queries",
+            "typedef int I __attribute__((aligned(_Generic(__builtin_ia32_rdpid(),unsigned:8,default:4))));\n"
+            "_Static_assert(_Alignof(I)==8,\"attribute query\");\n",
+            false,
+        },
+        {
+            "intrinsic generic types respect an ordinary shadowing declaration",
+            "int f(void){double (*__builtin_rotateleft8)(int,int);return _Generic(__builtin_rotateleft8(1,1),double:1,default:0);}\n",
+            false,
+        },
+        {
+            "generic intrinsic control rejects an extra argument",
+            "int f(void){return _Generic(__builtin_ia32_rdpid(1),unsigned:1,default:0);}\n",
+            true,
+        },
+        {
+            "generic intrinsic control rejects a missing argument",
+            "int f(void){return _Generic(__builtin_rotateleft8(1),unsigned char:1,default:0);}\n",
+            true,
+        },
+        {
+            "generic intrinsic control rejects an incompatible argument",
+            "struct S {int x;};int f(struct S s){return _Generic(__builtin_rotateleft8(s,1),unsigned char:1,default:0);}\n",
+            true,
+        },
+        {
+            "generic intrinsic control retains immediate constraints",
+            "typedef int V __attribute__((vector_size(64)));int f(V x,int n){return _Generic(__builtin_ia32_pshufd512(x,n),V:1,default:0);}\n",
+            true,
+        },
+        {
+            "generic declaration bound retains intrinsic immediate constraints",
+            "typedef int V __attribute__((vector_size(64)));int f(V x,int n){int a[_Generic(__builtin_ia32_pshufd512(x,n),V:2,default:1)];return sizeof(a);}\n",
+            true,
+        },
+        {
+            "generic intrinsic control retains hard SAE constraints",
+            "typedef float V __attribute__((vector_size(64)));int f(V x){return _Generic(__builtin_ia32_rndscaleps_mask(x,0,x,65535,5),V:1,default:0);}\n",
+            true,
+        },
+        {
             "exact intrinsic prototypes preserve distinct result and argument types",
             "void f(void){__builtin_ia32_clui();}unsigned long long g(unsigned long long a){return __builtin_ia32_urdmsr(a);}\n",
             false,

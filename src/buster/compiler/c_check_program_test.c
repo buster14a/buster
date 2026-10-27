@@ -1662,6 +1662,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int missing(void);int tested(int n){int x=0;int y=__builtin_choose_expr(0,({missing();n;}),({x++;n+1;}));return x*100+y;}",
         "statement-region-static-selection", clang);
+    check_test_program_source(test,
+        "int missing(void);int tested(int n){int x=n;"
+        "int a=_Generic(__builtin_rotateleft8(x++,missing()),unsigned char:3,default:7);"
+        "int b=_Generic(__builtin_ia32_rdpid(),unsigned:5,default:9);"
+        "int c=_Generic(__builtin_ia32_pause(),int:11,default:13);return x+a+b+c;}",
+        "intrinsic-generic-controls-unevaluated", clang);
     // GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
     // through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
     check_test_program_source(test,
