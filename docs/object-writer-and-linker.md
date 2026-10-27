@@ -3048,13 +3048,14 @@ fixups and of 64 kinds per 64, and a scalar relaxation per access in the
 patch's path for the other kinds (the static executable's 0.89 us for 47
 accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
 accesses" below). On the 9700X, `benchmark-executable`'s TLS modes (`--tls`)
-against their control, a probe of the same bytes and fixups without TLS, put
-the relaxation at about 19 ns per general-dynamic access to the program's own
-thread-local, 21 ns to `libc.so.6`'s `errno` and 23 ns per local-dynamic access
-with its `DTPOFF32`, on one lane at 2,000 and 180,000 workers: about 3 ns to
-count, 3 ns in the symbols' pass and 12 ns rewriting the chunks (16 ns with the
-`DTPOFF32`)
-([the measurement record](https://github.com/buster14a/buster-performance/blob/e1c95c8c928436542e57f754b8d2fe331e511422/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+against their control, a probe of the same bytes, atoms and fixups without
+TLS, add about 19 ns to the write per general-dynamic access to the program's
+own thread-local, 21 ns per access to `libc.so.6`'s `errno` and 23 ns per
+local-dynamic access with its `DTPOFF32`, on one lane at 2,000 and 180,000
+workers: the count and the symbols' pass about 3 ns each, and the chunks 12 ns
+(16 ns with the `DTPOFF32`). These are the whole writer's deltas between the
+programs, whose fixups' kinds and sections differ, not the relaxation's code
+alone ([the measurement record](https://github.com/buster14a/buster-performance/blob/211db644cd805e92f6c65d90707f6c727f0147b7/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
 
 #### The unwind tables
 
