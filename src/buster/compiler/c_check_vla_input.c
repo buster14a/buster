@@ -539,8 +539,17 @@ static void check_input_vla_finish(CheckInputReader* reader)
     // Lexical VM lifetimes are nested intervals. Their most recent active declaration implies every enclosing
     // lifetime, so one stack scan gives every transfer target its complete entry constraint in constant space
     // per token. Binding replay is finished; its scope scratch columns are available for this temporary map.
+    // A unit without a variably modified declaration has no lifetime for a jump to enter, and the scans below would find
+    // nothing: the vector path tests the declarations' lifetimes 16 tokens at a time for one, and the scalar reader
+    // makes the scans anyway, their twin.
+    bool lifetimes = parser->options.scalar;
+    for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
+    {
+        lifetimes = check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
+    }
+    const uint32_t scanned = lifetimes ? parser->tokens.count : 0;
     uint32_t depth = 0;
-    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+    for (uint32_t token = 0; token < scanned; token += 1)
     {
         while (depth != 0 && reader->vla_scope_ends[reader->scope_ends[depth - 1]] <= token)
         {
@@ -552,7 +561,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
         }
         reader->scope_marks[token] = depth != 0 ? reader->scope_ends[depth - 1] + 1 : 0;
     }
-    for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+    for (uint32_t token = 0; token < scanned; token += 1)
     {
         uint32_t source = token;
         uint32_t target = BUSTER_CHECK_NONE;
@@ -578,7 +587,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
     // A computed goto may go to any label whose address its function takes, so it must be inside the scope of every
     // variable-length array such a label is in (clang's JumpScopeChecker), whichever way it leaves its own: the labels'
     // innermost scopes intersect in one interval, [low, high), which holds each goto.
-    for (uint32_t opening = 0; reader->indirect_gotos != 0 && opening < parser->tokens.count; opening += 1)
+    for (uint32_t opening = 0; reader->indirect_gotos != 0 && opening < scanned; opening += 1)
     {
         const bool deferred = reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[opening] != 0;
         const uint32_t closing = parser->tree.parents[opening];

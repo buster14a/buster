@@ -620,6 +620,37 @@ static const char* check_driver_link_name(const Link* link, NameId name, char* b
     return buffer;
 }
 
+// Where a fixup of the link that binding joined to `runtime` (from unit `unit_base` on) comes from, as GNU ld names an
+// input: a member of the runtime's archives as archive(member), or "the program" for the unit's own code, and the name
+// of its target, into `buffer`. A pass over the atoms, on a failed write alone.
+static const char* check_driver_fixup_origin(const Link* link, const Runtime* runtime, uint32_t unit_base, FixupId fixup, char* buffer, uint64_t capacity)
+{
+    AtomId found = 0;
+    for (AtomId atom = 1; found == 0 && atom < link->atoms.count; atom += 1)
+    {
+        const bool inside = link->atoms.fixup_count[atom] != 0 && fixup >= link->atoms.fixup_begin[atom] && fixup - link->atoms.fixup_begin[atom] < link->atoms.fixup_count[atom];
+        found = inside ? atom : 0;
+    }
+    const uint32_t unit = found != 0 ? link->atoms.unit[found] : 0;
+    const bool member = found != 0 && unit >= unit_base + runtime->member_unit && unit - unit_base - runtime->member_unit < runtime->member_count;
+    const uint32_t m = member ? unit - unit_base - runtime->member_unit : 0;
+    const String8 archive = member ? runtime_member_archive(runtime, m)->path : (String8){ 0 };
+    const String8 name = member ? runtime_member_name(runtime, m) : (String8){ 0 };
+    const SymbolId target = fixup < link->fixups.count ? link->fixups.target[fixup] : 0;
+    const NameId target_name = target != 0 && target < link->symbols.count ? link->symbols.name[target] : 0;
+    char target_bytes[256];
+    check_driver_link_name(link, target_name, target_bytes, sizeof(target_bytes));
+    if (member)
+    {
+        snprintf(buffer, capacity, "%.*s(%.*s)'s fixup to '%s'", (int)archive.length, archive.pointer, (int)name.length, name.pointer, target_bytes);
+    }
+    else
+    {
+        snprintf(buffer, capacity, "%s fixup to '%s'", found != 0 && unit < unit_base ? "the program's" : "a", target_bytes);
+    }
+    return buffer;
+}
+
 // The libraries the command line names, -lNAME (or -l NAME), and the directories it adds to their search, -LDIR (or
 // -L DIR), each in its order, for the direct path to link (runtime_libraries_import).
 typedef struct CheckDriverLibraries CheckDriverLibraries;
@@ -771,14 +802,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                 {
                     // A member that joined refers to a name nothing defines, as GNU ld words it, with the archive's
                     // path and the member's name: on GCC's link line only libgcc_s.so.1 could define it, which the
-                    // driver names as needed and the direct path doesn't link (morestack.o's unwinder, for split-stack
-                    // code).
+                    // driver names as needed, and this system has none, or one without the name (morestack.o's
+                    // unwinder, for split-stack code).
                     const bool known = bind.member != UINT32_MAX;
                     const String8 archive = known ? runtime_member_archive(&runtime, bind.member)->path : (String8){ 0 };
                     const String8 member = known ? runtime_member_name(&runtime, bind.member) : (String8){ 0 };
-                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, which the direct path doesn't link\n",
-                            (int)archive.length, archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer,
-                            known ? ")" : "", name);
+                    fprintf(stderr, "error: %.*s%s%.*s%s: undefined reference to '%s'; GCC's driver takes it from libgcc_s.so.1, %s\n", (int)archive.length,
+                            archive.pointer, known ? "(" : "a member of the C runtime's archives", (int)member.length, member.pointer, known ? ")" : "", name,
+                            runtime.gcc_s_path.length != 0 ? "which doesn't define it here" : "which this system doesn't have");
                 }
                 else if (bind.error == BIND_ERROR_LIBRARY_VERSION)
                 {
@@ -850,6 +881,13 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             {
                 fprintf(stderr, "error: can't write %s: %s: %s\n", output_path, write.result.call != NULL ? write.result.call : "write",
                         strerror(write.result.system_error));
+            }
+            else if (!valid && (error == EXECUTABLE_ERROR_RELOCATION || error == EXECUTABLE_ERROR_FIXUP) && write.result.fixup != 0)
+            {
+                // The fixup's origin and target, a runtime member's as libgcc.a(generic-morestack.o) names one.
+                char origin[BUSTER_RUNTIME_PATH_BYTES + 512];
+                fprintf(stderr, "error: can't link %s: %s (executable error %u)\n", output_path,
+                        check_driver_fixup_origin(&code.link, &runtime, 1, write.result.fixup, origin, sizeof(origin)), (uint32_t)error);
             }
             else if (!valid)
             {
