@@ -1489,7 +1489,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 if (members[step] != BUSTER_CHECK_NONE && kind == BUSTER_TYPE_KIND_EXT_VECTOR && walker->identifiers != 0)
                 {
                     // An extension vector's swizzle (#555's sixth review): one lane its element type's scalar, more a
-                    // vector, which the base's type stands for (the callers ask only whether the value is one).
+                    // vector of those lanes, made as check_vector_member makes it, so that a swizzle of it counts them
+                    // (`v.xy.lo` is a lane: #555's eighth review); 0 where the table has no room for it.
                     const IdentId name = parser->tokens.names[members[step]];
                     uint8_t lanes[16];
                     CheckVectorMember swizzle;
@@ -1500,7 +1501,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                     // vector's are two lanes, a vector (#555's seventh review).
                     const uint32_t width = !decoded ? 0 : swizzle.kind == CHECK_VECTOR_MEMBER_LANES ? swizzle.count :
                                            swizzle.kind == CHECK_VECTOR_MEMBER_INVALID ? 0 : (vector_lanes + 1) / 2;
-                    result = width == 0 ? 0 : width == 1 ? check_vector_element(walker->types, base) : base;
+                    const TypeId element = check_vector_element(walker->types, base);
+                    result = width == 0 ? 0 : width == 1 ? element : type_vector(walker->types, element, width, true);
                 }
                 else if (members[step] != BUSTER_CHECK_NONE)
                 {
