@@ -500,6 +500,10 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .source = "enum { A=sizeof(int (*)(int x,int y))+sizeof(int (*)(int x,int y)) }; _Static_assert(A==16,\"separate prototypes\");\n",
         },
         {
+            .name = "nested type name parameter does not hide outer typedef",
+            .source = "typedef int T; enum { A=sizeof(int (*)(int (*cb)(int T),T x)) }; _Static_assert(A==8,\"typedef restored\");\n",
+        },
+        {
             .name = "type name unnamed parameters do not collide",
             .source = "enum { A=sizeof(int (*)(int,int,int,int)) }; _Static_assert(A==8,\"unnamed parameters\");\n",
         },
