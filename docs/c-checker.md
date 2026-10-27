@@ -752,10 +752,11 @@ What the lowering covers past scalars (#145's programs):
   label inside a function would split the function for a symbolizer, with the
   relocations against their sections' symbols. Deciding takes a merge sort of
   the switch's cases, scalar: a pass over a few cases per switch. On
-  `sqlite3.c`, whose 53 tables hold 2,776 entries, the tables add 431,141
+  `sqlite3.c`, whose 53 tables hold 2,776 entries, the tables add about 431,000
   instructions (0.019%) to `-c` and no cycles beyond the runs' spread (one
   executable with the tables on and off, on the 9700X), and its shell runs
-  13.8% faster.
+  13.8% faster
+  ([the record](https://github.com/buster14a/buster-performance/blob/6328c2664043f54076850f6c03c5a580ab5bfeb2/docs/measurements/switch-tables-136-2026-10-26/README.md)).
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 
