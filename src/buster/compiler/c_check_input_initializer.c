@@ -154,8 +154,9 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
             uint32_t failed = begin;
             CheckInitStatus status = CHECK_INIT_OK;
             // The casts in the initializer have their types already, at their `)`s: it finishes at its end.
-            valid = check_initializer_infer_array(reader->types, parser, type, begin, end, reader->designator_indices, reader->designator_valid,
-                                                  reader->declared_types, reader->query_types, reader->scratch, &type, &failed, &status);
+            valid = check_initializer_infer_array(reader->types, parser, reader->pp->table, type, begin, end, reader->designator_indices,
+                                                  reader->designator_valid, reader->declared_types, reader->query_types, reader->scratch, &type,
+                                                  &failed, &status);
             reader->output->resource |= status == CHECK_INIT_RESOURCE;
             if (!valid)
             {

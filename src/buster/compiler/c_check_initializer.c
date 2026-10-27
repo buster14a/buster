@@ -76,8 +76,8 @@ static __attribute__((unused)) bool check_initializer_run(TypeTable* types, cons
                                   TypeId type, uint32_t begin, uint32_t end, bool static_storage,
                                   Arena* output, Arena* scratch, CheckInitializer* result);
 
-static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
-                                          const uint64_t* designator_indices, const uint8_t* designator_valid,
+static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type,
+                                          uint32_t begin, uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
                                           uint32_t* failed_token, CheckInitStatus* status);
 
@@ -180,8 +180,10 @@ struct CheckInitWalker
     const uint64_t* indices;
     const uint8_t* index_valid;
     const TypeId* expression_types;
-    // An inferring walk's casts' types, at their `)`s (the reader's query types), or null.
+    // An inferring walk's casts' types, at their `)`s (the reader's query types), or null; and the identifiers' table,
+    // which spells an extension vector's swizzles.
     const TypeId* cast_types;
+    const InternTable* identifiers;
     CheckInitFrame* frames;
     uint32_t depth;
     uint32_t capacity;
@@ -1118,8 +1120,10 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // operands' (check_init_conditional_type: `n ? v : 0` is a vector, #555's third review) and its condition's
 // (check_init_condition_type: `mask ? 1 : 2` of an extension vector is one), a parenthesized expression's, a call's result where it calls a function by its name, and a cast's (the reader's, at its
 // `)`); an int, for which one stands for every scalar (the callers ask only whether the value is a record, a vector or
-// neither), for a constant, a `sizeof` or `_Alignof`, a `!`, a `&&` and a `||`; a subscript's, a member's (`.` and `->`)
-// and an indirection's of such an expression (`x[1]`, `p->a.b`, `*p`), from its base's type; a `-`, `+` or `~`'s, its
+// neither), for a constant, a `sizeof` or `_Alignof`; a `!`'s, a `&&`'s and a `||`'s from their operands', an int or,
+// of an extension vector, a vector (#555's sixth review); a subscript's, a member's (`.` and `->`, an extension vector's
+// swizzle among them) and an indirection's of such an expression (`x[1]`, `p->a.b`, `v.x`, `*p`), from its base's type;
+// a `-`, `+` or `~`'s, its
 // operand's; and a binary operator's (multiplicative to bitwise or), from both operands' as check_init_binary_type
 // combines them: a vector where either is one, a pointer for pointer arithmetic, and a scalar for the rest (`ha +
 // (short)n` is a vector, `*(p + 1)` a struct, `(p - q) * h` a vector, `*(p + (p - (S*)q))` a struct). 0 for another
@@ -1139,6 +1143,7 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 #define BUSTER_CHECK_INIT_ROOT_BINARY PARSE_KIND_COUNT
 #define BUSTER_CHECK_INIT_ROOT_CONDITIONAL (PARSE_KIND_COUNT + 1)
 #define BUSTER_CHECK_INIT_ROOT_CONDITION (PARSE_KIND_COUNT + 2)
+#define BUSTER_CHECK_INIT_ROOT_NOT (PARSE_KIND_COUNT + 3)
 
 // A binary operator's value's type from its operands' (0 for one the walk has no type for), as far as the walk needs it,
 // and 0 where they leave it open, so that an operand of no type is taken for no scalar (#555's second review):
@@ -1184,7 +1189,7 @@ static TypeId check_init_binary_type(const TypeTable* types, uint8_t operator_ki
     }
     return result;
 }
-_Static_assert(PARSE_KIND_COUNT + 2 <= UINT8_MAX, "a step's kind fits a byte");
+_Static_assert(PARSE_KIND_COUNT + 3 <= UINT8_MAX, "a step's kind fits a byte");
 
 // A ?:'s value's type from its second and third operands' (0 for one the walk has no type for): a vector's where either
 // is one (GNU C converts a scalar arm to the other's vector type); a record's, a pointer's or an array's where either is
@@ -1320,10 +1325,20 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 result = walker->cast_types != 0 ? walker->cast_types[root] : 0;
             }
             else if ((role == PARSE_ROLE_OPERAND && (parser->tokens.kinds[root] == PARSE_KIND_NUMBER || parser->tokens.kinds[root] == PARSE_KIND_CHARACTER)) ||
-                     (role == PARSE_ROLE_PREFIX && (parser->tokens.kinds[root] == PARSE_KIND_SIZEOF || parser->tokens.kinds[root] == PARSE_KIND_EXCLAIM)) ||
-                     role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR)
+                     (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_SIZEOF))
             {
                 result = BUSTER_TYPE_INT;
+            }
+            else if (steps < count && role == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_EXCLAIM && last[slot] != BUSTER_CHECK_NONE &&
+                     last[slot] > root)
+            {
+                // Its operand's type, from which the up-walk makes an int or, of an extension vector, its vector.
+                members[steps] = BUSTER_CHECK_NONE;
+                operators[steps] = BUSTER_CHECK_INIT_ROOT_NOT;
+                alternates[steps] = BUSTER_CHECK_NONE;
+                steps += 1;
+                root = last[slot];
+                descending = true;
             }
             else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY && first[slot] != BUSTER_CHECK_NONE)
             {
@@ -1403,7 +1418,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 root = last[slot];
                 descending = true;
             }
-            else if (steps < count && role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_BITWISE_OR && first[slot] != BUSTER_CHECK_NONE &&
+            else if (steps < count && ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_BITWISE_OR) || role == PARSE_ROLE_LOGICAL_AND ||
+                                       role == PARSE_ROLE_LOGICAL_OR) && first[slot] != BUSTER_CHECK_NONE &&
                      first[slot] < root && last[slot] != BUSTER_CHECK_NONE && last[slot] > root)
             {
                 // The left operand, the first child, then the right one, the last, the step's alternate.
@@ -1442,6 +1458,11 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                 steps = step + 1;
                 walking = true;
             }
+            else if (operators[step] == BUSTER_CHECK_INIT_ROOT_NOT)
+            {
+                // An extension vector's `!` is element by element, a vector; any other operand's, an int.
+                result = base != 0 && check_vector_type(walker->types, base) ? result : result != 0 ? BUSTER_TYPE_INT : 0;
+            }
             else if (binary)
             {
                 result = conditional ? check_init_conditional_type(walker->types, lefts[step], result) :
@@ -1465,7 +1486,21 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                     kind = base != 0 ? type_kind(walker->types, base) : 0;
                     result = base;
                 }
-                if (members[step] != BUSTER_CHECK_NONE)
+                if (members[step] != BUSTER_CHECK_NONE && kind == BUSTER_TYPE_KIND_EXT_VECTOR && walker->identifiers != 0)
+                {
+                    // An extension vector's swizzle (#555's sixth review): one lane its element type's scalar, more a
+                    // vector, which the base's type stands for (the callers ask only whether the value is one).
+                    const IdentId name = parser->tokens.names[members[step]];
+                    uint8_t lanes[16];
+                    CheckVectorMember swizzle;
+                    const bool decoded = check_vector_member_decode(intern_bytes(walker->identifiers, name), intern_length(walker->identifiers, name),
+                                                                    lanes, sizeof(lanes), &swizzle);
+                    const uint32_t vector_lanes = check_vector_count(walker->types, base);
+                    const uint32_t width = !decoded ? 0 : swizzle.kind == CHECK_VECTOR_MEMBER_LANES ? swizzle.count :
+                                           swizzle.kind == CHECK_VECTOR_MEMBER_INVALID ? 0 : vector_lanes / 2;
+                    result = width == 0 ? 0 : width == 1 ? check_vector_element(walker->types, base) : base;
+                }
+                else if (members[step] != BUSTER_CHECK_NONE)
                 {
                     uint64_t offset = 0;
                     const uint32_t member = base != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) ?
@@ -2142,8 +2177,8 @@ static __attribute__((unused)) bool check_initializer_source(TypeTable* types, c
                                   static_storage, false, true, output, scratch, result, NULL);
 }
 
-static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
-                                          const uint64_t* designator_indices, const uint8_t* designator_valid,
+static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, const InternTable* identifiers, TypeId type, uint32_t begin,
+                                          uint32_t end, const uint64_t* designator_indices, const uint8_t* designator_valid,
                                           const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
                                           uint32_t* failed_token, CheckInitStatus* status)
 {
@@ -2163,6 +2198,7 @@ static bool check_initializer_infer_array(TypeTable* types, const Parser* parser
             .index_valid = designator_valid,
             .expression_types = expression_types,
             .cast_types = cast_types,
+            .identifiers = identifiers,
             .infer = true,
             .ignore_excess = true,
             .scratch = scratch,

@@ -3711,6 +3711,14 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // An extension vector's !, && and ||, vectors element by element, and its swizzles: one lane a scalar, more a
+        // vector (#555's sixth review).
+        {
+            "an extension vector's logic and swizzles in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int e2 __attribute__((ext_vector_type(2)));\ntypedef int g4 __attribute__((vector_size(16)));\nint f(int n, e4 v, e4 w, e2 t, g4 x)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(!v), e4), \"not vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v && w), e4), \"and vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v || w), e4), \"or vector\");\n    g4 a[] = { !v, v && w, v || w, x };\n    _Static_assert(sizeof a == 4 * sizeof(g4), \"four\");\n    g4 b[] = { v.x, 2, 3, 4, x, v.s3, t.lo, !v.x, n && v.y };\n    _Static_assert(sizeof b == 3 * sizeof(g4), \"lanes braced into vectors\");\n    g4 c[] = { v.xyzw, v.wzyx, x, !n };\n    _Static_assert(sizeof c == 4 * sizeof(g4), \"two swizzled vectors, a vector, then a scalar\");\n    return a[3][0] + b[2][1] + c[3][0];\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
