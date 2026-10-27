@@ -44,7 +44,7 @@ static void check_input_naked_inherit(CheckInputReader* reader, uint32_t token, 
     }
 }
 
-static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t first, uint32_t end)
+static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t body)
 {
     const CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
@@ -55,8 +55,21 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
                   kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, first, end));
     for (uint32_t token = first; valid && token < end; token += 1)
     {
-        if (input->declarations[token] == token)
+        const uint8_t declaration_kind = input->declaration_kinds[token];
+        if (input->declarations[token] == token && input->declaration_bodies[token] == body &&
+            declaration_kind != C_BINDING_ENUMERATOR && declaration_kind != C_BINDING_TAG_KIND)
         {
+            // The range also contains member names, prototype parameters and declarations in nested
+            // statement expressions. Only declarators owned by this declaration statement qualify.
+            uint32_t owner = parser->tree.parents[token];
+            while (owner < parser->tokens.count && owner != end && parser->tree.roles[owner] != PARSE_ROLE_TERMINATOR)
+            {
+                owner = parser->tree.parents[owner];
+            }
+            if (owner != end)
+            {
+                continue;
+            }
             bool label = false;
             const CheckInputAttributes* attributes = input->attributes[token];
             for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
@@ -71,24 +84,111 @@ static bool check_input_naked_registers(const CheckInputReader* reader, uint32_t
     return found && valid;
 }
 
-static uint32_t check_input_naked_parameter(const CheckInputReader* reader, const CheckAsmOperand* operand, uint32_t body)
+typedef struct CheckInputNakedRange CheckInputNakedRange;
+struct CheckInputNakedRange
 {
-    const CheckInput* input = reader->output;
+    uint32_t first;
+    uint32_t end;
+};
+
+static bool check_input_naked_bound(const CheckInputReader* reader, const CheckInputVla* vla, uint32_t first, uint32_t end)
+{
     const Parser* parser = reader->parser;
+    bool visible = vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin >= first && vla->bound_end < end;
+    for (uint32_t owner = vla->scope_begin; visible && owner < parser->tokens.count && owner != end; owner = parser->tree.parents[owner])
+    {
+        // A typeof/typedef type wrapper contributes no expression children to Clang's asm operand walk.
+        // The parser can also hang a later array declarator on a completed specifier. Its bound is
+        // outside that specifier's parentheses and remains an expression child of the type trait.
+        visible = parser->tree.roles[owner] != PARSE_ROLE_CLOSE_SPECIFIER || owner < vla->scope_begin;
+    }
+    return visible;
+}
+
+static uint32_t check_input_naked_parameter(CheckInputReader* reader, const CheckAsmOperand* operand, uint32_t body)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint64_t mark = reader->scratch->length;
+    const uint32_t capacity = operand->closing - operand->opening;
+    CheckInputNakedRange* pending = NULL;
+    uint32_t depth = 0;
+    CheckInputNakedRange range =
+    {
+        .first = operand->opening + 1,
+        .end = operand->closing,
+    };
     uint32_t result = BUSTER_CHECK_NONE;
     // Expression children are visited rightmost first, including unevaluated/discarded operands. A GNU
     // statement expression's compound body is a statement child, so it is outside this expression walk.
-    for (uint32_t token = operand->closing; result == BUSTER_CHECK_NONE && token > operand->opening + 1;)
+    while (result == BUSTER_CHECK_NONE && !input->resource)
     {
-        token -= 1;
+        if (range.end <= range.first)
+        {
+            if (depth == 0)
+            {
+                break;
+            }
+            range = pending[--depth];
+            continue;
+        }
+        const uint32_t token = --range.end;
         const uint32_t region = input->expression_regions[token];
         if (region != 0 && token == input->regions[region - 1].closing)
         {
-            token = input->regions[region - 1].opening;
+            range.end = input->regions[region - 1].opening;
+        }
+        else if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_SIZEOF && reader->query_types[token] != 0)
+        {
+            const uint32_t first = check_input_first_token(reader, token);
+            const CheckInputNakedRange rest =
+            {
+                .first = range.first,
+                .end = first,
+            };
+            bool saved = false;
+            TypeId type = type_strip_aligned(reader->types, reader->query_types[token]);
+            // A type-form sizeof/alignof exposes its VLA size expressions, not arbitrary names in the
+            // type spelling. Queue only retained inline bounds, including those below constant dimensions.
+            for (uint32_t part = 0; !input->resource && part < reader->types->types.count &&
+                 type_kind_is_array(type_kind(reader->types, type)); part += 1)
+            {
+                const uint64_t extent = reader->types->types.extent[type_index(type)];
+                const uint32_t identity = type_kind(reader->types, type) == BUSTER_TYPE_KIND_VARIABLE_ARRAY && extent != 0 &&
+                                          extent <= parser->tokens.count ? reader->vla_bounds[extent - 1] : 0;
+                const CheckInputVla* vla = identity != 0 && identity <= input->vla_count ? input->vlas + identity - 1 : NULL;
+                if (vla != NULL && check_input_naked_bound(reader, vla, first, token))
+                {
+                    if (pending == NULL)
+                    {
+                        pending = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckInputNakedRange, capacity);
+                    }
+                    input->resource |= pending == NULL || depth >= capacity - 1;
+                    if (!input->resource)
+                    {
+                        if (!saved)
+                        {
+                            pending[depth++] = rest;
+                            saved = true;
+                        }
+                        pending[depth++] = (CheckInputNakedRange)
+                        {
+                            .first = vla->bound_begin,
+                            .end = vla->bound_end,
+                        };
+                    }
+                }
+                type = type_strip_aligned(reader->types, type_element(reader->types, type));
+            }
+            range.end = first;
+            if (saved && !input->resource)
+            {
+                range = pending[--depth];
+            }
         }
         else if (parser->tree.roles[token] == PARSE_ROLE_CLOSE_SPECIFIER)
         {
-            token = check_input_first_token(reader, token);
+            range.end = check_input_first_token(reader, token);
         }
         else if (parser->tree.roles[token] == PARSE_ROLE_OPERAND)
         {
@@ -100,6 +200,7 @@ static uint32_t check_input_naked_parameter(const CheckInputReader* reader, cons
             }
         }
     }
+    arena_pop_to(reader->scratch, mark);
     return result;
 }
 
@@ -131,7 +232,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
         {
             const uint32_t first = check_input_first_token(reader, child);
             const bool empty = parser->tree.roles[child] == PARSE_ROLE_TERMINATOR && reader->first_child[child] == BUSTER_CHECK_NONE;
-            if (child > body && !empty && input->asm_ids[child] == 0 && !check_input_naked_registers(reader, first, child))
+            if (child > body && !empty && input->asm_ids[child] == 0 && !check_input_naked_registers(reader, first, child, body))
             {
                 diagnostic.position = closing;
                 diagnostic.token = first;
@@ -162,7 +263,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
             }
         }
     }
-    if (diagnostic.position != BUSTER_CHECK_NONE)
+    if (diagnostic.position != BUSTER_CHECK_NONE && !input->resource)
     {
         input->naked_diagnostic = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputNakedDiagnostic, 1);
         input->resource |= input->naked_diagnostic == NULL;

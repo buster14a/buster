@@ -45,14 +45,20 @@ The semantic reader rejects naked functions' non-asm statements and references
 to their parameters in asm operands (#554), including under `-fsyntax-only`.
 `c_check_naked_input.c` uses the existing statement tree and resolved parameter
 identities. It permits empty bodies, null statements and uninitialized variables
-with asm register labels. Ordinary functions after a naked definition retain
+with asm register labels, including declarators whose inline type defines
+members or enumerators. Only the statement's own declarators are inspected.
+Ordinary functions after a naked definition retain
 their ordinary rules. Later declarations inherit a naked prototype's attribute;
 an attribute declared after a definition does not change that earlier body's
 checking.
 
 Parameter references in unevaluated or discarded expression operands still
 diagnose. A statement expression's compound body and a type-only `typeof` query
-are outside that expression walk, as in Clang. Operand errors become available
+are outside that expression walk, as in Clang. Type-form `sizeof` and `alignof`
+visit their retained inline VLA bounds, including dimensions below a constant
+array dimension; constant bounds and pointer/typeof type spellings do not
+become parameter uses. A bounded scratch worklist preserves the rightmost-first
+expression order for nested type queries. Operand errors become available
 at the asm's closing parenthesis, body-statement errors at the body's closing
 brace. A rejected input keeps its diagnostic spelling separately, so errors
 within a statement precede the body constraint while the displayed location is
