@@ -1714,13 +1714,16 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
+    // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
+    // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
+    const bool overloads = graph->overload_candidate_count != 0;
     const bool overload = action.op == CHECK_OP_CALL && stream->overload_count < graph->overload_count && graph->overload_calls[stream->overload_count].node == node;
     bool contextual_call = overload || (action.op == CHECK_OP_CALL && action.operands[0].overload_head != 0);
-    for (uint32_t i = 0; action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
+    for (uint32_t i = 0; overloads && action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
     {
         contextual_call |= action.arguments[i].overload_head != 0;
     }
-    const CheckDiagnostic contextual = contextual_call ? CHECK_DIAG_NONE : check_graph_overload_operands(types, graph, stream, &action, scratch);
+    const CheckDiagnostic contextual = contextual_call || !overloads ? CHECK_DIAG_NONE : check_graph_overload_operands(types, graph, stream, &action, scratch);
     if (contextual != CHECK_DIAG_NONE)
     {
         result = (CheckActionResult){ .diagnostic = contextual };
@@ -1965,16 +1968,39 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     return result;
 }
 
-static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
+// Whether `node` has a warning or a GNU constant where an ICE is required, which check_graph_warning_contexts must place.
+static bool check_graph_warning_needed(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
+    return stream->warnings[node] != 0 ||
+           ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
+            (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
+            check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+}
+
+static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
 {
     bool needed = false;
-    for (uint32_t node = 0; !needed && node < graph->count; node += 1)
+    uint32_t node = 0;
+    // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
+    // may need them (#530); the scalar path tests every node.
+    for (; !scalar && !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
-        const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
-        needed = stream->warnings[node] != 0 ||
-                 ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
-                  (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
-                  check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+        __mmask16 candidates = _mm512_test_epi32_mask(_mm512_loadu_si512(stream->warnings + node), _mm512_set1_epi32(-1));
+        if (graph->contexts != NULL)
+        {
+            const __m128i contexts = _mm_loadu_si128((const __m128i*)(graph->contexts + node));
+            candidates |= _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT))) &
+                          _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)BUSTER_CHECK_CONTEXT_GNU_CONSTANT));
+        }
+        for (uint32_t lanes = candidates; !needed && lanes != 0; lanes &= lanes - 1)
+        {
+            needed = check_graph_warning_needed(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+        }
+    }
+    for (; !needed && node < graph->count; node += 1)
+    {
+        needed = check_graph_warning_needed(graph, stream, node);
     }
     if (!needed)
     {
@@ -2052,43 +2078,63 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
     }
 }
 
-static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary)
+// A node's report: its action's diagnostic, or in a context, its value's fault or what the context requires of it.
+static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
-    for (uint32_t node = 0; node < graph->count; node += 1)
+    const CheckValue* value = stream->values + node;
+    const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
+    if (stream->diagnostics[node] != CHECK_DIAG_NONE)
     {
-        const CheckValue* value = stream->values + node;
-        const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
+        // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
+        // would move the first error to an earlier prefix/return token instead of the offending expression.
+        if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
+        }
+    }
+    else if (context != 0 && value->type != 0)
+    {
         const uint32_t extensions = (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
-        const bool folded_integer = check_action_integer_constant(value, extensions);
-        if (stream->diagnostics[node] != CHECK_DIAG_NONE)
+        if (value->fault != CHECK_FAULT_NONE)
         {
-            // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
-            // would move the first error to an earlier prefix/return token instead of the offending expression.
-            if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
-            }
+            const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
+            check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
         }
-        else if (context != 0 && value->type != 0)
+        else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !check_action_integer_constant(value, extensions))
         {
-            if (value->fault != CHECK_FAULT_NONE)
-            {
-                const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
-                check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
-            }
-            else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !folded_integer)
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
-            else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && value->integer == 0)
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_ASSERT, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
-            else if ((context & BUSTER_CHECK_CONTEXT_STATIC) != 0 && (value->constant_kind == CHECK_CONSTANT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_INITIALIZER, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
         }
+        else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && value->integer == 0)
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_ASSERT, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
+        }
+        else if ((context & BUSTER_CHECK_CONTEXT_STATIC) != 0 && (value->constant_kind == CHECK_CONSTANT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_INITIALIZER, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
+        }
+    }
+}
+
+static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
+{
+    // Only a node with a diagnostic or a context reports: the vector path finds those 16 at a time and reads no other
+    // node's value (a sixth of the graph's bytes, #530); the scalar path takes every node.
+    uint32_t node = 0;
+    for (; !scalar && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    {
+        __mmask16 reported = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
+        if (graph->contexts != 0)
+        {
+            reported |= _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(graph->contexts + node)), _mm_set1_epi8(-1));
+        }
+        for (uint32_t lanes = reported; lanes != 0; lanes &= lanes - 1)
+        {
+            check_graph_report_node(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+        }
+    }
+    for (; node < graph->count; node += 1)
+    {
+        check_graph_report_node(graph, stream, node);
     }
     // Diagnostics are cold. Four stable radix passes restore source-token order without callbacks or recursion.
     CheckReport* source = stream->reports;
@@ -2120,6 +2166,26 @@ static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, Ch
 }
 
 #include "c_check_query_runtime.c"
+
+_Static_assert(sizeof(CheckDiagnostic) == sizeof(uint32_t), "the vector scans load diagnostics as 32-bit lanes");
+
+// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the rest and
+// the scalar path one at a time.
+static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count, bool scalar)
+{
+    uint32_t found = BUSTER_CHECK_NONE;
+    uint32_t node = 0;
+    for (; !scalar && found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    {
+        const __mmask16 exhausted = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
+        found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
+    }
+    for (; found == BUSTER_CHECK_NONE && node < count; node += 1)
+    {
+        found = stream->diagnostics[node] == CHECK_DIAG_RESOURCE ? node : BUSTER_CHECK_NONE;
+    }
+    return found;
+}
 
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
@@ -2234,14 +2300,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         }
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            for (uint32_t i = 0; result && i < count; i += 1)
+            const uint32_t exhausted = check_graph_resource_node(stream, count, options->scalar);
+            if (exhausted != BUSTER_CHECK_NONE)
             {
-                if (stream->diagnostics[i] == CHECK_DIAG_RESOURCE)
-                {
-                    result = false;
-                    stream->status = CHECK_STATUS_RESOURCE;
-                    stream->failed_node = i;
-                }
+                result = false;
+                stream->status = CHECK_STATUS_RESOURCE;
+                stream->failed_node = exhausted;
             }
             if (result && pass == 0)
             {
@@ -2257,9 +2321,9 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             if (count != 0)
             {
-                check_graph_warning_contexts(types, graph, stream, pure);
+                check_graph_warning_contexts(types, graph, stream, pure, options->scalar);
             }
-            check_graph_reports(graph, stream, reports);
+            check_graph_reports(graph, stream, reports, options->scalar);
         }
     }
     if (!result)
