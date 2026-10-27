@@ -1465,7 +1465,7 @@ must be exactly the expected one:
   placement and build by build, then copy by copy, the copies' names, and
   nothing left after the run, nor after a copy that fails; and the builds'
   comparison on values worked out by hand, with placements and copies,
-  without either, and with placements that don't pair.
+  without either, and with more placements than the reference's.
 
 The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
 ARGUMENT... [-- ARGUMENT...]...`, `time-runs [--runs N] [--warmups N]

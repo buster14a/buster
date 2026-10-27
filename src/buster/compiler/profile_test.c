@@ -28,7 +28,7 @@
 //   - time-runs: shell commands that log their order, statuses kept and changed, and an executable that can't start;
 //     copies of scripts (two builds of two placements) that log their tags and paths, in the slots' order, removed
 //     afterwards, and a copy that fails; and the builds' comparison on values made by hand, with placements and
-//     copies, without either, and with placements that don't pair.
+//     copies, without either, and with more placements than the reference's.
 //
 // The exit status is 1 if a case fails.
 
@@ -766,7 +766,8 @@ static void profile_test_time_copies(ProfileTest* test)
 
 // profile_time_compare on values made by hand, against reports worked out by hand: two builds of two placements, run
 // from two copies three times each, whose medians, spreads and ranges each come from other values; the second list
-// of two builds without copies or placements; and builds whose placements don't pair, of one run each.
+// of two builds without copies or placements; and a build of two placements against a reference of one, with copies,
+// of one run each.
 static void profile_test_time_compare(ProfileTest* test)
 {
     const char* const names[] = { "main", "mine", "odd" };
@@ -804,7 +805,7 @@ static void profile_test_time_compare(ProfileTest* test)
                        "list 1, cycles:\n"
                        "  main: 12 runs, median 1017.000; placements 1003.000, 1020.000 (spread 1.69%); copies within 0.40%\n"
                        "  mine: 12 runs, median 1025.000; placements 1012.000, 1029.000 (spread 1.68%); copies within 0.39%; against main +0.79% "
-                       "(over shifts +0.88% to +0.90%; over shifts and copies +0.59% to +1.20%)\n");
+                       "(over placements -0.78% to +2.59%; over placements and copies -0.98% to +3.00%)\n");
 
     // Two lists of one placement each and no copies: values[r * 4 + l * 2 + e], list 1's never read.
     const uint64_t one_placements[] = { 0, 0 };
@@ -819,7 +820,7 @@ static void profile_test_time_compare(ProfileTest* test)
                        "  main: 3 runs, median 200.000\n"
                        "  mine: 3 runs, median 210.000; against main +5.00%\n");
 
-    // main and mine with copies alone, and odd at two placements, which don't pair with main's one: values[c * 4 + e].
+    // main and mine with copies alone, and odd at two placements against main's one: values[c * 4 + e].
     const uint64_t odd_builds[] = { 0, 1, 2, 2 };
     const uint64_t odd_placements[] = { 0, 0, 0, 1 };
     const uint64_t odd_values[8] = { 100, 104, 110, 120, 102, 101, 110, 121 };
@@ -831,11 +832,12 @@ static void profile_test_time_compare(ProfileTest* test)
     t.list_count = 1;
     t.runs = 1;
     ok = profile_time_compare(&test->arena, &test->report, &t, odd_values, 0, "user cycles (thousands)", 1000);
-    profile_test_check(test, "time-runs' comparison of unpaired placements", ok, true, profile_report_text(&test->report),
+    profile_test_check(test, "time-runs' comparison of unequal placements", ok, true, profile_report_text(&test->report),
                        "list 1, user cycles (thousands):\n"
                        "  main: 2 runs, median 0.102; copies within 2.00%\n"
                        "  mine: 2 runs, median 0.104; copies within 2.97%; against main +1.96% (over copies -0.98% to +4.00%)\n"
-                       "  odd: 4 runs, median 0.120; placements 0.110, 0.121 (spread 10.00%); copies within 0.83%; against main +17.65%\n");
+                       "  odd: 4 runs, median 0.120; placements 0.110, 0.121 (spread 10.00%); copies within 0.83%; against main +17.65% "
+                       "(over placements +7.84% to +18.63%; over placements and copies +7.84% to +21.00%)\n");
 }
 
 // Runs argv with its output into `output` (a path), and returns whether it exited with status 0.

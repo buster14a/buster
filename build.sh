@@ -189,26 +189,31 @@ build_compiler()
     clang -no-pie "${linker_flags[@]}" "${linked[@]}" "$@" -lm -ldl -o build/compiler
 }
 # Links build_compiler's objects into $1 with $3 bytes of padding in .text before the objects of the source of index
-# $2, an object of its own, in the order build_compiler links them. The padding is the source's .text's alignment and
-# defines buster_shift_padding, which the link keeps (-u): wild collects sections nothing refers to, and places .text's
-# by their alignment, the largest first, in the objects' order within each (wild 0.11), so only padding of the same
+# $2, an object of its own, in the order build_compiler links them. The padding is a section of its own,
+# .text.buster_shift_padding, which the linkers put in .text in the objects' order, with the source's .text's alignment
+# and SHF_GNU_RETAIN: wild collects sections nothing refers to (0.10 even what -u names, which 0.11 keeps), and places
+# .text's by their alignment, the largest first, in the objects' order within each, so only padding of the same
 # alignment goes right before the source's. Fails for a shift that isn't a multiple of that alignment, which would
-# round it up.
+# round it up, and if the linker dropped the padding all the same.
 link_shifted()
 {
     local object="$object_directory/$2.o" padding="$object_directory/padding-$3.o" alignment linked=()
     alignment="$(readelf -SW "$object" | awk '$0 ~ /\] \.text / { print $NF }')"
     [[ "$alignment" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh shifts: can't read the alignment of ${sources[$2]}'s .text" >&2; return 1; }
     [ $(($3 % alignment)) -eq 0 ] || { echo "build.sh shifts: $3 isn't a multiple of ${sources[$2]}'s .text's alignment, $alignment" >&2; return 1; }
-    printf '\t.text\n\t.balign %d\n\t.globl buster_shift_padding\nbuster_shift_padding:\n\t.skip %d\n' "$alignment" "$3" |
-        clang -c -x assembler - -o "$padding"
+    printf '\t.section .text.buster_shift_padding,"axR",@progbits\n\t.balign %d\n\t.globl buster_shift_padding\nbuster_shift_padding:\n\t.skip %d\n' \
+        "$alignment" "$3" | clang -c -x assembler - -o "$padding"
     for i in "${!sources[@]}"; do
         if [ "$i" -eq "$2" ]; then
             linked+=("$padding")
         fi
         linked+=("$object_directory/$i.o")
     done
-    clang -no-pie "${linker_flags[@]}" -Wl,-u,buster_shift_padding "${linked[@]}" -lm -ldl -o "$1"
+    clang -no-pie "${linker_flags[@]}" "${linked[@]}" -lm -ldl -o "$1"
+    if ! nm "$1" | grep -q ' buster_shift_padding$' || { [ "$3" -ne 0 ] && cmp -s build/compiler "$1"; }; then
+        echo "build.sh shifts: the linker dropped $1's padding" >&2
+        return 1
+    fi
     echo "build.sh shifts: $1: ${sources[$2]}'s code $3 bytes later (its .text is aligned to $alignment)" >&2
 }
 # Choose the linker for build/compiler only; compilation and IR capture keep their existing flags.

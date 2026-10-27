@@ -1904,10 +1904,11 @@ static double profile_change(double value, double reference)
 // One metric's comparison of the builds on list `list`, into `report`: values[r * slot count + slot] is run r's
 // process in each slot (profile_time_slot). For each build, in order: its runs and their median; each placement's
 // median (over its copies' runs) and their spread, the largest over the smallest; the largest spread of one
-// placement's copies' medians; and, for every build but the first, its median against the first's, then the same
-// against it placement by placement (pairing their placements by number, where both have as many) and with copies,
-// each of its copies' medians against each of the first build's at the same placement: the difference's range over
-// the shifts, and over the shifts and the copies. Medians are printed divided by `scale`.
+// placement's copies' medians; and, for every build but the first, its median against the first's, with that
+// difference's range over the placements, each of its placements' medians against each of the first build's, and
+// over the placements and the copies, each of its copies' medians against each of the first build's. The ranges pair
+// nothing: two trees' code starts at bases an arbitrary distance apart, so their placements of one number aren't the
+// same placement. Medians are printed divided by `scale`.
 static bool profile_time_compare(Arena* arena, ProfileReport* report, const ProfileTimeRuns* t, const uint64_t* values, uint64_t list, const char* metric, double scale)
 {
     const uint64_t copies = profile_time_copies(t);
@@ -1997,38 +1998,42 @@ static bool profile_time_compare(Arena* arena, ProfileReport* report, const Prof
         {
             profile_print(report, "; against %s %+.2f%%", t->build_names[0], profile_change(median, reference));
         }
-        if (b != 0 && placements == reference_placements && (placements > 1 || copies > 1))
+        const bool placed = placements > 1 || reference_placements > 1;
+        if (b != 0 && (placed || copies > 1))
         {
-            double shifts_low = 0;
-            double shifts_high = 0;
+            double placements_low = 0;
+            double placements_high = 0;
             double low = 0;
             double high = 0;
             for (uint64_t p = 0; p < placements; p += 1)
             {
                 const uint64_t e = profile_time_executable(t, b, p);
-                const uint64_t f = profile_time_executable(t, 0, p);
-                const double shift = profile_change(placement_medians[e], placement_medians[f]);
-                shifts_low = p == 0 || shift < shifts_low ? shift : shifts_low;
-                shifts_high = p == 0 || shift > shifts_high ? shift : shifts_high;
-                for (uint64_t c = 0; c < copies; c += 1)
+                for (uint64_t q = 0; q < reference_placements; q += 1)
                 {
-                    for (uint64_t d = 0; d < copies; d += 1)
+                    const uint64_t f = profile_time_executable(t, 0, q);
+                    const double change = profile_change(placement_medians[e], placement_medians[f]);
+                    placements_low = (p == 0 && q == 0) || change < placements_low ? change : placements_low;
+                    placements_high = (p == 0 && q == 0) || change > placements_high ? change : placements_high;
+                    for (uint64_t c = 0; c < copies; c += 1)
                     {
-                        const double change = profile_change(unit_medians[e * copies + c], unit_medians[f * copies + d]);
-                        const bool first = p == 0 && c == 0 && d == 0;
-                        low = first || change < low ? change : low;
-                        high = first || change > high ? change : high;
+                        for (uint64_t d = 0; d < copies; d += 1)
+                        {
+                            const double copy_change = profile_change(unit_medians[e * copies + c], unit_medians[f * copies + d]);
+                            const bool first = p == 0 && q == 0 && c == 0 && d == 0;
+                            low = first || copy_change < low ? copy_change : low;
+                            high = first || copy_change > high ? copy_change : high;
+                        }
                     }
                 }
             }
             profile_print(report, " (");
-            if (placements > 1)
+            if (placed)
             {
-                profile_print(report, "over shifts %+.2f%% to %+.2f%%%s", shifts_low, shifts_high, copies > 1 ? "; " : "");
+                profile_print(report, "over placements %+.2f%% to %+.2f%%%s", placements_low, placements_high, copies > 1 ? "; " : "");
             }
             if (copies > 1)
             {
-                profile_print(report, "over %s %+.2f%% to %+.2f%%", placements > 1 ? "shifts and copies" : "copies", low, high);
+                profile_print(report, "over %s %+.2f%% to %+.2f%%", placed ? "placements and copies" : "copies", low, high);
             }
             profile_print(report, ")");
         }
