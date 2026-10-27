@@ -1067,6 +1067,24 @@ The test command fails if the oracle cannot run. It covers:
   last linked program's takes that program's run: the same files would link
   into the same executable (#465). A program that fails is linked and run, and
   its directory kept with `driver.c` and `oracle.c`.
+- The passes after checking that visit a unit's few records rather than every
+  token (#592), on every program fixture by both paths
+  (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
+  replaced, kept as the test's oracle, record for record, with each object's
+  last declaration (`check_data_latest`) and the static declarations' keys;
+  `check_program_token_body` against the token-sized column of every body's
+  tokens; and the objects `check_program_object_access` finds the unit defines
+  against a walk of every token. `check_init_declarations` runs at every count
+  to 200 and larger ones, ending at `PROT_NONE` pages, beside #442's kernels.
+- The diagnostics' report (`check_driver_reports`, #592) against the walk of
+  every token it replaced, kept as the test's oracle
+  (`check_test_driver_reports` in `c_checker_driver_test.c`): units with
+  warnings of each kind, an error and a fatal error, reported as checked and
+  with their sparse records rewritten at random (constants' and nodes'
+  warnings, floating-point pragmas and packed members' addresses in token order
+  and out of it, the original pragmas apart, reports, the driver's own
+  diagnostics and excess elements, quiet and not). The text, the counts and the
+  fatal flag must be the oracle's by both paths.
 
 The fixtures that ask clang for acceptance and first errors go to it many at a
 time (`parse_test_clang`), split in order among up to eight processes that run
