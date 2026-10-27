@@ -387,6 +387,15 @@ designs and the compilers already built this way.
   units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
   one function that its optimizer takes superlinear time over.
+- `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
+  stage's milliseconds (startup, preprocessing and its phases, parsing, checking, lowering, Tier 0, branch sizing,
+  encoding, the object's build and write, the release; on several lanes their run is one stage, `lanes`), with its
+  system time, page faults and peak resident set added, and the process's resource use; off by default, its laps test
+  a null pointer. `measure-compile [--runs N]
+  [--reference PATH] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole processes, with and without the option and
+  against a reference compiler (tcc), in a rotating order, with each stage's medians; the 9700X job runs it on
+  `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
+  guide](docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
