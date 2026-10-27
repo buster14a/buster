@@ -3056,14 +3056,18 @@ does pays what a static executable pays: a compare of 16 targets per 16
 fixups and of 64 kinds per 64, and a scalar relaxation per access in the
 patch's path for the other kinds (the static executable's 0.89 us for 47
 accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
-accesses" below). On the 9700X, #553's TLS modes of `benchmark-executable`
-measured about 19 ns per general-dynamic access relaxed to local-exec, 21 per
-imported one relaxed to initial-exec and 23 per local-dynamic one, as
-whole-writer deltas against a control program of the same fixups without TLS
-([#515's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tls-relaxation-515-2026-10-27)),
-and `benchmark-executable --only dynamic`, whose programs have no TLS
-accesses, wrote them in the same time before and after, its count within the
-rounds' spread ([#489's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)).
+accesses" below). On the 9700X, `benchmark-executable`'s TLS modes (`--tls`)
+against their control, a probe of the same bytes, atoms and fixups without
+TLS, add about 19 ns to the write per general-dynamic access to the program's
+own thread-local, 21 ns per access to `libc.so.6`'s `errno` and 23 ns per
+local-dynamic access with its `DTPOFF32`, on one lane at 2,000 and 180,000
+workers: the count and the symbols' pass about 3 ns each, and the chunks 12 ns
+(16 ns with the `DTPOFF32`). These are the whole writer's deltas between the
+programs, whose fixups' kinds and sections differ, not the relaxation's code
+alone ([#515's record](https://github.com/buster14a/buster-performance/blob/c5c33148b8d0a891ec7f8eb94faabc748139b3ef/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+`benchmark-executable --only dynamic`, whose programs have no TLS accesses,
+wrote them in the same time before and after, its count within the rounds'
+spread ([#489's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)).
 
 #### The unwind tables
 

@@ -1,5 +1,4 @@
 name: 9700X test
-run-name: ${{ inputs.lease && format('9700X lease {0}', inputs.lease) || github.event.pull_request.title || github.event.head_commit.message || '9700X qualification' }}
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
@@ -9,22 +8,6 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
-    inputs:
-      target_pr:
-        description: Controller-owned PR qualification; leave empty for full main maintenance
-        type: string
-      target_head:
-        description: Controller-pinned PR head
-        type: string
-      target_base:
-        description: Controller-pinned PR base
-        type: string
-      target_merge:
-        description: Controller-pinned immutable merge commit
-        type: string
-      lease:
-        description: Controller lease nonce; operator controls use 9700x-control.yml
-        type: string
   # Once a day, the measurements a push to main leaves out (`changes`).
   schedule:
     - cron: '23 7 * * *'
@@ -44,77 +27,10 @@ permissions:
 # own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
 # shared host lock (AGENTS.md).
 concurrency:
-  group: buster-fast-9700x-${{ (inputs.target_pr && format('admitted-pr-{0}', inputs.target_pr)) || github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  invalid-target:
-    if: github.event_name == 'workflow_dispatch' && inputs.target_pr && vars.CI_9700X_ADMISSION_ENABLED != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    steps:
-      - name: Reject a targeted dispatch while admission is disabled
-        run: |
-          echo 'Targeted PR qualification requires enabled admission and a current controller lease.' >&2
-          exit 1
-
-  # Only reviewed main workflows reach the physical pool once admission is enabled. Native PR workflows retain
-  # independent hosted change detection. The controller publishes the existing required check on the PR head after
-  # a pinned merge succeeds; a workflow_dispatch's native default-branch check is never the PR's merge evidence.
-  # Before activation the existing path remains available so this change can qualify before default-branch rollout.
-  admission:
-    if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 335
-    env:
-      CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: read
-    outputs:
-      commit: ${{ steps.lease.outputs.commit }}
-      base: ${{ steps.lease.outputs.base }}
-      controller_sha: ${{ steps.lease.outputs.controller_sha }}
-      guard_sha256: ${{ steps.guard.outputs.sha256 }}
-      merge_pack_sha256: ${{ steps.pack.outputs.sha256 }}
-    steps:
-      - name: Check out the reviewed guard for this workflow revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-          sparse-checkout: tools/ci
-      - id: guard
-        name: Build the read-only admission guard on hosted capacity
-        run: |
-          set -euo pipefail
-          cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o "$RUNNER_TEMP/admission"
-          sha256sum "$RUNNER_TEMP/admission" | awk '{ print "sha256=" $1 }' >> "$GITHUB_OUTPUT"
-      - id: lease
-        name: Wait on GitHub-hosted capacity until this exact run is admitted
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: '"$RUNNER_TEMP/admission" --wait'
-      - id: pack
-        name: Freeze only the new merge objects for these exact input commits
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/admission" --merge-pack "$RUNNER_TEMP/merge.pack"
-          sha256sum "$RUNNER_TEMP/merge.pack" | awk '{ print "sha256=" $1 }' >> "$GITHUB_OUTPUT"
-      - name: Pass this reviewed guard to this exact workflow attempt
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/admission
-            ${{ runner.temp }}/merge.pack
-          retention-days: 1
-          if-no-files-found: error
-
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
   # GitHub-hosted runner so that it doesn't wait for the 9700X: the files the merge changes against its base. When this
   # job fails, `test` runs, with every benchmark. And whether it changes the harnesses of the baselines, the linkers'
@@ -143,15 +59,11 @@ jobs:
   # (`changes_benchmarks`) and the decision, which its --self-test checks against this workflow and the sources before
   # it decides.
   changes:
-    needs: admission
-    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'push' || (vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr)) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || github.event_name == 'pull_request' || needs.admission.result == 'success') }}
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
-      actions: read
-      checks: read
-      pull-requests: read
     outputs:
       code: ${{ steps.files.outputs.code }}
       baselines: ${{ steps.files.outputs.baselines }}
@@ -169,36 +81,16 @@ jobs:
       checker_bindings: ${{ steps.files.outputs.checker_bindings }}
       check_debug: ${{ steps.files.outputs.check_debug }}
       files: ${{ steps.files.outputs.files }}
+      compile_time: ${{ steps.files.outputs.compile_time }}
       performance: ${{ steps.files.outputs.performance }}
       measure: ${{ steps.files.outputs.measure }}
     steps:
       - name: Check out the triggering commit and its parents
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ needs.admission.outputs.base || needs.admission.outputs.commit || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
-
-      - name: Download only this admitted workflow attempt's frozen merge
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/9700x-admission
-
-      - name: Reconstruct the exact frozen merge before reading its selector
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
-          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
-          MERGE_PACK_SHA256: ${{ needs.admission.outputs.merge_pack_sha256 }}
-        run: |
-          set -euo pipefail
-          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
-          printf '%s  %s\n' "$MERGE_PACK_SHA256" "$RUNNER_TEMP/9700x-admission/merge.pack" | /usr/bin/sha256sum --check
-          chmod +x "$RUNNER_TEMP/9700x-admission/admission"
-          "$RUNNER_TEMP/9700x-admission/admission" --materialize "$RUNNER_TEMP/9700x-admission/merge.pack"
 
       - name: Build the selector and check it against this workflow and the sources
         # tools/ci/changes.c, built with the runner's cc in about a second: its self-test checks its tables against the
@@ -230,22 +122,16 @@ jobs:
           fi
 
   test:
-    # Fork previews cannot depend on the base repository's variables being present. They always use the controller.
-    name: ${{ (vars.CI_9700X_ADMISSION_ENABLED == 'true' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && ((github.event_name == 'pull_request' && '9700X queue request') || (inputs.target_pr && '9700X admitted execution')) || 'Build and execute on Ryzen 7 9700X' }}
-    needs: [changes, admission]
+    name: Build and execute on Ryzen 7 9700X
+    needs: changes
     # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (the daily and
     # dispatched runs) or failed.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (!inputs.target_pr || vars.CI_9700X_ADMISSION_ENABLED == 'true') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     # The full set of measurements takes about 13 minutes; every other run, about 4 to 7.
-    timeout-minutes: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.target_pr)) && 25 || 20 }}
-    permissions:
-      contents: read
-      actions: read
-      checks: read
-      pull-requests: read
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 20 }}
     defaults:
       run:
         shell: bash
@@ -253,26 +139,7 @@ jobs:
     # list for a pull request (",lexer,parser,"), and on any other run, or when `changes` failed, all of them.
     env:
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
-      CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
     steps:
-      - name: Download only this reviewed workflow attempt's admission guard
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/9700x-admission
-
-      - name: Revalidate the lease immediately before the hardware qualification
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
-        run: |
-          set -euo pipefail
-          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
-          chmod +x "$RUNNER_TEMP/9700x-admission/admission"
-          "$RUNNER_TEMP/9700x-admission/admission" --verify
-
       - name: Verify host and bootstrap compiler
         run: |
           test "$(uname -s)" = Linux
@@ -284,20 +151,8 @@ jobs:
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ needs.admission.outputs.base || needs.admission.outputs.commit || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-
-      - name: Reconstruct the exact frozen merge before qualification
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && inputs.target_pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
-          MERGE_PACK_SHA256: ${{ needs.admission.outputs.merge_pack_sha256 }}
-        run: |
-          set -euo pipefail
-          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
-          printf '%s  %s\n' "$MERGE_PACK_SHA256" "$RUNNER_TEMP/9700x-admission/merge.pack" | /usr/bin/sha256sum --check
-          "$RUNNER_TEMP/9700x-admission/admission" --materialize "$RUNNER_TEMP/9700x-admission/merge.pack"
 
       - name: Build the external Clang pragma token oracle and the compiler executable
         # Without debug information, which nothing here reads: it took a fifth of the build's time (BUSTER_DEBUG_INFO,
@@ -1329,6 +1184,43 @@ jobs:
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,4,8 --cpus "2,$others" "${source[@]}"
 
+      - name: Attribute sqlite3.c's compile time to the compiler's stages, against tcc
+        # #518 (docs/compile-time.md): `-c` of the frozen corpus's sqlite3.c with the options of #136's speedtest1
+        # record, as whole processes in a rotating order with tcc's, with --time-stages' report of where the time goes;
+        # then perf's counters and a profile by function of the default compile. Where `changes` doesn't rule it out
+        # (the stage clock and measure-compile: `compile_time`), and on the daily and dispatched runs.
+        if: needs.changes.outputs.compile_time != 'false'
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          # tcc is the comparison's reference: the step fails without it, or with another build of it. An upgrade
+          # starts a new series of ratios: update this hash and docs/compile-time.md's together.
+          tcc="$(command -v tcc)"
+          "$tcc" -v
+          printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
+          taskset -c 2 ./build/compiler measure-compile --runs 11 --reference "$tcc" -- "${options[@]}"
+          # The counters of 11 compiles of each, user and kernel apart, and the functions the default's samples fall
+          # in. They are the stage report's cross-check (#518), so the step fails when perf can't give them: when it
+          # can't run, when a counter isn't counted, or when the profile is empty.
+          out="$RUNNER_TEMP/compile-time"
+          mkdir -p "$out"
+          events=task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u
+          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-compiler.txt" -- ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
+          cat "$out/stat-compiler.txt"
+          taskset -c 2 perf stat -r 11 -e "$events" -o "$out/stat-tcc.txt" -- "$tcc" "${options[@]}" -o "$out/tcc.o"
+          cat "$out/stat-tcc.txt"
+          if grep -E '<not (supported|counted)>' "$out/stat-compiler.txt" "$out/stat-tcc.txt"; then
+              echo "::error::perf counted only some of the events, so the stage report has no cross-check"
+              exit 1
+          fi
+          taskset -c 2 perf record -q -F 20000 -o "$out/perf.data" -- \
+              bash -c 'for run in 1 2 3 4 5; do "$@" > /dev/null 2>&1 || exit 1; done' compile ./build/compiler "${options[@]}" -o "$out/sqlite3.o"
+          perf report -i "$out/perf.data" --stdio --no-children --sort dso --percent-limit 0.5 > "$out/dso.txt"
+          perf report -i "$out/perf.data" --stdio --no-children --sort symbol --percent-limit 0.4 > "$out/symbol.txt"
+          grep -v '^#' "$out/dso.txt" | sed '/^$/d'
+          grep -v '^#' "$out/symbol.txt" | sed -n '/^$/d; 1,80p'
+
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the
         # whole source reader is timed per mode, with the handoff's pieces alone and their memory.
@@ -1441,13 +1333,3 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
-
-      - name: Verify the qualified identity and lease again at completion
-        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
-        run: |
-          set -euo pipefail
-          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
-          "$RUNNER_TEMP/9700x-admission/admission" --verify
