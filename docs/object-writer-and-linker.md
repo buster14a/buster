@@ -2934,19 +2934,22 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   in a static executable; a shared library keeps them, with GOT pairs.
   Split-stack PIEs and libraries link and run.
 
-**The cost**, on a 4-core Xeon VM (not the 9700X), against main (7e3782a),
-the two builds' runs alternating: the dynamic runtime's snapshot grew from
-3,145,713 bytes to 3,150,769 (its directory from 278,784 to 283,840: 61 more
-global names, 3,389, the unwinder's and `libgcc_s.so.1`'s names `libgcc.a`
-lacks, and its versions' and exports' columns), with two more probes
-(`libgcc_s.so.1` absent from GCC's installation and found in a library
-directory). `runtime_open` from the snapshot took 26.9 to 30.6 us before and
-28.2 to 31.6 after over four runs each, within the VM's noise; each probe's
-`stat` is about 0.9 us of it. Binding one worker took the same. The C driver
-compiling and linking a hello world, 220 alternating runs each, took a median
-of 9.90 ms before and 9.96 after (p10 9.40 and 9.40), with a peak resident
-set of 28.9 MB and about 1,850 minor faults both ways; its executable is the
-same bytes. The 9700X's run against #483's record is still to be made.
+**The cost**, on the 9700X against #511's merge base (e04462c), with #483's
+harness in three alternating rounds
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)):
+the dynamic runtime's snapshot grew from 3,282,344 bytes to 3,286,696 (45
+more global names, 3,432, and four more probes: `libgcc_s.so.1` in GCC's
+installation and in the library directories). A link that doesn't import
+`libgcc_s.so.1` pays 0.8 us in `runtime_open` (11.7 to 11.9 us before, 12.6
+to 12.7 after), nearly all of it the probes' `stat`s, and 0.02 to 0.04 us in
+`bind_end` (1,919 instructions for one worker: the as-needed pass over a third
+library); `bind_begin`, the write and the direct link's resident memory are
+the same. The C driver's hello world took 0.08 to 0.10 ms and 2 MB more, all
+of it one transparent huge page of `.bss`: the larger code moves `.bss`, and
+`unwind.c`'s `unwind_indices`, which every link clears whole, then straddles
+a 2 MB boundary. With huge pages disabled the two builds' runs take memory
+within 20 KB and, in two rounds of three, time within 0.01 ms. That page follows
+the executable's layout, which any change can move.
 
 `test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
 libraries' and its exports apart from theirs, `__udivti3` a member's of
@@ -3053,10 +3056,14 @@ does pays what a static executable pays: a compare of 16 targets per 16
 fixups and of 64 kinds per 64, and a scalar relaxation per access in the
 patch's path for the other kinds (the static executable's 0.89 us for 47
 accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
-accesses" below). The 9700X's measurement of `benchmark-executable --only
-dynamic` before and after is still to be made: the session that wrote this
-had no access to the host, and its VM's Xeon lacks AVX-512 VBMI and GFNI,
-which the compiler needs to run.
+accesses" below). On the 9700X, #553's TLS modes of `benchmark-executable`
+measured about 19 ns per general-dynamic access relaxed to local-exec, 21 per
+imported one relaxed to initial-exec and 23 per local-dynamic one, as
+whole-writer deltas against a control program of the same fixups without TLS
+([#515's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tls-relaxation-515-2026-10-27)),
+and `benchmark-executable --only dynamic`, whose programs have no TLS
+accesses, wrote them in the same time before and after, its count within the
+rounds' spread ([#489's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)).
 
 #### The unwind tables
 
