@@ -99,6 +99,34 @@ static void members(unsigned n)
     printf("}\n");
 }
 
+static void typed_members(unsigned n)
+{
+    // n record types, each with a pointer to it, and four member accesses per type: the table grows with n, and so does
+    // the number of accesses.
+    for (unsigned i = 0; i < n; i++)
+        printf("struct T_%u\n{\n    int a;\n    int b;\n    long c;\n};\n", i);
+    for (unsigned i = 0; i < n; i++)
+        printf("long get_%u(struct T_%u* t)\n{\n    return t->a + t->b + t->c + t->a;\n}\n", i, i);
+}
+
+static void label_values(unsigned n)
+{
+    printf("int f(int x)\n{\n    static void* const table[] =\n    {\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("        &&L_%u,\n", i);
+    printf("    };\n    goto *table[x %% %u];\n", n);
+    for (unsigned i = 0; i < n; i++)
+        printf("L_%u:\n    x = x * 3 + %u;\n", i, i);
+    printf("    return x;\n}\n");
+}
+
+static void static_locals(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("int counter_%u(void)\n{\n    static int count = %u;\n    return count++;\n}\n", i, i);
+    printf("int main(void)\n{\n    return counter_%u() & 1;\n}\n", n / 2);
+}
+
 static void bitfields(unsigned n)
 {
     printf("struct B\n{\n");
@@ -345,6 +373,9 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "forward-gotos") == 0) forward_gotos(n);
     else if (strcmp(mode, "members") == 0) members(n);
     else if (strcmp(mode, "bitfields") == 0) bitfields(n);
+    else if (strcmp(mode, "typed-members") == 0) typed_members(n);
+    else if (strcmp(mode, "label-values") == 0) label_values(n);
+    else if (strcmp(mode, "static-locals") == 0) static_locals(n);
     else if (strcmp(mode, "enum") == 0) enumerators(n);
     else if (strcmp(mode, "integers") == 0) integers(n);
     else if (strcmp(mode, "bytes") == 0) bytes(n);
