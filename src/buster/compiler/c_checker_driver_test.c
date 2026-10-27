@@ -1754,6 +1754,169 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
     rmdir(headers);
 }
 
+// Reads --time-stages' report in `text` (check_clock_read): whether it has every row once, the stages adding up to the
+// total and the preprocessor's rows to its stage (each line is rounded to a microsecond), and the process's lines.
+// Each stage's milliseconds go to `stages` (by CheckStage).
+static bool check_test_driver_time_report(const char* text, double* stages)
+{
+    static const char* const process[] = { "\ntime-process\ttsc-mhz\t", "\ntime-process\tuser-ms\t", "\ntime-process\tsystem-ms\t",
+                                           "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t" };
+    double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
+    double total = -1;
+    bool valid = check_clock_read(text, stages, phases, &total, NULL);
+    double sum = 0;
+    double phase_sum = 0;
+    for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
+    {
+        sum += stages[s];
+    }
+    for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_PHASES; p += 1)
+    {
+        phase_sum += phases[p];
+    }
+    for (uint32_t p = 0; valid && p < BUSTER_ARRAY_LENGTH(process); p += 1)
+    {
+        valid = strstr(text, process[p]) != NULL;
+    }
+    const double stage_error = sum > total ? sum - total : total - sum;
+    const double phase_error = phase_sum > stages[CHECK_STAGE_PREPROCESS] ? phase_sum - stages[CHECK_STAGE_PREPROCESS] : stages[CHECK_STAGE_PREPROCESS] - phase_sum;
+    return valid && total > 0 && stage_error <= 0.001 * (CHECK_STAGE_COUNT + 1) && phase_error <= 0.001 * (BUSTER_CHECK_CLOCK_PHASES + 1);
+}
+
+// --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
+// its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
+// runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
+static void check_test_driver_time_stages(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static int table[4] = { 1, 2, 3, 4 };\n"
+                                  "static int sum(int n) { int s = 0; for (int i = 0; i < n; i++) s += table[i & 3]; return s; }\n"
+                                  "int main(void) { printf(\"%d\\n\", sum(10)); return sum(4) == 10 ? 0 : 1; }\n";
+    char compiler[PATH_MAX];
+    char source[256];
+    char plain[256];
+    char timed[256];
+    char linked[256];
+    snprintf(source, sizeof(source), "%s/time_stages.c", directory);
+    snprintf(plain, sizeof(plain), "%s/time_stages_plain.o", directory);
+    snprintf(timed, sizeof(timed), "%s/time_stages_timed.o", directory);
+    snprintf(linked, sizeof(linked), "%s/time_stages", directory);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    char* const compile_plain[] = { compiler, "-c", source, "-o", plain, NULL };
+    char* const compile_timed[] = { compiler, "-c", "--time-stages", source, "-o", timed, NULL };
+    char* const link[] = { compiler, "--time-stages", source, "-o", linked, NULL };
+    char* const syntax[] = { compiler, "-fsyntax-only", "--time-stages", source, NULL };
+    char* const run[] = { linked, NULL };
+    char* text = NULL;
+    double stages[CHECK_STAGE_COUNT] = { 0 };
+    const int plain_status = made ? check_test_driver_spawn(compile_plain, &text) : -1;
+    check_test_expect(test, plain_status == 0 && text != NULL && strstr(text, "time-stage") == NULL, "-c without --time-stages prints no report");
+    free(text);
+    text = NULL;
+    const int timed_status = made ? check_test_driver_spawn(compile_timed, &text) : -1;
+    const bool object_report = timed_status == 0 && check_test_driver_time_report(text, stages);
+    if (!object_report)
+    {
+        printf("  --time-stages -c: status %d: %s\n", timed_status, text != NULL ? text : "");
+    }
+    check_test_expect(test, object_report && stages[CHECK_STAGE_ENCODE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] > 0 && stages[CHECK_STAGE_EXECUTABLE] == 0 &&
+                                stages[CHECK_STAGE_LANES] == 0,
+                      "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
+    check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
+    free(text);
+    text = NULL;
+    memset(stages, 0, sizeof(stages));
+    const int link_status = made ? check_test_driver_spawn(link, &text) : -1;
+    const bool link_report = link_status == 0 && check_test_driver_time_report(text, stages);
+    if (!link_report)
+    {
+        printf("  --time-stages: status %d: %s\n", link_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int ran = link_status == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, link_report && ran == 0 && stages[CHECK_STAGE_EXECUTABLE] > 0 && stages[CHECK_STAGE_OBJECT_WRITE] == 0,
+                      "--time-stages on the direct path reports every stage once, and its executable runs");
+    // The direct path's -g on a program of many functions and tables, enough that each stage takes microseconds: the
+    // DWARF and the static data are their own stages, not the link's.
+    memset(stages, 0, sizeof(stages));
+    static char many[1u << 17];
+    uint64_t length = 0;
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "static int t%u[16] = { %u };\nstatic int f%u(void) { return t%u[0]; }\n", f, f, f, f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "int main(void)\n{\n    int s = 0;\n");
+    for (uint32_t f = 0; f < 512; f += 1)
+    {
+        length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    s += f%u();\n", f);
+    }
+    length += (uint64_t)snprintf(many + length, sizeof(many) - length, "    return s == 512 * 511 / 2 ? 0 : 1;\n}\n");
+    char debug_source[256];
+    snprintf(debug_source, sizeof(debug_source), "%s/time_stages_debug.c", directory);
+    const bool debug_made = made && length < sizeof(many) && parse_test_write(debug_source, many, length);
+    char* const debug_link[] = { compiler, "--time-stages", "-g", debug_source, "-o", linked, NULL };
+    const int debug_status = debug_made ? check_test_driver_spawn(debug_link, &text) : -1;
+    const bool debug_report = debug_status == 0 && check_test_driver_time_report(text, stages);
+    if (!debug_report)
+    {
+        printf("  --time-stages -g: status %d: %s\n", debug_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    const int debug_ran = debug_status == 0 ? check_test_driver_spawn(run, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, debug_report && debug_ran == 0 && stages[CHECK_STAGE_DEBUG] > 0 && stages[CHECK_STAGE_PUBLISH_DATA] > 0 &&
+                                stages[CHECK_STAGE_EXECUTABLE] > 0,
+                      "--time-stages -g on the direct path charges the DWARF and the static data to their own stages");
+    // The same program's functions on two lanes (#151): their run is the lanes' stage, not the one lane's stages from
+    // lowering to unwind, and the object is one lane's.
+    char one_lane[256];
+    char two_lanes[256];
+    snprintf(one_lane, sizeof(one_lane), "%s/time_stages_one_lane.o", directory);
+    snprintf(two_lanes, sizeof(two_lanes), "%s/time_stages_two_lanes.o", directory);
+    char* const compile_one[] = { compiler, "-c", "--lanes", "1", debug_source, "-o", one_lane, NULL };
+    char* const compile_two[] = { compiler, "-c", "--time-stages", "--lanes", "2", debug_source, "-o", two_lanes, NULL };
+    memset(stages, 0, sizeof(stages));
+    const int one_status = debug_made ? check_test_driver_spawn(compile_one, &text) : -1;
+    free(text);
+    text = NULL;
+    const int two_status = debug_made ? check_test_driver_spawn(compile_two, &text) : -1;
+    const bool two_report = two_status == 0 && check_test_driver_time_report(text, stages);
+    if (!two_report)
+    {
+        printf("  --time-stages --lanes 2: status %d: %s\n", two_status, text != NULL ? text : "");
+    }
+    free(text);
+    text = NULL;
+    check_test_expect(test, one_status == 0 && two_report && stages[CHECK_STAGE_LANES] > 0 && stages[CHECK_STAGE_ENCODE] == 0 &&
+                                check_test_driver_same_files(one_lane, two_lanes),
+                      "--time-stages with the functions on two lanes charges their run to the lanes' stage, and writes one lane's object");
+    memset(stages, 0, sizeof(stages));
+    const int syntax_status = made ? check_test_driver_spawn(syntax, &text) : -1;
+    check_test_expect(test, syntax_status == 0 && check_test_driver_time_report(text, stages) && stages[CHECK_STAGE_PARSE] > 0 && stages[CHECK_STAGE_LOWER] == 0,
+                      "--time-stages -fsyntax-only reports the stages it ran");
+    free(text);
+    text = NULL;
+    // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
+    char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
+    char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
+    const int measured_status = made ? check_test_driver_spawn(measured, &text) : -1;
+    free(text);
+    text = NULL;
+    const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
+    free(text);
+    check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
+    const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
 {
     Arena scratch = arena_reserve(64);
@@ -2455,6 +2618,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_script_path(&test, clang, executable, directory);
             check_test_driver_versions(&test, clang, executable, directory);
             check_test_driver_option_values(&test, executable, directory);
+            check_test_driver_time_stages(&test, executable, directory);
         }
         rmdir(directory);
     }

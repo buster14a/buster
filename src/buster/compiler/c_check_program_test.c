@@ -840,6 +840,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_select_test.c"
 #include "c_check_program_query_test.c"
 #include "c_check_region_input_test.c"
+#include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
@@ -1013,6 +1014,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_queries(test, clang);
     check_test_program_region_proofs(test, clang);
     check_test_program_helpers(test);
+    check_test_program_atomics(test, clang);
     check_test_program_diagnostics(test, clang);
     check_test_program_source(test,
         "int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);"
