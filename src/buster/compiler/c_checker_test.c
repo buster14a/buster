@@ -3686,6 +3686,15 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // A ?:'s value from both of its arms (#555's third review): a vector where either arm is one, a scalar arm
+        // converted to it; a scalar where both are; a pointer or a record where either is, a null pointer constant or
+        // GNU's `a ?: b` the other.
+        {
+            "a conditional's arms in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef int v4si __attribute__((vector_size(16)));\nint f(int n, v4si v, v4si w, S* p, S* q, S s, S t)\n{\n    v4si a[] = { n ? v : 0, n ? 0 : v, n ? v : w, n ? (v + w) : 1, v };\n    _Static_assert(sizeof a == 5 * sizeof(v4si), \"five\");\n    v4si b[] = { n ? 1 : 2, 3 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one\");\n    S x[] = { *(n ? p : 0), *(n ? 0 : q), n ? s : t, *(p ?: q), s };\n    _Static_assert(sizeof x == 5 * sizeof(S), \"five\");\n    return a[4][0] + b[0][1] + x[4].a;\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
