@@ -239,6 +239,15 @@ scalar-conditioned modes expose different host power states. Run repeated
 processes through the per-run 9700X lock, pinned to CPU 2, before retaining a
 performance claim. No performance acceptance is asserted by adding the tool.
 
+The [#609 fixed-filtering record](https://github.com/buster14a/buster-performance/tree/11051131ad5c4ae57c65d170fb38c6f5f3154796/docs/measurements/tier1-fixed-609-2026-10-27)
+compares compiler code `9a652c02` with `92c025e7` under the shared 9700X lock.
+At 8,192 sparse value/fixed intervals, filtering takes 6.954 ms versus 57.849 us
+(120.21x), and complete allocation 7.131 ms versus 263.745 us (27.04x).
+It covers dense/call/mixed constraints, no-fixed/tiny controls, scalar conditioning,
+exact output checks and native/guard/rollback qualification. Indexed scratch adds
+4*F bytes; all tiny samples, including slower ones, are retained in the record.
+These are allocator API measurements; the current native producer supplies F=0.
+
 Both issues remain open until source-corpus interval production and native
 spill/reload/phi/call lowering are integrated and qualified. Required remaining
 evidence includes SQLite and the slice's tests, #142, per-function assignment
