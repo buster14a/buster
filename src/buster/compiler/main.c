@@ -450,6 +450,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
+// #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
+#include "buster/compiler/c_check_lanes_test.c"
 #include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #include "buster/compiler/c_check_source_benchmark.c"
@@ -457,6 +459,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_deferred_benchmark.c"
 // #129's benchmark-lowering-source: what lowering only the referenced definitions saves on real units.
 #include "buster/compiler/c_lowering_source_benchmark.c"
+// #151's benchmark-check-lanes: a unit's functions compiled on lanes, against one lane.
+#include "buster/compiler/c_check_lanes_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_debug_benchmark.c"
 #include "buster/compiler/c_check_source_benchmark_test.c"
@@ -944,6 +948,10 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_check_debug_benchmark(argc - 2, argv + 2);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-lanes") == 0)
+    {
+        result = run_check_lanes_tests(argc - 2, argv + 2);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
         result = run_check_builtin_tests(argc - 2, argv + 2);
@@ -1067,6 +1075,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-lowering-source") == 0)
     {
         result = run_lowering_source_benchmark(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-lanes") == 0)
+    {
+        result = run_check_lanes_benchmark(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
