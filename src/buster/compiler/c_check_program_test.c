@@ -913,6 +913,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "unsigned long mask=((unsigned long)v&63)|((unsigned long)w&31)|((unsigned long)fixed&127);"
         "total+=sum8(sum,fixed[0],fixed[1],fixed[2],fixed[3],round,(long)sizeof(w),(long)mask*1000);}return (int)(total%1000003);}",
         "vlas-aligned-past-16", clang);
+    // A variable-length array aligned to 64 allocated below a guard array, while calls with two stack arguments put the
+    // outgoing area 16 bytes past the realigned frame's alignment: its storage, rounded up from the allocation's
+    // address, must leave the guard's bytes as they were (the allocation's room, its alignment less 16 bytes more).
+    check_test_program_source(test,
+        "long sum8(long a,long b,long c,long d,long e,long f,long g,long h){return a+b+c+d+e+f+g+h;}"
+        "int tested(int n){long total=0;for(int k=1;k<=4;k++){char guard[16*k];for(int i=0;i<16*k;i++)guard[i]=(char)(i+n);"
+        "_Alignas(64) char v[64*k];for(int i=0;i<64*k;i++)v[i]=(char)0x5a;long bad=0;"
+        "for(int i=0;i<16*k;i++)bad+=guard[i]!=(char)(i+n);"
+        "total+=sum8(bad*100000,v[0],v[64*k-1],k,n,0,0,(long)((unsigned long)v&63)*1000);}return (int)(total%1000003);}",
+        "vlas-aligned-past-16-room", clang);
     // Structs aligned to 32 and 64 passed by value (on a stack aligned to them at the call, which realigns the caller's
     // frame) and returned (through a hidden pointer), the parameters' addresses aligned.
     check_test_program_source(test,
