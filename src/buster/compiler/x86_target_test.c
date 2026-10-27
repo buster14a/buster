@@ -211,7 +211,6 @@ static bool x86_target_test_forms(void)
     passed &= vector[X86_FORM_XGETBV] == 0 && x86_target_validate(vector, &xcr0_read, 1) == 0;
     partial.features = BUSTER_X86_FEATURE(AVX512F);
     x86_target_forms(&partial, vector);
-    x86_target_forms(&partial, vector);
     passed &= vector[X86_FORM_KMOVW_K_K] && !vector[X86_FORM_KMOVB_K_K] && !vector[X86_FORM_KMOVQ_K_K];
     partial.features |= BUSTER_X86_FEATURE(AVX512DQ);
     x86_target_forms(&partial, vector);
