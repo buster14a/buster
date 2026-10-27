@@ -363,6 +363,11 @@ no Clang or corpus implementation is copied.
 
 ## C semantic compatibility references
 
+The type-name prototype name tree and its original generated, nested-scope,
+ordering and guarded membership fixtures (#604) use the project default terms.
+Clang 23.1.1 and 23.1.4 run externally as acceptance and diagnostic oracles;
+no external implementation, data or fixtures are incorporated.
+
 Naked-function constraints in `c_check_naked_input.c` and their original
 fixtures use Clang/LLVM `llvmorg-23.1.1`'s `SemaDecl.cpp`,
 `SemaStmtAsm.cpp` and `Expr.cpp`'s type-trait child rules as behavior references,
