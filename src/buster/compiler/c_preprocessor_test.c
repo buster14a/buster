@@ -5690,7 +5690,36 @@ static __attribute__((format(printf, 4, 5))) bool pp_test_append(char* buffer, s
 // scalar and vector small-list paths are checked against the insertion order, including the transition to hashing.
 static bool pp_test_parameter_index(void)
 {
-    bool result = true;
+    const long page_size = sysconf(_SC_PAGESIZE);
+    uint8_t* guarded = page_size > 0 ? mmap(0, (size_t)page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    bool result = guarded != MAP_FAILED && mprotect(guarded + page_size, (size_t)page_size, PROT_NONE) == 0;
+    for (uint32_t count = 0; result && count <= BUSTER_PP_SMALL_PARAMETERS; count += 1)
+    {
+        IdentId* names = (IdentId*)(guarded + page_size) - count;
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            names[p] = p * 8192;
+        }
+        for (uint32_t mode = 0; result && mode < 2; mode += 1)
+        {
+            for (uint32_t p = 0; result && p <= count; p += 1)
+            {
+                const uint32_t wanted = p < count ? p : BUSTER_PP_NONE;
+                result = pp_parameter_index_small(names, count, p * 8192, mode == 0) == wanted &&
+                         pp_parameter_index_small(names, count, p * 8192 + 1, mode == 0) == BUSTER_PP_NONE;
+            }
+            if (result && count > 1)
+            {
+                names[count - 1] = names[0];
+                result = pp_parameter_index_small(names, count, names[0], mode == 0) == 0;
+                names[count - 1] = (count - 1) * 8192;
+            }
+        }
+    }
+    if (guarded != MAP_FAILED)
+    {
+        munmap(guarded, (size_t)page_size * 2);
+    }
     for (uint32_t mode = 0; mode < 2; mode += 1)
     {
         PPParameterIndex index = { .vectorized = mode == 0 };
@@ -5727,7 +5756,7 @@ static bool pp_test_parameter_index(void)
         scratch_end(scratch);
         pp_parameter_index_end(&index);
     }
-    printf("macro parameter index: %s (sparse ids, first ordinals, misses and failed growth)\n", result ? "pass" : "FAIL");
+    printf("macro parameter index: %s (guarded small views, sparse ids, first ordinals, misses and failed growth)\n", result ? "pass" : "FAIL");
     return result;
 }
 
