@@ -775,7 +775,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 value_active_end[value] = input->ends[i];
             }
         }
-        if (error == TIER1_ALLOCATION_OK && !tier1_allocation_filter_fixed(input, arena, vector, events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && input->fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, vector, events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
