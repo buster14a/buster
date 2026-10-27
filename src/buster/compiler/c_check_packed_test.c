@@ -407,6 +407,8 @@ static void check_test_packed_members(CheckTest* test, const char* clang, const 
         { "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Waddress-of-packed-member\"\nint*f(struct P*p){return &p->w;}\n#pragma GCC diagnostic pop\nint*g(struct P*p){return &p->w;}\n", 1 },
         { "#define ADDR(p) (&(p)->w)\nint*f(struct P*p){return ADDR(p);}\n", 1 },
         { "int*f(struct P*p){return &p->w;}\nthis is invalid;\n", 1, true },
+        { "void f(struct P*p,int n){\n#pragma clang loop unroll(full) unroll_count(4)\nwhile(n--)itake(&p->w);\n}\n", 1, true },
+        { "void f(struct P*p,int n){\n#pragma clang loop unroll(full) unroll_count(4)\nwhile(n--)take(&p->w);\n}\n", 0, true },
     };
     char path[1024];
     char output[1024];
