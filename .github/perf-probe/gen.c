@@ -278,6 +278,76 @@ static void assembly(unsigned n)
     }
 }
 
+static void x_macros(unsigned n, const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/list.h", directory);
+    FILE* file = fopen(path, "w");
+    if (file == 0)
+    {
+        perror(path);
+        exit(1);
+    }
+    for (unsigned i = 0; i < 1000; i++)
+        fprintf(file, "X(item_%u, %u)\n", i, i * 3);
+    fclose(file);
+    for (unsigned round = 0; round < n; round++)
+        printf("#define X(name, value) int round_%u_##name = value;\n#include \"list.h\"\n#undef X\n", round);
+}
+
+static void warnings(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#warning \"warning number %u\"\n", i);
+    printf("int main(void)\n{\n    return 0;\n}\n");
+}
+
+static void redefinitions(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#define R %u\n", i);
+    printf("int get(void)\n{\n    return R;\n}\n");
+}
+
+static void local_initializer(unsigned n)
+{
+    printf("int f(int i)\n{\n    int a[%u] =\n    {\n", n);
+    for (unsigned k = 0; k < n; k++)
+        printf("%s%u,%s", k % 12 == 0 ? "        " : " ", k * 7 + 1, k % 12 == 11 ? "\n" : "");
+    printf("\n    };\n    return a[i];\n}\n");
+}
+
+static void huge_literal(unsigned n)
+{
+    printf("static const char text[] = \"");
+    for (unsigned k = 0; k < n; k++)
+        putchar('a' + (int)(k % 26));
+    printf("\";\nint get(int i)\n{\n    return text[i];\n}\n");
+}
+
+static void embed(unsigned n, const char* directory)
+{
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/blob.bin", directory);
+    FILE* file = fopen(path, "wb");
+    if (file == 0)
+    {
+        perror(path);
+        exit(1);
+    }
+    for (unsigned k = 0; k < n; k++)
+        fputc((int)((k * 2654435761u) >> 13) & 0xff, file);
+    fclose(file);
+    printf("static const unsigned char blob[] =\n{\n#embed \"blob.bin\"\n};\nint get(int i)\n{\n    return blob[i];\n}\n");
+}
+
+static void pastes(unsigned n)
+{
+    printf("#define CAT2(a, b) a##b\n#define CAT(a, b) CAT2(a, b)\n#define STR2(x) #x\n#define STR(x) STR2(x)\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("int CAT(name_, %u) = sizeof(STR(CAT(name_, %u)));\n", i, i);
+}
+
 static void bitfields(unsigned n)
 {
     printf("struct B\n{\n");
@@ -542,6 +612,13 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "shadowing") == 0) shadowing(n);
     else if (strcmp(mode, "casts") == 0) casts(n);
     else if (strcmp(mode, "assembly") == 0) assembly(n);
+    else if (strcmp(mode, "x-macros") == 0 && count > 3) x_macros(n, arguments[3]);
+    else if (strcmp(mode, "warnings") == 0) warnings(n);
+    else if (strcmp(mode, "redefinitions") == 0) redefinitions(n);
+    else if (strcmp(mode, "local-initializer") == 0) local_initializer(n);
+    else if (strcmp(mode, "huge-literal") == 0) huge_literal(n);
+    else if (strcmp(mode, "embed") == 0 && count > 3) embed(n, arguments[3]);
+    else if (strcmp(mode, "pastes") == 0) pastes(n);
     else if (strcmp(mode, "typed-members") == 0) typed_members(n);
     else if (strcmp(mode, "label-values") == 0) label_values(n);
     else if (strcmp(mode, "static-locals") == 0) static_locals(n);
