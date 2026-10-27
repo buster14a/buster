@@ -8660,10 +8660,16 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                     tier0_reject(&validator, 0, "a call's argument whose class doesn't fit its location, or an aggregate's that isn't U64");
                 }
                 // A 128-bit integer argument is an object's address, as a struct of two INTEGER eightbytes is, and so is a
-                // vector's, whose bytes one vector register holds whole.
+                // vector's, whose bytes one vector register holds whole. A class past the classes is none: a vector's
+                // stack byte (BUSTER_TIER0_STACK_VECTOR) would match one at the CALL, which compares its arguments' bytes
+                // with these (#556's review).
                 if (tier0_class_int128(class) || tier0_class_vector(class))
                 {
                     tier0_reject(&validator, 0, "a call's 128-bit integer or vector argument as a value, which an object passes");
+                }
+                if (class == BUSTER_TYPED_CLASS_VOID || class >= BUSTER_TYPED_CLASSES)
+                {
+                    tier0_reject(&validator, 0, "a call's argument without a class");
                 }
             }
         }
