@@ -1033,7 +1033,9 @@ designs and the compilers already built this way.
   tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
   `c_parser_benchmark.c` provides `benchmark-parser`.
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
-  several trees run in turn, under the 9700X's lock) and the reports of perf's
+  several trees run in turn, under the 9700X's lock), `time-runs` (whole
+  processes, and builds compared over their code's placements and fresh
+  copies of each executable, #509) and the reports of perf's
   and objdump's text, `hot-loops`, `label-spills`, `spill-report` and
   `branch-misses`. `profile_test.c` holds their tests (`main.c` includes both;
   `./build/compiler test-profile` runs them). `docs/profiling.md` is how the
