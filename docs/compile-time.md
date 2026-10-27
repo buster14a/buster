@@ -363,10 +363,14 @@ At about 393 MB, by arena (smaps at the compile's end, on the laptop):
 - **The checker's scratch, 88 MB.** The reader's 70 MB, and 18 MB of the
   parse's temporaries that lie past it.
 - **The checker's output arena, 72 MB.** Most of it is the expressions'
-  stream, with a 96-byte value per node (33 MB), which every later stage
-  reads (some 520 places in the sources).
+  stream, with a 96-byte value per node (33 MB), which the later stages read
+  (`stream->values`, on 128 lines of 15 files).
 - **The front end:** the preprocessor's 47 MB, and the parser's 13 columns,
   each in an arena of its own: about 31 MB by their sizes.
+
+Not at the peak, the reader's own arena's 61 MB of huge pages are still most of
+`check-input`'s system time. [#628](https://github.com/buster14a/buster/issues/628)
+follows up on these.
 
 ## The checker's graph and program passes (#530)
 
