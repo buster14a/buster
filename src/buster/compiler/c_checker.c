@@ -717,6 +717,8 @@ struct CheckGraphValidation
     uint32_t vectors;
     uint32_t x86;
     uint32_t overloads;
+    // The blocks check_graph_validate_vector decided itself, without the exact path (0 on that path).
+    uint32_t vector_blocks;
 };
 
 // The graph's own counts, its sideband lists and the columns every node needs, before any node.
@@ -1094,6 +1096,7 @@ static bool check_graph_validate_vector(const CheckGraph* graph, uint8_t* pure, 
     for (; result && columns && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
         const bool block = check_graph_validate_block(graph, node, pure, state, classes_low, classes_high);
+        state->vector_blocks += block;
         for (uint32_t lane = 0; result && !block && lane < BUSTER_CHECK_VALIDATE_LANES; lane += 1)
         {
             result = check_graph_validate_node(graph, node + lane, pure, state);

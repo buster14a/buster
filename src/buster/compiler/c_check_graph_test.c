@@ -595,8 +595,9 @@ static void check_test_graph_validation_world(CheckTest* test, CheckGraph* graph
 }
 
 // check_graph_validate_vector and its exact twin on one graph: the same result and failed node, and for a valid graph the
-// same purity and counters.
-static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph* graph, uint8_t* scalar_pure, uint8_t* vector_pure, const char* description)
+// same purity and counters. With `blocks` other than BUSTER_CHECK_NONE, a valid graph's blocks the vector path must decide
+// itself: a check of its that refused a valid block would leave the results exact, and only send the block to the twin.
+static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph* graph, uint8_t* scalar_pure, uint8_t* vector_pure, uint32_t blocks, const char* description)
 {
     CheckGraphValidation scalar_state;
     CheckGraphValidation vector_state;
@@ -604,10 +605,13 @@ static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph*
     uint32_t vector_failed = 0;
     const bool scalar = check_graph_validate(graph, scalar_pure, &scalar_state, &scalar_failed);
     const bool vector = check_graph_validate_vector(graph, vector_pure, &vector_state, &vector_failed);
-    bool equal = scalar == vector && scalar_failed == vector_failed;
+    bool equal = scalar == vector && scalar_failed == vector_failed && scalar_state.vector_blocks == 0;
     if (equal && scalar)
     {
-        equal = memcmp(scalar_pure, vector_pure, graph->count) == 0 && memcmp(&scalar_state, &vector_state, sizeof(scalar_state)) == 0;
+        CheckGraphValidation counters = vector_state;
+        counters.vector_blocks = 0;
+        equal = memcmp(scalar_pure, vector_pure, graph->count) == 0 && memcmp(&scalar_state, &counters, sizeof(scalar_state)) == 0 &&
+                (blocks == BUSTER_CHECK_NONE || vector_state.vector_blocks == blocks);
     }
     check_test_expect(test, equal, description);
 }
@@ -697,7 +701,9 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
         graph.overload_candidates = &candidate;
         graph.overload_candidate_count = sideband ? 1 : 0;
         check_test_graph_validation_world(test, &graph, count, pointer, true, sideband);
-        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation differs from its exact twin on a valid graph");
+        // Without the exact path's sideband nodes, every block of a valid graph is the vector path's.
+        const uint32_t blocks = sideband ? BUSTER_CHECK_NONE : count / BUSTER_CHECK_VALIDATE_LANES;
+        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, blocks, "vector graph validation differs from its exact twin on a valid graph");
         for (uint32_t rule = 0; count != 0 && rule < BUSTER_CHECK_TEST_GRAPH_RULES; rule += 1)
         {
             const uint32_t node = check_test_random(test) % count;
@@ -714,7 +720,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
                 const uint32_t saved_argument = graph.argument_count != 0 ? graph.argument_nodes[slot] : 0;
                 const uint32_t saved_head = graph.leaves[node].overload_head;
                 check_test_graph_break(test, &graph, node, rule);
-                check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation differs from its exact twin on a broken rule");
+                check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, BUSTER_CHECK_NONE, "vector graph validation differs from its exact twin on a broken rule");
                 graph.ops[node] = (CheckOp)saved_ops;
                 graph.operand0[node] = saved_operands[0];
                 graph.operand1[node] = saved_operands[1];
@@ -738,7 +744,7 @@ static void check_test_graph_validation(CheckTest* test, Arena* storage)
         // Without an optional column the blocks read, the vector path is the exact one throughout.
         uint32_t* members = graph.members;
         graph.members = NULL;
-        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation without member column differs from its exact twin");
+        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, 0, "vector graph validation without member column differs from its exact twin");
         graph.members = members;
     }
     arena_pop_to(storage, mark);
@@ -797,7 +803,7 @@ static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table,
         check_test_expect(test, placed, "guarded validator columns");
         if (placed)
         {
-            check_test_graph_validators_agree(test, &guarded, scalar_pure, vector_pure, "vector graph validation differs from its exact twin at a page edge");
+            check_test_graph_validators_agree(test, &guarded, scalar_pure, vector_pure, count / BUSTER_CHECK_VALIDATE_LANES, "vector graph validation differs from its exact twin at a page edge");
             check_test_compare_graph(test, table, &guarded, output, scratch, false);
         }
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(mappings); i += 1)
