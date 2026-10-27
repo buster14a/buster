@@ -29,9 +29,8 @@
 #define BUSTER_UNIT_DYNAMIC 6
 #define BUSTER_UNIT_TYPES 7
 #define BUSTER_UNIT_BACKEND 8
-#define BUSTER_UNIT_FRAGMENTS 9
-#define BUSTER_UNIT_CHECKER 10
-#define BUSTER_UNIT_CHECK_BUILTINS 11
+#define BUSTER_UNIT_CHECKER 9
+#define BUSTER_UNIT_CHECK_BUILTINS 10
 #ifndef BUSTER_UNIT
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
@@ -59,15 +58,10 @@
 #define BUSTER_HOME_DYNAMIC BUSTER_ELSEWHERE
 #endif
 // The modules' homes (at the top): the lexer's (c_lexer.c), the preprocessor's (c_preprocessor.c), the parser's
-// (c_parser.c) but for the fragments' unit, which compiles a parser of its own with the fragment sink, and the linker's
-// (link.c's).
+// (c_parser.c) and the linker's (link.c's).
 #define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
 #define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
-#if BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS)
-#define BUSTER_PARSER_ENTRY static
-#else
 #define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
-#endif
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 
 #include <stdint.h>
@@ -194,8 +188,6 @@ int run_files_benchmark(int argc, char** argv);
 
 // The parser (c_parser.c) and its tests, for the default command, which preprocesses and parses a file, and the
 // test-parser command.
-#include "buster/compiler/c_fragment_interleave.c"
-#include "buster/compiler/c_fragment_interleave_test.c"
 #include "buster/compiler/c_parser.c"
 #include "buster/compiler/c_parser_test.c"
 #include "buster/compiler/c_gnu_test.c"
@@ -459,13 +451,6 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
-// The fragment experiment's tests (#105, #106), for test-fragments: the fragments' unit alone has the sink, and its
-// semantic identity test checks units through c_check_corpus.c's paths.
-#if BUSTER_PARSE_FRAGMENT_SINK
-#include "buster/compiler/c_fragments_test.c"
-// #107's measurement, benchmark-parser --expressions: the four paths from tokens to the checker's results.
-#include "buster/compiler/c_check_fragments_benchmark.c"
-#endif
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
@@ -580,7 +565,6 @@ static bool main_assembly_source(int count, char** arguments)
     }
     return compile && assembly && !explicit_c;
 }
-int main_unit_fragments(int argc, char** argv, bool* found);
 
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). The driver's last branch, which no command takes,
@@ -646,22 +630,6 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_parser_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-fragment-interleave") == 0)
-    {
-        result = run_fragment_interleave_tests(argc - 2, argv + 2);
-    }
-#if BUSTER_PARSE_FRAGMENT_SINK
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS) && argc >= 2 && strcmp(argv[1], "test-fragments") == 0)
-    {
-        result = run_fragment_tests(argc - 2, argv + 2);
-    }
-    // benchmark-parser --expressions, #107's four paths: the fragments' unit's, since only it has the sink. The fragments'
-    // unit is asked before the driver's, whose benchmark-parser takes every other form.
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRAGMENTS) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0 && check_fragments_benchmark_requested(argc - 2, argv + 2))
-    {
-        result = run_fragment_benchmark(argc - 2, argv + 2);
-    }
-#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
@@ -1367,10 +1335,6 @@ int main(int argc, char** argv)
     }
     if (!found)
     {
-        result = main_unit_fragments(argc, argv, &found);
-    }
-    if (!found)
-    {
         result = main_command(argc, argv, &found);
     }
     return result;
@@ -1427,11 +1391,6 @@ int main_unit_check_builtins(int argc, char** argv, bool* found)
 }
 #elif BUSTER_UNIT == BUSTER_UNIT_BACKEND
 int main_unit_backend(int argc, char** argv, bool* found)
-{
-    return main_command(argc, argv, found);
-}
-#elif BUSTER_UNIT == BUSTER_UNIT_FRAGMENTS
-int main_unit_fragments(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
 }

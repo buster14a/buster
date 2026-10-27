@@ -365,10 +365,6 @@ struct CheckInputReader
     const char* lane_reason;
     bool lane;
     bool lane_unsupported;
-#if BUSTER_PARSE_FRAGMENT_SINK
-    // The fragment experiment's reader of expressions (c_check_fragments.c, #106) while its request is set, or null.
-    struct CheckFragments* fragments;
-#endif
 };
 
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
@@ -3467,32 +3463,6 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 
 #include "c_check_region_input.c"
 
-// Appends a child's values, the list from `begin` to `end` that value_next links, to a token's operands: their first
-// and last values and their count, linking the list after the ones before it.
-BUSTER_INLINE void check_input_append_values(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t* first, uint32_t* last, uint32_t* count)
-{
-    if (begin != BUSTER_CHECK_NONE)
-    {
-        if (*last != BUSTER_CHECK_NONE)
-        {
-            reader->value_next[*last] = begin;
-        }
-        else
-        {
-            *first = begin;
-        }
-        *last = end;
-        for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
-        {
-            *count += 1;
-        }
-    }
-}
-
-#if BUSTER_PARSE_FRAGMENT_SINK
-#include "c_check_fragments.c"
-#endif
-
 static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -3510,18 +3480,29 @@ static void check_input_expressions(CheckInputReader* reader)
         uint32_t first = BUSTER_CHECK_NONE;
         uint32_t last = BUSTER_CHECK_NONE;
         uint32_t count = 0;
-#if BUSTER_PARSE_FRAGMENT_SINK
-        // The fragment experiment's reader (c_check_fragments.c) takes an operator's operands from the unit's fragments.
-        const bool fragment = reader->fragments != 0 && check_fragments_operands(reader, token, &first, &last, &count);
-#else
-        const bool fragment = false;
-#endif
-        for (uint32_t child = fragment ? BUSTER_CHECK_NONE : reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+        for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
-            // Keep query-region nodes checked, but do not make their value a runtime declaration operand.
-            if (reader->specifier_finishes[token] == 0 || child > token)
+            if (reader->specifier_finishes[token] != 0 && child < token)
             {
-                check_input_append_values(reader, reader->first_value[child], reader->last_value[child], &first, &last, &count);
+                // Keep query-region nodes checked, but do not make their value a runtime declaration operand.
+                continue;
+            }
+            const uint32_t begin = reader->first_value[child];
+            if (begin != BUSTER_CHECK_NONE)
+            {
+                if (last != BUSTER_CHECK_NONE)
+                {
+                    reader->value_next[last] = begin;
+                }
+                else
+                {
+                    first = begin;
+                }
+                last = reader->last_value[child];
+                for (uint32_t n = begin; n != BUSTER_CHECK_NONE; n = reader->value_next[n])
+                {
+                    count += 1;
+                }
             }
         }
         const uint32_t a = first;
@@ -4776,24 +4757,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
                 if (check_input_region_initialize(&reader))
                 {
-#if BUSTER_PARSE_FRAGMENT_SINK
-                    // The fragment experiment's request, when set: the expressions' operands from the unit's fragments.
-                    // benchmark-parser --expressions times the reader's index and the walk (check_fragments_ticks).
-                    const uint64_t index_start = __rdtsc();
-                    reader.fragments = check_fragments_begin(c_fragment_request, parser, input->deferred_tokens);
-                    const uint64_t walk_start = __rdtsc();
-#endif
                     check_input_expressions(&reader);
-#if BUSTER_PARSE_FRAGMENT_SINK
-                    const uint64_t walk_end = __rdtsc();
-                    check_fragments_ticks.index += walk_start - index_start;
-                    check_fragments_ticks.walk += walk_end - walk_start;
-                    check_fragments_end(reader.fragments, input->report_count == 0 && !input->resource);
-                    if (c_fragment_request != 0)
-                    {
-                        c_fragment_request->consumer = reader.fragments;
-                    }
-#endif
                 }
                 if (!input->resource)
                 {
