@@ -348,3 +348,57 @@ name.
 
 [The planner's qualification record](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/c-lowering-2026-10-23/README.md)
 retains the planner's original synthetic measurements.
+
+### Whole-unit passes after checking (#442)
+
+[#442](https://github.com/buster14a/buster/issues/442) attributed that rest, on
+the same harness split by stage, with profiles and ablations of #418
+([the record](https://github.com/buster14a/buster-performance/tree/3fdc427d36380adc830f5484cc3cf5a08bd3149c/docs/measurements/lowering-scans-442-2026-10-26)).
+The attribution was made in a cloud VM on an Intel Xeon, without counters; the
+comparison below is the 9700X's, under its lock. The path's time after
+checking went mostly to passes over every token of the unit, most of them its
+headers', which predate #418: the selection's loop for declarations and its
+numbering of the needed objects over every object, the emission's three loops,
+the lowering's loop, and `abi_initialize` clearing the ABI table's columns for
+the type table's whole room, which the checker sizes at four times the unit's
+tokens. #418's excess grew with the tokens there: its selection's isn't its new
+edges (an ablation without them is no faster), but the per-token loop's code,
+and about two thirds of its emission's is `c_check_program_emit.c`'s (an
+ablation with main's file takes it back).
+
+So the selection, the emission and the lowering visit the tokens that declare
+(and for the lowering, that start an initializer), which
+`check_program_declaring` gives 16 at a time with a register compress; the
+selection counts and numbers its needed objects 64 at a time
+(`check_program_needed_count`, `check_program_needed_number`); each has an exact
+scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
+ABI table has rows for its type table's types alone (`abi_initialize_types`):
+the lowering makes no type, and classifies only the types it has rows for. The
+emission builds the declaring tokens before each place that reads them (its
+`defined` pass before the bodies compile on lanes, its attributes' passes
+after) and gives them back after it, never holding them through Tier 0. Of the
+names a unit gives, only asm labels with a `.` go in the made names' table,
+since every made name has one and no identifier does.
+Every c-testsuite object, by both paths, is byte for byte what main wrote before.
+
+On the 9700X, pinned to CPU 2, c-testsuite's 220 programs, each file's least
+run minimum over 6 rounds of 101 passes, summed:
+
+| | Main before #418 | #418's merge | Main at `7e3782a` | #442 (`8a81ea9`) |
+| --- | ---: | ---: | ---: | ---: |
+| All 220 (ns) | 1,856,242 | +1.8% | +4.6% | −17.3% |
+| The 216 whose output #418 kept | 1,718,753 | +1.7% | +4.4% | −17.5% |
+| The 4 whose output #418 changed | 137,489 | +2.8% | +6.6% | −14.7% |
+| Under 300 tokens (154) | 474,650 | +0.7% | +4.7% | +0.9% |
+| 3,000 tokens or more (60) | 1,304,588 | +2.2% | +4.5% | −24.3% |
+
+Every round's sum agreed (#442 −16.9 to −17.9%). Against main at `335424b`,
+after the function lanes (#151), the change merged with it is −19.8% in all,
+−2.5% under 300 tokens and −26.5% from 3,000, every round; and on the
+record's synthetic units of 200 and 2,000 definitions, whose few tokens leave the
+whole-unit passes little to cost, −3.7 to −7.9%. The Xeon gave −25.5% in all
+against main before #418, and +4.0% under 300 tokens. The smallest units, which
+have few tokens to skip, keep a fixed cost: chiefly the ABI classification of
+the 64 builtin types on every lowering, whose rows are the same for every unit
+of a configuration but would need state that `main.c`'s units share to cache.
+These are the post-checking path's times, not the whole compiler's, and not what the selection saves against `--lower-all`.
