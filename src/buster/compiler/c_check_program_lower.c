@@ -5268,7 +5268,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
 // A writer of the bodies' parts (check_lower_part) for one lane: its columns, with room for any of the program's bodies,
 // and its signatures' from `scratch`; the shared tables from `shared`; and `status`, the lane's copy of the program's
 // lowering, which a part's failure sets (check_lower_fail), whose helpers and errno function the bodies read and whose
-// label symbols are the writer's room for its part's.
+// label symbols are the writer's room for its part's. It only pushes, and writes nothing in what it pushes, which
+// check_lower_writer_bytes measures it by.
 static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* abi, CheckProgramLowered* status, const CheckLowerShared* shared, bool sources,
                                      Arena* scratch)
 {
@@ -5358,6 +5359,23 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     writer->label_symbol_room = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, label_room) : 0;
     valid &= label_room == 0 || writer->label_symbol_room != 0;
     return valid;
+}
+
+// The room check_lower_writer_begin takes for `shared`'s bodies from an arena whose base is page-aligned, as an arena
+// reserved for its columns has (check_program_emit_lanes): its pushes on `scratch` from a page-aligned address, then
+// popped. They touch none of scratch's pages, since the writer writes nothing in what it pushes. 0 if they don't fit.
+static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool sources, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    CheckLowerWriter writer;
+    CheckLowerAbi abi;
+    CheckProgramLowered status;
+    const bool aligned = arena_push(scratch, 0, BUSTER_ARENA_PAGE_BYTES) != 0;
+    const uint64_t begin = scratch->length;
+    const bool fits = aligned && check_lower_writer_begin(&writer, &abi, &status, shared, sources, scratch);
+    const uint64_t result = fits ? scratch->length - begin : 0;
+    arena_pop_to(scratch, mark);
+    return result;
 }
 
 // The most nodes a statement's prefetch takes (check_lower_prefetch): its root's and those just before it, the first the

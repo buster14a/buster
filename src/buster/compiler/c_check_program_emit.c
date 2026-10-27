@@ -196,7 +196,7 @@ struct CheckProgramLaneArenas
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
 // with the emission's link and lowering: the atoms' bytes and the functions' columns of the lanes past the first are in
 // their arenas here (check_program_lanes_release), which the next emission with it reuses, as it reuses the first's
-// scratch for lane 0's writer's columns (CheckEmitRun.columns).
+// scratch for lane 0's writer's columns (CheckEmitRun.columns) while it has their room.
 typedef struct CheckProgramLanes CheckProgramLanes;
 struct CheckProgramLanes
 {
@@ -321,7 +321,8 @@ struct CheckEmitRun
     Arena* bytes;
     // Lane 0's writer's columns, in base pages, as the other lanes' scratch is: each column has room for any of the
     // program's bodies, of which a body touches a little at the column's start, and in the caller's scratch, whose pages
-    // past its first 64 KB are huge, each column's first touch cleared a huge page of its own (#531).
+    // past its first 64 KB are huge, each column's first touch cleared a huge page of its own (#531). The caller's
+    // scratch where no address space can be reserved for them (check_program_emit_lanes).
     Arena* columns;
     Tier0Code* codes;
     CheckEmitBody* bodies;
@@ -755,13 +756,23 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         check_program_object_access(program, access, defined);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
-    // Lane 0's writer's columns (CheckEmitRun.columns): the lanes' first arenas' scratch, as the other lanes' scratch in
-    // base pages, reserved the first time and otherwise put back; or without lanes, an arena of this emission's own.
+    // Lane 0's writer's columns (CheckEmitRun.columns), in an arena of base pages reserved for the room they take
+    // (check_lower_writer_bytes): the lanes' first arenas' scratch, kept while it has the room and otherwise reserved
+    // again, or without lanes an arena of this emission's own; none without bodies, whose writer never begins. Where that
+    // address space can't be reserved (RLIMIT_AS, or overcommit refused), they go in the caller's scratch, which had the
+    // room for their measure, as before #531: the calling thread runs the bodies when the lanes can't, and needs no
+    // address space past the caller's arenas.
     Arena own_columns = { 0 };
-    Arena* columns = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
-    *columns = valid && columns->base == 0 ? arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36) : *columns;
-    arena_pop_to(columns, 0);
-    valid = valid && columns->base != 0;
+    Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
+    const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL, scratch) : 0;
+    if (column_bytes > reserved->capacity)
+    {
+        arena_release(reserved);
+        // In base pages throughout: `small` past the capacity.
+        *reserved = arena_reserve_small(column_bytes, BUSTER_ARENA_MAX_CAPACITY);
+    }
+    arena_pop_to(reserved, 0);
+    Arena* columns = column_bytes != 0 && reserved->base != 0 ? reserved : scratch;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
     const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
     CheckEmitRun run = {
@@ -829,6 +840,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         const uint64_t output_before = output->length;
         const uint64_t bytes_before = bytes->length;
         const uint64_t scratch_before = scratch->length;
+        const uint64_t columns_before = columns->length;
         if (active > 1)
         {
             again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
@@ -848,7 +860,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
-            arena_pop_to(columns, 0);
+            arena_pop_to(columns, columns_before);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
             check_program_emit_alone(&run);
         }
