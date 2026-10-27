@@ -228,7 +228,7 @@ none of its subset's programs makes a name twice in clang's objects.
   `--symbols-minimum 354`; `sqlite3.c`, which the backend refuses, compares
   none.
 
-On corpora, clang -O0 decides three things in its code otherwise than the
+On corpora, clang -O0 decides four things in its code otherwise than the
 selection. The harness explains a difference with one of them only from the
 checked program, never from a name, and fails on any other:
 
@@ -237,6 +237,7 @@ checked program, never from a name, and fails on any other:
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
 | dropped | ours only: a definition that the selection of clang's model doesn't reach, the program with unselected operands counted and a constant `if`'s dead arm left out (`CheckProgramOptions.folded_ifs`) | Doesn't emit the arm that an integer constant condition without side effects never runs, unless a label or a `case` of a `switch` outside it enters it (`CodeGenFunction::EmitIfStmt` and `ContainsLabel`), and so not what only that arm calls. musl's `FORCE_EVAL` calls `fp_force_evalf` and `fp_force_evall` in the arms a `double` never runs. Tier 0 lowers both arms, and the selection counts them. |
+| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 doesn't inline: it calls the function, so the object defines it. |
 
 The model doesn't name string literals, which have no symbols, and a constant
 `if`'s dead arm drops the ones only it refers to too (c-testsuite's 00212, 00214

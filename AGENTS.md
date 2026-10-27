@@ -4652,10 +4652,11 @@ checks each file as the driver does and compares it with
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
-names the checked source makes; a difference must have one of three documented
+names the checked source makes; a difference must have one of four documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects": folded constants, unselected operands, and a constant `if`'s
-dropped arm, from the model `CheckProgramOptions.folded_ifs`), and a file the
+-O0's objects": folded constants, unselected operands, a constant `if`'s
+dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
+`always_inline` function, which clang inlines everywhere), and a file the
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
