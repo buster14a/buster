@@ -166,7 +166,7 @@ Each upper bound is the time the item would save if its cost went to zero.
    time.
    - Upper bound: 35.7 ms.
    - Follow-up: [#530](https://github.com/buster14a/buster/issues/530), which
-     took 8.4 ms off them: [below](#the-checkers-graph-and-program-passes-530).
+     took 8.7 ms off them: [below](#the-checkers-graph-and-program-passes-530).
 4. **The lowering to the typed stream**, 25.7 ms (13.6%): 19 ms of user time,
    five times Tier 0's compile of the stream it produces (5.0 ms).
    - Upper bound: about 19 ms of user time; its 6.5 ms of system time is #528's.
@@ -300,29 +300,35 @@ and the stream's values. It shares the reader with
 ## The checker's graph and program passes (#530)
 
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
-`--time-stages` runs of each build, pinned to CPU 2: `main` at `a774acd2`
-(#520 merged), its merge into #530's branch (`2163d68a`), and the branch's
-next commit (`1989a51d`, which numbers the static objects' symbols with #442's
-kernels). Each build's object is the same bytes, by both paths.
-[The measurement record](https://github.com/buster14a/buster-performance/tree/53f9e4d89cdf7dcecac40cb9c1753d3888c7dcf9/docs/measurements/checker-passes-530-main-2026-10-27)
-holds every run, the scripts and the builds' identities.
+`--time-stages` runs of each build, pinned to CPU 2, each build first, second
+and third in 5 rounds: `main` at `a774acd2` (#520 merged), its merge into
+#530's branch (`2163d68a`), and the branch's next commit (`1989a51d`, which
+numbers the static objects' symbols with #442's kernels). Each build's object
+is the same bytes, by both paths.
+[The measurement record](https://github.com/buster14a/buster-performance/tree/a44531fbbb1606de7a018b6018864c8d4d94b1b8/docs/measurements/checker-passes-530-main-2026-10-27)
+holds every run, the scripts and the builds' identities; the stages are its
+`balanced/` repeat, and perf stat's counters 11 runs of each build.
 
 | | `main` | merge | change | `1989a51d` | change |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `check-expressions` | 20.396 ms | 15.822 ms | -22.4% | 15.674 ms | -23.2% |
-| `check-declarations` | 5.161 ms | 5.500 ms | +6.6% | 5.541 ms | +7.4% |
-| `check-program` | 15.947 ms | 12.088 ms | -24.2% | 12.196 ms | -23.5% |
-| the clock's span | 158.008 ms | 149.616 ms | -5.3% | 150.160 ms | -5.0% |
+| `check-expressions` | 20.550 ms | 15.823 ms | -23.0% | 15.753 ms | -23.3% |
+| `check-declarations` | 5.250 ms | 5.440 ms | +3.6% | 5.559 ms | +5.9% |
+| `check-program` | 16.024 ms | 12.085 ms | -24.6% | 12.141 ms | -24.2% |
+| the clock's span | 157.948 ms | 149.474 ms | -5.4% | 149.682 ms | -5.2% |
 | user instructions (perf stat) | 1,751.0 M | 1,555.3 M | -11.2% | 1,555.4 M | -11.2% |
 | user cycles (perf stat) | 738.2 M | 690.2 M | -6.5% | 689.3 M | -6.6% |
 
-- **Ranges.** The two stages' ranges don't overlap: 20.3 to 20.9 ms against
-  15.3 to 16.5, and 15.5 to 16.4 against 11.9 to 12.3.
+- **Ranges.** The two stages' ranges don't overlap: 20.2 to 21.2 ms against
+  15.3 to 16.7, and 15.6 to 16.3 against 11.9 to 12.2.
 - **The other stages.** Each is within 0.2 ms of `main`'s median, but for
-  `1989a51d`'s `check-input`, 0.50 ms longer. Its code is the merge's, whose
-  took 0.04 ms less: that is [where the code falls](profiling.md#comparing-two-versions).
+  `check-input`, 0.60 and 0.72 ms longer, though it runs before any code #530
+  changes: that is [where the code falls](profiling.md#comparing-two-versions).
+- **The first capture.** The record's first capture of the same builds, whose
+  script repeated the same five orders in each hold of the lock (each build
+  first in 3 or 6 of its 15 rounds), gave the two stages within 0.2 ms of
+  these, and `check-declarations` 0.34 and 0.38 ms longer than `main`'s.
 
-**Why `check-declarations` took 0.34 ms longer.**
+**Why `check-declarations` took 0.2 to 0.3 ms longer.**
 - **The same work.** Its checks of the initializers and its report of the
   warnings (`check_initializers_run`, `check_init_value`,
   `check_init_objects_open`, `check_driver_reports`) ran the same instructions
