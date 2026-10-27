@@ -530,11 +530,14 @@ arguments may be aligned past 16 (`incoming_variadic`'s stack alignment, which r
 `va_arg` recipes align each argument they read as before.
 
 **At no cost to the rest.** `tier0_frame_alignment` and its twin are out of line and read the objects' alignments (in a
-function with objects) and every call's stack alignment; the selections read the frame's alignment once, outside their
-loops, and the depth count, the frame's registers and the conversions' scratch tops take it after their loops. A
-function without such objects or calls has the frame, the prologue, the epilogue and the code it had before:
-`sqlite3.c`'s objects and c-testsuite's 220 programs' are the same bytes as main's, by both paths.
-[Measurements](#measurements) has `benchmark-backend`'s.
+function with objects) and every call's stack alignment, in loops kept rolled (the scalar twin's kept scalar too):
+clang's unrolled copies spread the few iterations a function takes over many instruction cache lines, which the
+per-entry passes evict between functions. Both selections take the frame's alignment as a constant
+(`tier0_select_entries` and `tier0_select_vector_entries`, as the memory classes' `memory`): a function without a
+realigned frame or the memory classes has main's loops, and one with either takes the out-of-line copy. The realigned
+prologue's records come from a cold helper (`tier0_emit_realignment`). A function without such objects or calls has the
+frame, the prologue, the epilogue and the code it had before: `sqlite3.c`'s objects and c-testsuite's 220 programs'
+are the same bytes as main's, by both paths. [Measurements](#measurements) has `benchmark-backend`'s.
 
 ## Symbols outside the image
 

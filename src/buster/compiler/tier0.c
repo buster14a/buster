@@ -3546,11 +3546,13 @@ static bool tier0_object_parameters(const Tier0Function* function)
 static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Function* function)
 {
     uint32_t log2 = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
+    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t l = 0; l < function->local_count && function->local_sizes != 0; l += 1)
     {
         const uint32_t alignment = function->local_sizes[l] != 0 ? function->local_alignments[l] : 0;
         log2 = alignment > log2 ? alignment : log2;
     }
+    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
     for (uint32_t c = 0; c < function->call_count; c += 1)
     {
         const uint32_t alignment = function->calls[c].stack_alignment_log2;
@@ -3567,12 +3569,14 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
     _Static_assert(sizeof(AbiCall) == 16 && offsetof(AbiCall, stack_alignment_log2) == 4, "4 calls in 64 bytes, each one's alignment the low byte of its second dword");
     __m512i most = _mm512_setzero_si512();
     const uint32_t locals = function->local_sizes != 0 ? function->local_count : 0;
+    #pragma clang loop unroll(disable)
     for (uint32_t first = 0; first < locals; first += 16)
     {
         const __m512i sizes = _mm512_maskz_loadu_epi32((__mmask16)tier0_lanes(first, locals), function->local_sizes + first);
         const __mmask16 objects = _mm512_test_epi32_mask(sizes, sizes);
         most = _mm512_max_epu32(most, _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(objects, function->local_alignments + first)));
     }
+    #pragma clang loop unroll(disable)
     for (uint32_t first = 0; first < function->call_count; first += 4)
     {
         const uint32_t left = function->call_count - first;
@@ -6385,6 +6389,17 @@ static X86Instruction tier0_realignment(uint32_t alignment_log2)
     return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)-(int64_t)(UINT64_C(1) << alignment_log2));
 }
 
+// A realigned frame's records after its reservation: rsp rounded down to its alignment, and with entries that move rsp
+// r15 set to it, its base. Out of line and cold, so that the prologue of a frame that isn't realigned keeps its code.
+static __attribute__((cold, noinline)) void tier0_emit_realignment(const Tier0Frame* frame, Tier0Writer* writer)
+{
+    tier0_put(writer, tier0_realignment(frame->alignment_log2));
+    if (frame->based)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R15, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+}
+
 // The prologue: with a frame pointer, rbp pushed and pointed at the push; the callee-saved registers the homes use
 // pushed, the frame reserved, in a realigned frame rsp rounded down to its alignment (and with entries that move rsp,
 // r15 set to it, its base), and the parameters moved from where they arrive to their homes (none for one that stays,
@@ -6410,11 +6425,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     }
     if (frame->alignment_log2 != 0)
     {
-        tier0_put(writer, tier0_realignment(frame->alignment_log2));
-        if (frame->based)
-        {
-            tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_RSP, X86_REGISTER_R15, BUSTER_X86_REGISTER_DIRECT, 0, 0));
-        }
+        tier0_emit_realignment(frame, writer);
     }
     if (function->incoming_variadic != 0)
     {
@@ -6651,10 +6662,12 @@ static bool tier0_is_deferred(uint16_t entry)
 // body touches, into the frame: the depth registers it reaches, the templates' fixed registers, and for a call
 // everything caller-saved, with the call save area's and the fixed slots' sizes. Returns the first entry without a
 // template (the count if none), and sets *error to TIER0_ERROR_DEPTH for depths past the tables. `memory` is
-// tier0_memory_function's: a constant at each of tier0_select's two uses, so that a function without values of the
-// memory classes has the loop without a look for their entries (#423's measurements).
+// tier0_memory_function's and `realigned` whether the frame is (Tier0Frame.alignment_log2): constants at tier0_select's
+// inline use, both false, so that a function without values of the memory classes or a realigned frame has the loop
+// without a look for their entries (#423's measurements) and without the frame's alignment, which its other entries
+// don't read; the out-of-line use takes either from the function.
 static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
-                                                                           Tier0Error* error, bool memory)
+                                                                           Tier0Error* error, bool memory, bool realigned)
 {
     uint32_t unsupported = function->count;
     int32_t integer_top = -1;
@@ -6666,7 +6679,6 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     bool fixed = false;
     bool calls = false;
     bool moves = false;
-    const bool realigned = frame->alignment_log2 != 0;
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
@@ -6780,15 +6792,16 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
     return unsupported;
 }
 
-// The selection of a function with values of the memory classes, out of line.
+// The selection of a function with values of the memory classes or a realigned frame, out of line.
 static __attribute__((noinline)) uint32_t tier0_select_memory(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
-    return tier0_select_entries(function, entries, frame, error, true);
+    return tier0_select_entries(function, entries, frame, error, tier0_memory_function(function), frame->alignment_log2 != 0);
 }
 
 static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
-    return tier0_memory_function(function) ? tier0_select_memory(function, entries, frame, error) : tier0_select_entries(function, entries, frame, error, false);
+    const bool rare = tier0_memory_function(function) || frame->alignment_log2 != 0;
+    return rare ? tier0_select_memory(function, entries, frame, error) : tier0_select_entries(function, entries, frame, error, false, false);
 }
 
 // What a deferred slot's emitter (but a call's) uses of each stack (0, the integer one, or 1): whether it uses its
@@ -8864,9 +8877,9 @@ static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offse
 // Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
 // ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
 // reaches and the fixed clobbers, as masks and lane maxima; the deferred entries' touches an entry at a time, as
-// tier0_select's, and `memory` as tier0_select_entries's.
+// tier0_select's, and `memory` and `realigned` as tier0_select_entries's.
 static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
-                                                                                  Tier0Error* error, bool memory)
+                                                                                  Tier0Error* error, bool memory, bool realigned)
 {
     const uint32_t count = function->count;
     const uint8_t* key_kinds = entries->key_kinds;
@@ -8891,7 +8904,6 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     bool fixed = false;
     bool calls = false;
     bool moves = false;
-    const bool realigned = frame->alignment_log2 != 0;
     const __m512i three = _mm512_set1_epi64(3);
     const __m512i fifteen = _mm512_set1_epi64(15);
     const __m512i not_template = _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_UNSUPPORTED));
@@ -9014,15 +9026,16 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     return unsupported;
 }
 
-// The vector selection of a function with values of the memory classes, out of line.
+// The vector selection of a function with values of the memory classes or a realigned frame, out of line.
 static __attribute__((noinline)) uint32_t tier0_select_vector_memory(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
-    return tier0_select_vector_entries(function, entries, frame, error, true);
+    return tier0_select_vector_entries(function, entries, frame, error, tier0_memory_function(function), frame->alignment_log2 != 0);
 }
 
 static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
 {
-    return tier0_memory_function(function) ? tier0_select_vector_memory(function, entries, frame, error) : tier0_select_vector_entries(function, entries, frame, error, false);
+    const bool rare = tier0_memory_function(function) || frame->alignment_log2 != 0;
+    return rare ? tier0_select_vector_memory(function, entries, frame, error) : tier0_select_vector_entries(function, entries, frame, error, false, false);
 }
 
 // Measuring for the vector path, 8 words at a time, from the prologue's length on:
