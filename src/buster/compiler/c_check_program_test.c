@@ -1666,7 +1666,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int missing(void);int tested(int n){int x=n;"
         "int a=_Generic(__builtin_rotateleft8(x++,missing()),unsigned char:3,default:7);"
         "int b=_Generic(__builtin_ia32_rdpid(),unsigned:5,default:9);"
-        "int c=_Generic(__builtin_ia32_pause(),int:11,default:13);return x+a+b+c;}",
+        "int c=_Generic(__builtin_ia32_pause(),int:11,default:13);"
+        "int d=_Generic(({x++;__builtin_rotateleft32(x,missing());}),unsigned:17,default:19);return x+a+b+c+d;}",
         "intrinsic-generic-controls-unevaluated", clang);
     // GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
     // through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
