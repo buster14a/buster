@@ -94,6 +94,11 @@ static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
 // BUSTER_ARENA_SMALL_BYTES), for a table that usually stays below what a huge page is worth: the kernel clears a huge
 // page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X.
 static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
+// An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
+// page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
+// addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
+// push returns faults: only code that pushes and writes nothing in what it pushes may run on it.
+static __attribute__((unused)) Arena arena_measure(void);
 // Unmaps the arena, and leaves it without capacity.
 static __attribute__((unused)) void arena_release(Arena* arena);
 // `size` bytes at the first address from base + length that is a multiple of `alignment`, a power of two. Returns 0 and
@@ -150,6 +155,14 @@ static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
 static Arena arena_reserve(uint64_t capacity)
 {
     return arena_reserve_small(capacity, BUSTER_ARENA_SMALL_BYTES);
+}
+
+static Arena arena_measure(void)
+{
+    return (Arena){
+        .base = (uint8_t*)(uintptr_t)BUSTER_ARENA_MAX_CAPACITY,
+        .capacity = BUSTER_ARENA_MAX_CAPACITY,
+    };
 }
 
 static void arena_release(Arena* arena)

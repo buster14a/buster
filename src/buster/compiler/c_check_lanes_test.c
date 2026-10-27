@@ -35,6 +35,9 @@
 //   check_program_emit's, on lanes of one and on 8 lanes, each one lane's object, lane 0's columns in the caller's
 //   scratch at the first limit and in their reservation at the second, and the 8 lanes run again on one. And a program
 //   without bodies, which reserves nothing for lane 0's columns, emitted with no address space past its arenas.
+// - The caller's scratch: the squeezes' program by each path, with -g's rows and unwind tables and without, emitted by
+//   check_program_emit and on lanes of one with the least room of the caller's scratch they take, found by halving:
+//   one lane's object, with less room than lane 0's columns take, whose own arena mustn't depend on the scratch's room.
 // - The driver (with --executable, this executable by default): four of the generated programs' objects (-c) and
 //   executables (one of 3 functions, two of random sizes and the first of 600) by --lanes 1, 3 and 8 and by default, by
 //   each path: the same bytes, and the executables exit with the same status; in a child limited as above, the first
@@ -320,9 +323,10 @@ static uint64_t check_lanes_test_mapped(void)
 }
 
 // check_lanes_test_emit, with the emission alone limited (RLIMIT_AS) to `room` bytes of address space more than the
-// process has, UINT64_MAX for no limit: the test's child's (check_lanes_test_address_space).
+// process has, and to `scratch_room` bytes of its scratch arena, UINT64_MAX for neither: the test's child's
+// (check_lanes_test_address_space).
 static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers,
-                                                            CheckProgramLanes* lanes, bool scalar, bool rows, bool unwind, uint64_t room)
+                                                            CheckProgramLanes* lanes, bool scalar, bool rows, bool unwind, uint64_t room, uint64_t scratch_room)
 {
     CheckLanesTestEmission result = { 0 };
     Arena output = arena_reserve(UINT64_C(1) << 32);
@@ -341,12 +345,15 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
         .rlim_max = before.rlim_max,
     };
     result.limited = mapped != 0 && setrlimit(RLIMIT_AS, &limit) == 0;
+    const uint64_t scratch_capacity = scratch.capacity;
+    scratch.capacity = scratch_room < scratch_capacity ? scratch_room : scratch_capacity;
     const bool emitted = ready && (room == UINT64_MAX || result.limited) &&
                          (lanes != NULL ? check_program_emit_lanes(&code, program, parser, identifiers, unit->selected.data.capacity, scalar, &output, &bytes, &scratch,
                                                                    NULL, rows ? &row_set : NULL, unwind, true, lanes) :
                                           check_program_emit(&code, program, parser, identifiers, unit->selected.data.capacity, scalar, &output, &bytes, &scratch, NULL,
                                                              rows ? &row_set : NULL, unwind, true));
     result.limited = result.limited && setrlimit(RLIMIT_AS, &before) == 0;
+    scratch.capacity = scratch_capacity;
     result.columns_capacity = lanes != NULL ? lanes->arenas[0].scratch.capacity : 0;
     result.columns_length = lanes != NULL ? lanes->arenas[0].scratch.length : 0;
     result.emitted = emitted;
@@ -390,7 +397,7 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
 static CheckLanesTestEmission check_lanes_test_emit(CheckLanesTestUnit* unit, const Parser* parser, Preprocessor* pp, const InternTable* identifiers,
                                                     CheckProgramLanes* lanes, bool scalar, bool rows, bool unwind)
 {
-    return check_lanes_test_emit_limited(unit, parser, pp, identifiers, lanes, scalar, rows, unwind, UINT64_MAX);
+    return check_lanes_test_emit_limited(unit, parser, pp, identifiers, lanes, scalar, rows, unwind, UINT64_MAX, UINT64_MAX);
 }
 
 // Whether two emissions made the same: the same object, or the same failure.
@@ -885,7 +892,7 @@ static void check_lanes_test_address_space(CheckLanesTestTally* tally, const cha
                             .slow_microseconds = 500,
                         };
                         CheckLanesTestEmission limited =
-                            check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, kind == 0 ? NULL : &lanes, scalar != 0, rows, rows, allowed);
+                            check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, kind == 0 ? NULL : &lanes, scalar != 0, rows, rows, allowed, UINT64_MAX);
                         snprintf(detail, sizeof(detail), "%s path%s, %s, %llu bytes more: status %u/%u, %llu/%llu bytes, columns' arena %llu bytes, again %u",
                                  scalar != 0 ? "scalar" : "vector", rows ? ", -g and unwind tables" : "",
                                  kind == 0 ? "check_program_emit" : kind == 1 ? "lanes of one" : "8 lanes", (unsigned long long)allowed, (uint32_t)one.status,
@@ -927,7 +934,7 @@ static void check_lanes_test_address_space(CheckLanesTestTally* tally, const cha
             CheckLanesTestEmission one = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, NULL, false, false, false);
             CheckProgramLanes probe = { .lanes = 1 };
             CheckLanesTestEmission probed = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, &probe, false, false, false);
-            CheckLanesTestEmission limited = check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, NULL, false, false, false, 0);
+            CheckLanesTestEmission limited = check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, NULL, false, false, false, 0, UINT64_MAX);
             snprintf(detail, sizeof(detail), "%llu/%llu/%llu bytes, columns' arena %llu bytes", (unsigned long long)one.size, (unsigned long long)probed.size,
                      (unsigned long long)limited.size, (unsigned long long)probed.columns_capacity);
             check_lanes_test_expect(&own, one.emitted && one.built && check_lanes_test_same(&one, &probed) && probed.columns_capacity == 0,
@@ -968,6 +975,74 @@ static void check_lanes_test_address_space(CheckLanesTestTally* tally, const cha
     }
     check_lanes_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "emissions in a limited address space make one lane's, in a child",
                             ended);
+}
+
+// The caller's scratch (see the file's comment): the squeezes' program by each path, with -g's rows and unwind tables and
+// without, emitted by check_program_emit and on lanes of one with the least room of the caller's scratch that they take,
+// found by halving the room between none and 16 GB to a page: each one lane's object, and that room less than lane 0's
+// columns take, which then don't fit in the scratch, so that their own arena's room mustn't depend on it.
+static void check_lanes_test_scratch(CheckLanesTestTally* tally, const char* directory)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    char path[PATH_MAX];
+    char detail[256];
+    uint32_t searched = 0;
+    uint64_t largest = 0;
+    uint64_t columns = 0;
+    snprintf(path, sizeof(path), "%s/squeeze.c", directory);
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        CheckLanesTestUnit unit;
+        check_lanes_test_compile(&unit, &pp, &parser, &identifiers, path, scalar != 0);
+        check_lanes_test_expect(tally, unit.ready, "compile the squeezes' program", path);
+        for (uint32_t shape = 0; unit.ready && shape < 2; shape += 1)
+        {
+            const bool rows = shape == 1;
+            CheckLanesTestEmission one = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, NULL, scalar != 0, rows, rows);
+            CheckProgramLanes probe = { .lanes = 1 };
+            CheckLanesTestEmission probed = check_lanes_test_emit(&unit, &parser, &pp, &identifiers, &probe, scalar != 0, rows, rows);
+            columns = probed.columns_capacity > columns ? probed.columns_capacity : columns;
+            for (uint32_t kind = 0; kind < 2; kind += 1)
+            {
+                uint64_t fails = 0;
+                uint64_t fits = UINT64_C(1) << 34;
+                while (fits - fails > BUSTER_ARENA_PAGE_BYTES)
+                {
+                    const uint64_t middle = fails + (fits - fails) / 2;
+                    CheckProgramLanes lanes = { .lanes = 1 };
+                    CheckLanesTestEmission squeezed =
+                        check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, kind == 0 ? NULL : &lanes, scalar != 0, rows, rows, UINT64_MAX, middle);
+                    const bool same = check_lanes_test_same(&one, &squeezed);
+                    fits = same ? middle : fits;
+                    fails = same ? fails : middle;
+                    free(squeezed.object);
+                }
+                CheckProgramLanes lanes = { .lanes = 1 };
+                CheckLanesTestEmission least =
+                    check_lanes_test_emit_limited(&unit, &parser, &pp, &identifiers, kind == 0 ? NULL : &lanes, scalar != 0, rows, rows, UINT64_MAX, fits);
+                snprintf(detail, sizeof(detail), "%s path%s, %s: %llu bytes of scratch, %llu of lane 0's columns", scalar != 0 ? "scalar" : "vector",
+                         rows ? ", -g and unwind tables" : "", kind == 0 ? "check_program_emit" : "lanes of one", (unsigned long long)fits,
+                         (unsigned long long)probed.columns_capacity);
+                check_lanes_test_expect(tally, check_lanes_test_same(&one, &least) && (kind == 0 || least.columns_capacity == probed.columns_capacity),
+                                        "an emission with the least scratch it takes makes one lane's object, its columns in their own arena", detail);
+                check_lanes_test_expect(tally, probed.columns_capacity != 0 && fits < probed.columns_capacity,
+                                        "the least scratch an emission takes has less room than lane 0's columns", detail);
+                largest = fits > largest ? fits : largest;
+                searched += 1;
+                free(least.object);
+            }
+            free(one.object);
+            free(probed.object);
+        }
+        check_lanes_test_close(&unit);
+        parse_release(&parser);
+        pp_release(&pp);
+        intern_release(&identifiers);
+    }
+    printf("  scratch: %u emissions with the least scratch they take, at most %llu bytes, against lane 0's columns' %llu, each one lane's\n", searched,
+           (unsigned long long)largest, (unsigned long long)columns);
 }
 
 // The lane rule (see the file's comment): a generated program's lanes by default, with room for 8.
@@ -1301,6 +1376,7 @@ static int run_check_lanes_tests(int argc, char** argv)
         check_lanes_test_squeezes(&tally, directory);
         check_lanes_test_unstarted(&tally, directory);
         check_lanes_test_address_space(&tally, directory);
+        check_lanes_test_scratch(&tally, directory);
         check_lanes_test_rule(&tally, directory);
         check_lanes_test_driver(&tally, executable, directory, programs);
         check_lanes_test_driver_failing(&tally, executable, directory);

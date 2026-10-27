@@ -773,12 +773,12 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     // Lane 0's writer's columns (CheckEmitRun.columns), in an arena of base pages reserved for the room they take
     // (check_lower_writer_bytes): the lanes' first arenas' scratch, kept while it has the room and otherwise reserved
     // again, or without lanes an arena of this emission's own; none without bodies, whose writer never begins. Where that
-    // address space can't be reserved (RLIMIT_AS, or overcommit refused), they go in the caller's scratch, which had the
-    // room for their measure, as before #531: the calling thread runs the bodies when the lanes can't, and needs no
-    // address space past the caller's arenas.
+    // address space can't be reserved (RLIMIT_AS, or overcommit refused), they go in the caller's scratch, as before
+    // #531, if it has their room: the calling thread runs the bodies when the lanes can't, and then needs no address space
+    // past the caller's arenas.
     Arena own_columns = { 0 };
     Arena* reserved = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
-    const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL, scratch) : 0;
+    const uint64_t column_bytes = valid && count != 0 ? check_lower_writer_bytes(&shared, rows != NULL) : 0;
     if (column_bytes > reserved->capacity)
     {
         arena_release(reserved);

@@ -5390,20 +5390,16 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
 }
 
 // The room check_lower_writer_begin takes for `shared`'s bodies from an arena whose base is page-aligned, as an arena
-// reserved for its columns has (check_program_emit_lanes): its pushes on `scratch` from a page-aligned address, then
-// popped. They touch none of scratch's pages, since the writer writes nothing in what it pushes. 0 if they don't fit.
-static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool sources, Arena* scratch)
+// reserved for its columns has (check_program_emit_lanes): its pushes on an arena of no memory (arena_measure), which
+// they take whatever room the caller's arenas have, since the writer writes nothing in what it pushes. UINT64_MAX if a
+// column's bytes overflow, which no reservation takes.
+static uint64_t check_lower_writer_bytes(const CheckLowerShared* shared, bool sources)
 {
-    const uint64_t mark = scratch->length;
     CheckLowerWriter writer;
     CheckLowerAbi abi;
     CheckProgramLowered status;
-    const bool aligned = arena_push(scratch, 0, BUSTER_ARENA_PAGE_BYTES) != 0;
-    const uint64_t begin = scratch->length;
-    const bool fits = aligned && check_lower_writer_begin(&writer, &abi, &status, shared, sources, scratch);
-    const uint64_t result = fits ? scratch->length - begin : 0;
-    arena_pop_to(scratch, mark);
-    return result;
+    Arena measure = arena_measure();
+    return check_lower_writer_begin(&writer, &abi, &status, shared, sources, &measure) ? measure.length : UINT64_MAX;
 }
 
 // The most nodes a statement's prefetch takes (check_lower_prefetch): its root's and those just before it, the first the
