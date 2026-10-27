@@ -4987,6 +4987,7 @@ struct PPParameterIndex
     uint32_t capacity;
     uint32_t count;
     bool vectorized;
+    bool repeated; // The preceding large definition insertion found an earlier ordinal.
     Scratch scratch;
 };
 
@@ -4997,19 +4998,19 @@ static void pp_parameter_index_begin(PPParameterIndex* index, bool vectorized)
     index->capacity = 0;
     index->count = 0;
     index->vectorized = vectorized;
+    index->repeated = false;
     index->scratch.arena = 0;
 }
 
 // Only large macros allocate even the index's descriptor. Keep its arrays out of the ordinary compiler stack frame.
-static bool pp_parameter_index_allocate(PPParameterIndex** index, bool vectorized)
+static PPParameterIndex* pp_parameter_index_allocate(bool vectorized)
 {
     Scratch scratch = scratch_begin(0);
-    *index = arena_push(scratch.arena, sizeof(PPParameterIndex), _Alignof(PPParameterIndex));
-    const bool result = *index != 0;
-    if (result)
+    PPParameterIndex* result = arena_push(scratch.arena, sizeof(PPParameterIndex), _Alignof(PPParameterIndex));
+    if (result != 0)
     {
-        pp_parameter_index_begin(*index, vectorized);
-        (*index)->scratch = scratch;
+        pp_parameter_index_begin(result, vectorized);
+        result->scratch = scratch;
     }
     else
     {
@@ -5030,7 +5031,7 @@ static uint32_t pp_parameter_slot(const uint64_t* slots, uint32_t capacity, Iden
     return result;
 }
 
-static uint32_t pp_parameter_index(const PPParameterIndex* index, IdentId id)
+static __attribute__((noinline)) uint32_t pp_parameter_index(const PPParameterIndex* index, IdentId id)
 {
     uint32_t result = BUSTER_PP_NONE;
     if (index->slots != 0)
@@ -5117,13 +5118,21 @@ static void pp_parameter_index_end(PPParameterIndex* index)
     }
 }
 
-static bool pp_parameter_index_build(PPParameterIndex** index, const IdentId* names, uint32_t count, bool vectorized)
+// Return the descriptor directly: passing the address of the caller's local pointer would force it onto the stack
+// and add a stack-protector check to every ordinary macro. Keep this cold construction in its own frame.
+static __attribute__((noinline)) PPParameterIndex* pp_parameter_index_build(const IdentId* names, uint32_t count, bool vectorized)
 {
-    bool result = pp_parameter_index_allocate(index, vectorized);
-    for (uint32_t p = 0; result && p < count; p += 1)
+    PPParameterIndex* result = pp_parameter_index_allocate(vectorized);
+    bool complete = result != 0;
+    for (uint32_t p = 0; complete && p < count; p += 1)
     {
         uint32_t previous;
-        result = pp_parameter_insert(*index, names[p], p, &previous);
+        complete = pp_parameter_insert(result, names[p], p, &previous);
+    }
+    if (!complete && result != 0)
+    {
+        pp_parameter_index_end(result);
+        result = 0;
     }
     return result;
 }
@@ -5261,28 +5270,32 @@ static bool pp_language_defined(const Preprocessor* pp, const PPMacro* macro)
 }
 
 // The cold continuation once the preceding 16 identifiers have passed their bounded duplicate/grammar checks.
-static bool pp_define_parameter_large(Preprocessor* pp, const PPFileData* data, const PPMacro* macro, PPParameterIndex** parameters, IdentId name, uint32_t ordinal, bool* repeated)
+static __attribute__((noinline)) PPParameterIndex* pp_define_parameter_large(Preprocessor* pp, const PPFileData* data, const PPMacro* macro, PPParameterIndex* parameters, IdentId name, uint32_t ordinal)
 {
-    bool result = true;
-    *repeated = false;
-    if (*parameters == 0)
+    PPParameterIndex* result = parameters;
+    if (result == 0)
     {
-        result = pp_parameter_index_allocate(parameters, pp->vectorized);
-        if (result)
+        result = pp_parameter_index_allocate(pp->vectorized);
+        if (result != 0)
         {
             for (uint32_t p = 0; p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
             {
-                (*parameters)->names[p] = data->values[macro->parameters_begin + 2 * p];
-                (*parameters)->ordinals[p] = p;
+                result->names[p] = data->values[macro->parameters_begin + 2 * p];
+                result->ordinals[p] = p;
             }
-            (*parameters)->count = BUSTER_PP_SMALL_PARAMETERS;
+            result->count = BUSTER_PP_SMALL_PARAMETERS;
         }
     }
-    if (result)
+    if (result != 0)
     {
         uint32_t previous;
-        result = pp_parameter_insert(*parameters, name, ordinal, &previous);
-        *repeated = previous != BUSTER_PP_NONE;
+        const bool complete = pp_parameter_insert(result, name, ordinal, &previous);
+        result->repeated = previous != BUSTER_PP_NONE;
+        if (!complete)
+        {
+            pp_parameter_index_end(result);
+            result = 0;
+        }
     }
     return result;
 }
@@ -5319,8 +5332,11 @@ BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data
         else if (kind == C_TOKEN_ELLIPSIS)
         {
             macro->flags |= BUSTER_PP_MACRO_VARIADIC;
-            bool repeated;
-            result = parameter_count < BUSTER_PP_SMALL_PARAMETERS || pp_define_parameter_large(pp, data, macro, parameters, C_NAME_VA_ARGS, parameter_count, &repeated);
+            if (parameter_count >= BUSTER_PP_SMALL_PARAMETERS)
+            {
+                *parameters = pp_define_parameter_large(pp, data, macro, *parameters, C_NAME_VA_ARGS, parameter_count);
+                result = *parameters != 0;
+            }
             if (!result)
             {
                 pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");
@@ -5353,7 +5369,9 @@ BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data
             }
             else
             {
-                result = pp_define_parameter_large(pp, data, macro, parameters, parameter, parameter_count, &repeated);
+                *parameters = pp_define_parameter_large(pp, data, macro, *parameters, parameter, parameter_count);
+                result = *parameters != 0;
+                repeated = result && (*parameters)->repeated;
             }
             if (!result)
             {
@@ -5566,7 +5584,8 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     PPParameterIndex* parameters = 0;
     if (result && parameter_count > BUSTER_PP_SMALL_PARAMETERS)
     {
-        result = pp_parameter_index_build(&parameters, parameter_ids, parameter_count, pp->vectorized);
+        parameters = pp_parameter_index_build(parameter_ids, parameter_count, pp->vectorized);
+        result = parameters != 0;
         if (!result)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");

@@ -5724,15 +5724,15 @@ static bool pp_test_parameter_index(void)
     Scratch descriptor = scratch_begin(0);
     const uint64_t descriptor_capacity = descriptor.arena->capacity;
     descriptor.arena->capacity = descriptor.arena->length;
-    PPParameterIndex* allocated = 0;
-    const bool made = pp_parameter_index_allocate(&allocated, true);
-    result = result && !made && allocated == 0 && descriptor.arena->length == descriptor.length;
+    PPParameterIndex* allocated = pp_parameter_index_allocate(true);
+    result = result && allocated == 0 && descriptor.arena->length == descriptor.length;
     descriptor.arena->capacity = descriptor_capacity;
     scratch_end(descriptor);
     if (result)
     {
         Scratch outer = scratch_begin(0);
-        result = pp_parameter_index_allocate(&allocated, true);
+        allocated = pp_parameter_index_allocate(true);
+        result = allocated != 0;
         for (uint32_t p = 0; result && p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
         {
             uint32_t previous;
@@ -5748,6 +5748,21 @@ static bool pp_test_parameter_index(void)
             pp_parameter_index_end(allocated);
         }
         result = result && outer.arena->length == outer.length;
+        scratch_end(outer);
+    }
+    if (result)
+    {
+        Scratch outer = scratch_begin(0);
+        IdentId names[BUSTER_PP_SMALL_PARAMETERS + 1];
+        for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(names); p += 1)
+        {
+            names[p] = p;
+        }
+        const uint64_t capacity = outer.arena->capacity;
+        outer.arena->capacity = outer.arena->length + sizeof(PPParameterIndex) + _Alignof(PPParameterIndex);
+        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names), true);
+        result = allocated == 0 && outer.arena->length == outer.length;
+        outer.arena->capacity = capacity;
         scratch_end(outer);
     }
     for (uint32_t mode = 0; mode < 2; mode += 1)
