@@ -17,7 +17,8 @@
 //     a file is added to the directory, #embed's resource or what __has_include found changes; errors naming
 //     absolute paths, taken with the other directory's; a missing #include and -M options, not kept;
 //   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; __TIMESTAMP__'s files'
-//     times; __DATE__ without SOURCE_DATE_EPOCH, not kept, and with it, kept;
+//     times; __DATE__ without SOURCE_DATE_EPOCH, not kept, and with it, kept; shared directories, a file added beside
+//     the source taken and a dependency changed not; a run past its time limit, killed and not kept;
 //   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
 //     whose run read other bytes isn't stale;
 //   - damaged entries: a changed magic, key, body length, root or dependency count, one cut short, cut inside its
@@ -25,7 +26,8 @@
 //   - modes: off, a mode that names none, and no directory keep nothing;
 //   - writers at once: 8 processes running the same 4 runs 16 times each, whose counts add up in the parent's and
 //     whose entries are whole after, with no file left beside them;
-//   - the process's cache: BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, a directory made private, three levels deep.
+//   - the process's cache: BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, a directory made private, three levels deep, and
+//     turned off (oracle_cache_disable).
 // It prints its checks and failures and exits with status 1 if any fail.
 
 #ifndef BUSTER_ORACLE_CACHE_TEST_INCLUDED
@@ -584,6 +586,32 @@ static void oracle_test_identities(OracleTest* test)
     }
     free(kept);
     oracle_test_expect(test, dated, "identities: __DATE__ without SOURCE_DATE_EPOCH isn't kept, and with it is");
+    // A run whose directories hold other runs' files as it runs keeps its dependencies but not their names.
+    char* argv[] = { "clang", "-fsyntax-only", "-fno-color-diagnostics", "links.c", 0 };
+    OracleRun run = { .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
+    bool shared = oracle_run(&run) && !run.taken;
+    oracle_run_release(&run);
+    shared &= oracle_test_write_text(directory, "beside.c", "\n");
+    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
+    shared &= oracle_run(&run) && run.taken;
+    oracle_run_release(&run);
+    shared &= oracle_test_write_text(directory, "b.h", "#pragma once\nint b;\n");
+    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
+    shared &= oracle_run(&run) && !run.taken;
+    oracle_run_release(&run);
+    oracle_test_expect(test, shared, "identities: shared directories, their names left out and the dependencies kept");
+    // A run past its time limit is killed, fails, and isn't kept.
+    char* slow[] = { "sleep", "20", 0 };
+    const uint64_t before = cache.counts->unkept;
+    struct timespec start;
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: slow", .arguments = slow, .timeout = 1 };
+    const bool failed = !oracle_run(&run) && run.killed;
+    oracle_run_release(&run);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    const double seconds = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+    oracle_test_expect(test, failed && seconds < 10 && cache.counts->unkept == before + 1, "runs: a run past its time limit, killed and not kept");
     oracle_cache_close(&cache);
 }
 
@@ -801,11 +829,17 @@ static void oracle_test_process(OracleTest* test)
         struct stat status;
         const bool right = cache->mode == ORACLE_MODE_USE && strcmp(cache->directory, expected) == 0 && stat(expected, &status) == 0 && S_ISDIR(status.st_mode) &&
                            (status.st_mode & 0777) == 0700;
-        _exit(right ? 0 : 1);
+        // And turned off, as a harness's test turns it off: nothing kept.
+        oracle_cache_disable();
+        char* arguments[] = { "sh", "-c", "printf x", 0 };
+        OracleRun run = { .purpose = "oracle test: disabled", .arguments = arguments };
+        const bool off = !oracle_cache_active(oracle_cache()) && oracle_run(&run) && !run.taken && strcmp(run.output, "x") == 0;
+        oracle_run_release(&run);
+        _exit(right && off ? 0 : 1);
     }
     int status = 0;
     oracle_test_expect(test, child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                       "the process's cache from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, made private");
+                       "the process's cache from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, made private, and turned off");
 }
 
 // Removes the files of `base`/`relative` (or `base` itself) and then each directory of `relative`, deepest first (the

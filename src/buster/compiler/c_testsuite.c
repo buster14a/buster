@@ -342,8 +342,28 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
     snprintf(oracle, sizeof(oracle), "%s/object-clang.o", directory);
     snprintf(log, sizeof(log), "%s/object-clang.txt", directory);
     char* const compile[] = { (char*)suite->clang, "-O0", "-c", "-w", (char*)source, "-o", oracle, 0 };
-    bool timed_out = false;
-    const int status = c_testsuite_run(compile, directory, log, suite->compile_timeout, &timed_out);
+    // Through the oracle cache (oracle_cache.c, #542): the test's directory holds this compiler's files too, so its
+    // names aren't what clang read (the source and the headers are). Its output and errors go to the log, as
+    // c_testsuite_run writes them.
+    const char* files[] = { oracle };
+    OracleRun run = {
+        .purpose = "c-testsuite: clang -O0 -c",
+        .arguments = compile,
+        .directory = directory,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+        .shared_directories = true,
+        .timeout = suite->compile_timeout,
+    };
+    const bool ran = oracle_run(&run);
+    FILE* written = fopen(log, "w");
+    const bool logged = written != 0 && fwrite(run.output != 0 ? run.output : "", 1, run.output_length, written) == run.output_length &&
+                        fwrite(run.errors != 0 ? run.errors : "", 1, run.errors_length, written) == run.errors_length;
+    const bool closed = written == 0 || fclose(written) == 0;
+    const int status = ran && logged && closed ? run.status : -1;
+    const bool timed_out = run.killed;
+    oracle_run_release(&run);
     bool valid = c_testsuite_compiled(status, timed_out, log, "cross-check: clang -O0 -c", detail, capacity);
     Arena arena = valid ? arena_reserve(UINT64_C(1) << 32) : (Arena){ 0 };
     LoweringSymbols ours = { 0 };
@@ -694,7 +714,9 @@ static bool c_testsuite_execute(CTestsuite* suite, const char* root, const char*
     valid = valid && mkdtemp(work) != 0 && realpath(work, suite->work) != 0;
     if (valid)
     {
-        // Workers take the tests in turn: worker w the tests w, w + jobs, ...
+        // Workers take the tests in turn: worker w the tests w, w + jobs, ... The oracle cache is set up before they fork,
+        // so that their counts reach its report.
+        OracleCache* oracle = oracle_cache();
         const uint64_t workers = jobs != 0 ? jobs : parallel_core_count();
         pid_t* children = malloc((workers != 0 ? workers : 1) * sizeof(pid_t));
         uint64_t started = 0;
@@ -723,6 +745,7 @@ static bool c_testsuite_execute(CTestsuite* suite, const char* root, const char*
             while (waited < 0 && errno == EINTR);
         }
         free(children);
+        oracle_cache_report(oracle, "test-c-testsuite");
     }
     return valid;
 }
@@ -836,6 +859,8 @@ static bool c_testsuite_expect(const CTestsuite* suite, const char* scenario, co
 // fourth scenario its compiles, must be killed at their one-second timeouts, long before they would end.
 static int c_testsuite_self_test(CTestsuite* suite)
 {
+    // The harness's processes must run, each scenario's own: no oracle run comes from the cache (oracle_cache.c).
+    oracle_cache_disable();
     static const char* const directories[] = { "checkout", "checkout/tests", "checkout/tests/single-exec", "work" };
     static const char* const files[][2] = {
         { "checkout/tests/single-exec/00001.c", "int main(void) { return 0; }\n" },

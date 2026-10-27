@@ -49,12 +49,14 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -660,6 +662,13 @@ static OracleCache* oracle_cache(void)
     return cache;
 }
 
+// Turns the process's cache off, as BUSTER_ORACLE_CACHE unset does: for a test of a harness, whose processes must run.
+static void oracle_cache_disable(void)
+{
+    oracle_cache_close(&oracle_cache_state);
+    oracle_cache_open(&oracle_cache_state, 0, 0);
+}
+
 // A key's start: the format, the purpose and the cache's host part.
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
@@ -814,7 +823,9 @@ struct OracleRun
     // The run, which the caller sets and keeps until the run is finished: the cache (null: the process's), the purpose,
     // the tool (as posix_spawnp takes it) and its arguments with a null after them, its environment (null: this
     // process's), the file its standard input reads (null: /dev/null), its working directory (null: this process's),
-    // the files it writes, and whether it is a compiler's run of one source whose dependencies its entry lists.
+    // the files it writes, whether it is a compiler's run of one source whose dependencies its entry lists, whether
+    // its directories hold other runs' files as it runs (so that their names aren't what it read: its dependencies
+    // are), and the seconds it may run (0: no limit), past which it is killed and fails.
     OracleCache* cache;
     const char* purpose;
     char* const* arguments;
@@ -824,14 +835,17 @@ struct OracleRun
     const char* const* files;
     uint32_t file_count;
     bool dependencies;
+    bool shared_directories;
+    uint32_t timeout;
     // Its result once finished: its wait status, its standard output and errors (malloc's, each with a NUL after it),
-    // and whether it came from an entry.
+    // whether it came from an entry, and whether it ran past its time limit and was killed.
     int status;
     char* output;
     uint64_t output_length;
     char* errors;
     uint64_t errors_length;
     bool taken;
+    bool killed;
     // The run's own state.
     bool keyed;
     OracleKey key;
@@ -1066,6 +1080,13 @@ static int oracle_capture(void)
             unlink(path);
             fcntl(result, F_SETFD, FD_CLOEXEC);
         }
+    }
+    // Never a standard descriptor, which the child's dup2 calls would overwrite where the caller has closed one.
+    if (result >= 0 && result <= 2)
+    {
+        const int low = result;
+        result = fcntl(low, F_DUPFD_CLOEXEC, 3);
+        close(low);
     }
     return result;
 }
@@ -1762,13 +1783,14 @@ static bool oracle_run_start(OracleRun* run)
     run->errors = 0;
     run->errors_length = 0;
     run->taken = false;
+    run->killed = false;
     run->pid = 0;
     run->output_descriptor = -1;
     run->errors_descriptor = -1;
     run->dependency_path[0] = 0;
     run->listings = (OracleRecords){ 0 };
     run->keyed = oracle_run_key(run);
-    run->keyed = run->keyed && (!run->dependencies || oracle_run_listings(run));
+    run->keyed = run->keyed && (!run->dependencies || run->shared_directories || oracle_run_listings(run));
     run->taken = run->keyed && run->cache->mode == ORACLE_MODE_USE && oracle_run_take(run);
     if (run->taken)
     {
@@ -1788,17 +1810,36 @@ static bool oracle_run_finish(OracleRun* run)
     bool result = run->taken;
     if (!run->taken)
     {
+        // With a time limit, the wait a millisecond at a time, and past the limit the tool killed and waited for.
         int status = 0;
-        pid_t waited = -1;
-        do
+        pid_t waited = 0;
+        bool killed = false;
+        uint64_t waits = 0;
+        const struct timespec pause = { .tv_sec = 0, .tv_nsec = 1000000 };
+        while (run->pid > 0 && waited != run->pid && !(waited < 0 && errno != EINTR))
         {
-            waited = run->pid > 0 ? waitpid(run->pid, &status, 0) : -1;
+            const bool expired = run->timeout != 0 && waits >= 1000ull * run->timeout;
+            if (expired && !killed)
+            {
+                kill(run->pid, SIGKILL);
+                killed = true;
+            }
+            waited = waitpid(run->pid, &status, run->timeout != 0 && !expired ? WNOHANG : 0);
+            if (waited == 0)
+            {
+                nanosleep(&pause, 0);
+                waits += 1;
+            }
         }
-        while (waited < 0 && run->pid > 0 && errno == EINTR);
-        result = run->pid > 0 && waited == run->pid;
+        result = run->pid > 0 && waited == run->pid && !killed;
+        run->killed = killed;
         run->status = status;
         result = oracle_read_capture(run->output_descriptor, &run->output, &run->output_length) && result;
         result = oracle_read_capture(run->errors_descriptor, &run->errors, &run->errors_length) && result;
+        if (run->keyed && !result)
+        {
+            oracle_count(&run->cache->counts->unkept);
+        }
         result = result && (!run->keyed || oracle_run_keep(run));
     }
     if (run->output_descriptor >= 0)

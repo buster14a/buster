@@ -1721,6 +1721,13 @@ run, stale, not kept) are in shared memory, which the parts a test forks after
 it sets up the cache add to, and a test prints them at its end
 (`oracle_cache_report`).
 
+A run whose directories hold other runs' files as it runs
+(`OracleRun.shared_directories`) keeps its dependencies but not their
+directories' names. A run may have a time limit (`OracleRun.timeout`), past
+which it is killed (`OracleRun.killed`), fails and isn't kept. A test of a
+harness whose processes must run turns the process's cache off
+(`oracle_cache_disable`).
+
 Its users:
 
 - the predefines' tests (`c_predefines_test.c`): the option sets' `clang -dM
@@ -1730,9 +1737,19 @@ Its users:
   the header, keyword and feature sets, and the files given to it;
 - `parse_test_clang`, the parser's and the checker's `clang -fsyntax-only` of
   their snippets and fixtures: with the cache on, a file per process, as many
-  at once as its batches have, each file's result the one a batch gives it.
+  at once as its batches have, each file's result the one a batch gives it;
+- test-checker-corpus's clang (`check_corpus_clang_phase`, its first error,
+  and `check_corpus_clang_object`, `-O0 -c`'s objects), which test-checker-asm
+  and test-checker-driver use too;
+- test-tier0's cross-check's compiles of each program's C and of its harness,
+  each then linked with Tier 0's object (`tier0_test_compile`);
+- test-calling-convention's cross-check's compiles of the C side, each then
+  linked with ours (`abi_test_compile`, its runs sharing their directory);
+- test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
+  in `--self-test`, which turns the cache off.
 
-`./build/compiler test-oracle-cache` (about 0.5 s) checks it with sh and clang
+`./build/compiler test-oracle-cache` (about 1.5 s, a second of it the time
+limit's run) checks it with sh and clang
 as the tools, in a directory of its own under `$TMPDIR` (or `/tmp`) and two of
 one template beside it:
 
@@ -1756,7 +1773,9 @@ one template beside it:
   options, not kept;
 - what a run reads besides bytes: a hard link replaced by a copy of its bytes,
   `__TIMESTAMP__`'s files' times, and `__DATE__` without `SOURCE_DATE_EPOCH`
-  (not kept) and with it (kept);
+  (not kept) and with it (kept); shared directories, where a file added beside
+  the source leaves the entry taken and a changed dependency doesn't; a run
+  past its time limit, killed and not kept;
 - check mode: an entry made stale fails its run and is written again (the test
   prints that it makes one on purpose), and one whose run read other bytes
   isn't stale;
@@ -1768,7 +1787,7 @@ one template beside it:
 - 8 processes running the same 4 runs 16 times each, whose counts add up in
   the parent's and whose entries are whole after, with nothing beside them;
 - the process's cache, from `BUSTER_ORACLE_CACHE` and `XDG_CACHE_HOME`, its
-  directory made private three levels deep.
+  directory made private three levels deep, and turned off.
 
 The cache is test tooling outside the compile path and has no vector path: a
 run hashes what it read. The 9700X job's test step runs its tests.

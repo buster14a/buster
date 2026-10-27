@@ -1367,6 +1367,29 @@ static int tier0_test_shell(const char* command, const char* prefix, char* line,
     return status;
 }
 
+// `clang -O0 [-fwrapv -fno-strict-aliasing] -w -c SOURCE -o OBJECT` through the oracle cache (oracle_cache.c, #542),
+// with `dialect` the repository's (the program's C) or not (the harness's), what it prints on the errors: whether it
+// compiled.
+static bool tier0_test_compile(const char* clang, bool dialect, const char* source, const char* object)
+{
+    char* program[] = { (char*)clang, "-O0", "-fwrapv", "-fno-strict-aliasing", "-w", "-c", (char*)source, "-o", (char*)object, 0 };
+    char* harness[] = { (char*)clang, "-O0", "-w", "-c", (char*)source, "-o", (char*)object, 0 };
+    const char* files[] = { object };
+    OracleRun run = {
+        .purpose = "tier0: clang -O0 -c",
+        .arguments = dialect ? program : harness,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+    };
+    const bool ran = oracle_run(&run);
+    fputs(run.output != 0 ? run.output : "", stderr);
+    fputs(run.errors != 0 ? run.errors : "", stderr);
+    const bool result = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0;
+    oracle_run_release(&run);
+    return result;
+}
+
 // The cross-check: `count` programs, each compiled by clang -O0 (as C) and by Tier 0 (as an object), linked into one
 // harness that runs both on the same inputs; their results and globals must agree. Also reports the code's sizes (clang's
 // .text, Tier 0's functions) and the harness's times. With records (#137), each program is also linked mixed, its even
@@ -1442,10 +1465,18 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
                 // globals Tier 0 reaches through the GOT is a shared library the executable finds by its run path, data
                 // alone, which GNU as assembles and ld links without the C runtime's files.
-                snprintf(command, sizeof(command),
-                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
-                         "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
-                         clang, source, source, library, library, library, library, clang, executable, harness, source, object, library, directory);
+                // clang's compiles go through the oracle cache (tier0_test_compile), the harness's on its own; the rest, which
+                // reads Tier 0's objects, runs every time.
+                char program_object[620];
+                char harness_object[620];
+                char mixed_program_object[620];
+                snprintf(program_object, sizeof(program_object), "%s.o", source);
+                snprintf(harness_object, sizeof(harness_object), "%s.o", harness);
+                snprintf(mixed_program_object, sizeof(mixed_program_object), "%s.o", mixed_source);
+                const bool compiled = tier0_test_compile(clang, true, source, program_object) && (!mixed || tier0_test_compile(clang, true, mixed_source, mixed_program_object)) &&
+                                tier0_test_compile(clang, false, harness, harness_object);
+                snprintf(command, sizeof(command), "as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && %s -O0 -w -o %s %s %s %s %s.so -Wl,-rpath,%s 2>&1", library,
+                         library, library, library, clang, executable, harness_object, program_object, object, library, directory);
                 if (mixed)
                 {
                     // The mixed build's: clang's object with its even functions weak, Tier 0's even ones taking their
@@ -1460,13 +1491,11 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                         length += written > 0 ? (uint64_t)written : 0;
                     }
                     snprintf(command, sizeof(command),
-                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
-                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && objcopy%s %s.o 2>&1 && "
-                             "%s -O0 -w -o %s %s %s.o %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
-                             clang, source, source, library, library, library, library, clang, mixed_source, mixed_source, weaken, mixed_source, clang, executable,
-                             harness, source, object, mixed_source, mixed_object, library, directory);
+                             "as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && objcopy%s %s 2>&1 && %s -O0 -w -o %s %s %s %s %s %s %s.so -Wl,-rpath,%s 2>&1",
+                             library, library, library, library, weaken, mixed_program_object, clang, executable, harness_object, program_object, object,
+                             mixed_program_object, mixed_object, library, directory);
                 }
-                ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
+                ok = tier0_test_expect(tally, compiled && tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
                 if (ok && tier0_test_shell(command, ".text ", line, sizeof(line)) == 0)
@@ -5302,6 +5331,7 @@ static int run_tier0_tests(int argc, char** argv)
         {
             total.failures += 1;
         }
+        oracle_cache_report(oracle_cache(), "test-tier0");
         printf("test-tier0: %" PRIu64 " checks, %" PRIu64 " failed\n", total.checks, total.failures);
         result = total.failures == 0 ? 0 : 1;
     }
