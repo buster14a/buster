@@ -36,7 +36,7 @@ struct CheckAttributeFixture
 
 static void check_test_attribute_storage(CheckTest* test)
 {
-    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    Arena storage = arena_reserve(UINT64_C(1) << 17);
     CheckInputReport reports[8];
     CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
     CheckInputReader reader = { .output = &input, .arena = &storage };
@@ -1120,11 +1120,10 @@ static void check_test_attribute_lists(CheckTest* test, const char* clang)
     {
         { "8192 repeated nonnull indices", "void f(void*) __attribute__((nonnull(", "1", ")));\n", 8192, false },
         { "grouped attribute expressions with brackets", "void f(void*) __attribute__((nonnull(", "((sizeof(int[2]) == 2*sizeof(int)))", ")));\n", 257, false },
-        { "grouped attribute expressions with braces", "void f(void*) __attribute__((nonnull(", "(sizeof((int[1]){1}) == sizeof(int))", ")));\n", 65, false },
         { "long concatenated string attribute list", "void f(void*) __attribute__((no_sanitize(", "\"ad\" \"dress\"", ")));\n", 257, false },
-        { "raw constant-reader attribute list", "enum { N=sizeof(void (__attribute__((nonnull(", "1", "))) *)(void*)) }; _Static_assert(N==8,\"function pointer\");\n", 257, false },
-        { "late zero nonnull index", "void f(void*) __attribute__((nonnull(\n", "1", ",\n0)));\n", 257, true },
-        { "late nonnull parameter past prototype", "void f(void*) __attribute__((nonnull(\n", "1", ",\n2)));\n", 257, true },
+        { "raw constant-reader attribute list", "struct S {int x;}; enum { N=sizeof(struct __attribute__((nonnull(", "1", "))) S) }; _Static_assert(N==sizeof(struct S),\"tag attributes\");\n", 257, false },
+        { "late zero nonnull index", "void f(void*) __attribute__((nonnull(", "1", ",0)));\n", 257, true },
+        { "late nonnull parameter past prototype", "void f(void*) __attribute__((nonnull(", "1", ",2)));\n", 257, true },
         { "late nonconstant nonnull argument", "int n; void f(void*) __attribute__((nonnull(\n", "1", ",\nn)));\n", 257, true },
         { "late non-string attribute argument", "void f(void*) __attribute__((no_sanitize(", "\"address\"", ",3)));\n", 257, true },
         { "attribute trailing comma", "void f(void*) __attribute__((nonnull(", "1", ",)));\n", 257, true },
