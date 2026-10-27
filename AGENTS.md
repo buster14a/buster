@@ -4413,11 +4413,21 @@ the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 [--programs N] [--keep]` emits generated programs of up to 600 functions (of
 libgcc's functions in random first-use orders, computed gotos through static
 tables of labels' addresses, switches, structs by value, long doubles,
-variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, and
-on 8 with a slow lane, by both paths, with `-g`'s rows and unwind tables and
-without: each must be the one lane's object or failure; then the lane rule,
-and the driver's objects and executables by `--lanes` and by default, each one
-lane's, the executables exiting alike. `./build/compiler benchmark-check-lanes
+variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
+8 with a slow lane, and on 8 that can't be pinned (which `lane_run` runs, then
+counts as lanes that didn't start), by both paths, with `-g`'s rows and unwind
+tables and without: each must be the one lane's object or failure, run again
+on one lane only when its lanes didn't start. Then the serial retry's other
+causes, each emission one lane's: a lane short of room
+(`CheckProgramLanes.squeeze_body`: the lane that takes a body's part left only
+so many bytes in one of its arenas, from none up, doubling, until the part
+fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
+code's after it), and lanes that start no thread, in a child that
+`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+objects and executables by `--lanes` and by default, each one lane's, the
+executables exiting alike, and with lanes that don't start, and the failing
+programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
+`./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
