@@ -210,6 +210,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "\"l4:\\n\\tleaq l5(%rip), %rax\\n\\tleaq l0(%rip), %rdx\\n\\tsubq %rdx, %rax\\n\\tret\\nl5:\\n\");}"
         "int tested(int n){__int128 w=(__int128)n*1000000007;long q=(long)(w/(__int128)(n|1));return (int)pick(n&7)+(int)(q&0xff);}",
         "asm-naked-runtime", clang);
+    // A jump table beside the templates' names, in one unit: the function whose switch takes a table has templates that
+    // call the unit's static function, update its static and take the address of a label a naked function's template
+    // defines. The names' own symbols come after the tables' and their labels' (CheckProgramLowered.case_symbol_base),
+    // and neither's references are the other's to rewrite.
+    static const char* const asm_tables =
+        "static __attribute__((used)) int bump(int x){return x+1;}"
+        "static int total;"
+        "static __attribute__((naked,noinline)) int relay(int x){__asm__(\"addl $2, %edi\\nrelay_tail:\\n\\tjmp bump\\n\");}"
+        "static int dense(int x){int r;long tail,start;"
+        "switch(x){case 0:r=3;break;case 1:r=5;break;case 2:r=7;break;case 3:r=11;break;case 5:r=13;break;default:r=-1;}"
+        "__asm__ volatile(\"movl %1, %%edi\\n\\tcall bump\\n\\taddl %%eax, total(%%rip)\\n\\tmovl %%eax, %0\" : \"=r\"(r) : \"r\"(r)"
+        ": \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"xmm0\",\"xmm1\",\"xmm2\",\"xmm3\",\"xmm4\",\"xmm5\",\"xmm6\",\"xmm7\",\"xmm8\",\"xmm9\",\"xmm10\",\"xmm11\",\"xmm12\",\"xmm13\",\"xmm14\",\"xmm15\",\"memory\",\"cc\");"
+        "__asm__(\"leaq relay_tail(%%rip), %0\" : \"=r\"(tail));"
+        "__asm__(\"leaq relay(%%rip), %0\" : \"=r\"(start));"
+        "return r+(int)(tail-start)+bump(0);}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*7+(unsigned)dense(i+n)+(unsigned)relay(i);return (int)s+total;}";
+    check_test_program_source(test, asm_tables, "asm-names-switch-tables", clang);
+    check_test_program_tables(test, asm_tables, "asm-names-switch-tables", 1, 6);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");

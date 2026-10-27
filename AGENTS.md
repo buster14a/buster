@@ -652,8 +652,9 @@ designs and the compilers already built this way.
   unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
   the same way; and the unwind tables (`c_check_unwind_test.c`): a fixture's
   `backtrace()` through a variable-length array's function, a computed goto's,
-  one with values live across its call and one of 128-bit integers, by
-  default and with each option
+  one with values live across its call, one of 128-bit integers and two in
+  realigned frames (an array aligned to 64, and one aligned to 4096 beside a
+  variable-length array, with a base), by default and with each option
   that keeps or drops the tables, by each path, as executables and as objects
   linked three ways; the options' rule against clang's objects of the fixture;
   and gdb's backtrace at every instruction of each function, whose steps must
@@ -679,13 +680,14 @@ designs and the compilers already built this way.
   consumer that does not repeat generic instruction validation), or reads them
   from the frame Tier 0 published, with no pass over the body
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
-  refuses); `unwind.c` emits original CIE/FDE contributions with scalar/vector
+  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks);
+  `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch. `check_program_emit` writes the C driver's unwind tables so, one
   EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
-  frame against the analyzer and actual Tier 0 code, a frame pointer's among
-  it, with native GDB/perf consumers. `benchmark-unwind` charges
+  frame against the analyzer and actual Tier 0 code, a frame pointer's and
+  realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
   analysis/emission to the existing Tier 0, sizing and encoding chain,
   including per-function arena cleanup, and the driver's published frame
   (`--only published`). [The unwind guide](docs/unwind.md) records the trusted
@@ -932,7 +934,12 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. An optional per-unit
+  positions, which give their function a frame pointer. An object, or a call's
+  outgoing area, aligned past 16 bytes realigns its function's frame (rbp the
+  frame pointer, `and rsp` after the reservation, the frame's places rsp's or,
+  where rsp moves, r15's, and its incoming places rbp's: docs/tier0.md's
+  "Realigned frames"), and `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of a class
+  may name an object, a value that must live in memory. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
@@ -1183,7 +1190,9 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every pull request's job queues behind every other's, so keep the job short.
+- Keep each qualification short. With admission enabled, the hosted controller
+  chooses priority before a job enters the physical queue ("9700X admission"
+  below); the shared host lock still protects every measurement.
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
@@ -1232,6 +1241,76 @@ there at a time, so everything takes one lock:
   benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## 9700X admission
+
+`tools/ci/admission.c` and `.github/workflows/9700x-control.yml` implement the
+default-branch eligibility/priority controller for #546-#548.
+[The admission guide](docs/ci-9700x-admission.md) describes the version-1
+interface, required-check attribution, recovery and the live rollout gates.
+Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
+ordinary qualification and restricted runner-group access have been verified.
+Verify this repository's exact default-workflow entrypoint and the existing
+single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
+with legacy, use the documented root-owned Buster-only job-start source guard;
+do not narrow legacy's group-wide access, broaden access or change other jobs.
+
+When enabled, confirmed conflicting PRs are blocked and their own outstanding
+qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
+to be a conflict. Behind-but-clean PRs remain eligible. The controller preserves
+the `buster-fast-9700x-` per-PR/ref concurrency groups and the shared host lock.
+It admits one job, rather than flooding the self-hosted queue. P0 critical,
+P1 high/current approval, P2 ordinary, P3 background and explicit P4 low are FIFO
+within class, with the guide's reserved aging slots and two-hour main/daily
+deadline. The default backlog threshold is three waiting eligible PRs.
+
+Maintainers with verified repository write/maintain/admin permission can post
+one standalone command in a PR conversation:
+
+```text
+/ci priority critical|high|normal|low
+/ci hold
+/ci resume
+/ci retry
+/ci status
+```
+
+The priority words above are alternatives. Append `run RUN_ID` for a current
+request-specific control, or use the controller's `workflow_dispatch` form on
+`main` with a PR/run ID. `normal`/`clear` removes an override; automatic approval
+priority can apply again. PR overrides/holds persist across commits until
+reset/resume or closure. Run overrides are bound to that request ID/SHA and expire
+on supersession/completion. Hold/promote never preempts admitted work. Retry
+qualifies only the current revision and is a no-op while its run is active.
+
+Automatic P1 requires a trusted current-head `APPROVED` review, or a comment
+consisting of `LGTM`, `APPROVED`, `SHIP IT`, `READY TO MERGE` or `/ci approve`.
+Quotes, code blocks, incidental/negated text and untrusted actors do not approve.
+Comment approval binds only a head already observed by the controller; edit or
+repost after observation, or use a commit-associated review, when ambiguous.
+Edits/deletions, dismissed reviews and new heads remove derived approval. Manual
+priority persists independently. Public fork revisions need a trusted current
+approval before any physical execution; a persistent priority alone is not one.
+
+The required context keeps its name, `Build and execute on Ryzen 7 9700X`, and
+GitHub Actions integration. In active mode the controller publishes both its
+Check Run and same-name commit status on the PR head after the exact current
+head/base/merge qualification; the native default-branch dispatch is not the PR
+result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
+status green. Documentation-only clean PRs retain success without hardware work.
+The check and controller summary expose priority, position, blocked reason,
+command result, admitted SHA/run, state and expiry. Raw real-run scheduling
+measurements belong in `buster-performance`, not here.
+
+Run `cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o /tmp/admission`
+and `/tmp/admission --self-test` after changing this policy, and rerun the existing
+`changes --self-test` after any workflow gate/benchmark edit. The policy/fixtures
+are original C; the privileged workflow never runs PR code or consumes a PR cache
+or artifact as authority. Guard binaries are compiled on hosted capacity and
+checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
+block new admission; never clear a live lease merely because it expired.
+`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
+backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 
@@ -4695,11 +4774,13 @@ and the program runs: each side checks every argument, result, hidden pointer,
 side: a world of what its C passes (integers to 64 bits, `__int128` and
 `unsigned __int128`, enums, pointers, `float`, `double`, `long double`, their
 complex types and the
-records, arrays and aligned typedefs of them, aligned to 16 at most, with C23's
+records, arrays and aligned typedefs of them, aligned to 64 as the clang
+worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
-signatures within Tier 0's depths (13 integer arguments, long doubles and
-128-bit integers among them, and 15 floating ones); our
+signatures within Tier 0's depths (12 integer arguments, long doubles and
+128-bit integers among them, a realigned frame's rbp past them, and 15
+floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
@@ -4774,24 +4855,27 @@ informational.
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
-[--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
-2.9 s with `--cross-check`) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of six shapes: one function of
+[--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
+14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
+`tier0_generate.c`, `--count` (300) of each of seven shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
 load every way (byte arrays of 1 to 17 bytes, floats and doubles mixed with
 integers both ways round, unions, a member aligned to 16, the empty struct,
-records past 16 bytes), whose programs must reach every kind of part,
-location and result the catalog makes, and functions with a frame pointer
-(variable-length arrays) that pass, take or return records; and larger past
-the depth tables (calls of 13 to 32 arguments, each evaluated over the ones
-before it, and deeper expressions, whose deep entries must be at least 1% of
-the entries). Their calls pass up to 12
+records aligned to 32 and records past 16 bytes), whose programs must reach
+every kind of part, location and result the catalog makes, and functions with
+a frame pointer (variable-length arrays) that pass, take or return records;
+larger past the depth tables (calls of 13 to 32 arguments, each evaluated over
+the ones before it, and deeper expressions, whose deep entries must be at
+least 1% of the entries); and that with objects aligned past 16 bytes (to 32,
+64 and 4096, `over_aligned`), in realigned frames, a base (r15) among them
+where variable-length arrays move rsp, many of each. Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
-are local arrays and structs, some `_Alignas(16)`, read, written and pointed
+are local arrays and structs, some `_Alignas(16)` (or past it, in the last
+shape), read, written and pointed
 into, copied (twins' bytes, all or a prefix, in statements and before a call's
 arguments, its C sequenced), each address's remainder by its alignment a value,
 and every object's bits folded into a global at its function's end (a
@@ -4808,16 +4892,23 @@ refuse unsupported entries alike and compile up to 240 values at once alike,
 refusing more, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
-alike, aligned, inside the frame and apart; copies: their rules, and a copy of
+alike, aligned, inside the frame and apart, every other round's realigned for
+objects aligned past 16 (the prologue's `and rsp` by the most they need, which
+the frame publishes); the frame's alignment, `tier0_frame_alignment` and its
+vector twin, on random columns of every count of locals to 40 and of calls to
+12, each ending at a `PROT_NONE` page; copies: their rules, and a copy of
 each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call; and deep values (`tier0_deep_test.c`): seven
+values saved around the call; and deep values (`tier0_deep_test.c`): eleven
 functions that fill the depth tables and cross their line with an entry of each
 kind (a dropped value, `?:`, a fused compare and branch, floating values,
 division by a local and by a value and shifts by a register, a frame pointer's
-14, both stacks at once), run natively against the file's model; and the
+14, both stacks at once, rsp moved past the line, a conversion past the
+floating line, a realigned frame's 14 and a realigned frame with a base's 13,
+an allocation past them that keeps rsp aligned to 4096), run natively against
+the file's model; and the
 operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left

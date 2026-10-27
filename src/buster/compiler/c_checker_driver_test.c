@@ -686,6 +686,227 @@ static void check_test_driver_complex(CheckTest* test, const char* executable, c
     unlink(outputs[1]);
 }
 
+// The jump tables' switches of check_test_driver_switch_tables, as the test's own clang build computes them.
+static int check_test_switch_dense(int x)
+{
+    int result = -1;
+    switch (x)
+    {
+        case 0: result = 3; break;
+        case 1: result = 5; break;
+        case 2: result = 7; break;
+        case 3: result = 11; break;
+        case 5: result = 13; break;
+        case 7: result = 17; break;
+        default: break;
+    }
+    return result;
+}
+
+static int check_test_switch_wide(long x)
+{
+    int result = 0;
+    switch (x)
+    {
+        case -3: result += 1;
+        case -2: result += 2; break;
+        case 0 ... 2: result += 4; break;
+        case 4: result += 8;
+        case 5: result += 16; break;
+        default: result += 100; break;
+    }
+    return result;
+}
+
+// Whether `bytes` (`length` of them) are an ELF object without the lowering's switch symbols (.Lbuster_switch_N and
+// .Lbuster_case_N) and whose .rodata's relocations are `entries` PC32 ones, each against .text's section symbol: the
+// tables and their labels the lowering's temporaries (check_driver_object), as an assembler leaves clang's .LJTI and
+// .LBB. String literals' .Lbuster_string_N stay, as clang's .L.str do.
+static bool check_test_driver_temporaries(const uint8_t* bytes, uint64_t length, uint32_t entries)
+{
+    Elf64_Ehdr header = { 0 };
+    bool valid = bytes != NULL && length >= sizeof(header);
+    if (valid)
+    {
+        memcpy(&header, bytes, sizeof(header));
+        valid = memcmp(header.e_ident, ELFMAG, SELFMAG) == 0 && header.e_shentsize == sizeof(Elf64_Shdr) && header.e_shstrndx < header.e_shnum &&
+                header.e_shoff + (uint64_t)header.e_shnum * sizeof(Elf64_Shdr) <= length;
+    }
+    Elf64_Shdr names = { 0 };
+    if (valid)
+    {
+        memcpy(&names, bytes + header.e_shoff + header.e_shstrndx * sizeof(Elf64_Shdr), sizeof(names));
+        valid = names.sh_offset + names.sh_size <= length;
+    }
+    uint32_t symtab = 0;
+    uint32_t text = 0;
+    uint32_t rodata = 0;
+    for (uint32_t s = 1; valid && s < header.e_shnum; s += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes + header.e_shoff + s * sizeof(Elf64_Shdr), sizeof(section));
+        const char* name = section.sh_name < names.sh_size ? (const char*)bytes + names.sh_offset + section.sh_name : "";
+        symtab = section.sh_type == SHT_SYMTAB ? s : symtab;
+        text = strcmp(name, ".text") == 0 ? s : text;
+        rodata = strcmp(name, ".rodata") == 0 ? s : rodata;
+    }
+    Elf64_Shdr symbols = { 0 };
+    Elf64_Shdr strings = { 0 };
+    valid = valid && symtab != 0 && text != 0 && rodata != 0;
+    if (valid)
+    {
+        memcpy(&symbols, bytes + header.e_shoff + symtab * sizeof(Elf64_Shdr), sizeof(symbols));
+        valid = symbols.sh_link < header.e_shnum && symbols.sh_entsize == sizeof(Elf64_Sym) && symbols.sh_offset + symbols.sh_size <= length;
+    }
+    if (valid)
+    {
+        memcpy(&strings, bytes + header.e_shoff + symbols.sh_link * sizeof(Elf64_Shdr), sizeof(strings));
+        valid = strings.sh_offset + strings.sh_size <= length;
+    }
+    const uint64_t symbol_count = valid ? symbols.sh_size / sizeof(Elf64_Sym) : 0;
+    for (uint64_t i = 0; valid && i < symbol_count; i += 1)
+    {
+        Elf64_Sym symbol;
+        memcpy(&symbol, bytes + symbols.sh_offset + i * sizeof(Elf64_Sym), sizeof(symbol));
+        const char* name = symbol.st_name < strings.sh_size ? (const char*)bytes + strings.sh_offset + symbol.st_name : NULL;
+        valid = name != NULL && strncmp(name, ".Lbuster_switch_", 16) != 0 && strncmp(name, ".Lbuster_case_", 14) != 0;
+    }
+    uint32_t relocations = 0;
+    for (uint32_t s = 1; valid && s < header.e_shnum; s += 1)
+    {
+        Elf64_Shdr section;
+        memcpy(&section, bytes + header.e_shoff + s * sizeof(Elf64_Shdr), sizeof(section));
+        const bool applies = section.sh_type == SHT_RELA && section.sh_info == rodata;
+        valid = !applies || (section.sh_entsize == sizeof(Elf64_Rela) && section.sh_offset + section.sh_size <= length);
+        for (uint64_t r = 0; valid && applies && r < section.sh_size / sizeof(Elf64_Rela); r += 1)
+        {
+            Elf64_Rela relocation;
+            memcpy(&relocation, bytes + section.sh_offset + r * sizeof(Elf64_Rela), sizeof(relocation));
+            Elf64_Sym symbol = { 0 };
+            valid = ELF64_R_SYM(relocation.r_info) < symbol_count && ELF64_R_TYPE(relocation.r_info) == R_X86_64_PC32;
+            if (valid)
+            {
+                memcpy(&symbol, bytes + symbols.sh_offset + ELF64_R_SYM(relocation.r_info) * sizeof(Elf64_Sym), sizeof(symbol));
+                valid = ELF64_ST_TYPE(symbol.st_info) == STT_SECTION && symbol.st_shndx == text;
+            }
+            relocations += 1;
+        }
+    }
+    return valid && relocations == entries;
+}
+
+// Jump tables in the C driver's outputs (#136's item 7): a program of two switches clang -O0 would make tables of, an
+// int's of 8 entries and a long's of 9, and a 128-bit division, which calls libgcc's __udivti3 from the same part of
+// the bodies (one lane's), where the tables' symbols' numbers fall among the runtime functions' provisional ones, each
+// reference rewritten once. Compiled with -c by both paths into the same bytes. The object holds no symbol of the
+// lowering's (.Lbuster_switch_N, .Lbuster_case_N), its tables' 17 entries are relocations against .text's section
+// symbol, and linked by clang it prints what the test's clang build computes, as does the direct path's executable.
+static void check_test_driver_switch_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] = "#include <stdio.h>\n"
+                                  "static int dense(int x)\n"
+                                  "{\n"
+                                  "    int result = -1;\n"
+                                  "    switch (x)\n"
+                                  "    {\n"
+                                  "        case 0: result = 3; break;\n"
+                                  "        case 1: result = 5; break;\n"
+                                  "        case 2: result = 7; break;\n"
+                                  "        case 3: result = 11; break;\n"
+                                  "        case 5: result = 13; break;\n"
+                                  "        case 7: result = 17; break;\n"
+                                  "        default: break;\n"
+                                  "    }\n"
+                                  "    return result;\n"
+                                  "}\n"
+                                  "static int wide(long x)\n"
+                                  "{\n"
+                                  "    int result = 0;\n"
+                                  "    switch (x)\n"
+                                  "    {\n"
+                                  "        case -3: result += 1;\n"
+                                  "        case -2: result += 2; break;\n"
+                                  "        case 0 ... 2: result += 4; break;\n"
+                                  "        case 4: result += 8;\n"
+                                  "        case 5: result += 16; break;\n"
+                                  "        default: result += 100; break;\n"
+                                  "    }\n"
+                                  "    return result;\n"
+                                  "}\n"
+                                  "static unsigned long long quotient(unsigned __int128 n, unsigned long long d)\n"
+                                  "{\n"
+                                  "    return (unsigned long long)(n / d);\n"
+                                  "}\n"
+                                  "int main(void)\n"
+                                  "{\n"
+                                  "    unsigned sum = 0;\n"
+                                  "    for (int i = -4; i < 10; i++)\n"
+                                  "    {\n"
+                                  "        sum = sum * 31 + (unsigned)dense(i);\n"
+                                  "        sum = sum * 7 + (unsigned)wide(i - 2);\n"
+                                  "        sum = sum * 3 + (unsigned)quotient(((unsigned __int128)(unsigned)(i + 5) << 70) + 12345, 1000003);\n"
+                                  "    }\n"
+                                  "    printf(\"%u\\n\", sum);\n"
+                                  "    return 0;\n"
+                                  "}\n";
+    char source[256];
+    char objects[2][256];
+    char linked_path[256];
+    char direct_path[256];
+    snprintf(source, sizeof(source), "%s/switch-tables.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/switch-tables.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/switch-tables-scalar.o", directory);
+    snprintf(linked_path, sizeof(linked_path), "%s/switch-tables-linked", directory);
+    snprintf(direct_path, sizeof(direct_path), "%s/switch-tables-direct", directory);
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "jump tables' program written");
+    char* text = NULL;
+    bool compiled = written;
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path == 0 ? vector_arguments : scalar_arguments, &text);
+        check_test_expect(test, status == 0, path == 0 ? "the jump tables' program compiles with -c" : "the jump tables' program compiles with -c, scalar");
+        compiled = compiled && status == 0;
+        free(text);
+        text = NULL;
+    }
+    check_test_expect(test, compiled && check_test_driver_same_files(objects[0], objects[1]), "both paths write the same object of jump tables");
+    uint64_t length = 0;
+    uint8_t* bytes = compiled ? check_test_driver_read_aligned(objects[0], &length) : NULL;
+    check_test_expect(test, check_test_driver_temporaries(bytes, length, 17),
+                      "the object holds none of the lowering's symbols, and its tables' 17 entries name .text's section symbol");
+    free(bytes);
+    unsigned sum = 0;
+    for (int i = -4; i < 10; i += 1)
+    {
+        sum = sum * 31 + (unsigned)check_test_switch_dense(i);
+        sum = sum * 7 + (unsigned)check_test_switch_wide(i - 2);
+        sum = sum * 3 + (unsigned)(unsigned long long)((((unsigned __int128)(unsigned)(i + 5) << 70) + 12345) / 1000003u);
+    }
+    char expected[32];
+    snprintf(expected, sizeof(expected), "%u\n", sum);
+    char* const link[] = { (char*)clang, "-o", linked_path, objects[0], NULL };
+    const int linked = compiled ? check_test_driver_spawn(link, &text) : -1;
+    free(text);
+    text = NULL;
+    char captured[64];
+    check_test_expect(test, linked == 0 && check_test_driver_capture(linked_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "clang's link of the object dispatches through the tables as clang's own code does");
+    char* const direct[] = { (char*)executable, "-o", direct_path, source, NULL };
+    const int built = written ? check_test_driver_spawn(direct, &text) : -1;
+    free(text);
+    text = NULL;
+    check_test_expect(test, built == 0 && check_test_driver_capture(direct_path, captured, sizeof(captured)) && strcmp(captured, expected) == 0,
+                      "the direct path's executable dispatches through the tables as clang's own code does");
+    unlink(source);
+    unlink(objects[0]);
+    unlink(objects[1]);
+    unlink(linked_path);
+    unlink(direct_path);
+}
+
 // A library that a needed library refers to (#398's review): main calls a_func, which libA defines and which calls
 // b_func, which libB defines. Where libA's DT_NEEDED doesn't name libB, the executable needs both, in the line's order,
 // either way round (GNU ld refuses -lB -lA); where it does (libAB), the executable needs libAB alone, as GNU ld links
@@ -1973,6 +2194,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
+            check_test_driver_switch_tables(&test, clang, executable, directory);
             check_test_driver_asm_symbols(&test, executable, directory);
             check_test_driver_split_stack(&test, executable, directory);
             check_test_driver_damaged_snapshot(&test, executable, directory);

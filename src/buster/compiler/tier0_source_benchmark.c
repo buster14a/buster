@@ -119,7 +119,7 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     Tier0BenchmarkAdd outcome = TIER0_BENCHMARK_ADDED;
     uint32_t b = 0;
     uint8_t* defined = 0;
-    bool added = emitted && check_program_access(&code.lowered, &selected.program, &source->lowered, &path.scratch, &defined);
+    bool added = emitted && check_program_access(&code, &selected.program, &source->lowered, &path.scratch, &defined);
     outcome = emitted && !added ? TIER0_BENCHMARK_MEMORY : outcome;
     while (added && b < count)
     {
