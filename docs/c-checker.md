@@ -746,8 +746,16 @@ What the lowering covers past scalars (#145's programs):
   record as it does `&&label`'s) with the entry's offset as its addend, as
   clang's `.long .LBB - .LJTI` entries are. The tables' and the labels' symbols
   are the lowering's own, numbered after the runtime functions' at the
-  lowering's end, when those are all known. Deciding takes a merge sort of
-  the switch's cases, scalar: a pass over a few cases per switch.
+  lowering's end, when those are all known. In `-c`'s object they are
+  temporaries (`ObjectOptions.temporary_symbols`), as an assembler takes
+  clang's `.LJTI` and `.LBB` labels: left out of its symbol table, where a
+  label inside a function would split the function for a symbolizer, with the
+  relocations against their sections' symbols. Deciding takes a merge sort of
+  the switch's cases, scalar: a pass over a few cases per switch. On
+  `sqlite3.c`, whose 53 tables hold 2,776 entries, the tables add 431,141
+  instructions (0.019%) to `-c` and no cycles beyond the runs' spread (one
+  executable with the tables on and off, on the 9700X), and its shell runs
+  13.8% faster.
 - **Truth tests** of 8- and 16-bit values widen them first, since Tier 0 has
   no compares of those classes.
 

@@ -468,10 +468,26 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         ObjectSymbols symbols = { 0 };
         valid = link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) &&
                 object_map_symbols(&symbols, &code.link, scratch);
+        // The jump tables' symbols and their labels' (CheckProgramLowered.case_symbol_base) are the lowering's
+        // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
+        // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols).
+        const uint32_t switch_symbols = code.lowered.table_count + code.lowered.case_symbol_count;
+        uint8_t* temporary = valid && switch_symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code.link.symbols.count) : 0;
+        valid = valid && (switch_symbols == 0 || temporary != 0);
+        if (temporary != 0)
+        {
+            memset(temporary, 0, code.link.symbols.count);
+            memset(temporary + code.lowered.case_symbol_base, 1, switch_symbols);
+        }
         if (valid)
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
-            const ObjectOptions options = { .debug = debug ? &dwarf.object : NULL, .debug_count = debug ? 1 : 0 };
+            const ObjectOptions options = {
+                .temporary_symbols = temporary,
+                .temporary_symbol_count = temporary != 0 ? code.link.symbols.count : 0,
+                .debug = debug ? &dwarf.object : NULL,
+                .debug_count = debug ? 1 : 0,
+            };
             const Object object = object_build(&code.link, &units, &symbols, 0, options, source, scratch);
             // The optional dump consumes the same resolved Link as the object writer. Validate and render it
             // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
