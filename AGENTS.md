@@ -2153,8 +2153,9 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
-  as it was), sizes and counts whose arithmetic overflows, and the page sizes
-  asked for, read back from `/proc/self/smaps`;
+  as it was), sizes and counts whose arithmetic overflows, the page sizes
+  asked for, read back from `/proc/self/smaps`, and a measuring arena's
+  (`arena_measure`) random pushes, which must take what a reserved arena's do;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;
@@ -4610,6 +4611,8 @@ code's after it), and lanes that start no thread, in a child that
 their reservation, emissions with less room than that reservation maps (lane
 0's columns in the caller's scratch) and with it and 1 GB more (in their
 reservation; the 8 lanes' other arenas not reserved), each one lane's; then
+emissions with the least room of the caller's scratch they take, found by
+halving, which must be less than lane 0's columns take, each one lane's; then
 the lane rule, and the driver's
 objects and executables by `--lanes` and by default, each one lane's, the
 executables exiting alike, and with lanes that don't start, and the failing
