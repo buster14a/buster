@@ -10,10 +10,15 @@
 // return unsigned long. The caller applies checked argument conversions and converts a load result to its C
 // value type. Atomic/environment calls remain unknown-effect compiler barriers; terminal calls have no successor.
 // Output and scratch are disjoint stable-address arenas. Failure restores both lengths and clears the result.
+//
+// An atomic access's object must be aligned to its size, as clang's code generation gives its address's alignment
+// (c_checker.c's check_graph_atomic_alignment): a misaligned one, which clang calls libatomic for, is refused.
 #ifndef BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_HELPERS_INCLUDED
 
-#define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES 28u
+#define BUSTER_CHECK_PROGRAM_HELPER_FIXED 28u
+// A read/modify/write signature's key follows the others': its rule's, its width's and its format's.
+#define BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES (BUSTER_CHECK_PROGRAM_HELPER_FIXED + (uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules) * 16u)
 
 typedef struct CheckProgramHelper CheckProgramHelper;
 struct CheckProgramHelper
@@ -23,8 +28,11 @@ struct CheckProgramHelper
     SymbolId symbol;
     Tier0Code code;
     uint32_t parameter_count;
-    TypeId parameter_types[3];
+    TypeId parameter_types[6];
     TypeId result_type;
+    // A read/modify/write leaf's (c_builtin_atomic_rmw_helpers.c) value format.
+    CBuiltinAtomicRmwFormat rmw_format;
+    bool rmw;
     CheckBuiltinMathKind math_kind;
     TypeId floating_type;
     bool terminates;
@@ -58,15 +66,25 @@ struct CheckProgramHelpers
     const char* reason;
 };
 
-static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes)
+static uint32_t check_program_helper_key(CBuiltinId id, uint64_t bytes, bool rmw, CBuiltinAtomicRmwFormat format)
 {
     uint32_t key = UINT32_MAX;
-    if ((id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N) &&
-        (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8))
+    const CheckBuiltinAtomicRmwRule* rule = rmw ? check_builtin_atomic_rmw_rule(id) : NULL;
+    const uint32_t width = bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
+    // A floating format's width is its type's.
+    const uint32_t layout = format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS ? 0 : format == CBUILTIN_ATOMIC_RMW_BOOL_BITS ? 1 :
+                            format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS ? 2 :
+                            format == CBUILTIN_ATOMIC_RMW_F32_BITS || format == CBUILTIN_ATOMIC_RMW_F64_BITS ? 3 : UINT32_MAX;
+    if (rule != NULL && (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8) && layout != UINT32_MAX)
     {
-        key = (id == CBUILTIN_ATOMIC_STORE_N ? 4 : 0) + (bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3);
+        key = BUSTER_CHECK_PROGRAM_HELPER_FIXED + ((uint32_t)(rule - check_builtin_atomic_rmw_rules) * 4 + width) * 4 + layout;
     }
-    else if (bytes == 0)
+    else if (!rmw && (id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N) &&
+             (bytes == 1 || bytes == 2 || bytes == 4 || bytes == 8))
+    {
+        key = (id == CBUILTIN_ATOMIC_STORE_N ? 4 : 0) + width;
+    }
+    else if (!rmw && bytes == 0)
     {
         switch (id)
         {
@@ -143,33 +161,129 @@ static CheckProgramStatus check_program_helper_math(const CheckProgram* program,
     return status;
 }
 
-static CheckProgramStatus check_program_helper_atomic(const CheckBuiltinAtomicEffect* effect, CBuiltinId id, CheckProgramHelper* helper)
+// What an atomic call's unsupported bits, or its object's alignment, lack, for the refusal.
+static const char* check_program_helper_atomic_reason(const CheckBuiltinAtomicEffect* effect)
+{
+    const uint32_t bits = effect->unsupported;
+    const char* reason = NULL;
+    if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_WIDTH) != 0)
+    {
+        reason = "atomic objects of other than 1, 2, 4 or 8 bytes";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_UNKNOWN_ALIGNMENT) != 0 || !effect->alignment_known)
+    {
+        reason = "an atomic object whose address's alignment this doesn't work out";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_ALIGNMENT) != 0 || effect->minimum_alignment < effect->object_size)
+    {
+        reason = "a misaligned atomic object, which clang calls libatomic for";
+    }
+    else if ((bits & (BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT | BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW)) != 0)
+    {
+        reason = "atomic arithmetic, minimum or maximum of floating values";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BOOL_RMW) != 0)
+    {
+        reason = "atomic arithmetic or NAND of bool";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_SUBBYTE_INTEGER) != 0)
+    {
+        reason = "atomic read-modify-write of an integer narrower than a byte";
+    }
+    else if ((bits & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION) != 0)
+    {
+        reason = "an atomic builtin's complex or extended floating value";
+    }
+    return reason;
+}
+
+// A read/modify/write's leaf (c_builtin_atomic_rmw_helpers.c), of its builtin, width and value format: integer and pointer
+// bits, bool's 0 or 1, for min and max a signed integer's, and for GNU's exchange a float's or a double's (the lowering
+// passes and takes their bits, check_lower_helper). A call passes the object's address and its fixed arguments
+// (GNU's compare-exchange the expected object's address), the orders and GNU's weak flag as ints, and takes the old or new
+// bits, or whether a compare-exchange stored (a legacy release nothing). A legacy call's protected variables aren't taken.
+static CheckProgramStatus check_program_helper_rmw(const CheckProgram* program, const CheckBuiltinAtomicEffect* effect, const CheckBuiltinAtomicRmwRule* rule,
+                                                    uint32_t arguments, CheckProgramHelper* helper, const char** reason)
+{
+    const TypeTable* types = program->types;
+    CheckProgramStatus status = CHECK_PROGRAM_OK;
+    const bool compare = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE;
+    const bool ordered = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || rule->operation == CHECK_BUILTIN_ATOMIC_RMW_MAX;
+    const bool valid_type = types != NULL && type_is_valid(types, effect->value_type);
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = valid_type && check_action_integer_type(types, effect->value_type, &width, &is_signed);
+    const bool pointer = valid_type && check_action_kind(types, effect->value_type) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId plain = valid_type ? type_unqualified(type_strip_aligned(types, effect->value_type)) : 0;
+    const bool floating = rule->id == CBUILTIN_ATOMIC_EXCHANGE_N && (plain == BUSTER_TYPE_FLOAT || plain == BUSTER_TYPE_DOUBLE);
+    // A legacy release is a store, no read/modify/write of its object.
+    const bool release = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE;
+    if (effect->runtime_builtin != rule->id || !effect->compiler_barrier || effect->rmw == release || !valid_type ||
+        effect->evaluated_operands != (UINT32_C(1) << rule->fixed_count) - 1 || arguments == BUSTER_CHECK_NONE)
+    {
+        status = CHECK_PROGRAM_INVALID;
+    }
+    else if (arguments != rule->fixed_count)
+    {
+        status = CHECK_PROGRAM_UNSUPPORTED;
+        *reason = "a legacy atomic builtin's protected variables";
+    }
+    else if (effect->unsupported != 0 || !effect->alignment_known || effect->minimum_alignment < effect->object_size)
+    {
+        status = CHECK_PROGRAM_UNSUPPORTED;
+        *reason = check_program_helper_atomic_reason(effect);
+    }
+    else if (!integer && !pointer && !floating)
+    {
+        status = CHECK_PROGRAM_UNSUPPORTED;
+        *reason = "atomic read-modify-write of floating values but GNU's exchange";
+    }
+    if (status == CHECK_PROGRAM_OK)
+    {
+        const bool boolean = plain == BUSTER_TYPE_BOOL;
+        *helper = (CheckProgramHelper){
+            .id = rule->id,
+            .bytes = (uint32_t)effect->object_size,
+            .parameter_count = rule->fixed_count,
+            .result_type = release ? BUSTER_TYPE_VOID : BUSTER_TYPE_ULONG,
+            .compiler_barrier = true,
+            .required_alignment = (uint32_t)effect->object_size,
+            .rmw_format = boolean ? CBUILTIN_ATOMIC_RMW_BOOL_BITS : plain == BUSTER_TYPE_FLOAT && floating ? CBUILTIN_ATOMIC_RMW_F32_BITS :
+                          floating ? CBUILTIN_ATOMIC_RMW_F64_BITS : ordered && is_signed ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : CBUILTIN_ATOMIC_RMW_INTEGER_BITS,
+            .rmw = true,
+        };
+        const uint32_t first_int = rule->legacy ? rule->fixed_count : compare ? 3 : 2;
+        for (uint32_t i = 0; i < rule->fixed_count; i += 1)
+        {
+            helper->parameter_types[i] = i >= first_int ? BUSTER_TYPE_INT : BUSTER_TYPE_ULONG;
+        }
+    }
+    return status;
+}
+
+static CheckProgramStatus check_program_helper_atomic(const CheckProgram* program, const CheckBuiltinAtomicEffect* effect, CBuiltinId id, uint32_t arguments,
+                                                       CheckProgramHelper* helper, const char** reason)
 {
     CheckProgramStatus status = CHECK_PROGRAM_OK;
     const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(id);
     const bool memory = id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N;
     const bool load = id == CBUILTIN_ATOMIC_LOAD_N;
     const bool store = id == CBUILTIN_ATOMIC_STORE_N;
-    // A read/modify/write evaluates its rule's fixed arguments; a legacy release is a store, no read/modify/write.
-    const uint32_t parameters = rule != NULL ? rule->fixed_count : load ? 2 : store ? 3 : id == CBUILTIN_SYNC_SYNCHRONIZE ? 0 : 1;
-    const bool rmw = rule != NULL && rule->operation != CHECK_BUILTIN_ATOMIC_RMW_RELEASE;
-    if (effect->runtime_builtin != id || !effect->compiler_barrier ||
-        effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw != rmw)
+    const uint32_t parameters = load ? 2 : store ? 3 : id == CBUILTIN_SYNC_SYNCHRONIZE ? 0 : 1;
+    if (rule != NULL)
+    {
+        status = check_program_helper_rmw(program, effect, rule, arguments, helper, reason);
+    }
+    else if (effect->runtime_builtin != id || !effect->compiler_barrier ||
+             effect->evaluated_operands != (UINT32_C(1) << parameters) - 1 || effect->rmw)
     {
         status = CHECK_PROGRAM_INVALID;
     }
-    else if (rule != NULL)
-    {
-        // The read/modify/write leaves (c_builtin_atomic_rmw_helpers.c) have no planned signature here yet.
-        status = CHECK_PROGRAM_UNSUPPORTED;
-    }
-    else if (effect->unsupported != 0 || check_program_helper_key(id, effect->object_size) == UINT32_MAX)
+    else if (effect->unsupported != 0 || check_program_helper_key(id, effect->object_size, false, CBUILTIN_ATOMIC_RMW_INTEGER_BITS) == UINT32_MAX ||
+             (memory && (!effect->alignment_known || effect->minimum_alignment < effect->object_size)))
     {
         status = CHECK_PROGRAM_UNSUPPORTED;
-    }
-    else if (memory && (!effect->alignment_known || effect->minimum_alignment < effect->object_size))
-    {
-        status = CHECK_PROGRAM_UNSUPPORTED;
+        *reason = check_program_helper_atomic_reason(effect);
     }
     else if ((memory && (effect->required_alignment != effect->object_size || effect->minimum_alignment == 0 ||
                          (effect->minimum_alignment & (effect->minimum_alignment - 1)) != 0)) ||
@@ -177,7 +291,7 @@ static CheckProgramStatus check_program_helper_atomic(const CheckBuiltinAtomicEf
     {
         status = CHECK_PROGRAM_INVALID;
     }
-    if (status == CHECK_PROGRAM_OK)
+    if (rule == NULL && status == CHECK_PROGRAM_OK)
     {
         *helper = (CheckProgramHelper){
             .id = id,
@@ -217,11 +331,13 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     {
         result->status = CHECK_PROGRAM_INVALID;
     }
-    CheckProgramHelper planned[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
-    uint32_t first_nodes[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
     uint32_t keys[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
+    // At most a signature per builtin node, and per key.
+    const uint32_t signatures = valid && program->builtin_count < BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES ? program->builtin_count : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES;
     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
-    if (valid && program->builtin_count != 0 && uses == 0)
+    CheckProgramHelper* planned = uses != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
+    uint32_t* first_nodes = planned != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, signatures) : 0;
+    if (valid && program->builtin_count != 0 && first_nodes == 0)
     {
         result->status = CHECK_PROGRAM_RESOURCE;
     }
@@ -320,14 +436,13 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     }
                     else
                     {
-                        result->status = check_program_helper_atomic(stream->atomics + atomic, id, &helper);
-                        result->reason = result->status == CHECK_PROGRAM_UNSUPPORTED && check_builtin_atomic_rmw_rule(id) != NULL ?
-                                         "atomic read-modify-write builtins" : NULL;
+                        const uint32_t arguments = graph->argument_counts != 0 ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
+                        result->status = check_program_helper_atomic(program, stream->atomics + atomic, id, arguments, &helper, &result->reason);
                     }
                 }
                 if (result->status == CHECK_PROGRAM_OK && !folded)
                 {
-                    const uint32_t key = check_program_helper_key(helper.id, helper.bytes);
+                    const uint32_t key = check_program_helper_key(helper.id, helper.bytes, helper.rmw, helper.rmw_format);
                     if (key >= BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES)
                     {
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
@@ -404,6 +519,22 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
         {
             const CBuiltinRoundsHelper native = cbuiltin_rounds_helper(helper->id, output);
             helper->code = native.code;
+        }
+        else if (helper->rmw)
+        {
+            const CBuiltinAtomicRmwHelper native = cbuiltin_atomic_rmw_helper_emit(helper->id, helper->bytes, helper->rmw_format, output);
+            helper->code = native.code;
+            bool classes = native.parameter_count == helper->parameter_count &&
+                           native.result_class == (helper->result_type == BUSTER_TYPE_VOID ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64);
+            for (uint32_t a = 0; a < helper->parameter_count && a < 6; a += 1)
+            {
+                classes &= native.parameter_classes[a] == (helper->parameter_types[a] == BUSTER_TYPE_INT ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U64);
+            }
+            if (native.code.error == TIER0_OK && !classes)
+            {
+                result->status = CHECK_PROGRAM_INVALID;
+                result->token = program->input->graph.tokens[first_nodes[i]];
+            }
         }
         else
         {

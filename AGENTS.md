@@ -270,7 +270,11 @@ designs and the compilers already built this way.
   #133's producer lowers a variadic definition's `va_start`, `va_arg` (of
   structs, unions and long doubles too), `va_copy` and `va_end` through them
   over Tier 0's incoming variadic frames (#137); full Tier 1 coverage and corpus
-  acceptance remain separate requirements.
+  acceptance remain separate requirements. The atomic builtins lower through
+  per-unit leaves (`c_check_program_helpers.c`), their objects aligned as
+  clang's code generation aligns their addresses (`check_graph_atomic_alignment`,
+  #126); `test-checker` runs them against clang's code and checks that a
+  misaligned one is refused exactly where clang calls libatomic.
   Every build/test/measurement uses the approved 9700X lock per run.
 
 - `src/buster/compiler/x86_zen5.c` supplies the partial operand-sensitive Zen 5
@@ -516,13 +520,14 @@ designs and the compilers already built this way.
   takes what the vector path leaves to it (the design's "Step 5's phases,
   data-parallel"). `runtime.c` finds the C runtime's files as GCC's driver
   does (`Scrt1.o`, `crti.o`, `crtbeginS.o`, `crtendS.o` and `crtn.o`, GCC's
-  `libgcc.a`, which the driver names around `libc.so`, and the `libc.so.6`,
-  `libc_nonshared.a` and loader that `libc.so` names, the loader as needed)
-  and imports them into a link of their own, with what each name
+  `libgcc.a`, which the driver names around `libc.so`, `libgcc_s.so.1`, which
+  it names as needed after each `libgcc.a`, where the system has one, and the
+  `libc.so.6`, `libc_nonshared.a` and loader that `libc.so` names, the loader
+  as needed) and imports them into a link of their own, with what each name
   they refer to binds to (the first part of step 5 of the design's plan), each
   object's records as a piece, and an index and a filter of their global
   names and the libraries' (the loader's version indices numbered after
-  `libc.so.6`'s);
+  `libc.so.6`'s, and `libgcc_s.so.1`'s after both);
   `runtime_import_static` does the same for a static executable's runtime
   (`crt1.o`, `crtbeginT.o` and `crtend.o`, and the archives of GCC's group:
   `libgcc.a`, `libgcc_eh.a`, `libatomic.a` where GCC has it, and `libc.a`),
@@ -543,13 +548,15 @@ designs and the compilers already built this way.
   GCC's driver links it, one symbol per global name, and each name of the link
   bound as GNU ld binds it: to the program, the runtime's objects, the linker,
   an export of `libc.so.6` at its version (an import), a member of
-  `libgcc.a` (`__udivti3`) or `libc_nonshared.a` (`atexit`), which joins, or
-  for a weak reference to nothing; with
-  the link's imports and exports listed. A name that only the members which
-  joined refer to and nothing defines is refused, naming the member
+  `libgcc.a` (`__udivti3`) or `libc_nonshared.a` (`atexit`), which joins, an
+  export of `libgcc_s.so.1` (the unwinder: `_Unwind_Resume`,
+  `_Unwind_Backtrace`), which the link then needs, as GCC's driver names it
+  as needed after `libgcc.a` (#489), or for a weak reference to nothing; with
+  the link's imports and exports listed. On a system without
+  `libgcc_s.so.1`, a name that only the members which joined refer to and
+  nothing defines is refused, naming the member
   (`BIND_ERROR_MEMBER_UNDEFINED`): `libgcc.a`'s split-stack `morestack.o`'s
-  unwinder, which GCC's driver takes from `libgcc_s.so.1`, as needed, and the
-  direct path doesn't link. It has a vector path and an exact
+  unwinder. It has a vector path and an exact
   one, its twin, which make the same link. `link_program.c`'s programs leave
   room for it (`link_program_generate_begin`, `_atoms` and `_end`), and the C
   driver's links take room for the crt objects and the members their names
@@ -581,7 +588,10 @@ designs and the compilers already built this way.
   relax them, and an IFUNC whose stub only calls reach reads the stub's slot
   through the GOT, as lld's does; a dynamic PIE takes its own IFUNCs too, their
   stubs before its imports' and their `IRELATIVE` relocations last in
-  `.rela.dyn`; all from vector passes with exact twins.
+  `.rela.dyn`, and relaxes its general- and local-dynamic TLS accesses
+  (`ExecutableDynamic.tls_get_addr`, #515): to local-exec, or to initial-exec
+  through a `TPOFF64` slot for an imported thread-local; all from vector
+  passes with exact twins.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
@@ -832,7 +842,10 @@ designs and the compilers already built this way.
   encoded, from `x86_measure`'s offsets and rounds over the branches alone
   (`size_branches`, its scalar twin `size_branches_scalar`, and
   `branch_sizing_validate`, the checks the two leave to the code generator, as
-  `x86_encode` leaves `x86_validate`'s). The scalar path gets its initial
+  `x86_encode` leaves `x86_validate`'s; `branch_sizing_validate_branches` and
+  its twin are those checks but `x86_validate`, the branch columns alone,
+  which the C driver's emission runs on Tier 0's valid records, keeping
+  `x86_validate` for `--verify`, #532). The scalar path gets its initial
   offsets from `x86_measure_scalar`; neither sizing path retains machine
   code. The former encoded-byte scratch column, chunk-size setting and chunk
   rebasing are removed. `branch_sizing_generate.c` generates
@@ -1186,7 +1199,9 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every pull request's job queues behind every other's, so keep the job short.
+- Keep each qualification short. With admission enabled, the hosted controller
+  chooses priority before a job enters the physical queue ("9700X admission"
+  below); the shared host lock still protects every measurement.
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
@@ -1235,6 +1250,81 @@ there at a time, so everything takes one lock:
   benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## 9700X admission
+
+`tools/ci/admission.c` and `.github/workflows/9700x-control.yml` implement the
+default-branch eligibility/priority controller for #546-#548.
+[The admission guide](docs/ci-9700x-admission.md) describes the version-1
+interface, required-check attribution, recovery and the live rollout gates.
+Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
+ordinary qualification and restricted runner-group access have been verified.
+Verify this repository's exact default-workflow entrypoint and the existing
+single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
+with legacy, use the documented root-owned Buster-only job-start source guard;
+do not narrow legacy's group-wide access, broaden access or change other jobs.
+
+When enabled, confirmed conflicting PRs are blocked and their own outstanding
+qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
+to be a conflict. Behind-but-clean PRs remain eligible. The controller preserves
+the `buster-fast-9700x-` per-PR/ref concurrency groups and the shared host lock.
+It admits one job, rather than flooding the self-hosted queue. P0 critical,
+P1 high/current approval, P2 ordinary, P3 background and explicit P4 low are FIFO
+within class, with the guide's reserved aging slots and two-hour main/daily
+deadline. The default backlog threshold is three waiting eligible PRs.
+
+Maintainers with verified repository write/maintain/admin permission can post
+one standalone command in a PR conversation:
+
+```text
+/ci priority critical|high|normal|low
+/ci hold
+/ci resume
+/ci retry
+/ci status
+```
+
+The priority words above are alternatives. Append `run RUN_ID` for a current
+request-specific control, or use the controller's `workflow_dispatch` form on
+`main` with a PR/run ID. `normal`/`clear` removes an override; automatic approval
+priority can apply again. PR overrides/holds persist across commits until
+reset/resume or closure. Run overrides are bound to that request ID/SHA and expire
+on supersession/completion. Hold/promote never preempts admitted work. Retry
+qualifies only the current revision and is a no-op while its run is active.
+
+Automatic P1 requires a trusted current-head `APPROVED` review, or a comment
+consisting of `LGTM`, `APPROVED`, `SHIP IT`, `READY TO MERGE` or `/ci approve`.
+Quotes, code blocks, incidental/negated text and untrusted actors do not approve.
+Comment approval binds only a head already observed by the controller; edit or
+repost after observation, or use a commit-associated review, when ambiguous.
+Edits/deletions, dismissed reviews and new heads remove derived approval. Manual
+priority persists independently. Public fork revisions need a trusted current
+approval before any physical execution; a persistent priority alone is not one.
+
+The required context keeps its name, `Build and execute on Ryzen 7 9700X`, and
+GitHub Actions integration. In active mode the controller publishes both its
+Check Run and same-name commit status on the PR head after the exact current
+head/base/merge qualification; the native default-branch dispatch is not the PR
+result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
+status green. Documentation-only clean PRs retain success without hardware work.
+Live branch-ref targets bind the pair: cached PR base/test-merge snapshots can
+lag. Hosted preflight checks a private bare Git merge without checkout, PR
+execution, inherited hooks/drivers or GitHub writes. The executor reconstructs
+the canonical unpublished merge from its pinned inputs and an authenticated
+small object pack; both parents and the checkout SHA must match the lease.
+The check and controller summary expose priority, position, blocked reason,
+command result, admitted SHA/run, state and expiry. Raw real-run scheduling
+measurements belong in `buster-performance`, not here.
+
+Run `cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o /tmp/admission`
+and `/tmp/admission --self-test` after changing this policy, and rerun the existing
+`changes --self-test` after any workflow gate/benchmark edit. The policy/fixtures
+are original C; the privileged workflow never runs PR code or consumes a PR cache
+or artifact as authority. Guard binaries are compiled on hosted capacity and
+checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
+block new admission; never clear a live lease merely because it expired.
+`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
+backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 
@@ -1854,7 +1944,9 @@ measurements are informational.
 `./build/compiler test-branch-sizing [--seed N] [--count N] [--cross-check]
 [--keep]` (about 1.4 s on the 9700X, and 2.5 s with `--cross-check`) checks
 `branch_sizing.c`. Every function it sizes must be one `branch_sizing_validate`
-accepts, as the code generator's are, and both paths must give identical
+accepts, as the code generator's are, and so must both paths of the branch
+columns' check (`branch_sizing_validate_branches` and its twin), and both
+sizing paths must give identical
 results: the records, the offsets, the length, the rounds, the long branches
 and the worklist's evaluations. Each result must also be the test's reference's
 (relaxation over the records, as an assembler does it, with each record's
@@ -1865,14 +1957,17 @@ record, and be long exactly where a rel8 can't reach:
 - forms: every form number as a branch's record, with and without a segment
   override or the fixup flag: `branch_sizing_validate` accepts `JMP_REL8` and
   the 16 `Jcc_REL8` (found from the form table's opcodes), which grow by 3 and
-  4 to the rel32 forms after them, and refuses every other;
+  4 to the rel32 forms after them, and refuses every other, and so do both
+  paths of the columns' check (the vector path's bitmap of the forms against
+  the scalar path's list);
 - errors, `branch_sizing_validate`'s: a branch's index equal to the one
   before, below it, at the count and past it, a target past the count, a form
   that isn't a branch's, a branch's form with FS, GS or the fixup flag, at
   every place among 40 branches (the first error is the one reported), more
   branches than records, more records than `x86_encode` takes (which both
   paths refuse too), and a record `x86_validate` rejects, after a branch's
-  error;
+  error; both paths of the columns' check must give each but the last, which
+  they take;
 - boundaries: a probe branch, forward and backward, jmp and jcc, at every
   displacement from 100 to 135 and from −140 to −105 with every branch short,
   over 0 to 3 branches that grow or don't: it must end long exactly when its
@@ -1882,13 +1977,19 @@ record, and be long exactly where a rel8 can't reach:
   `branch_sizing_generate.c`'s filler or random instructions of every form;
   also with the worklist from rounds 1, 2 and 3 and with no round limit,
   which must give the same records and offsets;
+- columns: 4,000 random functions of up to 1,200 records broken 0 to 3 times
+  at random (an index, a target, a branch's form, or a record `x86_validate`
+  rejects): both paths of the columns' check must give
+  `branch_sizing_validate`'s first error, or take the function where only
+  `x86_validate` refuses it;
 - chains (`branch_sizing_chain`) of 1 to 1,000 links, forward and backward,
   which take a round per link: up to `BUSTER_BRANCH_SIZING_ROUNDS`, then the
   worklist;
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
-  and every branch count up to 40: a read past an end faults, and the command
-  then names the case and exits with status 1;
+  and every branch count up to 40, checked by both paths of the columns'
+  check and sized: a read past an end faults, and the command then names the
+  case and exits with status 1;
 - memory: a function sized with no scratch memory to spare, then 64 bytes
   more at a time until it succeeds: every failure must be
   `BRANCH_SIZING_ERROR_MEMORY` and leave the records and offsets as they were.
@@ -2413,12 +2514,17 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   `__errno_location` at `GLIBC_2.2.5`, `__libc_start_main` at `GLIBC_2.34`
   and `GLIBC_ABI_DT_RELR`, the loader with its soname, `__tls_get_addr` at
   `GLIBC_2.3` and `_r_debug` and `__libc_stack_end` at `GLIBC_2.2.5`, its
-  version indices past `libc.so.6`'s, `libgcc.a` then `libc_nonshared.a`,
-  `libc_nonshared.a` with `atexit` in its index, `__udivti3` a member's of
-  `libgcc.a`, and none of `libgcc.a`'s names an export of `libc.so.6` or the
-  loader (binding takes an export before a member, which the driver's order,
-  `libgcc.a` first, agrees with only so), and every reference to each name
-  bound: `main` to the program,
+  version indices past `libc.so.6`'s, `libgcc_s.so.1` with its soname,
+  `_Unwind_Resume` and `__udivti3` at `GCC_3.0`, `_Unwind_Backtrace` at
+  `GCC_3.3` and `__gcc_personality_v0` at `GCC_3.3.1`, its version indices
+  past both libraries' and none of its exports one of theirs (binding takes
+  theirs first, where the driver's order has `libgcc_s.so.1` first),
+  `libgcc.a` then `libc_nonshared.a`, `libc_nonshared.a` with `atexit` in its
+  index, `__udivti3` a member's of `libgcc.a` and `libgcc_s.so.1`'s export
+  after it, `_Unwind_Backtrace` `libgcc_s.so.1`'s alone, and none of
+  `libgcc.a`'s names an export of `libc.so.6` or the loader (binding takes
+  an export before a member, which the driver's order, `libgcc.a` first,
+  agrees with only so), and every reference to each name bound: `main` to the program,
   `__libc_start_main` and `__cxa_finalize` to libc, `__gmon_start__` and the
   `_ITM_` functions to nothing, `__TMC_END__` to `crtendS.o`, and
   `_GLOBAL_OFFSET_TABLE_`, which the crt objects that use the GOT name, to the
@@ -2457,16 +2563,18 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   readelf's, as the static runtime's are;
 - the shared library's runtime: `runtime_import_shared`, without a start
   object (its piece empty, no ABI note); `crti.o`, `crtbeginS.o`, `crtendS.o`
-  and `crtn.o`; `libgcc.a`, `libc.so.6`, the loader and `libc_nonshared.a`;
-  nothing referring to `main`, which is no global name, and only `libgcc.a`'s
-  members (its split-stack ones) referring to names nothing in the runtime
-  defines; `_init` crti.o's and
+  and `crtn.o`; `libgcc.a`, `libgcc_s.so.1`, `libc.so.6`, the loader and
+  `libc_nonshared.a`; nothing referring to `main`, which is no global name,
+  only `libgcc.a`'s members referring to names nothing in the runtime
+  defines, and `morestack.o`'s `_Unwind_Resume` bound to `libgcc_s.so.1`;
+  `_init` crti.o's and
   `__dso_handle` crtbeginS.o's; the names its linker defines (`_DYNAMIC`
   among them), and no other; and every crt object and member taking the
   vector path.
 
-`--cross-check`, which needs `readelf`, compares `libc.so.6`'s and the
-loader's exports (name, version, type, binding and size) and references with
+`--cross-check`, which needs `readelf`, compares `libc.so.6`'s, the
+loader's and `libgcc_s.so.1`'s exports (name, version, type, binding and
+size) and references with
 `readelf -W --dyn-syms`, and every relocation of the crt objects and the
 archives' members, the static runtime's among them, with `readelf -W -r`:
 each one must be a fixup of its kind at its offset (a `GOTPCRELX` or
@@ -2550,9 +2658,11 @@ exports and members:
   libc.so.6 defines (an error), and a weak hidden one (nothing, not an
   import); references to the init and fini arrays' bounds (the linker's);
   references to `__morestack` and to `__splitstack_getcontext`, whose
-  members of `libgcc.a` make `morestack.o` join (refused, naming
-  `_Unwind_Resume` and the member: `BIND_ERROR_MEMBER_UNDEFINED`), and one to
-  `__morestack` beside the program's own unwinder (bound); a
+  members of `libgcc.a` make `morestack.o` join (its `_Unwind_Resume` a
+  strong import of `libgcc_s.so.1`'s, and against the runtime without it,
+  `bind_test_without_gcc_s`, refused, naming `_Unwind_Resume` and the
+  member: `BIND_ERROR_MEMBER_UNDEFINED`), and one to `__morestack` beside the
+  program's own unwinder (bound); a
   local `_init`; a symbol of the program's that it never defines (left to
   `link_check`); and a link without room. Then the rules this system's runtime
   can't reach through the entry points, on binding's own steps: a strong
@@ -2573,7 +2683,14 @@ exports and members:
   without the third, a needed library's reference to `b_func` is
   `BIND_ERROR_LIBRARY_UNDEFINED` naming the library (but with a global
   definition, or neither needed), and a library whose `DT_NEEDED` names one
-  the link lacks isn't checked;
+  the link lacks isn't checked; and libraries made by hand that refer
+  strongly to `_Unwind_Backtrace` without and with a `DT_NEEDED` for
+  `libgcc_s.so.1`, to `__tls_get_addr`, and weakly to `_Unwind_Backtrace`:
+  as GNU ld's `--as-needed` keeps it, `libgcc_s.so.1` (or the loader) is
+  needed (`Bind.runtime_needed`) for a needed library's strong reference its
+  `DT_NEEDED` doesn't cover, and not when main defines the name, the library
+  isn't needed, the reference is weak or another needed library's `DT_NEEDED`
+  names `libgcc_s.so.1` (without `libgcc_s.so.1`, refused);
 - an atexit program: `main` registers a handler with `atexit` and returns 3,
   the handler exits with 0. Bound, it must pass `link_check`, and `atexit.oS`
   must join, defining `atexit`, its `__cxa_atexit` imported at `GLIBC_2.2.5`
@@ -2587,8 +2704,9 @@ exports and members:
 - the room (`bind_capacity_needed`), against this runtime and a shared
   library's: for each of the members with a global name that no library
   exports (300), a link of `main` and a strong reference to that name, bound
-  with every member's room, must bind (or be refused for `morestack.o`'s
-  reference to the unwinder) adding no more records, names' bytes and atoms'
+  with every member's room, must bind (or, without `libgcc_s.so.1`, be
+  refused for `morestack.o`'s reference to the unwinder) adding no more
+  records, names' bytes and atoms'
   bytes than `bind_capacity_needed` counts for the name, and that count no
   more than `bind_capacity`'s. Members that join in one round refer to names
   none of them defines yet (`memset`, `__sfp_handle_exceptions`, the decimal
@@ -2692,7 +2810,8 @@ paths, which must make the same link and binding:
   all but the hidden one exports; references to `__tls_get_addr` and
   `puts`, imports of the loader's at `GLIBC_2.3` and of `libc.so.6`'s at
   `GLIBC_2.2.5`; and a reference to `__morestack`, whose member's reference
-  to the unwinder is refused as in a PIE rather than left to the loader;
+  to the unwinder binds to `libgcc_s.so.1`, as in a PIE, rather than being
+  left to the loader (and without `libgcc_s.so.1` is refused);
 - with `--cross-check`, three C libraries that `cc` compiles with `-fPIC`
   (exports of every visibility; imports from `libc.so.6` and the loader,
   general-dynamic TLS with `-mtls-dialect=gnu`, and undefined and weak
@@ -2701,13 +2820,19 @@ paths, which must make the same link and binding:
   must link it, and with lld, whose `.dynsym` must have the imports at their
   versions, the undefined and weak references and the exports binding found,
   and whose `--why-extract` the members that joined;
-- with `--cross-check`, split-stack code: C compiled with `-fsplit-stack` as
-  a library and as a PIE, which binding refuses by both paths, naming
-  `_Unwind_Resume` and `libgcc.a(morestack.o)`, while `cc`'s links of the
-  same objects with GNU ld and with lld need `libgcc_s.so.1`, load into a
-  harness that doesn't (`dlopen` with `RTLD_NOW`) and run; and lld's link of
-  the library with `libgcc.a` and libc but not `libgcc_s.so.1`, which leaves
-  the unwinder to the loader, must fail to load there.
+- with `--cross-check`, split-stack code (`bind_test_split_stack`): C
+  compiled with `-fsplit-stack` (and `-fcf-protection=none`, whose `endbr64`
+  keeps lld from adjusting a split-stack prologue) as a library and as a
+  PIE, which binding binds by both paths alike, `morestack.o` joined and its
+  `_Unwind_Resume` a strong import of `libgcc_s.so.1`'s; the bound links'
+  objects linked by ld.lld and ld.bfd with `libgcc_s.so.1` as needed run,
+  the library in a harness that doesn't need `libgcc_s.so.1` (`dlopen` with
+  `RTLD_NOW`). Against the runtimes without `libgcc_s.so.1` binding refuses
+  both, naming `_Unwind_Resume` and `libgcc.a(morestack.o)`. `cc`'s links of
+  the same objects with GNU ld and with lld need `libgcc_s.so.1`, load into
+  the harness and run; and lld's link of the library with `libgcc.a` and
+  libc but not `libgcc_s.so.1`, which leaves the unwinder to the loader, must
+  fail to load there.
 
 The objects and programs go in a new directory under `$TMPDIR` (or `/tmp`),
 removed at the end unless `--keep`. The 9700X job's test step runs it with
@@ -2883,6 +3008,19 @@ alone and run alike. The checks:
   cases with `DT_NEEDED` the loader after `libc.so.6` exactly when a strong
   reference needs it, and `.gnu.version_r` an entry for each library, each
   import's version in its library's;
+- general- and local-dynamic TLS (#515): test-bind's split-stack PIE, whose
+  `generic-morestack.o` has such accesses, and assembly with each sequence
+  through the PLT and the GOT, to its own thread-locals and to `libc.so.6`'s
+  `errno` (status 53): every access's bytes in the file the relaxation's
+  (local-exec, or initial-exec through the import's GOT slot), each written
+  from binding's bytes (the relaxation can't be repeated), and run; calls of
+  `__tls_get_addr` that no access makes, through its stub and its GOT slot
+  with the executable's own module, beside an access whose call the
+  relaxation consumes, written and run (status 120); and refused, by every
+  lane count and the exact twins, without an output: that assembly written
+  without `__tls_get_addr` named (at its first access to `errno`); and a
+  local-dynamic access to `errno`, which `link_check` refuses
+  (`LINK_ERROR_BINDING`);
 - exports: sixteen functions whose names `libc.so.6` defines too, which
   binding exports and `main` finds with `dlsym` through the executable's
   `.gnu.hash`;
@@ -2941,7 +3079,19 @@ the library's exported symbols and initial-exec TLS, and the corresponding
 dynamic relocations. Compiled fixtures verify that the executable's definitions
 preempt the library's calls, data and pointer tables, and one whose 128-bit
 division, remainder and conversions call seven of `libgcc.a`'s functions, whose
-members join it, checks their results. With `--cross-check`, lld
+members join it, checks their results, and one whose code walks its stack with
+`_Unwind_Backtrace`, which needs `libgcc_s.so.1` where the program that loads
+it doesn't. Then the unwinder (#489, `dynamic_test_libgcc_s`): test-bind's
+split-stack code as a library, and a PIE whose `main` calls
+`_Unwind_Backtrace`, compiled by `cc`, bound with an import of
+`libgcc_s.so.1`'s, written by every lane count with `DT_NEEDED`
+`libgcc_s.so.1` before `libc.so.6` and its version need (the structure's
+rules), and run, the library through a harness that doesn't need
+`libgcc_s.so.1`. On a system without `libgcc_s.so.1`, binding must refuse
+both instead (the library's as `BIND_ERROR_MEMBER_UNDEFINED`), and the
+compiled library that walks its stack is left out; test-import, test-bind
+and test-checker-driver assert the same fallback (`cc
+-print-file-name=libgcc_s.so.1` tells the driver's test). With `--cross-check`, lld
 links the same objects with `-shared`; the comparison accounts for its lazy PLT
 slots and our non-lazy GLOB_DAT slots. Local-exec TLS, text relocations, a direct
 address of a preemptible function, and currently general/local-dynamic TLS are
@@ -4432,9 +4582,10 @@ the failure reported is source order's (the earliest step's, its first
 body's), whatever the lane count. The lowering numbers the runtime's
 functions (libgcc's) and the label symbols part by part, and
 `check_lower_finish` puts them in source order. Lane 0 is the calling thread
-with the caller's arenas; each other lane has its own
-(`CheckProgramLanes.arenas`), which the caller keeps until it is done with the
-link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
+with the caller's arenas but for its writer's columns, which take the first
+lane's scratch in base pages (`CheckEmitRun.columns`, #531); each other lane
+has its own (`CheckProgramLanes.arenas`), which the caller keeps until it is
+done with the link. The lanes: one, and one more per `BUSTER_CHECK_EMIT_LANE_TOKENS` of the
 bodies' tokens beyond twice the largest body's, no more than the bodies or
 the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 
@@ -4576,10 +4727,11 @@ checks each file as the driver does and compares it with
 presumed file and line, and the scalar and vector paths, column by column.
 `--symbols` (#129) also writes each accepted file's object as `-c` does and
 compares the functions and objects it defines with `clang -O0 -c`'s, with the
-names the checked source makes; a difference must have one of three documented
+names the checked source makes; a difference must have one of four documented
 reasons, found from the checked program (`docs/c-lowering.md`, "Against clang
--O0's objects": folded constants, unselected operands, and a constant `if`'s
-dropped arm, from the model `CheckProgramOptions.folded_ifs`), and a file the
+-O0's objects": folded constants, unselected operands, a constant `if`'s
+dropped arm, from the model `CheckProgramOptions.folded_ifs`, and a local
+`always_inline` function, which clang inlines everywhere), and a file the
 backend refuses is counted with its feature.
 `--symbols-minimum N` fails the run unless at least N files' objects were
 compared: the 9700X job's test step compares eight of the frozen musl `src`
@@ -4899,7 +5051,27 @@ other integers, under live values where
 past the slots fails it, and only the entries that ran in the programs both
 paths compiled, that ran and matched the check's stack machine count toward its
 coverage, which must reach each class's every kind, conversion and save and
-both arms of a `?:`.
+both arms of a `?:`. Then the `vectors` check (`tier0_vector_test.c`) does the
+same for VECTOR values and `X86` entries, its rows' model plain C (each
+instruction's elements as its definition has them): the rows' rules
+(`tier0_operation_valid`: each of 20 breaks refused, integer operands narrower
+than their fields among them, every row of the check and the narrow operands'
+neighbours taken) and the stream's, each break refused at its entry (a vector
+converted and two compared among them); each row under no
+live values, under 8 floats and 3 integers, and under as many floats as leave
+its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
+one past it and a scratch register past the integer table, which both paths
+refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+registers and on the stack, called from C and calling C (a vector argument on
+the stack among them), a float parameter's register that a row of no records
+loads its vector operand into, and a 16-byte operand that a ZMM form reads
+whole, its upper bytes zero; and `--count` random programs of vector, integer and
+float statements, masked stores and dropped vectors over the rows (operands and
+results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
+operands, a row of no records), constants, frame objects of each width, DUP,
+STORE's kept value and `?:`, under live values on both stacks, every output
+byte against the check's stack machine. Its coverage must reach every VECTOR
+kind at each width it has, every row and both arms.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
