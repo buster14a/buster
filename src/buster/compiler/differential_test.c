@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Self-tests for differential.c. The only external dependency is clang, which builds our original fixture tool.
+// Self-tests for differential.c. Clang builds our original fixture tool; rm removes passing workspaces.
 // All fake compiler/generator runs are marked as fixtures and count as zero source-to-machine campaign passes.
 // These tests exercise the protocol, process supervision and retained evidence; they cannot qualify Buster codegen.
 
@@ -452,14 +452,42 @@ static void differential_test_config(DifferentialTests* tests, const char* direc
     free(argument);
 }
 
+static bool differential_test_remove(const char* directory)
+{
+    // Pass the path as one literal argument, including the fixture's shell metacharacters.
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        execlp("rm", "rm", "-rf", "--", directory, (char*)0);
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0)
+    {
+        do
+        {
+            waited = waitpid(child, &status, 0);
+        } while (waited < 0 && errno == EINTR);
+    }
+    struct stat metadata;
+    const bool removed = waited == child && child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0 && lstat(directory, &metadata) < 0 && errno == ENOENT;
+    return removed;
+}
+
 static int run_differential_tests(int argc, char** argv)
 {
     const char* clang = "clang";
     const char* source = "tests/differential/tool.c";
+    bool keep = false;
     bool valid = true;
     for (int i = 0; valid && i < argc; ++i)
     {
-        if (i + 1 < argc && strcmp(argv[i], "--clang") == 0)
+        if (strcmp(argv[i], "--keep") == 0)
+        {
+            keep = true;
+        }
+        else if (i + 1 < argc && strcmp(argv[i], "--clang") == 0)
         {
             clang = argv[++i];
         }
@@ -486,7 +514,9 @@ static int run_differential_tests(int argc, char** argv)
     valid = valid && realpath(temporary, temporary_directory) != 0 && stat(temporary_directory, &temporary_metadata) == 0 && S_ISDIR(temporary_metadata.st_mode) && access(temporary_directory, W_OK | X_OK) == 0;
     // Child tools change working directory; their own temporary-file lookup needs the same absolute base.
     valid = valid && setenv("TMPDIR", temporary_directory, 1) == 0;
-    valid = valid && differential_path(directory, sizeof(directory), temporary_directory, "buster differential '$;-XXXXXX") && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0 && mkdtemp(directory) != 0 && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
+    valid = valid && differential_path(directory, sizeof(directory), temporary_directory, "buster differential '$;-XXXXXX") && differential_resolve(clang, compiler) && realpath(source, fixture_source) != 0;
+    const bool made = valid && mkdtemp(directory) != 0;
+    valid = made && differential_path(fixture, sizeof(fixture), directory, "fixture tool '$;.exe");
     DifferentialTests tests = {0};
     if (valid)
     {
@@ -515,9 +545,20 @@ static int run_differential_tests(int argc, char** argv)
     }
     else
     {
-        fprintf(stderr, "test-differential-harness requires clang, tests/differential/tool.c and an existing writable TMPDIR (default /tmp); [--clang PATH] [--fixture-source PATH]\n");
+        fprintf(stderr, "test-differential-harness requires clang, tests/differential/tool.c and an existing writable TMPDIR (default /tmp); [--clang PATH] [--fixture-source PATH] [--keep]\n");
     }
-    fprintf(stderr, "differential harness: %llu checks, %llu failures; compiler campaigns=0; artifacts=%s\n", (unsigned long long)tests.checks, (unsigned long long)tests.failures, directory);
+    bool retained = made;
+    if (made && valid && tests.failures == 0 && !keep)
+    {
+        retained = !differential_test_remove(directory);
+        differential_test_check(&tests, !retained, "remove passing artifacts");
+    }
+    fprintf(stderr, "differential harness: %llu checks, %llu failures; compiler campaigns=0", (unsigned long long)tests.checks, (unsigned long long)tests.failures);
+    if (retained)
+    {
+        fprintf(stderr, "; artifacts=%s", directory);
+    }
+    fputc('\n', stderr);
     const int result = valid ? tests.failures ? 1 : 0 : 2;
     return result;
 }
