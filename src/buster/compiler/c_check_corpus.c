@@ -1251,7 +1251,8 @@ static bool check_corpus_check(CheckCorpusPath* path, Parser* parser, Preprocess
 static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
 {
     bool equal = x->types.count == y->types.count && x->parameters.count == y->parameters.count && x->tags.count == y->tags.count &&
-                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->last_error == y->last_error;
+                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->lookup.count == y->lookup.count &&
+                 x->last_error == y->last_error;
     for (uint32_t i = 1; equal && i < x->types.count; i += 1)
     {
         equal = x->types.kind[i] == y->types.kind[i] && x->types.code[i] == y->types.code[i] && x->types.flags[i] == y->types.flags[i] &&
@@ -1266,7 +1267,8 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->tags.type[i] == y->tags.type[i] && x->tags.name[i] == y->tags.name[i] && x->tags.member_begin[i] == y->tags.member_begin[i] &&
                 x->tags.member_count[i] == y->tags.member_count[i] && x->tags.completion[i] == y->tags.completion[i] &&
-                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i];
+                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
+                x->tags.lookup[i] == y->tags.lookup[i] && x->tags.lookup_log2[i] == y->tags.lookup_log2[i];
     }
     for (uint32_t i = 1; equal && i < x->members.count; i += 1)
     {
@@ -1274,6 +1276,7 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
                 x->members.bit_width[i] == y->members.bit_width[i] && x->members.alignment_log2[i] == y->members.alignment_log2[i] &&
                 x->members.flags[i] == y->members.flags[i] && x->members.offset[i] == y->members.offset[i];
     }
+    equal = equal && (x->lookup.count <= 1 || memcmp(x->lookup.buckets + 1, y->lookup.buckets + 1, (uint64_t)(x->lookup.count - 1) * sizeof(TypeLookupBucket)) == 0);
     return equal;
 }
 

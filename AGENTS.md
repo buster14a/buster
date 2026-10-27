@@ -903,8 +903,11 @@ designs and the compilers already built this way.
   form and the measurements.
 - `src/buster/compiler/c_types.c` is the C type table (#132, contract 5 for
   #133 and #137): `TypeId`s, hash-consed one at a time and in batches, tags,
-  clang's record layout (one record at a time, and 16 at once in vectors), the
-  conversions as `vpermb` tables 64 pairs at a time, compatibility and
+  clang's record layout (one record at a time, and 16 at once in vectors), each
+  record's member lookup (#591: a scan of its names, or an index of the names
+  its anonymous members hold too, built when it is defined, with
+  `type_lookup_member_scalar` its twin and a walk where an index doesn't fit),
+  the conversions as `vpermb` tables 64 pairs at a time, compatibility and
   composite types, and clang's spelling of a type, all as clang 23 has them on
   x86-64. `c_types_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-types` runs them) and `c_types_benchmark.c` provides
@@ -4642,6 +4645,19 @@ the one `--clang` names:
   by the scalar layout in one table and by `type_layout_records` in another:
   identical offsets, sizes, alignments and completion order; and member lookup
   of a fresh table's first member, directly and through an anonymous member;
+- member lookup (#591, `c_types_lookup_test.c`): the lookup, its scalar twin,
+  the walk and `type_find_member` against an oracle that lists a record's
+  named members depth first through its anonymous members (member, offset and
+  qualifiers), on random worlds of records of 0 to 459 members that hold one
+  another as anonymous members, qualified and aligned, by every name and
+  absent ones, with the default room for indices and with room for 48 buckets,
+  past which records walk; the scan's limit of 16 members, a name that an
+  anonymous member finds before a named member has it, and 24 names in one
+  bucket of eight; a copy, a view taken back and a tag withdrawn and restored;
+  unions that hold the one before them twice, 64 levels deep; a record of
+  100,000 members; the walk with every amount of room to 16 KB left in its
+  scratch arena; and the scan at every count to 16 of names ending at a
+  `PROT_NONE` page;
 - conversions: every pair of codes through both vector kernels and the scalar
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
