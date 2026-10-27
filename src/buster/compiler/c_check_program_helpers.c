@@ -42,6 +42,8 @@ struct CheckProgramHelper
     bool may_raise_inexact;
     bool requires_errno_address;
     uint32_t required_alignment;
+    // An asm statement's helper (c_check_program_asm.c): the statement's index plus one; 0 for a builtin's.
+    uint32_t assembly;
 };
 
 typedef struct CheckProgramHelperUse CheckProgramHelperUse;

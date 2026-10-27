@@ -1,4 +1,5 @@
 name: 9700X test
+run-name: ${{ inputs.lease && format('9700X lease {0}', inputs.lease) || github.event.pull_request.title || github.event.head_commit.message || '9700X qualification' }}
 
 # This public repository must not execute unreviewed fork code on the host.
 on:
@@ -8,6 +9,22 @@ on:
       - 'docs/**'
       - '**.md'
   workflow_dispatch:
+    inputs:
+      target_pr:
+        description: Controller-owned PR qualification; leave empty for full main maintenance
+        type: string
+      target_head:
+        description: Controller-pinned PR head
+        type: string
+      target_base:
+        description: Controller-pinned PR base
+        type: string
+      target_merge:
+        description: Controller-pinned immutable merge commit
+        type: string
+      lease:
+        description: Controller lease nonce; operator controls use 9700x-control.yml
+        type: string
   # Once a day, the measurements a push to main leaves out (`changes`).
   schedule:
     - cron: '23 7 * * *'
@@ -27,17 +44,63 @@ permissions:
 # own, so that a push to main doesn't replace it while it waits. The runner's job hooks serialize all jobs with the
 # shared host lock (AGENTS.md).
 concurrency:
-  group: buster-fast-9700x-${{ github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
+  group: buster-fast-9700x-${{ (inputs.target_pr && format('admitted-pr-{0}', inputs.target_pr)) || github.event.pull_request.number || (github.event_name == 'schedule' && 'schedule') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Only reviewed main workflows reach the physical pool once admission is enabled. Native PR workflows retain
+  # independent hosted change detection. The controller publishes the existing required check on the PR head after
+  # a pinned merge succeeds; a workflow_dispatch's native default-branch check is never the PR's merge evidence.
+  # Before activation the existing path remains available so this change can qualify before default-branch rollout.
+  admission:
+    if: vars.CI_9700X_ADMISSION_ENABLED == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 335
+    env:
+      CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    outputs:
+      commit: ${{ steps.lease.outputs.commit }}
+      controller_sha: ${{ steps.lease.outputs.controller_sha }}
+      guard_sha256: ${{ steps.guard.outputs.sha256 }}
+    steps:
+      - name: Check out the reviewed guard for this workflow revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: tools/ci
+      - id: guard
+        name: Build the read-only admission guard on hosted capacity
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o "$RUNNER_TEMP/admission"
+          sha256sum "$RUNNER_TEMP/admission" | awk '{ print "sha256=" $1 }' >> "$GITHUB_OUTPUT"
+      - id: lease
+        name: Wait on GitHub-hosted capacity until this exact run is admitted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: '"$RUNNER_TEMP/admission" --wait'
+      - name: Pass this reviewed guard to this exact workflow attempt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/admission
+          retention-days: 1
+          if-no-files-found: error
+
   # Whether a pull request changes anything but documentation (`docs/**` and `*.md`, as `push`'s paths-ignore), on a
   # GitHub-hosted runner so that it doesn't wait for the 9700X: the files the merge changes against its base. When this
   # job fails, `test` runs, with every benchmark. And whether it changes the harnesses of the baselines, the linkers'
   # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
   # for every pull request, so `test` measures them on the daily and dispatched runs and on pull requests that change
   # these harnesses, as when this job is skipped or fails. The same for benchmark-foreign's mold and wild
-  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases. And, per
+  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases, and for
+  # benchmark-preprocessor's `clang -E` (`--clang`, `preprocessor_clang`: c_preprocessor_benchmark.c). And, per
   # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
@@ -58,7 +121,8 @@ jobs:
   # (`changes_benchmarks`) and the decision, which its --self-test checks against this workflow and the sources before
   # it decides.
   changes:
-    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    needs: admission
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'push' || inputs.target_pr) && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || github.event_name == 'pull_request' || needs.admission.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -68,6 +132,7 @@ jobs:
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
       branch_sizing: ${{ steps.files.outputs.branch_sizing }}
+      preprocessor_clang: ${{ steps.files.outputs.preprocessor_clang }}
       zen5: ${{ steps.files.outputs.zen5 }}
       ssa: ${{ steps.files.outputs.ssa }}
       parser_bindings: ${{ steps.files.outputs.parser_bindings }}
@@ -85,7 +150,7 @@ jobs:
       - name: Check out the triggering commit and its parents
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.admission.outputs.commit || github.sha }}
           fetch-depth: 2
           persist-credentials: false
 
@@ -119,16 +184,21 @@ jobs:
           fi
 
   test:
-    name: Build and execute on Ryzen 7 9700X
-    needs: changes
+    name: ${{ vars.CI_9700X_ADMISSION_ENABLED == 'true' && ((github.event_name == 'pull_request' && '9700X queue request') || (inputs.target_pr && '9700X admitted execution')) || 'Build and execute on Ryzen 7 9700X' }}
+    needs: [changes, admission]
     # Runs after `changes` unless it found documentation alone; also when `changes` was skipped (the daily and
     # dispatched runs) or failed.
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' }}
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.changes.outputs.code != 'false' && (vars.CI_9700X_ADMISSION_ENABLED != 'true' || (github.event_name != 'pull_request' && needs.admission.result == 'success')) }}
     runs-on:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     # The full set of measurements takes about 13 minutes; every other run, about 4 to 7.
-    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 20 }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.target_pr)) && 25 || 20 }}
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
     defaults:
       run:
         shell: bash
@@ -136,7 +206,26 @@ jobs:
     # list for a pull request (",lexer,parser,"), and on any other run, or when `changes` failed, all of them.
     env:
       MEASURE: ${{ needs.changes.outputs.measure || 'all' }}
+      CI_9700X_POOL_CAPACITY: ${{ vars.CI_9700X_POOL_CAPACITY }}
     steps:
+      - name: Download only this reviewed workflow attempt's admission guard
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: 9700x-guard-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/9700x-admission
+
+      - name: Revalidate the lease immediately before the hardware qualification
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
+          chmod +x "$RUNNER_TEMP/9700x-admission/admission"
+          "$RUNNER_TEMP/9700x-admission/admission" --verify
+
       - name: Verify host and bootstrap compiler
         run: |
           test "$(uname -s)" = Linux
@@ -148,7 +237,7 @@ jobs:
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.admission.outputs.commit || github.sha }}
           persist-credentials: false
 
       - name: Build the external Clang pragma token oracle and the compiler executable
@@ -351,7 +440,7 @@ jobs:
           export SOURCE_DATE_EPOCH=1792454400
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           musl="$corpus/libc/musl"
-          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 348 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
+          ./build/compiler test-checker-corpus --clang /usr/bin/clang --symbols-minimum 354 --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os -pipe \
             -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
             "$musl/src/math" "$musl/src/string" "$musl/src/stdlib" "$musl/src/fenv" "$musl/src/legacy" "$musl/src/process" "$musl/src/signal" "$musl/src/multibyte"
           == Test the C lexer as C++
@@ -960,13 +1049,23 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
 
-      - name: Benchmark the preprocessor on main.c
+      - name: Benchmark the preprocessor on main.c against clang -E
         # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
-        # -funsigned-char's among them.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        # -funsigned-char's among them. --clang also times `clang -E` on the same file after each timed pass, about
+        # 6 s of the step's 12, which measures clang rather than this compiler: it runs where `changes` doesn't rule
+        # it out (c_preprocessor_benchmark.c's harness).
+        if: needs.changes.outputs.preprocessor_clang != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
+        # scalar twins, without clang's.
+        if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
@@ -1230,6 +1329,19 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-unwind --functions 64
           taskset -c "$cpu" ./build/compiler benchmark-streaming --units 100 --runs 5
 
+      - name: Benchmark the backend on the frozen SQLite source's functions
+        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
+        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
+        # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-backend-source "${source[@]}"
+
       - name: Benchmark the IR verifier and derived arrays
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir,')
         run: |
@@ -1270,3 +1382,13 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
+
+      - name: Verify the qualified identity and lease again at completion
+        if: vars.CI_9700X_ADMISSION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GUARD_SHA256: ${{ needs.admission.outputs.guard_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$GUARD_SHA256" "$RUNNER_TEMP/9700x-admission/admission" | /usr/bin/sha256sum --check
+          "$RUNNER_TEMP/9700x-admission/admission" --verify

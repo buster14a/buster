@@ -310,6 +310,20 @@ static bool unwind_tier0_stack(const X86Instruction* record, uint32_t form, uint
     return record->form == form && record->mode == BUSTER_X86_REGISTER_DIRECT && record->rm == reg;
 }
 
+// Whether a realigned frame's records after its reservation are Tier 0's (tier0_emit_prologue's): rsp rounded down to
+// 2^`alignment_log2` (and rsp, -alignment: imm8 to 128 bytes), and with `base` rsp copied into r15 after it.
+static bool unwind_tier0_realignment(const X86Instruction* records, uint32_t alignment_log2, bool base)
+{
+    const X86Instruction* realign = &records[0];
+    const uint32_t form = alignment_log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32;
+    const bool rounds = realign->form == form && realign->mode == BUSTER_X86_REGISTER_DIRECT && realign->rm == X86_REGISTER_RSP &&
+                        (int64_t)realign->immediate == -(int64_t)(UINT64_C(1) << alignment_log2);
+    const X86Instruction* copy = base ? &records[1] : 0;
+    const bool copies = copy == 0 || (copy->form == X86_FORM_MOV_RM64_R64 && copy->reg == X86_REGISTER_RSP && copy->rm == X86_REGISTER_R15 &&
+                                      copy->mode == BUSTER_X86_REGISTER_DIRECT);
+    return rounds && copies;
+}
+
 // Whether a frame pointer's function's release, the record before its pops, is Tier 0's: rsp back from rbp, past the
 // `pushes` after rbp's (a lea, or a mov without any).
 static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
@@ -321,18 +335,20 @@ static bool unwind_tier0_release(const X86Instruction* record, uint32_t pushes)
     return lea || mov;
 }
 
-// The descriptor of a function from the frame its producer published (Tier0Code.frame_saved, frame_size and
-// frame_pointer, #395), with no pass over its body: tier0_emit_prologue's pushes (rbp's and its mov first with a frame
-// pointer) and reservation are the code's first records, and tier0_emit_epilogue's release, pops and ret its last, so
-// that each transition is the end of a record known by its index, which this checks is the instruction it must be. The
-// body keeps the frame, and moves rsp only with a frame pointer, whose CFA is rbp's: unwind_tier0 proves that for the
-// functions it takes (the tests compare the two there), and this takes the producer's word for the others (a frame
-// pointer, a computed goto's indirect jump). Its work is constant per function, which is what makes the C driver's
-// unwind tables cheap enough to have by default; scalar, since no column of many items is there to take in lanes. A
-// frameless function may end in a ud2 rather than the ret (unwind_tier0_end): the terminal builtins' helper, a ud2
-// alone, whose FDE of no transitions lets an unwinder from its trap reach its caller.
-// UNWIND_ERROR_INVALID for code or a frame its records can't be, UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue
-// that isn't the frame's and UNWIND_ERROR_LIMIT past the format's limits, each leaving the descriptor alone.
+// The descriptor of a function from the frame its producer published (Tier0Code.frame_saved, frame_size, frame_pointer,
+// frame_alignment_log2 and frame_base, #395), with no pass over its body: tier0_emit_prologue's pushes (rbp's and its mov
+// first with a frame pointer), reservation and realignment (a realigned frame's and of rsp, and its base's mov to r15)
+// are the code's first records, and tier0_emit_epilogue's release, pops and ret its last, so that each transition is the
+// end of a record known by its index, which this checks is the instruction it must be. The body keeps the frame, and
+// moves rsp only with a frame pointer, whose CFA is rbp's: unwind_tier0 proves that for the functions it takes (the tests
+// compare the two there), and this takes the producer's word for the others (a frame pointer, a computed goto's
+// indirect jump). A realigned frame's and, like its reservation, is no transition: from rbp's mov on, the CFA is rbp's,
+// whatever rsp does. Its work is constant per function, which is what makes the C driver's unwind tables cheap enough to
+// have by default; scalar, since no column of many items is there to take in lanes. A frameless function may end in a
+// ud2 rather than the ret (unwind_tier0_end): the terminal builtins' helper, a ud2 alone, whose FDE of no transitions
+// lets an unwinder from its trap reach its caller. UNWIND_ERROR_INVALID for code or a frame its records can't be,
+// UNWIND_ERROR_UNSUPPORTED for a prologue or epilogue that isn't the frame's and UNWIND_ERROR_LIMIT past the format's
+// limits, each leaving the descriptor alone.
 static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
 {
     UnwindError error = UNWIND_OK;
@@ -340,12 +356,18 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
     const uint32_t pushes = (uint32_t)__builtin_popcount(saved);
     const bool pointer = code != 0 && code->frame_pointer;
     const bool reserved = code != 0 && code->frame_size != 0 && !pointer;
+    const uint32_t alignment_log2 = code != 0 ? code->frame_alignment_log2 : 0;
+    const bool base = code != 0 && code->frame_base;
     // The prologue's records, and the epilogue's from its release (a frame pointer's lea or mov, which is no
     // transition) to its ret.
-    const uint32_t prologue = (pointer ? 2 + pushes + (code->frame_size != 0 ? 1 : 0) : pushes + (reserved ? 1 : 0));
+    const uint32_t realignment = (alignment_log2 != 0 ? 1 : 0) + (base ? 1 : 0);
+    const uint32_t prologue = (pointer ? 2 + pushes + (code->frame_size != 0 ? 1 : 0) + realignment : pushes + (reserved ? 1 : 0));
     const uint32_t epilogue = (pointer ? 1 + pushes + 1 : pushes + (reserved ? 1 : 0)) + 1;
+    // A realigned frame has a frame pointer, past 16 bytes' alignment and within an and's immediate, and its base is r15,
+    // one of its pushes.
+    const bool realigned = alignment_log2 == 0 ? !base : pointer && alignment_log2 > 4 && alignment_log2 <= 31 && (!base || (saved & (1u << BUSTER_TIER0_SAVED_R15)) != 0);
     if (code == 0 || final_offsets == 0 || output == 0 || code->error != TIER0_OK || code->records == 0 || code->count == 0 || saved >= 64 ||
-        (pointer && (saved & 2) != 0) || prologue + epilogue > code->count || size == 0 || final_offsets[0] != 0)
+        (pointer && (saved & 2) != 0) || !realigned || prologue + epilogue > code->count || size == 0 || final_offsets[0] != 0)
     {
         error = UNWIND_ERROR_INVALID;
     }
@@ -389,6 +411,11 @@ static UnwindError unwind_tier0_frame(const Tier0Code* code, const uint32_t* fin
         {
             events[count++] = at;
         }
+        at += 1;
+    }
+    if (records != 0 && error == UNWIND_OK && alignment_log2 != 0)
+    {
+        error = unwind_tier0_realignment(&records[at], alignment_log2, base) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
     }
     // The epilogue, from its release.
     at = code != 0 ? code->count - epilogue : 0;
