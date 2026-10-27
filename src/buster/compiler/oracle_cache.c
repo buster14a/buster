@@ -35,28 +35,34 @@
 // to BUSTER_ORACLE_VARIANTS entries, one for each state its runs found (a test that writes a file anew for each of its
 // runs, with other bytes and the same arguments, has one key for them all), and a run takes the first that is as it
 // finds it. The files a run writes are among what it looked at, as they were before it (their bytes read at its first
-// look at each, which a run that reads its output first depends on), and a file it changes after it read it isn't
-// kept; nor is a run that does what the tracing can't follow (openat2's resolution flags, chroot, the mount calls,
-// extended attributes: oracle_unfollowed_calls). The package manager's files are left out (oracle_path_rule): the
-// package database's identity stands for them. The kernel's (/proc and /sys) are looked at but never read, as their
-// bytes change with no file changing (a process's id in /proc/self/stat, the time in /proc/uptime): a run that opens,
-// lists or changes one of them, reads a link there (but its own process's links that name files, as LLVM reads its
-// files' real paths) or follows a process's link into the file system (/proc/self/cwd, /dev/fd/3) isn't kept. /dev's
-// other paths are kept, /dev/shm's files among them, but a run that opens a device (but /dev/null, /dev/zero and
-// /dev/full, whose data never change, and /dev/tty, which a run, without a controlling terminal, can't open), a FIFO, a
-// socket or, through any other path, a file of the kernel's isn't kept (oracle_opens_unseen). Its getrandom calls are
-// answered by the cache (oracle_trace_random), the same each time the run runs, and it inherits no descriptor but the
-// standard three (oracle_child). A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH
-// (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and clang's __TIMESTAMP__; the entries of a
-// tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files' modification times. A test that compares with
-// compilers fixes the epoch (oracle_epoch_begin), and gives the files it writes for such a tool the epoch's time
-// (oracle_epoch_file).
+// look at each, which a run that reads its output first depends on), and a file it changes after it read it isn't kept;
+// nor is a run that does what the tracing can't follow (openat2's resolution flags, chroot, the mount calls, extended
+// attributes, a file system's figures: oracle_unfollowed_calls). The package manager's files are left out
+// (oracle_path_rule): the package database's identity stands for them. The kernel's (/proc and /sys) change with no
+// file changing (a process's id in /proc/self/stat, the time in /proc/uptime, the inode and times stat gives of
+// /proc/self): a run that checks for one of them (access, as LLVM checks for /proc/self/fd) is kept, but not one that
+// stats, opens, lists or changes one, reads a link there (but its own process's links that name files, as LLVM reads
+// its files' real paths), follows a process's link into the file system (/proc/self/cwd, /dev/fd/3) or uses another
+// process's paths. /dev's other paths are kept, /dev/shm's files among them, but a run that opens a device (but
+// /dev/null, /dev/zero and /dev/full, whose data never change, and /dev/tty, which a run, without a controlling
+// terminal, can't open), a FIFO, a socket or, through any other path, a file of the kernel's isn't kept
+// (oracle_opens_unseen). Its getrandom calls are answered by the cache (oracle_trace_random), the same each time the
+// run runs, and it inherits no descriptor but the standard three (oracle_child). A compiler's run is kept only if its
+// environment sets SOURCE_DATE_EPOCH (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and
+// clang's __TIMESTAMP__; the entries of a tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files'
+// modification times. A test that compares with compilers fixes the epoch (oracle_epoch_begin), and gives the files it
+// writes for such a tool the epoch's time (oracle_epoch_file).
 //
 // What the tracing can't see, a tool's result must not depend on: the clocks (the vDSO's), its process and thread ids,
 // its addresses and the kernel's random bytes for its start (AT_RANDOM), the processor's (rdrand, rdtsc), the machine's
-// figures (uname, sysinfo, the CPUs it may run on) and what other processes send it (sockets, shared memory). A
-// compiler's doesn't: with SOURCE_DATE_EPOCH, clang's and gcc's outputs are the same from run to run, which check mode
-// verifies.
+// figures (uname, sysinfo, the CPUs it may run on), what other processes send it (sockets, shared memory), and the
+// numbers the kernel gives the files it finds and makes, which a path's state doesn't have: their inode and device
+// numbers, link and block counts, and times (but the modification times, for a tool whose entries have them), which
+// stat gives beside a file's kind, size, owner and permissions, and fstat of any descriptor (a pipe's, a capture's),
+// with no path to trace. They differ from one run to the next for every file a test or a run makes anew (clang's driver
+// stats its source, cc's link the executable it wrote), so that a state that held them would never be found again. A
+// compiler's result depends on none of them: with SOURCE_DATE_EPOCH, clang's and gcc's outputs are the same from run to
+// run, which check mode verifies, and a run whose result depends on one fails there, its entry stale.
 //
 // A test makes its files in directories of mkdtemp's under $TMPDIR (or /tmp), whose names differ from one run to the
 // next. A root is such a name in a run's strings: $TMPDIR/NAME, NAME a run of letters, digits, '.', '_' and '-' whose
@@ -752,7 +758,7 @@ static bool oracle_epoch_file(const char* path)
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
     oracle_sha256_begin(hash);
-    oracle_hash_text(hash, "buster oracle 8");
+    oracle_hash_text(hash, "buster oracle 9");
     oracle_hash_text(hash, purpose);
     oracle_hash_bytes(hash, cache->host, BUSTER_ORACLE_KEY_BYTES);
 }
@@ -1619,11 +1625,14 @@ static void oracle_looks_release(OracleLooks* looks)
 #define GRND_INSECURE 0x0004
 #endif
 
-// What a traced call does at its paths (oracle_path_rule): looks at them (what stat and access give, as a path's look
-// has it), opens one (a file's bytes, a directory's names, a device's data), reads one (a link's target, a directory's
-// names, a program's bytes), or makes, removes, renames or changes them.
+// What a traced call does at its paths (oracle_path_rule): checks for one (whether it is there and what access allows
+// of it: access's and chdir's answer), looks at one (what stat gives: its kind, size, owner and permissions, which a
+// path's look has, and the numbers the kernel gives it, which it doesn't), opens one (a file's bytes, a directory's
+// names, a device's data), reads one (a link's target, a directory's names, a program's bytes), or makes, removes,
+// renames or changes them.
 typedef enum OracleUse
 {
+    ORACLE_USE_CHECK,
     ORACLE_USE_LOOK,
     ORACLE_USE_OPEN,
     ORACLE_USE_READ,
@@ -1660,17 +1669,14 @@ static const OracleCall oracle_calls[] = {
     { SYS_lstat, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_LOOK },
     { SYS_newfstatat, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_LOOK },
     { SYS_statx, { 1, -1 }, { 0, -1 }, 2, true, false, false, ORACLE_USE_LOOK },
-    { SYS_access, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
-    { SYS_faccessat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
-    { SYS_faccessat2, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_LOOK },
+    { SYS_access, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHECK },
+    { SYS_faccessat, { 1, -1 }, { 0, -1 }, -1, true, false, false, ORACLE_USE_CHECK },
+    { SYS_faccessat2, { 1, -1 }, { 0, -1 }, 3, true, false, false, ORACLE_USE_CHECK },
     { SYS_readlink, { 0, -1 }, { -1, -1 }, -1, false, false, false, ORACLE_USE_READ },
     { SYS_readlinkat, { 1, -1 }, { 0, -1 }, -1, false, false, false, ORACLE_USE_READ },
     { SYS_execve, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_READ },
     { SYS_execveat, { 1, -1 }, { 0, -1 }, 4, true, false, false, ORACLE_USE_READ },
-    { SYS_chdir, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
-    // libselinux's start in every program linked with it (statfs of /sys/fs/selinux, which the kernel's paths leave
-    // out): a path like stat's, its file system's figures, which any file written changes, not part of it.
-    { SYS_statfs, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_LOOK },
+    { SYS_chdir, { 0, -1 }, { -1, -1 }, -1, true, false, false, ORACLE_USE_CHECK },
     { SYS_getdents, { -1, -1 }, { 0, -1 }, -1, true, true, false, ORACLE_USE_READ },
     { SYS_getdents64, { -1, -1 }, { 0, -1 }, -1, true, true, false, ORACLE_USE_READ },
     // Making, removing, renaming and changing a path, whose results read what is there and its directory.
@@ -1704,9 +1710,12 @@ static const OracleCall oracle_calls[] = {
 // The calls the filter stops that make their run unkept, as the tracing can't follow them: those that reach files it
 // can't name (io_uring's, files opened by handle), that change how their process resolves paths (chroot, pivot_root,
 // the mount calls, unshare and setns), that read or change extended attributes (a path's state has them as the run
-// first found them, not as it reads them), and that list the mounts. Calls of another architecture, and x32's, are
-// stopped and do the same.
+// first found them, not as it reads them), that list the mounts, and statfs, whose answer is its file system's
+// figures (its free blocks and files, which any file written changes), which no path's state has (libselinux's start
+// makes one, of /sys/fs/selinux, in a program linked with it, which also reads /proc/filesystems). Calls of another
+// architecture, and x32's, are stopped and do the same.
 static const uint32_t oracle_unfollowed_calls[] = {
+    SYS_statfs,
     SYS_io_uring_setup,
     SYS_name_to_handle_at,
     SYS_open_by_handle_at,
@@ -1907,15 +1916,17 @@ static const char* oracle_process_part(const char* rest, pid_t caller, bool* own
 }
 
 // What the cache makes of `link` (a process's path after its directory, as "/fd/3" or "/cwd/x.h"), at which the run's
-// call makes `use`, following it to its end if `followed`; `own` if the process is the caller's own. A process's links
-// into the file system (cwd, root, exe, fd/N and map_files/RANGE) lead to what that process sees, which the cache,
-// another process, can't look at: a path past one, or a call that follows one but the caller's own exe and standard
-// three descriptors (the tool or what it executed, which the tracing saw, and the key's input and the run's captures),
-// is refused. A link read names what its process opened: the caller's own are left out (as LLVM reads its files' real
-// paths), but a descriptor's that names a pipe's or a socket's inode ("pipe:[N]", read here as `caller` sees it),
-// which another run's differs from, and another process's are refused. What else the kernel has of processes (their
-// status, their descriptors' positions, which process /proc/self is) changes from one run to the next with no file
-// changing: a look at it is left out, and any other use refused.
+// call makes `use`, following it to its end if `followed`; `own` if the process is the caller's own. Another process's
+// paths are that process's state, and are refused whatever the use. Of the caller's own, what stat gives of any (the
+// numbers and times the kernel gives /proc/self, a link, or what a standard descriptor leads to: a capture, made anew
+// for each run) and a change are refused. Its links into the file system (cwd, root, exe, fd/N and map_files/RANGE)
+// lead to what it sees, which the cache, another process, can't look at: a path past one, or a call that follows one
+// but its exe and standard three descriptors (the tool or what it executed, which the tracing saw, and the key's input
+// and the run's captures), is refused. A link read names what the process opened: left out (as LLVM reads its files'
+// real paths), but a descriptor's that names a pipe's or a socket's inode ("pipe:[N]", read here as `caller` sees it),
+// which another run's differs from. What else the kernel has of it (its status, its descriptors' positions, which
+// process /proc/self is) changes from one run to the next with no file changing: a check for it (access, as LLVM
+// checks for /proc/self/fd) is left out, and any other use refused.
 static OraclePath oracle_process_link(const char* link, bool followed, OracleUse use, bool own, pid_t caller)
 {
     const char* name = link[0] == '/' ? link + 1 : "";
@@ -1935,8 +1946,8 @@ static OraclePath oracle_process_link(const char* link, bool followed, OracleUse
     char target[BUSTER_ORACLE_PATH_BYTES];
     snprintf(descriptor, sizeof(descriptor), "/proc/%ld/fd/%s", (long)caller, entry);
     const bool inode = descriptors && single && own && !followed && use == ORACLE_USE_READ && readlink(descriptor, target, sizeof(target)) > 0 && target[0] != '/';
-    const bool refused = past || inode || (linked && followed && !(own && (executable || standard))) ||
-                         (linked && !followed && !own && use != ORACLE_USE_LOOK) || (!linked && use != ORACLE_USE_LOOK);
+    const bool refused = !own || past || inode || use == ORACLE_USE_LOOK || use == ORACLE_USE_CHANGE || (linked && followed && !(executable || standard)) ||
+                         (!linked && use != ORACLE_USE_CHECK);
     return refused ? ORACLE_PATH_REFUSED : ORACLE_PATH_LEFT_OUT;
 }
 
@@ -1946,8 +1957,9 @@ static OraclePath oracle_process_link(const char* link, bool followed, OracleUse
 //   - the package manager's files (under /usr but /usr/local, and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which
 //     merged-usr systems link into /usr) are left out: the package database's identity in every key stands for them;
 //   - the kernel's (/proc and /sys), which describe the processes and the machine and change with no file changing,
-//     are left out where they are looked at and refused where they are opened, read or changed; but for a process's
-//     links into the file system (oracle_process_link), which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to;
+//     are left out where a call checks for them (access, chdir) and refused where it stats, opens, reads or changes
+//     them; and a process's paths, which /dev/fd, /dev/stdin, /dev/stdout and /dev/stderr lead to, by
+//     oracle_process_link;
 //   - any other path is kept, the rest of /dev's among them: a device node by its kind and number (opened, it may be
 //     refused: oracle_opens_unseen), and /dev/shm's files, an ordinary tmpfs's, as any other directory's.
 // A path with ".." in it may lead out of where it starts, and isn't left out: it is kept, or refused where a process's
@@ -1986,7 +1998,7 @@ static OraclePath oracle_path_rule(const OracleRun* run, const char* path, bool 
             own = true;
         }
     }
-    const OraclePath kernel_rule = process != 0 ? oracle_process_link(process, followed, use, own, caller) : use == ORACLE_USE_LOOK ? ORACLE_PATH_LEFT_OUT : ORACLE_PATH_REFUSED;
+    const OraclePath kernel_rule = process != 0 ? oracle_process_link(process, followed, use, own, caller) : use == ORACLE_USE_CHECK ? ORACLE_PATH_LEFT_OUT : ORACLE_PATH_REFUSED;
     return oracle_run_rooted(run, path) ? ORACLE_PATH_KEPT
            : parent && (kernel || process != 0) ? ORACLE_PATH_REFUSED
            : parent                            ? ORACLE_PATH_KEPT
