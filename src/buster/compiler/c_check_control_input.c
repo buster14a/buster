@@ -231,11 +231,15 @@ static uint32_t check_input_control_next(const Parser* parser, CheckInputControl
     return token;
 }
 
-static void check_input_controls(CheckInputReader* reader)
+// before == NONE is the unchanged full-unit path. The diagnostic prefix collects all function-scoped label names
+// for forward references, but reports only sites before its completion and defers unfinished-function obligations.
+static __attribute__((always_inline)) void check_input_controls_mode(CheckInputReader* reader, uint32_t before)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const bool scalar = parser->options.scalar;
+    const bool prefix = before != BUSTER_CHECK_NONE;
+    const uint32_t limit = prefix && before < count ? before : count;
     const uint64_t mark = reader->scratch->length;
     uint64_t capacity = 1;
     while (capacity < (uint64_t)count * 2 + 1)
@@ -281,7 +285,10 @@ static void check_input_controls(CheckInputReader* reader)
                 const uint32_t name_token = reader->first_child[token];
                 if (body == BUSTER_CHECK_NONE || name_token >= count || parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
                 {
-                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                    if (!prefix || token < limit)
+                    {
+                        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                    }
                 }
                 else
                 {
@@ -294,7 +301,10 @@ static void check_input_controls(CheckInputReader* reader)
                         const uint32_t old_name = reader->first_child[old];
                         if (reader->output->declaration_bodies[old] == body && parser->tokens.names[old_name] == name)
                         {
-                            check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                            if (!prefix || token < limit)
+                            {
+                                check_input_report(reader, token, CHECK_INPUT_REDECLARATION);
+                            }
                             break;
                         }
                         slot = (slot + 1) & (capacity - 1);
@@ -306,7 +316,7 @@ static void check_input_controls(CheckInputReader* reader)
             {
                 reader->output->declaration_bodies[token] = body;
             }
-            else if (role == PARSE_ROLE_OPEN_CASE)
+            else if (role == PARSE_ROLE_OPEN_CASE && (!prefix || token < limit))
             {
                 const uint32_t end = parser->tree.parents[token];
                 uint32_t owner = end < count ? parser->tree.parents[end] : count;
@@ -319,11 +329,12 @@ static void check_input_controls(CheckInputReader* reader)
                     }
                     owner = parser->tree.parents[owner];
                 }
-                if (owner >= count || end >= count || !check_input_region_transfer(reader, owner, end))
+                const bool complete = !prefix || (owner < limit && end < limit);
+                if (owner >= count || end >= count || (complete && !check_input_region_transfer(reader, owner, end)))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
-                else
+                else if (complete)
                 {
                     reader->output->control_owners[token] = owner;
                     reader->output->control_owners[end] = owner;
@@ -331,12 +342,12 @@ static void check_input_controls(CheckInputReader* reader)
             }
         }
         scan = (CheckInputControlScan){ 0 };
-        for (uint32_t token = 0; token < count; token += 1)
+        for (uint32_t token = 0; token < limit; token += 1)
         {
             if (!scalar)
             {
                 token = check_input_control_next(parser, &scan, true);
-                if (token == count)
+                if (token >= limit)
                 {
                     break;
                 }
@@ -359,19 +370,32 @@ static void check_input_controls(CheckInputReader* reader)
                 // its name, and an address of a label outside a function too).
                 const uint32_t body = reader->output->declaration_bodies[token];
                 const uint32_t operand = reader->first_child[token];
-                const uint32_t target = body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
+                uint32_t target = body != BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ?
                                         check_input_find_label(reader, labels, capacity, body, parser->tokens.names[operand]) : BUSTER_CHECK_NONE;
+                const bool unfinished = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY &&
+                                        parser->tree.parents[body] >= reader->fragment_end;
+                if (prefix && unfinished && address && target == BUSTER_CHECK_NONE && operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER)
+                {
+                    // &&name implicitly declares a function-scoped label before its definition. Its canonical first
+                    // reference is enough to type/fold this diagnostic-only graph; a definition is required only at
+                    // function completion. These reference identities never reach an accepted or emitted unit.
+                    uint64_t slot = ((uint64_t)parser->tokens.names[operand] * UINT64_C(11400714819323198485) + body) & (capacity - 1);
+                    while (labels[slot] != 0)
+                    {
+                        slot = (slot + 1) & (capacity - 1);
+                    }
+                    labels[slot] = token + 1;
+                    target = token;
+                }
                 if (target != BUSTER_CHECK_NONE)
                 {
                     reader->output->label_targets[token] = target;
                     reader->output->label_address_count += address;
-                    if (!address && !check_input_region_transfer(reader, token, target))
+                    if (!address && (!prefix || !unfinished) && !check_input_region_transfer(reader, token, target))
                     {
                         check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                     }
                 }
-                const bool unfinished = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY &&
-                                        parser->tree.parents[body] >= reader->fragment_end;
                 if (target == BUSTER_CHECK_NONE && !unfinished)
                 {
                     check_input_report(reader, address && operand < count ? operand : token, CHECK_INPUT_UNDECLARED);
@@ -398,4 +422,17 @@ static void check_input_controls(CheckInputReader* reader)
         }
     }
     arena_pop_to(reader->scratch, mark);
+}
+
+static void check_input_controls(CheckInputReader* reader)
+{
+    check_input_controls_mode(reader, BUSTER_CHECK_NONE);
+}
+
+static __attribute__((noinline)) void check_input_controls_prefix(CheckInputReader* reader, uint32_t before)
+{
+    const uint32_t fragment_end = reader->fragment_end;
+    reader->fragment_end = before < fragment_end ? before : fragment_end;
+    check_input_controls_mode(reader, before);
+    reader->fragment_end = fragment_end;
 }

@@ -151,6 +151,83 @@ applies after the base completed it, is refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
+What this compiler's own `main.c` needed (#129) the checker takes as clang 23
+does, each rule checked against clang's answers on probes of it:
+
+- **Loop hints** (`c_check_loop_input.c`): `#pragma clang loop` with its
+  eleven options, and `#pragma unroll`, `nounroll`, `unroll_and_jam`,
+  `nounroll_and_jam` and `GCC unroll`, as hints of the same categories, read in
+  clang's three steps. Its pragma handler lexes the options' names and their
+  arguments in parentheses: an unknown name, a missing `(` and an unclosed
+  argument are errors, and a token after the options that isn't another one's
+  name drops the pragma, with a warning (`unroll_count(4))`), so that nothing
+  in it is placed or checked. Then each argument: a state takes its own words
+  (`licm` only `disable`, `vectorize_predicate` `assume_safety` too), and a
+  count must be a positive integer constant that fits an `int`
+  (`vectorize_width` also `fixed` or `scalable`, alone or after the count).
+  What follows the word or the constant expression clang reads is ignored,
+  with a warning (`vectorize(enable x)`, `vectorize_width(scalable, 4)`); an
+  empty argument is an error, and so is one no expression starts with
+  (`unroll_count(;)`, `unroll return`). Last, no hint may come twice in one
+  category, across the pragmas before one loop too, nor a count beside a state
+  that rules it out (`unroll`'s every state, the others' `disable`), and a
+  `for`, `while` or `do`-`while` loop must follow, in a function. Errors are
+  reported on the pragma's line, but a misplaced one's at the statement after
+  it, as clang reports them. `GCC unroll` is `unroll` (#480's review), whose
+  count may be left out, in parentheses or the rest of the line, as clang's
+  `ParseLoopHintValue` reads it; a pragma clang drops with a warning
+  (`nounroll 4`, `unroll (4) x`) is no hint. A count here is an integer
+  literal, alone or before a token no expression goes on with (`unroll 4)`,
+  `unroll_count(4, x)`, as clang reads them): another constant expression
+  (`4 + 4`, `-1`, an enumerator) is refused as unsupported, not guessed. In a
+  function, clang checks a count before it reads the next option or pragma,
+  and places the hints and checks them against each other only after the
+  statement they precede, so the first error is the count's when it isn't a
+  valid one (`int N`, `4 / 0`, an enumerator of 0), and a later pragma's or
+  the place's only when it is (#480's fourth review): such a count leaves the
+  loop's pragmas unsupported, including when a state or count of its category
+  shares its pragma. At file scope, where clang reads no count, the pragma is
+  an error. Placement, duplicate and incompatible hints wait for the whole
+  annotated statement (#503): its exclusive end is the reader's barrier and
+  the ordering position of its report, so the diagnostic graph includes the
+  statement's type errors too. The printed source is separate: conflicts at
+  the later pragma's `loop` or hint name, placement at the statement's first
+  token, with clang's directive names and messages. Nested statements finishing
+  together report the inner hints first. The existing postorder subtree ends
+  supply the boundary; the pragma reader follows parent links to the statement
+  root without scanning its body. Only a rejected unit retains one cold
+  `CheckInput.loop_diagnostic` record; successful loops retain no hint metadata.
+  Dropped pragmas create neither a placement error nor a barrier. Counts not
+  evaluated here remain unsupported rather than guessing which later error
+  clang would report. At the same completion position, an error from the next
+  pragma's handler precedes the current hints (the parser lexes that lookahead
+  before Sema); an error parsing that next pragma's argument follows them.
+  The rejected prefix still runs the scalar/vector control walk: duplicate
+  labels and completed switch constraints inside the statement precede the
+  hint. It collects the function-scoped names of forward labels from the tree,
+  while deferring undefined-label and jump-scope obligations until function
+  completion. Unfinished label references have canonical diagnostic-only
+  identities for typing `&&name`; these can never be published or emitted.
+  The ordinary control walk is specialized without the prefix checks.
+  Tier 0 has no loop transformation for the hints to steer.
+- **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
+  or a compound statement's start. Its state changes nothing, since nothing
+  here contracts `a * b + c` into a fused operation.
+- **`no_builtin`**, on a function's definition only: on another declaration of
+  a function it is an error, and on anything else it is ignored, as clang has
+  it.
+- **`unsigned _BitInt(1)`:** the declaration's specifiers read a `_BitInt`'s
+  width alone, so that their own `unsigned` decides its signedness. A typedef
+  of an unsigned `_BitInt` stays unsigned where it is used, which main didn't
+  have (`U8` of `typedef unsigned _BitInt(8) U8` was signed).
+- **An array of unknown size with struct elements:** the reader infers its size
+  before expressions have types, so whether an element initializes a whole
+  struct, or starts brace elision, comes from the tree: the element's root's
+  type, from an identifier's declaration, a compound literal's type, a `?:`'s
+  third operand, a parenthesized expression or a call of a function by its name.
+  It came from the last typed token in the element, and so a compound literal
+  with a member's value, `(struct L){ .target = n }`, read as `n`'s type.
+
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
 records declare/use/restore events as it elaborates, and each use's event
@@ -836,6 +913,45 @@ or with `--scalar` and for a unit whose runs can't say, by the expansion
 history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
 levels" has both.
 Floating results are compared field by field, never by `long double` padding.
+
+Packed-member addresses warn by default (`-Waddress-of-packed-member`, #507).
+`c_check_packed_input.c` retains sparse source witnesses even in `sizeof` and
+`typeof`: a direct chain of members must start at a declaration, contain a
+packed record or field, and have either an insufficient enclosing alignment
+or an offset incompatible with the final member's type. An explicitly aligned
+object can strengthen a direct `.` access. `#pragma pack` alone does not trigger
+this warning, nor do array decay, an address of an array element, or the complex
+bases Clang currently excludes (a call, subscript or explicit dereference).
+Anonymous members participate in both layout and the choice of packed culprit.
+The reader counts actual layout witnesses before reserving their retained
+storage. It bounds chain scratch by the largest candidate expression, and
+builds conversion context only when a witness exists. An unused packed type
+plus ordinary local addresses needs no diagnostic records or scratch.
+The first anonymous diagnostic builds a temporary tag-to-source/context map;
+later addresses reuse it, so formatting many anonymous locals stays linear in
+the source size plus the emitted names.
+
+`c_check_packed_diagnostic.c` cancels a pending warning when a source conversion
+permits the culprit's reduced alignment, including integer and incomplete-pointer
+casts. It follows conditional arms and a comma expression's right operand in
+their implicit consuming context. Generic/choose selections transparently use
+the chosen operand. A bounded source interval scan preserves pending warnings
+inside unevaluated and unchosen operands, where Clang does not perform its
+implicit-conversion analysis. An explicit cast cancels only a directly
+addressed member; its target does not flow into conditional/comma operands.
+A cast to `void` does not cancel it. Builtin lowering
+conversions are distinguished from source conversions: `__builtin_assume_aligned`
+retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
+can cancel it. The existing diagnostic pragma history controls suppression and
+promotion, and `-w` silences the diagnostic. Source records remain ordered and
+the driver consumes them sparsely without widening its dense warning columns.
+
+The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
+`llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation
+or fixtures were imported. `test-checker-driver` runs the original probes through
+both checker schedules and, with `--executable`, both production command routes;
+it compares warning decisions, complete messages and presumed line/column pairs
+with Clang, and covers guarded classifier/interval tails and allocation failure.
 
 ## Corpus comparison and semantic mutations
 
