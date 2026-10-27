@@ -366,7 +366,12 @@ designs and the compilers already built this way.
   any other until it was split into the types, checker and checker builtins
   units. A test runner that calls each section once (`run_checker_tests`)
   marks the sections `noinline`, which keeps clang from inlining them all into
-  one function that its optimizer takes superlinear time over.
+  one function that its optimizer takes superlinear time over. The checker's
+  own sources (not its tests or the builtins' actions) are included between
+  `#pragma clang section text = ".text.buster_checker"` and its reset, a
+  section that starts on a page, so that code compiled before them doesn't
+  move the driver's hot loops in the instruction caches (#502,
+  `docs/profiling.md`'s "Placement"): a new one goes there too.
 - `build.sh` invokes Clang and produces **only** `build/compiler`, using
   `-march=native`, so the machine executing the build determines the host ISA.
   The benchmark is linked into this executable rather than built separately.
