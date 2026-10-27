@@ -77,6 +77,14 @@
 #define BUSTER_X86_TEMPLATE_ENTRY BUSTER_ELSEWHERE
 #endif
 
+// Keep description visibility/locality in C checking, assembly and backend consumers. Other main units share the
+// immutable X86 catalogue; standalone inclusions still define static descriptions. Mutable encoder state stays local.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
+#define BUSTER_X86_FORM_DATA __attribute__((visibility("hidden")))
+#elif !(BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER))
+#define BUSTER_X86_FORM_DATA_ELSEWHERE
+#endif
+
 // The ISA requirement tables are immutable and need no initialization. Share their frontend copy without sharing
 // encoder storage or adding calls/loads to the local table-building kernels. Standalone inclusions stay static.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)

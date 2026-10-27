@@ -4895,8 +4895,15 @@ struct X86FormDescription
     { mnemonic, opcode, prefixes, opcode_bytes, BUSTER_X86_ENCODING_##encoding, immediate, 0, w, BUSTER_X86_OPERAND_##reg, \
       BUSTER_X86_OPERAND_##rm, operand_bytes, X86_SYNTAX_##syntax, BUSTER_X86_FAMILY_##family, length, BUSTER_X86_OPERAND_##vvvv, \
       BUSTER_X86_EVEX_##evex, disp8_scale },
-static const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_X86_FORM_DESCRIPTION,
+#ifdef BUSTER_X86_FORM_DATA_ELSEWHERE
+extern const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] __attribute__((visibility("hidden")));
+#else
+#ifndef BUSTER_X86_FORM_DATA
+#define BUSTER_X86_FORM_DATA static
+#endif
+BUSTER_X86_FORM_DATA const X86FormDescription x86_form_descriptions[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_X86_FORM_DESCRIPTION,
                                                                                             BUSTER_X86_VECTOR_FORM_DESCRIPTION) };
+#endif
 #undef BUSTER_X86_VECTOR_FORM_DESCRIPTION
 #undef BUSTER_X86_FORM_DESCRIPTION
 

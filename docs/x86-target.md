@@ -95,6 +95,11 @@ loops are unchanged.
 Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
 home. The caller supplies its immutable form descriptions and keeps its own
 template storage and readiness flags. Descriptions and output must be disjoint.
+DRIVER, ASSEMBLER, BACKEND and CHECKER retain static descriptions, including
+initializer visibility and the physical copy used by the C source pipeline.
+Other main units share X86's hidden immutable catalogue; their template storage,
+readiness and legacy properties remain local. Standalone units retain static
+catalogues. Sharing introduces no initialization or allocation.
 The constructor accepts only default 64-bit, address32 and APX modes and reads no legacy-mode state; legacy properties
 and initialization stay local. Standalone inclusions keep static descriptions
 and construction. Address32 also accepts null descriptions to select the home's
