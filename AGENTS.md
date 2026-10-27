@@ -1053,7 +1053,8 @@ designs and the compilers already built this way.
   both; `./build/compiler test-parallel` runs them); "The parallel runner"
   below describes both.
 - `src/buster/compiler/oracle_cache.c` keeps the results of the clang runs
-  that tests compare with between runs, in the cache directory (#542):
+  that tests compare with between runs, with what each read, in the cache
+  directory (#542):
   `BUSTER_ORACLE_CACHE=use` takes a kept result rather than run clang again,
   and `check` runs every one and fails on a kept result that differs.
   `oracle_cache_test.c` holds its tests (`./build/compiler test-oracle-cache`);
@@ -1661,9 +1662,14 @@ test step runs its tests too.
 ## The oracle cache
 
 Most of the 9700X job's test step is clang and gcc processes that tests run as
-oracles, on inputs that change little from one run to the next (#465, #542).
-`oracle_cache.c` keeps their results between runs: an entry per run, a file
-in `oracle/` under the cache directory (the runtime snapshot's:
+oracles, on inputs that change little from one run to the next (#465, #542):
+on the run #542 measured, 12,599 processes took 204.8 s of the step's 401.5 s
+of CPU, 175.8 s of them clang's. `oracle_cache.c` keeps their results between
+runs. A test runs a tool through it as an `OracleRun` (`oracle_run_start` and
+`oracle_run_finish`, or `oracle_run`): the tool, its arguments, environment,
+standard input and working directory, and the files it writes. Its result,
+its wait status, standard output and errors and those files' bytes, is kept
+as an entry in `oracle/` under the cache directory (the runtime snapshot's:
 `$XDG_CACHE_HOME/buster` or `$HOME/.cache/buster`), named by its key, which is
 SHA-256 of:
 
@@ -1673,50 +1679,99 @@ SHA-256 of:
   (pacman's, dpkg's or rpm's), which any package's update changes, so that a
   new clang, its libraries or its headers make new keys; and the CPU's model
   and flags, which `-march=native` reads;
-- its arguments, exactly; the environment variables that change a compiler's
-  result (`oracle_environment_names`) with their values; and the bytes of its
-  standard input and of any other file its caller names.
+- its arguments, its working directory, the names of the files it writes and
+  the environment variables that change a compiler's result
+  (`oracle_environment_names`) with their values, each with its roots made
+  alike (below); and the bytes of its standard input.
 
-A run that reads files its key doesn't name (headers) isn't for the cache
-until its key names them. An entry holds the exit status and the standard
-output, written into a file of its own and renamed over its name, so that a
-reader sees a whole entry or none whatever runs at once. `BUSTER_ORACLE_CACHE`
-picks the mode: `use` takes an entry rather than run the tool and writes an
-entry for each run; `check` runs every one, writes it, and reports an entry
-that holds anything else as stale, which fails its test; anything else, or
-unset, keeps nothing (local runs). The 9700X job's test step uses `use`, but
-on the daily and dispatched runs, which use `check` and then remove the
-entries no test has written for two days. An entry is only as right as the
-run that wrote it: the daily check finds one a pull request's run left wrong.
+A compiler's run of one source (`OracleRun.dependencies`) also has `-MD -MF
+FILE`, which its key doesn't, and its entry lists what it read: each file its
+dependency file names (its source, the headers, `#embed`'s resources and what
+`__has_include` found, which clang 23 lists) with SHA-256 of its bytes and of
+which of them is the same file (a hard link, which `#pragma once` takes once),
+and of their modification times where one of them has `__TIMESTAMP__`; and the
+names in each directory under a root that its arguments name, as the run found
+them, so that a file added where it looked for one and found none runs it
+again. An entry is taken only if all of these are as they were. A run isn't
+kept whose dependency file can't be read (a compiler writes none when an
+`#include` fails), that has `-M` options of its own, whose files or input have
+`__DATE__` or `__TIME__` without `SOURCE_DATE_EPOCH`, or that has more than 8
+roots.
 
-The predefines' tests' clang runs go through it (`c_predefines_test.c`: the
-option sets' `clang -dM -E` and the generator's `-S -emit-llvm`): each reads
-its input on its standard input, so that its command and its output don't
-name the test's directory, and they run at most `test_process_cpus()` at
-once.
+The roots: a test makes its files in directories of `mkdtemp`'s under
+`$TMPDIR` (or `/tmp`), whose names differ from one run to the next. A root is
+such a name in a run's strings, `$TMPDIR/NAME`, NAME's last 6 characters (or
+the 6 before its last `.`) letters and digits, as `mkdtemp`'s random ones are.
+A key has a placeholder for each root's 6 characters, by the root's place
+among the run's; an entry holds the roots it was made with, which a run that
+takes it replaces with its own, as long, in the result (an object's bytes as
+much as a text's) and in the names of what it read.
 
-`./build/compiler test-oracle-cache` (about 0.3 s) checks it, in a directory
-of its own under `$TMPDIR` (or `/tmp`):
+An entry is written into a file of its own and renamed over its name, so that
+a reader sees a whole entry or none whatever runs at once.
+`BUSTER_ORACLE_CACHE` picks the mode: `use` takes an entry rather than run the
+tool and writes an entry for each run; `check` runs every one and writes it,
+and where an entry with the same inputs holds another result reports it as
+stale, which fails the run; anything else, or unset, keeps nothing (local
+runs). The 9700X job's test step uses `use`, but on the daily and dispatched
+runs, which use `check` and then remove the entries no test has written for
+two days. An entry is only as right as the run that wrote it: the daily check
+finds one a pull request's run left wrong. The counts of what runs did (taken,
+run, stale, not kept) are in shared memory, which the parts a test forks after
+it sets up the cache add to, and a test prints them at its end
+(`oracle_cache_report`).
+
+Its users:
+
+- the predefines' tests (`c_predefines_test.c`): the option sets' `clang -dM
+  -E` and the generator's `-S -emit-llvm`, each reading its input on its
+  standard input, at most `test_process_cpus()` at once;
+- the preprocessor's tests' `clang -E` (`pp_test_clang_process`): the cases,
+  the header, keyword and feature sets, and the files given to it;
+- `parse_test_clang`, the parser's and the checker's `clang -fsyntax-only` of
+  their snippets and fixtures: with the cache on, a file per process, as many
+  at once as its batches have, each file's result the one a batch gives it.
+
+`./build/compiler test-oracle-cache` (about 0.5 s) checks it with sh and clang
+as the tools, in a directory of its own under `$TMPDIR` (or `/tmp`) and two of
+one template beside it:
 
 - SHA-256 against FIPS 180-4's examples, and every length to 300 bytes whole
   and in random pieces;
-- keys: the same parts give the same key, and each part changes it (the
-  purpose, an argument's byte, where the arguments split, a variable's value,
-  a variable set to nothing against one that isn't set, an input's byte, the
-  tool's file), but a variable no compiler reads;
-- entries read back as written (empty, with NUL bytes, 3 MB, five statuses),
-  and a missing key, another magic, key or length, an entry cut short or a byte
-  longer not read; no file left beside the entries;
-- the modes: off keeps and takes nothing and makes no directory, and so does a
-  name that is no mode; `use` takes what it kept; `check` takes nothing, finds
-  the same result current and another output or status stale, which it
-  writes;
-- 8 processes writing the same 64 entries at once, each whole after;
+- roots: a directory's, an option's and a file's, names that aren't roots, two
+  in order, more than 8, a root followed by a name's character (not it), two
+  replaced by each other in one pass, and keys alike only where the random
+  characters differ;
+- runs: a run's status, output, errors and written file (NUL bytes among its
+  own), taken by the same run and by one in the other directory, naming that
+  one's directory; each part of a key making a new one (the input's bytes, an
+  argument's byte, where the arguments split, a variable's value, one set to
+  nothing against one not set, the purpose, the tool's path and its file's
+  times), and `HOME` not; a tool not on `PATH`; a file the run didn't write,
+  removed when its entry is taken;
+- dependencies: a compile taken in its directory and in the other, and run
+  again after a header changes, a file is added beside it, or `#embed`'s
+  resource or what `__has_include` found changes; errors naming absolute
+  paths, taken with the other directory's; a missing `#include` and `-M`
+  options, not kept;
+- what a run reads besides bytes: a hard link replaced by a copy of its bytes,
+  `__TIMESTAMP__`'s files' times, and `__DATE__` without `SOURCE_DATE_EPOCH`
+  (not kept) and with it (kept);
+- check mode: an entry made stale fails its run and is written again (the test
+  prints that it makes one on purpose), and one whose run read other bytes
+  isn't stale;
+- damaged entries: another magic, key, body length, root or dependency count,
+  cut short, cut inside its header or a byte longer, each run again and
+  written whole;
+- the modes: off, a name that is no mode and no directory keep nothing and
+  make no directory;
+- 8 processes running the same 4 runs 16 times each, whose counts add up in
+  the parent's and whose entries are whole after, with nothing beside them;
 - the process's cache, from `BUSTER_ORACLE_CACHE` and `XDG_CACHE_HOME`, its
   directory made private three levels deep.
 
 The cache is test tooling outside the compile path and has no vector path: a
-run hashes a few kilobytes. The 9700X job's test step runs its tests.
+run hashes what it read. The 9700X job's test step runs its tests.
 
 ## x86-64 disassembler
 

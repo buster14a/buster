@@ -649,14 +649,37 @@ static bool pp_test_read_output(FILE* stream, char** text, size_t* length)
     return result;
 }
 
+// This process's environment without CPATH and C_INCLUDE_PATH, which clang reads and the preprocessor doesn't: a
+// calloc'd array of its strings, or null.
+static char** pp_test_clang_environment(void)
+{
+    uint32_t variables = 0;
+    while (environ[variables] != 0)
+    {
+        variables += 1;
+    }
+    char** result = calloc((size_t)variables + 1, sizeof(char*));
+    uint32_t kept = 0;
+    for (uint32_t i = 0; result != 0 && i < variables; i += 1)
+    {
+        if (strncmp(environ[i], "CPATH=", 6) != 0 && strncmp(environ[i], "C_INCLUDE_PATH=", 15) != 0)
+        {
+            result[kept] = environ[i];
+            kept += 1;
+        }
+    }
+    return result;
+}
+
+// `executable ARGUMENTS -E [-dM -x c] PATH`, through the oracle cache (oracle_cache.c, #542): its output and
+// diagnostics in memory, bounded, and whether clang accepted the input, rejected it, or couldn't run reliably.
 static PPClangOutput pp_test_clang_process(const char* executable, char** arguments, int argument_count, const char* path, bool macros)
 {
     PPClangOutput result = { 0 };
-    FILE* output = tmpfile();
-    FILE* diagnostics = tmpfile();
     char** argv = calloc((size_t)argument_count + 9, sizeof(char*));
-    bool ready = output != 0 && diagnostics != 0 && argv != 0;
-    pid_t child = -1;
+    char** environment = pp_test_clang_environment();
+    bool ready = argv != 0 && environment != 0;
+    int status = 0;
     if (ready)
     {
         int n = 0;
@@ -673,53 +696,34 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
             argv[n++] = "c";
         }
         argv[n++] = (char*)path;
-        child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            if (dup2(fileno(output), STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            execvp(executable, argv);
-            perror(executable);
-            _exit(127);
-        }
-        int status = 0;
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        size_t diagnostic_length = 0;
-        ready = waited == child && child > 0 && pp_test_read_output(output, &result.text, &result.length) &&
-                pp_test_read_output(diagnostics, &result.diagnostics, &diagnostic_length);
-        // Exit 1 alone does not establish an input rejection: a driver can also report a failed frontend or I/O.
-        const char* message = result.diagnostics != 0 ? result.diagnostics : "";
-        const bool rejected = strstr(message, "error:") != 0 && strstr(message, "clang: error:") == 0 &&
-                              strstr(message, "unable to execute command") == 0 && strstr(message, "PLEASE submit a bug report") == 0 &&
-                              strstr(message, "LLVM ERROR") == 0 && strstr(message, "No space left on device") == 0 &&
-                              strstr(message, "Input/output error") == 0 && strstr(message, "Cannot allocate memory") == 0;
-        if (ready && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || (WEXITSTATUS(status) == 1 && rejected)))
-        {
-            result.status = WEXITSTATUS(status) == 0 ? PP_CLANG_ACCEPTED : PP_CLANG_REJECTED;
-        }
-        else
-        {
-            fprintf(stderr, "%s: Clang oracle could not run reliably (wait status %d)\n", path, status);
-        }
+        argv[n] = 0;
+        OracleRun run = {
+            .purpose = "preprocessor: clang -E",
+            .arguments = argv,
+            .environment = environment,
+            .dependencies = true,
+        };
+        ready = oracle_run(&run) && run.output_length < BUSTER_PP_TEST_MAX_OUTPUT && run.errors_length < BUSTER_PP_TEST_MAX_OUTPUT;
+        status = run.status;
+        result.text = run.output;
+        result.length = run.output_length;
+        result.diagnostics = run.errors;
     }
-    if (output != 0)
+    // Exit 1 alone does not establish an input rejection: a driver can also report a failed frontend or I/O.
+    const char* message = result.diagnostics != 0 ? result.diagnostics : "";
+    const bool rejected = strstr(message, "error:") != 0 && strstr(message, "clang: error:") == 0 && strstr(message, "unable to execute command") == 0 &&
+                          strstr(message, "PLEASE submit a bug report") == 0 && strstr(message, "LLVM ERROR") == 0 && strstr(message, "No space left on device") == 0 &&
+                          strstr(message, "Input/output error") == 0 && strstr(message, "Cannot allocate memory") == 0;
+    if (ready && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || (WEXITSTATUS(status) == 1 && rejected)))
     {
-        fclose(output);
+        result.status = WEXITSTATUS(status) == 0 ? PP_CLANG_ACCEPTED : PP_CLANG_REJECTED;
     }
-    if (diagnostics != 0)
+    else
     {
-        fclose(diagnostics);
+        fprintf(stderr, "%s: Clang oracle could not run reliably (wait status %d)\n", path, status);
     }
     free(argv);
+    free(environment);
     return result;
 }
 
@@ -7162,6 +7166,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
     const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    // The oracle cache, set up before the parts fork, so that their counts reach its report.
+    OracleCache* oracle = oracle_cache();
     bool passed_all = created;
     if (passed_all && generate_targets)
     {
@@ -7255,6 +7261,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
                (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
     }
+    oracle_cache_report(oracle, "test-preprocessor");
     if (valid && print_case)
     {
         passed_all = pp_fuzz_print_case(&fuzz, printed_case);

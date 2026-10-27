@@ -1,18 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-oracle-cache: the oracle cache's checks (oracle_cache.c), in a directory of their own under $TMPDIR (or /tmp):
+// test-oracle-cache: the oracle cache's checks (oracle_cache.c), in a directory of their own under $TMPDIR (or /tmp)
+// and two more of one template beside it, with sh and clang as the tools:
 //   - SHA-256: FIPS 180-4's examples (the empty message, "abc", the 448-bit message, a million a's), and every length
 //     from 0 to 300 bytes hashed whole and in random pieces, which must agree;
-//   - keys: each part changes the key (the purpose, an argument's byte, where the arguments split, a variable's value,
-//     a variable set to nothing against one that isn't set, an input's byte, the tool's file), and the same parts give
-//     the same key;
-//   - entries: what is written is read back (an empty output, one with NUL bytes, a large one, each status); a missing
-//     key, an entry with a changed magic, key or length, cut short or one byte longer, isn't read; and no file is left
-//     beside the entries;
-//   - modes: off keeps and takes nothing; `use` takes what it kept; `check` takes nothing, and keeping a result unlike
-//     its entry's is stale and writes the new result; a mode that names no mode is off;
-//   - writers at once: 8 processes writing the same 64 keys, each key's entry readable whole after;
+//   - roots: a directory's, an option's and a file's (its random characters before its suffix), names that aren't
+//     roots, two in order, more than BUSTER_ORACLE_ROOTS, a root followed by a name's character (not it), two roots
+//     replaced by each other in one pass, and keys that are alike only where the random characters differ;
+//   - runs: a run's status, output, errors and written file, taken by the same run again and by one in the other
+//     directory, whose output and file (NUL bytes among them) name its own directory; each part of a key (the input's
+//     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
+//     isn't set, the purpose, the tool's path and its file's times) making a new one, and HOME not; a tool not on
+//     PATH; a file the run didn't write removed when it is taken;
+//   - dependencies (clang -fsyntax-only): taken in the same and the other directory, again after a header changes,
+//     a file is added to the directory, #embed's resource or what __has_include found changes; errors naming
+//     absolute paths, taken with the other directory's; a missing #include and -M options, not kept;
+//   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; __TIMESTAMP__'s files'
+//     times; __DATE__ without SOURCE_DATE_EPOCH, not kept, and with it, kept;
+//   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
+//     whose run read other bytes isn't stale;
+//   - damaged entries: a changed magic, key, body length, root or dependency count, one cut short, cut inside its
+//     header or one byte longer, run again and written whole;
+//   - modes: off, a mode that names none, and no directory keep nothing;
+//   - writers at once: 8 processes running the same 4 runs 16 times each, whose counts add up in the parent's and
+//     whose entries are whole after, with no file left beside them;
 //   - the process's cache: BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, a directory made private, three levels deep.
 // It prints its checks and failures and exits with status 1 if any fail.
 
@@ -21,6 +33,7 @@
 
 #include <dirent.h>
 #include <stddef.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 
 typedef struct OracleTest OracleTest;
@@ -28,6 +41,9 @@ struct OracleTest
 {
     uint32_t checks;
     uint32_t failures;
+    // The test's own directory, and two of one template beside it, each a root.
+    char base[BUSTER_ORACLE_PATH_BYTES];
+    char runs[2][BUSTER_ORACLE_PATH_BYTES];
 };
 
 static void oracle_test_expect(OracleTest* test, bool condition, const char* what)
@@ -63,6 +79,7 @@ static bool oracle_test_same(OracleKey a, OracleKey b)
     return memcmp(a.bytes, b.bytes, sizeof(a.bytes)) == 0;
 }
 
+// SplitMix64 (public domain).
 static uint64_t oracle_test_random(uint64_t* state)
 {
     *state += 0x9e3779b97f4a7c15ull;
@@ -75,7 +92,7 @@ static uint64_t oracle_test_random(uint64_t* state)
 static void oracle_test_sha(OracleTest* test)
 {
     oracle_test_expect(test, oracle_test_hex(oracle_test_sha256("", 0), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"), "SHA-256 of the empty message");
-    oracle_test_expect(test, oracle_test_hex(oracle_test_sha256("abc", 3), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256 of abc");
+    oracle_test_expect(test, oracle_test_hex(oracle_test_sha256("abc", 3), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"), "SHA-256 of \"abc\"");
     static const char two_blocks[] = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
     oracle_test_expect(test, oracle_test_hex(oracle_test_sha256(two_blocks, sizeof(two_blocks) - 1), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"),
                        "SHA-256 of the 448-bit message");
@@ -85,124 +102,160 @@ static void oracle_test_sha(OracleTest* test)
         memset(million, 'a', 1000000);
         oracle_test_expect(test, oracle_test_hex(oracle_test_sha256(million, 1000000), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"),
                            "SHA-256 of a million a's");
-        free(million);
     }
-    // Every length whole and in random pieces.
-    uint8_t bytes[300];
+    free(million);
     uint64_t state = 542;
-    for (uint32_t i = 0; i < sizeof(bytes); i += 1)
-    {
-        bytes[i] = (uint8_t)oracle_test_random(&state);
-    }
-    uint32_t differ = 0;
+    uint8_t bytes[300];
+    bool agree = true;
     for (uint32_t length = 0; length <= sizeof(bytes); length += 1)
     {
-        const OracleKey whole = oracle_test_sha256(bytes, length);
-        OracleHash hash;
-        oracle_sha256_begin(&hash);
+        for (uint32_t i = 0; i < length; i += 1)
+        {
+            bytes[i] = (uint8_t)oracle_test_random(&state);
+        }
+        OracleHash pieces;
+        oracle_sha256_begin(&pieces);
         uint32_t done = 0;
         while (done < length)
         {
-            const uint32_t piece = 1 + (uint32_t)(oracle_test_random(&state) % 70);
-            const uint32_t taken = piece < length - done ? piece : length - done;
-            oracle_hash_raw(&hash, bytes + done, taken);
-            done += taken;
+            const uint32_t piece = 1 + (uint32_t)(oracle_test_random(&state) % 97);
+            const uint32_t take = piece < length - done ? piece : length - done;
+            oracle_hash_raw(&pieces, bytes + done, take);
+            done += take;
         }
-        differ += !oracle_test_same(whole, oracle_hash_end(&hash));
+        agree &= oracle_test_same(oracle_hash_end(&pieces), oracle_test_sha256(bytes, length));
     }
-    oracle_test_expect(test, differ == 0, "SHA-256 of every length to 300, whole and in pieces");
+    oracle_test_expect(test, agree, "SHA-256 of 0 to 300 bytes, whole and in pieces");
 }
 
-// A key of the given parts, as a caller makes one.
-static OracleKey oracle_test_key(const OracleCache* cache, const char* purpose, const char* const* arguments, char* const* environment, const char* input)
+// --- Roots ---
+
+// A key of `text` alone, its roots found in it.
+static OracleKey oracle_test_rooted(const char* text)
 {
+    OracleRoots roots;
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, text);
     OracleHash hash;
-    oracle_hash_begin(&hash, cache, purpose);
-    for (uint32_t i = 0; arguments[i] != 0; i += 1)
-    {
-        oracle_hash_text(&hash, arguments[i]);
-    }
-    oracle_hash_environment(&hash, environment);
-    if (input != 0 && !oracle_hash_file(&hash, input))
-    {
-        oracle_hash_text(&hash, "(unreadable)");
-    }
+    oracle_sha256_begin(&hash);
+    oracle_hash_rooted(&hash, &roots, text);
     return oracle_hash_end(&hash);
 }
 
-static bool oracle_test_write_file(const char* path, const char* text, size_t length)
+static uint32_t oracle_test_root_count(const char* text)
 {
-    FILE* file = fopen(path, "w");
-    const bool result = file != 0 && fwrite(text, 1, length, file) == length;
+    OracleRoots roots;
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, text);
+    return roots.count;
+}
+
+static void oracle_test_roots(OracleTest* test)
+{
+    const char* saved = getenv("TMPDIR");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    setenv("TMPDIR", "/b/", 1);
+    OracleRoots roots;
+    oracle_roots_begin(&roots);
+    oracle_test_expect(test, roots.base_length == 2 && strcmp(roots.base, "/b") == 0, "roots: the temporary directory without its trailing slash");
+    oracle_roots_find(&roots, "/b/x-Ab3d9Z/c.c");
+    oracle_test_expect(test, roots.count == 1 && roots.roots[0].length == 11 && roots.roots[0].random == 5 && memcmp(roots.roots[0].name, "/b/x-Ab3d9Z", 11) == 0,
+                       "roots: a directory's");
+    oracle_roots_find(&roots, "-I/b/x-Ab3d9Z/include");
+    oracle_test_expect(test, roots.count == 1, "roots: the same root in an option");
+    oracle_roots_find(&roots, "/b/case-Ab3d9Z.c");
+    oracle_test_expect(test, roots.count == 2 && roots.roots[1].length == 16 && roots.roots[1].random == 8, "roots: a file's, its random characters before its suffix");
+    static const char* const none[] = { "/b/case.c", "/b/abc", "/b/", "/b", "/bx/y-Ab3d9Z", "/b/y-Ab3d9!", "/b/y-Ab3_9Z", "b/y-Ab3d9Z", "" };
+    bool found_none = true;
+    for (uint32_t i = 0; i < sizeof(none) / sizeof(none[0]); i += 1)
+    {
+        found_none &= oracle_test_root_count(none[i]) == 0;
+    }
+    oracle_test_expect(test, found_none, "roots: names that aren't");
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, "/b/p-AAAAAA:/b/q-BBBBBB/f");
+    oracle_test_expect(test, roots.count == 2 && memcmp(roots.roots[0].name, "/b/p-AAAAAA", 11) == 0 && memcmp(roots.roots[1].name, "/b/q-BBBBBB", 11) == 0,
+                       "roots: two, in order");
+    oracle_roots_begin(&roots);
+    char many[16 * (BUSTER_ORACLE_ROOTS + 1)];
+    size_t length = 0;
+    for (uint32_t i = 0; i <= BUSTER_ORACLE_ROOTS; i += 1)
+    {
+        length += (size_t)snprintf(many + length, sizeof(many) - length, "/b/r-AAAAA%c ", 'a' + i);
+    }
+    oracle_roots_find(&roots, many);
+    oracle_test_expect(test, roots.count == BUSTER_ORACLE_ROOTS && roots.overflow, "roots: more than BUSTER_ORACLE_ROOTS");
+    oracle_roots_begin(&roots);
+    oracle_roots_find(&roots, "/b/x-Ab3d9Z");
+    const OracleRoot* root = roots.roots;
+    oracle_test_expect(test, oracle_root_in(root, 1, (const uint8_t*)"/b/x-Ab3d9Zq", 12, 0) == 1 && oracle_root_in(root, 1, (const uint8_t*)"/b/x-Ab3d9Z/", 12, 0) == 0 &&
+                           oracle_root_in(root, 1, (const uint8_t*)"/b/x-Ab3d9Z", 11, 0) == 0,
+                       "roots: one followed by a name's character isn't it");
+    const OracleRoot old[2] = { { .name = "/b/x-AAAAAA", .length = 11 }, { .name = "/b/y-BBBBBB", .length = 11 } };
+    const OracleRoot new[2] = { { .name = "/b/y-BBBBBB", .length = 11 }, { .name = "/b/x-AAAAAA", .length = 11 } };
+    char swapped[] = "/b/x-AAAAAA and /b/y-BBBBBB/f, /b/x-AAAAAAz";
+    oracle_roots_replace(old, new, 2, (uint8_t*)swapped, strlen(swapped));
+    oracle_test_expect(test, strcmp(swapped, "/b/y-BBBBBB and /b/x-AAAAAA/f, /b/x-AAAAAAz") == 0, "roots: two replaced by each other in one pass");
+    oracle_test_expect(test, oracle_test_same(oracle_test_rooted("/b/x-AAAAAA/c.c"), oracle_test_rooted("/b/x-BBBBBB/c.c")) &&
+                           !oracle_test_same(oracle_test_rooted("/b/x-AAAAAA/c.c"), oracle_test_rooted("/b/y-AAAAAA/c.c")) &&
+                           !oracle_test_same(oracle_test_rooted("/b/x-AAAAAA/c.c"), oracle_test_rooted("/b/x-AAAAAA/d.c")) &&
+                           oracle_test_same(oracle_test_rooted("/b/p-AAAAAA /b/q-BBBBBB"), oracle_test_rooted("/b/p-CCCCCC /b/q-DDDDDD")) &&
+                           !oracle_test_same(oracle_test_rooted("/b/p-AAAAAA /b/q-BBBBBB"), oracle_test_rooted("/b/p-AAAAAA /b/p-AAAAAA")),
+                       "roots: keys alike where the random characters differ, and only there");
+    if (kept != 0)
+    {
+        setenv("TMPDIR", kept, 1);
+    }
+    else
+    {
+        unsetenv("TMPDIR");
+    }
+    free(kept);
+}
+
+// --- Files ---
+
+static bool oracle_test_write(const char* path, const void* bytes, size_t length)
+{
+    FILE* file = fopen(path, "wb");
+    bool result = file != 0 && fwrite(bytes, 1, length, file) == length;
     if (file != 0)
     {
-        fclose(file);
+        result = fclose(file) == 0 && result;
     }
     return result;
 }
 
-static void oracle_test_keys(OracleTest* test, const OracleCache* cache, const char* directory)
+static bool oracle_test_write_text(const char* directory, const char* name, const char* text)
 {
-    char input[BUSTER_ORACLE_PATH_BYTES];
-    char tool_directory[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(input, sizeof(input), "%s/input.c", directory);
-    snprintf(tool_directory, sizeof(tool_directory), "%s/bin", directory);
-    oracle_test_expect(test, oracle_test_write_file(input, "int x;\n", 7), "an input written");
-    static const char* const arguments[] = { "-dM", "-E", "-x", "c", "-", 0 };
-    static const char* const changed[] = { "-dM", "-E", "-x", "d", "-", 0 };
-    static const char* const resplit_a[] = { "-dM", "-E", "-xc", "-", 0 };
-    static const char* const resplit_b[] = { "-dM", "-E-x", "c", "-", 0 };
-    char* environment[] = { "PATH=/usr/bin", "SOURCE_DATE_EPOCH=1", "HOME=/somewhere", 0 };
-    char* other_value[] = { "PATH=/usr/bin", "SOURCE_DATE_EPOCH=2", "HOME=/somewhere", 0 };
-    char* empty_value[] = { "PATH=/usr/bin", "SOURCE_DATE_EPOCH=", "HOME=/somewhere", 0 };
-    char* unset[] = { "PATH=/usr/bin", "HOME=/somewhere", 0 };
-    char* other_home[] = { "PATH=/usr/bin", "SOURCE_DATE_EPOCH=1", "HOME=/elsewhere", 0 };
-    const OracleKey key = oracle_test_key(cache, "test", arguments, environment, input);
-    oracle_test_expect(test, oracle_test_same(key, oracle_test_key(cache, "test", arguments, environment, input)), "the same parts give the same key");
-    oracle_test_expect(test, !oracle_test_same(key, oracle_test_key(cache, "other", arguments, environment, input)), "the purpose changes the key");
-    oracle_test_expect(test, !oracle_test_same(key, oracle_test_key(cache, "test", changed, environment, input)), "an argument's byte changes the key");
-    oracle_test_expect(test, !oracle_test_same(oracle_test_key(cache, "test", resplit_a, environment, input), oracle_test_key(cache, "test", resplit_b, environment, input)),
-                       "where the arguments split changes the key");
-    oracle_test_expect(test, !oracle_test_same(key, oracle_test_key(cache, "test", arguments, other_value, input)), "a variable's value changes the key");
-    oracle_test_expect(test, !oracle_test_same(oracle_test_key(cache, "test", arguments, empty_value, input), oracle_test_key(cache, "test", arguments, unset, input)),
-                       "a variable set to nothing isn't one that isn't set");
-    oracle_test_expect(test, oracle_test_same(key, oracle_test_key(cache, "test", arguments, other_home, input)), "a variable no compiler reads doesn't change the key");
-    oracle_test_expect(test, oracle_test_write_file(input, "int y;\n", 7), "the input changed");
-    oracle_test_expect(test, !oracle_test_same(key, oracle_test_key(cache, "test", arguments, environment, input)), "an input's byte changes the key");
-    // The tool: a file of its own on PATH, changed.
-    mkdir(tool_directory, 0700);
-    char tool[BUSTER_ORACLE_PATH_BYTES + 32];
-    snprintf(tool, sizeof(tool), "%s/oracle-test-tool", tool_directory);
-    oracle_test_expect(test, oracle_test_write_file(tool, "#!/bin/sh\n", 10) && chmod(tool, 0700) == 0, "a tool written");
-    const char* path = getenv("PATH");
-    char* saved = path != 0 ? strdup(path) : 0;
-    setenv("PATH", tool_directory, 1);
-    OracleHash hash;
-    oracle_hash_begin(&hash, cache, "tool");
-    const bool found = oracle_hash_tool(&hash, "oracle-test-tool");
-    const OracleKey before = oracle_hash_end(&hash);
-    oracle_test_expect(test, found, "the tool found on PATH");
-    oracle_test_expect(test, oracle_test_write_file(tool, "#!/bin/sh\nexit 0\n", 17), "the tool changed");
-    oracle_hash_begin(&hash, cache, "tool");
-    oracle_hash_tool(&hash, "oracle-test-tool");
-    oracle_test_expect(test, !oracle_test_same(before, oracle_hash_end(&hash)), "the tool's file changes the key");
-    oracle_hash_begin(&hash, cache, "tool");
-    oracle_test_expect(test, !oracle_hash_tool(&hash, "oracle-test-missing"), "a tool that isn't on PATH");
-    if (saved != 0)
-    {
-        setenv("PATH", saved, 1);
-        free(saved);
-    }
-    else
-    {
-        unsetenv("PATH");
-    }
-    unlink(tool);
-    rmdir(tool_directory);
-    unlink(input);
+    char path[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    return oracle_test_write(path, text, strlen(text));
 }
 
-// The files in the cache's directory, and of them those that aren't entries' names (64 hex digits).
+// A file's bytes, malloc's with a NUL after them (null if it can't be read), and their length.
+static char* oracle_test_read(const char* path, uint64_t* length)
+{
+    OracleBuffer buffer = { 0 };
+    const bool read = oracle_buffer_file(&buffer, path);
+    oracle_buffer_put(&buffer, "", 1);
+    const bool result = read && !buffer.failed;
+    *length = result ? buffer.length - 1 : 0;
+    if (!result)
+    {
+        free(buffer.bytes);
+    }
+    return result ? (char*)buffer.bytes : 0;
+}
+
+static void oracle_test_open(OracleTest* test, OracleCache* cache, const char* mode, const char* name)
+{
+    char base[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(base, sizeof(base), "%s/%s", test->base, name);
+    oracle_cache_open(cache, mode, base);
+}
+
+// The files in a cache's directory, and of them those that aren't entries' names (64 hex digits).
 static void oracle_test_count(const OracleCache* cache, uint32_t* files, uint32_t* others)
 {
     *files = 0;
@@ -210,16 +263,15 @@ static void oracle_test_count(const OracleCache* cache, uint32_t* files, uint32_
     DIR* directory = opendir(cache->directory);
     for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
     {
-        if (entry->d_name[0] != '.')
+        const bool own = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
+        bool hex = strlen(entry->d_name) == 2 * BUSTER_ORACLE_KEY_BYTES;
+        for (uint32_t i = 0; hex && i < 2 * BUSTER_ORACLE_KEY_BYTES; i += 1)
         {
-            *files += 1;
-            bool name = strlen(entry->d_name) == 2 * BUSTER_ORACLE_KEY_BYTES;
-            for (uint32_t i = 0; name && i < 2 * BUSTER_ORACLE_KEY_BYTES; i += 1)
-            {
-                name = (entry->d_name[i] >= '0' && entry->d_name[i] <= '9') || (entry->d_name[i] >= 'a' && entry->d_name[i] <= 'f');
-            }
-            *others += !name;
+            const char c = entry->d_name[i];
+            hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
         }
+        *files += !own;
+        *others += !own && !hex;
     }
     if (directory != 0)
     {
@@ -227,163 +279,465 @@ static void oracle_test_count(const OracleCache* cache, uint32_t* files, uint32_
     }
 }
 
-static OracleKey oracle_test_numbered(const OracleCache* cache, uint32_t number)
+// --- Runs ---
+
+// A run of `arguments` through `cache`, with `input` and `environment`, whose result the caller releases: whether it
+// ran (or took its entry).
+static bool oracle_test_go(OracleRun* run, OracleCache* cache, const char* purpose, char* const* arguments, const char* input, char* const* environment)
 {
-    OracleHash hash;
-    oracle_hash_begin(&hash, cache, "numbered");
-    oracle_hash_bytes(&hash, &number, sizeof(number));
-    return oracle_hash_end(&hash);
+    *run = (OracleRun){
+        .cache = cache,
+        .purpose = purpose,
+        .arguments = arguments,
+        .input = input,
+        .environment = environment,
+    };
+    return oracle_run(run);
 }
 
-// Rewrites an entry's file with its byte at `offset` changed, or cut to `length` bytes, or with a byte more.
-static bool oracle_test_damage(const OracleCache* cache, OracleKey key, int64_t offset, int64_t length, bool longer)
+// Whether a run of `arguments` takes an entry.
+static bool oracle_test_takes(OracleCache* cache, const char* purpose, char* const* arguments, const char* input, char* const* environment)
 {
-    char path[BUSTER_ORACLE_PATH_BYTES + 80];
-    oracle_entry_path(cache, key, path, sizeof(path));
-    FILE* file = fopen(path, "r+");
-    bool result = file != 0;
-    if (result && offset >= 0)
-    {
-        result = fseek(file, offset, SEEK_SET) == 0;
-        const int byte = result ? fgetc(file) : EOF;
-        result = byte != EOF && fseek(file, offset, SEEK_SET) == 0 && fputc(byte ^ 0x5a, file) != EOF;
-    }
-    if (result && longer)
-    {
-        result = fseek(file, 0, SEEK_END) == 0 && fputc(0, file) != EOF;
-    }
-    if (file != 0)
-    {
-        fclose(file);
-    }
-    if (result && length >= 0)
-    {
-        result = truncate(path, length) == 0;
-    }
+    OracleRun run;
+    const bool ran = oracle_test_go(&run, cache, purpose, arguments, input, environment);
+    oracle_run_release(&run);
+    return ran && run.taken;
+}
+
+static bool oracle_test_copy(const char* from, const char* to)
+{
+    uint64_t length = 0;
+    char* bytes = oracle_test_read(from, &length);
+    const bool result = bytes != 0 && oracle_test_write(to, bytes, length) && chmod(to, 0755) == 0;
+    free(bytes);
     return result;
 }
 
-static void oracle_test_entries(OracleTest* test, OracleCache* cache)
+// The run's status, output and errors, and its written file's bytes, as `sh -c SCRIPT` in `directory` gives them.
+static bool oracle_test_results(const OracleRun* run, const char* directory, const char* written)
 {
-    static const char with_nul[] = { 'a', 0, 'b', 0, 0, 'c' };
-    const size_t large_length = 3u << 20;
-    char* large = malloc(large_length);
-    uint64_t state = 7;
-    for (size_t i = 0; large != 0 && i < large_length; i += 1)
+    char output[BUSTER_ORACLE_PATH_BYTES + 64];
+    snprintf(output, sizeof(output), "out %s\ninput bytes\n", directory);
+    char file[BUSTER_ORACLE_PATH_BYTES + 64];
+    const int file_length = snprintf(file, sizeof(file), "a%c%s%cb", 0, directory, 0);
+    uint64_t length = 0;
+    char* bytes = oracle_test_read(written, &length);
+    const bool result = WIFEXITED(run->status) && WEXITSTATUS(run->status) == 3 && run->output != 0 && strcmp(run->output, output) == 0 && run->errors != 0 &&
+                        strcmp(run->errors, "err\n") == 0 && bytes != 0 && length == (uint64_t)file_length && memcmp(bytes, file, length) == 0;
+    free(bytes);
+    return result;
+}
+
+static void oracle_test_runs(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "runs");
+    char input[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(input, sizeof(input), "%s/input", test->base);
+    bool ready = oracle_test_write(input, "input bytes\n", 12);
+    static char script[] = "printf 'out %s\\n' \"$1\"; printf 'err\\n' >&2; cat; printf 'a\\000%s\\000b' \"$1\" > \"$1/written\"; exit 3";
+    // The same run, the same run again, and the run in the other directory.
+    static const uint32_t directories[] = { 0, 0, 1 };
+    bool right = ready;
+    for (uint32_t i = 0; i < 3; i += 1)
     {
-        large[i] = (char)oracle_test_random(&state);
+        char* directory = test->runs[directories[i]];
+        char written[BUSTER_ORACLE_PATH_BYTES + 16];
+        snprintf(written, sizeof(written), "%s/written", directory);
+        unlink(written);
+        char* arguments[] = { "sh", "-c", script, "sh", directory, 0 };
+        const char* files[] = { written };
+        OracleRun run = {
+            .cache = &cache,
+            .purpose = "oracle test: sh",
+            .arguments = arguments,
+            .input = input,
+            .files = files,
+            .file_count = 1,
+        };
+        const bool ran = oracle_run(&run);
+        right &= ran && run.taken == (i != 0) && oracle_test_results(&run, directory, written);
+        oracle_run_release(&run);
     }
-    static const int statuses[] = { 0, 1, 2, 128, 255 };
-    uint32_t round_trips = 0;
-    for (uint32_t s = 0; s < sizeof(statuses) / sizeof(statuses[0]); s += 1)
+    oracle_test_expect(test, right, "runs: a run's result taken by the same run and by one in the other directory, naming its own");
+    oracle_test_expect(test, cache.counts->taken == 2 && cache.counts->run == 1, "runs: the counts");
+    // Each part of the key.
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    char tools[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(tools, sizeof(tools), "%s/tools", test->base);
+    snprintf(path, sizeof(path), "PATH=%s", getenv("PATH") != 0 ? getenv("PATH") : "/usr/bin:/bin");
+    char* plain[] = { path, "LANG=C", 0 };
+    char* other_value[] = { path, "LANG=POSIX", 0 };
+    char* empty[] = { path, "LANG=", 0 };
+    char* unset[] = { path, 0 };
+    char* home[] = { path, "LANG=C", "HOME=/somewhere", 0 };
+    char* whole[] = { "sh", "-c", "echo ab", "x", 0 };
+    char* split[] = { "sh", "-c", "echo a", "bx", 0 };
+    char* byte[] = { "sh", "-c", "echo ab ", "x", 0 };
+    const bool first = oracle_test_takes(&cache, "oracle test: parts", whole, input, plain);
+    oracle_test_expect(test, !first && oracle_test_takes(&cache, "oracle test: parts", whole, input, plain), "keys: the same parts, the same key");
+    oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: parts", split, input, plain), "keys: where the arguments split");
+    oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: parts", byte, input, plain), "keys: an argument's byte");
+    oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: other parts", whole, input, plain), "keys: the purpose");
+    oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: parts", whole, input, other_value), "keys: a variable's value");
+    const bool empty_first = !oracle_test_takes(&cache, "oracle test: parts", whole, input, empty);
+    oracle_test_expect(test, empty_first && !oracle_test_takes(&cache, "oracle test: parts", whole, input, unset), "keys: a variable set to nothing, and not set");
+    oracle_test_expect(test, oracle_test_takes(&cache, "oracle test: parts", whole, input, home), "keys: HOME isn't a part");
+    oracle_test_write(input, "input bytez\n", 12);
+    oracle_test_expect(test, !oracle_test_takes(&cache, "oracle test: parts", whole, input, plain), "keys: the input's bytes");
+    // The tool: another sh first on PATH, and that file's times changed.
+    char shell[BUSTER_ORACLE_PATH_BYTES];
+    char copy[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(copy, sizeof(copy), "%s/sh", tools);
+    const bool copied = oracle_find_tool("sh", shell, sizeof(shell)) && mkdir(tools, 0700) == 0 && oracle_test_copy(shell, copy);
+    const char* saved = getenv("PATH");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    char search[2 * BUSTER_ORACLE_PATH_BYTES];
+    snprintf(search, sizeof(search), "%s:%s", tools, kept != 0 ? kept : "/usr/bin:/bin");
+    setenv("PATH", search, 1);
+    const bool moved = copied && !oracle_test_takes(&cache, "oracle test: parts", whole, input, plain);
+    const bool again = oracle_test_takes(&cache, "oracle test: parts", whole, input, plain);
+    const struct timespec times[2] = { { .tv_sec = 1000000000 }, { .tv_sec = 1000000000 } };
+    const bool touched = utimensat(AT_FDCWD, copy, times, 0) == 0 && !oracle_test_takes(&cache, "oracle test: parts", whole, input, plain);
+    setenv("PATH", kept != 0 ? kept : "/usr/bin:/bin", 1);
+    free(kept);
+    oracle_test_expect(test, moved && again && touched, "keys: the tool's path on PATH and its file's times");
+    // A tool that isn't on PATH runs without the cache, and doesn't start.
+    char* missing[] = { "buster-oracle-no-such-tool", 0 };
+    OracleRun run;
+    const uint64_t unkept = cache.counts->unkept;
+    const bool started = oracle_test_go(&run, &cache, "oracle test: parts", missing, 0, 0);
+    oracle_run_release(&run);
+    oracle_test_expect(test, !started && cache.counts->unkept == unkept + 1, "runs: a tool that isn't on PATH");
+    // A file the run didn't write is removed when its entry is taken.
+    char absent[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(absent, sizeof(absent), "%s/absent", test->runs[0]);
+    unlink(absent);
+    char* nothing[] = { "sh", "-c", "true", 0 };
+    const char* files[] = { absent };
+    bool removed = true;
+    for (uint32_t i = 0; i < 2; i += 1)
     {
-        for (uint32_t kind = 0; kind < 4; kind += 1)
-        {
-            const char* output = kind == 0 ? "" : kind == 1 ? "#define X 1\n" : kind == 2 ? with_nul : large;
-            const size_t length = kind == 0 ? 0 : kind == 1 ? 12 : kind == 2 ? sizeof(with_nul) : large_length;
-            if (output != 0)
-            {
-                const OracleKey key = oracle_test_numbered(cache, 100 * s + kind);
-                int status = -1;
-                char* read = 0;
-                size_t read_length = 0;
-                const bool written = oracle_cache_write(cache, key, statuses[s], output, length);
-                const bool same = written && oracle_cache_read(cache, key, &status, &read, &read_length) && status == statuses[s] && read_length == length &&
-                                  memcmp(read, output, length) == 0 && read[length] == 0;
-                round_trips += same;
-                free(read);
-            }
-        }
+        run = (OracleRun){ .cache = &cache, .purpose = "oracle test: sh", .arguments = nothing, .files = files, .file_count = 1 };
+        removed &= oracle_run(&run) && run.taken == (i == 1);
+        oracle_run_release(&run);
+        removed &= i == 1 || oracle_test_write(absent, "junk", 4);
     }
-    oracle_test_expect(test, round_trips == 5 * (large != 0 ? 4 : 3), "entries read back as written");
+    struct stat status;
+    oracle_test_expect(test, removed && lstat(absent, &status) != 0 && errno == ENOENT, "runs: a file the run didn't write, removed when it is taken");
+    uint32_t count = 0;
+    uint32_t others = 0;
+    oracle_test_count(&cache, &count, &others);
+    oracle_test_expect(test, count != 0 && others == 0, "runs: entries alone in the cache's directory");
+    oracle_cache_report(&cache, "test-oracle-cache's runs");
+    oracle_cache_close(&cache);
+    unlink(copy);
+    rmdir(tools);
+}
+
+// --- Dependencies ---
+
+// A run of clang -fsyntax-only with `arguments` after it, in `directory` (null: this process's), its dependencies
+// listed: whether it ran, whether it took its entry, and its status and errors.
+static bool oracle_test_clang(OracleCache* cache, const char* directory, char* const* arguments, bool* taken, int* status, char* errors, size_t capacity)
+{
+    char* argv[16] = { "clang", "-fsyntax-only", "-fno-color-diagnostics" };
+    uint32_t count = 3;
+    for (uint32_t i = 0; arguments[i] != 0 && count + 1 < sizeof(argv) / sizeof(argv[0]); i += 1)
+    {
+        argv[count] = arguments[i];
+        count += 1;
+    }
+    argv[count] = 0;
+    OracleRun run = { .cache = cache, .purpose = "oracle test: clang", .arguments = argv, .directory = directory, .dependencies = true };
+    const bool result = oracle_run(&run);
+    *taken = result && run.taken;
+    *status = run.status;
+    snprintf(errors, capacity, "%s", run.errors != 0 ? run.errors : "");
+    oracle_run_release(&run);
+    return result;
+}
+
+static void oracle_test_dependencies(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "dependencies");
+    bool ready = true;
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        ready &= oracle_test_write_text(test->runs[d], "main.c", "#include \"h.h\"\nint x = X;\n") && oracle_test_write_text(test->runs[d], "h.h", "#define X 1\n");
+        ready &= oracle_test_write_text(test->runs[d], "bad.c", "int y = ;\n");
+        ready &= oracle_test_write_text(test->runs[d], "data.bin", "abc");
+        ready &= oracle_test_write_text(test->runs[d], "embed.c", "#if __has_include(\"h.h\")\n#endif\nconst char d[] = {\n#embed \"data.bin\"\n};\n");
+    }
+    char errors[16384];
+    bool taken = false;
     int status = 0;
-    char* read = 0;
-    size_t length = 0;
-    oracle_test_expect(test, !oracle_cache_read(cache, oracle_test_numbered(cache, 999999), &status, &read, &length), "a missing key isn't read");
-    // Damaged entries: the magic, the key, the length's field, cut short, a byte longer.
-    const OracleKey damaged = oracle_test_numbered(cache, 1);
-    static const struct
+    char* main_source[] = { "main.c", 0 };
+    const bool first = ready && oracle_test_clang(&cache, test->runs[0], main_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    const bool same = oracle_test_clang(&cache, test->runs[0], main_source, &taken, &status, errors, sizeof(errors)) && taken && status == 0;
+    const bool other = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && taken && status == 0;
+    oracle_test_expect(test, first && same && other, "dependencies: a compile taken in its directory and in the other");
+    oracle_test_write_text(test->runs[1], "h.h", "#define X 2\n");
+    const bool changed = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    const bool again = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_expect(test, changed && again, "dependencies: a header that changes");
+    oracle_test_write_text(test->runs[1], "new.h", "\n");
+    const bool added = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_expect(test, added, "dependencies: a file added to the directory");
+    char added_path[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(added_path, sizeof(added_path), "%s/new.h", test->runs[1]);
+    unlink(added_path);
+    char* embed_source[] = { "-std=c23", "embed.c", 0 };
+    const bool embedded = oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0 &&
+                          oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_write_text(test->runs[0], "data.bin", "abd");
+    const bool resource = oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_write_text(test->runs[0], "h.h", "#define X 3\n");
+    const bool probed = oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_expect(test, embedded && resource && probed, "dependencies: #embed's resource and what __has_include found");
+    // Errors naming absolute paths, taken with the other directory's.
+    char bad[2][BUSTER_ORACLE_PATH_BYTES + 16];
+    for (uint32_t d = 0; d < 2; d += 1)
     {
+        snprintf(bad[d], sizeof(bad[d]), "%s/bad.c", test->runs[d]);
+    }
+    bool named = true;
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        char* bad_source[] = { bad[d], 0 };
+        named &= oracle_test_clang(&cache, 0, bad_source, &taken, &status, errors, sizeof(errors)) && taken == (d == 1) && WIFEXITED(status) && WEXITSTATUS(status) == 1 &&
+                 strstr(errors, bad[d]) != 0 && strstr(errors, bad[1 - d]) == 0;
+    }
+    oracle_test_expect(test, named, "dependencies: errors naming the run's paths, taken with the other directory's");
+    // A missing #include writes no dependencies, and -M options can't be added to: neither is kept.
+    oracle_test_write_text(test->runs[0], "missing.c", "#include \"missing.h\"\n");
+    char* missing_source[] = { "missing.c", 0 };
+    char* asked[] = { "-MD", "main.c", 0 };
+    const uint64_t unkept = cache.counts->unkept;
+    bool not_kept = true;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        not_kept &= oracle_test_clang(&cache, test->runs[0], missing_source, &taken, &status, errors, sizeof(errors)) && !taken && status != 0;
+        not_kept &= oracle_test_clang(&cache, test->runs[0], asked, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    }
+    oracle_test_expect(test, not_kept && cache.counts->unkept == unkept + 4, "dependencies: a missing #include and -M options, not kept");
+    oracle_cache_close(&cache);
+}
+
+// What a run reads of its files besides their bytes: which of them are one file (a hard link, which #pragma once takes
+// once), their times where __TIMESTAMP__ reads them, and whether __DATE__ and __TIME__ make it depend on when it runs.
+static void oracle_test_identities(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "identities");
+    const char* directory = test->runs[0];
+    char a[BUSTER_ORACLE_PATH_BYTES + 16];
+    char b[BUSTER_ORACLE_PATH_BYTES + 16];
+    char stamped[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(a, sizeof(a), "%s/a.h", directory);
+    snprintf(b, sizeof(b), "%s/b.h", directory);
+    snprintf(stamped, sizeof(stamped), "%s/stamped.c", directory);
+    unlink(b);
+    bool ready = oracle_test_write_text(directory, "a.h", "#pragma once\nint a;\n") && link(a, b) == 0 &&
+                 oracle_test_write_text(directory, "links.c", "#include \"a.h\"\n#include \"b.h\"\n") &&
+                 oracle_test_write_text(directory, "stamped.c", "const char* stamp = __TIMESTAMP__;\n") &&
+                 oracle_test_write_text(directory, "dated.c", "const char* date = __DATE__;\n");
+    char errors[4096];
+    bool taken = false;
+    int status = 0;
+    char* links[] = { "links.c", 0 };
+    const bool linked = ready && oracle_test_clang(&cache, directory, links, &taken, &status, errors, sizeof(errors)) && !taken && status == 0 &&
+                        oracle_test_clang(&cache, directory, links, &taken, &status, errors, sizeof(errors)) && taken;
+    // The hard link replaced by a copy of the same bytes, which #pragma once doesn't take for the same file.
+    const bool copied = unlink(b) == 0 && oracle_test_write_text(directory, "b.h", "#pragma once\nint a;\n") &&
+                        oracle_test_clang(&cache, directory, links, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_expect(test, linked && copied, "identities: a hard link and a copy of the same bytes are other dependencies");
+    const struct timespec first[2] = { { .tv_sec = 946684800 }, { .tv_sec = 946684800 } };
+    const struct timespec second[2] = { { .tv_sec = 978307200 }, { .tv_sec = 978307200 } };
+    char* stamp[] = { "stamped.c", 0 };
+    const bool timed = utimensat(AT_FDCWD, stamped, first, 0) == 0 && oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && !taken &&
+                       oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && taken && utimensat(AT_FDCWD, stamped, second, 0) == 0 &&
+                       oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_expect(test, timed, "identities: __TIMESTAMP__ makes its files' times part of what the run read");
+    const char* saved = getenv("SOURCE_DATE_EPOCH");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    unsetenv("SOURCE_DATE_EPOCH");
+    char* date[] = { "dated.c", 0 };
+    const uint64_t unkept = cache.counts->unkept;
+    bool dated = true;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        dated &= oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && !taken;
+    }
+    dated &= cache.counts->unkept == unkept + 2;
+    setenv("SOURCE_DATE_EPOCH", "0", 1);
+    dated &= oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && !taken &&
+             oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && taken;
+    if (kept != 0)
+    {
+        setenv("SOURCE_DATE_EPOCH", kept, 1);
+    }
+    else
+    {
+        unsetenv("SOURCE_DATE_EPOCH");
+    }
+    free(kept);
+    oracle_test_expect(test, dated, "identities: __DATE__ without SOURCE_DATE_EPOCH isn't kept, and with it is");
+    oracle_cache_close(&cache);
+}
+
+// --- Check mode ---
+
+static void oracle_test_check(OracleTest* test)
+{
+    OracleCache use;
+    OracleCache check;
+    oracle_test_open(test, &use, "use", "check");
+    oracle_test_open(test, &check, "check", "check");
+    char* value[] = { "sh", "-c", "cat \"$1/value\"", "sh", test->runs[0], 0 };
+    OracleRun run;
+    bool right = oracle_test_write_text(test->runs[0], "value", "a\n");
+    right &= oracle_test_go(&run, &use, "oracle test: check", value, 0, 0) && !run.taken && strcmp(run.output, "a\n") == 0;
+    oracle_run_release(&run);
+    oracle_test_write_text(test->runs[0], "value", "b\n");
+    right &= oracle_test_go(&run, &use, "oracle test: check", value, 0, 0) && run.taken && strcmp(run.output, "a\n") == 0;
+    oracle_run_release(&run);
+    // The stale entry: the run fails, its result is the tool's, and the entry is written again.
+    printf("oracle cache: an entry made stale on purpose, which the next line reports:\n");
+    fflush(stdout);
+    const bool stale = !oracle_test_go(&run, &check, "oracle test: check", value, 0, 0) && !run.taken && run.output != 0 && strcmp(run.output, "b\n") == 0;
+    oracle_run_release(&run);
+    right &= oracle_test_go(&run, &use, "oracle test: check", value, 0, 0) && run.taken && strcmp(run.output, "b\n") == 0;
+    oracle_run_release(&run);
+    right &= oracle_test_go(&run, &check, "oracle test: check", value, 0, 0) && !run.taken;
+    oracle_run_release(&run);
+    oracle_test_expect(test, right && stale && check.counts->stale == 1, "check: a stale entry fails its run and is written again");
+    // An entry whose run read other bytes isn't stale.
+    char* main_source[] = { "main.c", 0 };
+    char errors[4096];
+    bool taken = false;
+    int status = 0;
+    oracle_test_write_text(test->runs[0], "h.h", "#define X 4\n");
+    const bool kept = oracle_test_clang(&use, test->runs[0], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_write_text(test->runs[0], "h.h", "#define X 5\n");
+    const bool current = oracle_test_clang(&check, test->runs[0], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    oracle_test_expect(test, kept && current && check.counts->stale == 1, "check: an entry whose run read other bytes isn't stale");
+    oracle_cache_close(&use);
+    oracle_cache_close(&check);
+}
+
+// --- Damaged entries ---
+
+// Rewrites an entry's file with the u32 at `offset` set to `value`, or cut to `length` bytes, or with a byte more.
+static bool oracle_test_damage(const char* path, int64_t offset, uint32_t value, int64_t length, bool longer)
+{
+    uint64_t size = 0;
+    char* bytes = oracle_test_read(path, &size);
+    bool result = bytes != 0 && (offset < 0 || (uint64_t)offset + sizeof(value) <= size);
+    if (result && offset >= 0)
+    {
+        memcpy(bytes + offset, &value, sizeof(value));
+    }
+    const uint64_t written = length >= 0 ? (uint64_t)length : size;
+    char* more = result && longer ? realloc(bytes, size + 1) : 0;
+    if (more != 0)
+    {
+        bytes = more;
+        bytes[size] = 'x';
+    }
+    result = result && (!longer || more != 0) && oracle_test_write(path, bytes, longer ? size + 1 : written);
+    free(bytes);
+    return result;
+}
+
+static void oracle_test_damaged(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "damaged");
+    char* arguments[] = { "sh", "-c", "printf 'out %s\\n' \"$1\" >&2; printf 'x'", "sh", test->runs[0], 0 };
+    OracleRun run;
+    const bool made = oracle_test_go(&run, &cache, "oracle test: damage", arguments, 0, 0) && !run.taken;
+    char path[BUSTER_ORACLE_PATH_BYTES + 80];
+    oracle_entry_path(&cache, run.key, path, sizeof(path));
+    oracle_run_release(&run);
+    uint32_t key_word = 0;
+    memcpy(&key_word, run.key.bytes + 4, sizeof(key_word));
+    typedef struct OracleTestDamage OracleTestDamage;
+    struct OracleTestDamage
+    {
+        const char* name;
         int64_t offset;
+        uint32_t value;
         int64_t length;
         bool longer;
-        const char* what;
-    } damages[] = {
-        { 0, -1, false, "an entry with another magic isn't read" },
-        { 8, -1, false, "an entry with another key isn't read" },
-        { (int64_t)offsetof(OracleEntryHeader, length), -1, false, "an entry with another length isn't read" },
-        { -1, (int64_t)sizeof(OracleEntryHeader) + 5, false, "an entry cut short isn't read" },
-        { -1, (int64_t)sizeof(OracleEntryHeader) - 1, false, "an entry cut inside its header isn't read" },
-        { -1, -1, true, "an entry a byte longer isn't read" },
     };
-    for (uint32_t d = 0; d < sizeof(damages) / sizeof(damages[0]); d += 1)
+    const OracleTestDamage damages[] = {
+        { "a changed magic", 0, 0x54535543u, -1, false },
+        { "a changed key", (int64_t)offsetof(OracleEntryHeader, key) + 4, key_word ^ 1u, -1, false },
+        { "a changed body length", (int64_t)offsetof(OracleEntryHeader, body), 7, -1, false },
+        { "too many roots", (int64_t)offsetof(OracleEntryHeader, roots), BUSTER_ORACLE_ROOTS + 1, -1, false },
+        { "a dependency count past its records", (int64_t)offsetof(OracleEntryHeader, dependencies), 3, -1, false },
+        { "cut short", -1, 0, -2, false },
+        { "cut inside its header", -1, 0, 10, false },
+        { "a byte longer", -1, 0, -1, true },
+    };
+    for (uint32_t i = 0; made && i < sizeof(damages) / sizeof(damages[0]); i += 1)
     {
-        const bool written = oracle_cache_write(cache, damaged, 0, "#define X 1\n", 12);
-        const bool changed = written && oracle_test_damage(cache, damaged, damages[d].offset, damages[d].length, damages[d].longer);
-        read = 0;
-        oracle_test_expect(test, changed && !oracle_cache_read(cache, damaged, &status, &read, &length), damages[d].what);
-        free(read);
+        uint64_t size = 0;
+        free(oracle_test_read(path, &size));
+        const int64_t length = damages[i].length == -2 ? (int64_t)size - 1 : damages[i].length;
+        const bool damaged = oracle_test_damage(path, damages[i].offset, damages[i].value, length, damages[i].longer);
+        const bool runs = oracle_test_go(&run, &cache, "oracle test: damage", arguments, 0, 0) && !run.taken;
+        oracle_run_release(&run);
+        const bool whole = oracle_test_go(&run, &cache, "oracle test: damage", arguments, 0, 0) && run.taken && strcmp(run.output, "x") == 0;
+        oracle_run_release(&run);
+        char what[128];
+        snprintf(what, sizeof(what), "damaged entries: %s, run again and written whole", damages[i].name);
+        oracle_test_expect(test, damaged && runs && whole, what);
     }
-    uint32_t files;
-    uint32_t others;
-    oracle_test_count(cache, &files, &others);
-    oracle_test_expect(test, files != 0 && others == 0, "no file left beside the entries");
-    free(large);
+    oracle_test_expect(test, made, "damaged entries: an entry to damage");
+    oracle_cache_close(&cache);
 }
 
-static void oracle_test_modes(OracleTest* test, const char* base)
-{
-    OracleCache cache;
-    int status = 0;
-    char* output = 0;
-    size_t length = 0;
-    // Off: nothing taken, kept or made.
-    char off_base[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(off_base, sizeof(off_base), "%s/off", base);
-    oracle_cache_open(&cache, 0, off_base);
-    struct stat status_of;
-    oracle_test_expect(test, !oracle_cache_active(&cache) && stat(off_base, &status_of) != 0, "unset is off and makes no directory");
-    const OracleKey key = oracle_test_numbered(&cache, 5);
-    oracle_test_expect(test, oracle_cache_keep(&cache, key, 0, "x", 1) && !oracle_cache_take(&cache, key, &status, &output, &length), "off keeps and takes nothing");
-    oracle_cache_open(&cache, "uses", off_base);
-    oracle_test_expect(test, !oracle_cache_active(&cache), "a mode that names no mode is off");
-    oracle_cache_open(&cache, "use", 0);
-    oracle_test_expect(test, !oracle_cache_active(&cache), "a cache without a directory is off");
-    // Use: a miss, then what was kept.
-    char modes_base[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(modes_base, sizeof(modes_base), "%s/modes", base);
-    oracle_cache_open(&cache, "use", modes_base);
-    const OracleKey used = oracle_test_numbered(&cache, 6);
-    oracle_test_expect(test, oracle_cache_active(&cache) && !oracle_cache_take(&cache, used, &status, &output, &length), "use misses an entry that isn't there");
-    oracle_test_expect(test, oracle_cache_keep(&cache, used, 3, "result", 6), "use keeps a result");
-    output = 0;
-    oracle_test_expect(test, oracle_cache_take(&cache, used, &status, &output, &length) && status == 3 && length == 6 && memcmp(output, "result", 6) == 0,
-                       "use takes what it kept");
-    free(output);
-    oracle_test_expect(test, cache.hits == 1 && cache.runs == 1 && cache.stale == 0 && cache.unwritten == 0, "use's counts");
-    // Check: takes nothing; the same result is current, another is stale and written.
-    oracle_cache_open(&cache, "check", modes_base);
-    output = 0;
-    oracle_test_expect(test, !oracle_cache_take(&cache, used, &status, &output, &length), "check takes nothing");
-    oracle_test_expect(test, oracle_cache_keep(&cache, used, 3, "result", 6), "check finds the same result current");
-    oracle_test_expect(test, !oracle_cache_keep(&cache, used, 3, "other!", 6), "check finds another output stale");
-    oracle_test_expect(test, !oracle_cache_keep(&cache, used, 4, "other!", 6), "check finds another status stale");
-    oracle_test_expect(test, oracle_cache_keep(&cache, used, 4, "other!", 6), "check wrote the run's result");
-    oracle_test_expect(test, oracle_cache_keep(&cache, oracle_test_numbered(&cache, 7), 0, "", 0), "check of a key without an entry");
-    oracle_test_expect(test, cache.runs == 5 && cache.stale == 2 && cache.hits == 0, "check's counts");
-}
+// --- Modes ---
 
-// 8 processes writing the same 64 keys at once: each key's entry must be whole after.
-static void oracle_test_writers(OracleTest* test, const char* base)
+static void oracle_test_modes(OracleTest* test)
 {
-    char writers_base[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(writers_base, sizeof(writers_base), "%s/writers", base);
     OracleCache cache;
-    oracle_cache_open(&cache, "use", writers_base);
-    static char output[1 << 14];
-    for (uint32_t i = 0; i < sizeof(output); i += 1)
+    char* arguments[] = { "sh", "-c", "printf 'x'", 0 };
+    static const char* const modes[] = { 0, "bogus", "use" };
+    bool off = true;
+    for (uint32_t m = 0; m < sizeof(modes) / sizeof(modes[0]); m += 1)
     {
-        output[i] = (char)('a' + i % 26);
+        char base[BUSTER_ORACLE_PATH_BYTES];
+        snprintf(base, sizeof(base), "%s/modes", test->base);
+        oracle_cache_open(&cache, modes[m], m < 2 ? base : 0);
+        OracleRun run;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            off &= oracle_test_go(&run, &cache, "oracle test: modes", arguments, 0, 0) && !run.taken && strcmp(run.output, "x") == 0;
+            oracle_run_release(&run);
+        }
+        char directory[BUSTER_ORACLE_PATH_BYTES + 16];
+        snprintf(directory, sizeof(directory), "%s/oracle", base);
+        struct stat status;
+        off &= !oracle_cache_active(&cache) && stat(directory, &status) != 0;
+        oracle_cache_close(&cache);
+    }
+    oracle_test_expect(test, off, "modes: off, a mode that names none, and no directory keep nothing");
+}
+
+// --- Writers at once ---
+
+static void oracle_test_writers(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "writers");
+    char scripts[4][64];
+    for (uint32_t k = 0; k < 4; k += 1)
+    {
+        snprintf(scripts[k], sizeof(scripts[k]), "head -c %u /dev/zero | tr '\\0' '%c'", 16384 * (k + 1), 'a' + k);
     }
     fflush(stdout);
     pid_t children[8];
@@ -392,46 +746,48 @@ static void oracle_test_writers(OracleTest* test, const char* base)
         children[c] = fork();
         if (children[c] == 0)
         {
-            bool written = true;
-            for (uint32_t round = 0; round < 4; round += 1)
+            bool right = true;
+            for (uint32_t round = 0; round < 16; round += 1)
             {
-                for (uint32_t k = 0; k < 64; k += 1)
+                for (uint32_t k = 0; k < 4; k += 1)
                 {
-                    written &= oracle_cache_write(&cache, oracle_test_numbered(&cache, 1000 + k), (int)k, output, sizeof(output) - k);
+                    char* arguments[] = { "sh", "-c", scripts[(k + c) % 4], 0 };
+                    OracleRun run;
+                    right &= oracle_test_go(&run, &cache, "oracle test: writers", arguments, 0, 0) && run.output_length == 16384 * ((k + c) % 4 + 1);
+                    oracle_run_release(&run);
                 }
             }
-            _exit(written ? 0 : 1);
+            _exit(right ? 0 : 1);
         }
     }
-    uint32_t succeeded = 0;
+    bool right = true;
     for (uint32_t c = 0; c < 8; c += 1)
     {
         int status = 0;
-        succeeded += children[c] > 0 && waitpid(children[c], &status, 0) == children[c] && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        right &= children[c] > 0 && waitpid(children[c], &status, 0) == children[c] && WIFEXITED(status) && WEXITSTATUS(status) == 0;
     }
-    oracle_test_expect(test, succeeded == 8, "8 writers at once each wrote every entry");
-    uint32_t whole = 0;
-    for (uint32_t k = 0; k < 64; k += 1)
+    const uint64_t counted = cache.counts->taken + cache.counts->run;
+    for (uint32_t k = 0; k < 4; k += 1)
     {
-        int status = -1;
-        char* read = 0;
-        size_t length = 0;
-        whole += oracle_cache_read(&cache, oracle_test_numbered(&cache, 1000 + k), &status, &read, &length) && status == (int)k && length == sizeof(output) - k &&
-                 memcmp(read, output, length) == 0;
-        free(read);
+        char* arguments[] = { "sh", "-c", scripts[k], 0 };
+        OracleRun run;
+        right &= oracle_test_go(&run, &cache, "oracle test: writers", arguments, 0, 0) && run.taken && run.output_length == 16384 * (k + 1) && run.output[0] == 'a' + (char)k;
+        oracle_run_release(&run);
     }
-    oracle_test_expect(test, whole == 64, "every entry whole after the writers");
-    uint32_t files;
-    uint32_t others;
+    uint32_t files = 0;
+    uint32_t others = 0;
     oracle_test_count(&cache, &files, &others);
-    oracle_test_expect(test, files == 64 && others == 0, "the writers left their entries alone");
+    oracle_test_expect(test, right && counted == 8 * 16 * 4 && files == 4 && others == 0, "writers at once: counts added up, entries whole, nothing left beside them");
+    oracle_cache_close(&cache);
 }
 
-// The process's cache: from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, its directory made private three levels deep.
-static void oracle_test_process(OracleTest* test, const char* base)
+// --- The process's cache ---
+
+// From BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, its directory made private three levels deep.
+static void oracle_test_process(OracleTest* test)
 {
     char cache_home[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(cache_home, sizeof(cache_home), "%s/process/one/two", base);
+    snprintf(cache_home, sizeof(cache_home), "%s/process/one/two", test->base);
     fflush(stdout);
     const pid_t child = fork();
     if (child == 0)
@@ -452,12 +808,12 @@ static void oracle_test_process(OracleTest* test, const char* base)
                        "the process's cache from BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, made private");
 }
 
-// Removes the files of `base`/`relative` and then each directory of `relative`, deepest first (the tests' own tree,
-// whose directories hold files alone).
+// Removes the files of `base`/`relative` (or `base` itself) and then each directory of `relative`, deepest first (the
+// tests' own trees, whose directories hold files alone).
 static void oracle_test_remove(const char* base, const char* relative)
 {
     char path[BUSTER_ORACLE_PATH_BYTES];
-    snprintf(path, sizeof(path), "%s/%s", base, relative);
+    snprintf(path, sizeof(path), relative[0] != 0 ? "%s/%s" : "%s%s", base, relative);
     DIR* directory = opendir(path);
     for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
     {
@@ -472,7 +828,7 @@ static void oracle_test_remove(const char* base, const char* relative)
     {
         closedir(directory);
     }
-    for (char* end = path + strlen(path); end > path + strlen(base); end -= 1)
+    for (char* end = path + strlen(path); end >= path + strlen(base); end -= 1)
     {
         if (*end == '/' || *end == 0)
         {
@@ -486,36 +842,43 @@ static int run_oracle_cache_tests(int argc, char** argv)
 {
     (void)argv;
     OracleTest test = { 0 };
-    char base[BUSTER_ORACLE_PATH_BYTES];
     const char* temporary = getenv("TMPDIR");
-    snprintf(base, sizeof(base), "%s/buster-oracle-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
-    const bool made = argc == 0 && mkdtemp(base) != 0;
-    if (made)
+    temporary = temporary != 0 && temporary[0] != 0 ? temporary : "/tmp";
+    snprintf(test.base, sizeof(test.base), "%s/buster-oracle-test-XXXXXX", temporary);
+    snprintf(test.runs[0], sizeof(test.runs[0]), "%s/buster-oracle-run-XXXXXX", temporary);
+    snprintf(test.runs[1], sizeof(test.runs[1]), "%s/buster-oracle-run-XXXXXX", temporary);
+    const bool made = argc == 0 && mkdtemp(test.base) != 0;
+    const bool runs = made && mkdtemp(test.runs[0]) != 0 && mkdtemp(test.runs[1]) != 0;
+    char clang[BUSTER_ORACLE_PATH_BYTES];
+    const bool tools = oracle_find_tool("sh", clang, sizeof(clang)) && oracle_find_tool("clang", clang, sizeof(clang));
+    if (runs && tools)
     {
         oracle_test_sha(&test);
-        OracleCache cache;
-        char entries_base[BUSTER_ORACLE_PATH_BYTES];
-        snprintf(entries_base, sizeof(entries_base), "%s/entries", base);
-        oracle_cache_open(&cache, "use", entries_base);
-        oracle_test_expect(&test, oracle_cache_active(&cache), "a cache in a new directory");
-        oracle_test_keys(&test, &cache, base);
-        oracle_test_entries(&test, &cache);
-        oracle_test_modes(&test, base);
-        oracle_test_writers(&test, base);
-        oracle_test_process(&test, base);
-        static const char* const directories[] = { "entries/oracle", "modes/oracle", "writers/oracle", "process/one/two/buster/oracle" };
-        for (uint32_t i = 0; i < sizeof(directories) / sizeof(directories[0]); i += 1)
-        {
-            oracle_test_remove(base, directories[i]);
-        }
-        rmdir(base);
+        oracle_test_roots(&test);
+        oracle_test_runs(&test);
+        oracle_test_dependencies(&test);
+        oracle_test_identities(&test);
+        oracle_test_check(&test);
+        oracle_test_damaged(&test);
+        oracle_test_modes(&test);
+        oracle_test_writers(&test);
+        oracle_test_process(&test);
         printf("oracle cache: %u checks, %u failures\n", test.checks, test.failures);
     }
     else
     {
-        fprintf(stderr, "usage: test-oracle-cache\n");
+        fprintf(stderr, "usage: test-oracle-cache (with sh and clang on PATH, and $TMPDIR or /tmp writable)\n");
     }
-    return made && test.failures == 0 ? 0 : 1;
+    static const char* const directories[] = { "runs/oracle", "dependencies/oracle", "identities/oracle", "check/oracle", "damaged/oracle", "writers/oracle", "process/one/two/buster/oracle", "" };
+    for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
+    {
+        oracle_test_remove(test.base, directories[i]);
+    }
+    for (uint32_t r = 0; runs && r < 2; r += 1)
+    {
+        oracle_test_remove(test.runs[r], "");
+    }
+    return runs && tools && test.failures == 0 ? 0 : 1;
 }
 
 #endif
