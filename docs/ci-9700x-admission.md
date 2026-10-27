@@ -331,7 +331,7 @@ This is the stable control-plane interface; descriptive labels are unnecessary.
 The required PR check also retains a version-1 JSON receipt in `output.text`.
 
 A global controller concurrency group serializes updates; it is a mutex, not a
-priority queue. Reconciliation rereads live facts on PR/base/comment/review/run
+priority queue. This controlled conflict probe changes the pending wakeup sentence on PR/base/comment/review/run
 events and every five minutes. The platform may delay scheduled wakeups; the
 guard stays closed until a valid lease exists. State is committed before dispatch.
 Head/base/mergeability metadata is batched in one bounded GraphQL query. Review
