@@ -488,7 +488,7 @@ and this repository's compiler, built by clang alone.
 
 `benchmark-link` times `link-foreign` beside GNU ld, lld, mold and wild on the
 design's generated programs, from one command line, as a process of its own
-with `--lanes=8` and `--lanes=1`. On the 9700X, one lane links the programs of
+by default, with `--lanes=8` and with `--lanes=1`. On the 9700X, one lane links the programs of
 1 worker, 2,000 workers and synth's shape in 0.60, 1.12 and 55.2 ms, against
 wild's 1.35, 2.56 and 99.9 ms and mold's 2.44, 3.31 and 99.9 ms on one thread:
 0.89 GB/s of output per lane on the largest, against mold's 0.54; as a
@@ -507,3 +507,66 @@ sections (`-gz=none`), in 3.38 ms (0.96 of DWARF) against lld's 18.2 and 11.8
 and mold's 14.7 and 13.1; with `-S`, in 1.76 ms. The relocations' vector path
 takes the uncompressed DWARF in 0.96 ms against the exact path's 1.40
 ([the record](https://github.com/buster14a/buster-performance/tree/cabd9313cbdf76b566c0d63ed990c15925d466cf/docs/measurements/foreign-dwarf-395-2026-10-25)).
+
+## The default lanes
+
+Without `--lanes`, a link's objects choose its lanes (#594): one, and one
+more per 3 MB, at most 8. The threshold comes from a sweep on the 9700X of
+`benchmark-link`'s programs that call libc, of 1 to 102,400 workers, written
+as objects by its `--keep` and linked from its command lines by main
+([`d8805cb7`](https://github.com/buster14a/buster/tree/d8805cb7436542f16e1015c29f66feb15dac7c81)),
+each a process of its own: with `--lanes=1` pinned to CPU 2, as
+`benchmark-link` runs one thread, and with `--lanes=2` to `8` on every CPU,
+as it runs threads ([the
+record](https://github.com/buster14a/buster-performance/tree/1fa1ba42d296cb6607f1da10563ffc192dd3f8e3/docs/measurements/link-foreign-lanes-594-2026-10-27)).
+Medians of 36 links (8 from 10,000 workers), in µs, as dynamic PIEs, the
+fastest in bold, and the lanes the default takes:
+
+| Workers | Objects | 1 lane | 2 | 3 | 4 | 6 | 8 | Default |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 14 KB | **1,024** | 1,345 | 1,409 | 1,504 | 1,567 | 1,692 | 1 |
+| 2,000 | 1.34 MB | **1,716** | 1,826 | 1,801 | 1,873 | 2,005 | 2,211 | 1 |
+| 2,000 | 1.68 MB | 1,887 | **1,827** | 1,918 | 1,965 | 2,117 | 2,256 | 1 |
+| 5,000 | 4.33 MB | 3,149 | 2,693 | **2,597** | 2,714 | 3,099 | 3,389 | 2 |
+| 10,000 | 8.76 MB | 5,728 | 4,826 | **4,303** | 4,422 | 4,775 | 4,928 | 3 |
+| 20,000 | 18.0 MB | 10,946 | 8,618 | 7,584 | 7,477 | **7,128** | 7,410 | 6 |
+| 40,000 | 36.7 MB | 22,562 | 16,257 | 14,321 | 13,822 | **13,051** | 13,513 | 8 |
+| 102,400 | 96.2 MB | 60,391 | 42,106 | 36,064 | 33,221 | **31,733** | 32,046 | 8 |
+
+The programs of 1 and 2,000 workers (1.34 MB) are `benchmark-link`'s, of up
+to 8 filler instructions a worker; the others have up to 64, as its
+102,400's. The default's lanes' time against the fastest count's in the
+sweep, each kind (0 where the default takes the fastest count):
+
+| Kind | 1 | 2,000 | 2,000 (1.68 MB) | 5,000 | 10,000 | 20,000 | 40,000 | 102,400 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Dynamic PIE | 0 | 0 | +3.3% | +3.7% | 0 | 0 | +3.5% | +1.0% |
+| Static executable | +5.4% | +9.8% | +10.6% | 0 | +4.9% | +2.8% | 0 | 0 |
+| Static PIE | 0 | +2.7% | +3.8% | +3.0% | +2.0% | +2.5% | 0 | 0 |
+| Shared library | 0 | +0.1% | +7.7% | +1.3% | 0 | 0 | +1.7% | 0 |
+
+Against one lane, the default takes 7.6% to 14.7% off at 5,000 workers and
+31% to 47% off at 40,000 and more. A static executable of up to 1.7 MB of
+objects is faster on 2 lanes: its runtime's members of `libc.a`, which the
+objects' bytes don't count, are about as much work as 2.5 MB of objects (the
+1-worker static executable takes 1.25 ms longer than the dynamic PIE on one
+lane).
+
+What a lane costs a small link: the 1-worker dynamic PIE's `--time` took
+0.794 ms on 2 lanes against 0.487 on one: the team's start 0.066 ms, the
+resolution 0.043 more, the conversion 0.106 more (0.080 of them in its first
+phase, lane 0's own work after it has woken the worker from its futex) and
+the release 0.041 more (the worker's arenas and its join).
+
+A link that runs one lane by default runs where the scheduler puts it, which
+on the 9700X is slower than CPU 2 for a link of a few milliseconds: in a
+first confirmation (main and the head, 40 rounds), main's own default, one
+lane, took 24% to 59% longer unpinned than with `--lanes=1` pinned to CPU 2,
+on `benchmark-link`'s programs of 1 and 2,000 workers. At one placement the
+head's default is one lane's link: pinned to CPU 2, its time against
+`--lanes=1`'s was −8.6% to +6.3% (paired medians, within the runs' spread),
+and unpinned, against main's default, −2.8% to +5.0%. So `benchmark-link`
+times link-foreign's `--lanes=1` on every CPU too ("1 thread, its CPUs"),
+beside its default, its `--lanes=8` and its pinned one thread. On 102,400
+workers the default, 8 lanes, took 37% to 46% off one lane pinned to CPU 2,
+every kind, and was `--lanes=8`'s time within 1.5% (5 rounds).
