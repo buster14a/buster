@@ -53,14 +53,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
-**Measured** ("Measurements", below): `speedtest1`, SQLite's own benchmark, with the generated code's run time and
-size against clang -O0's and tcc's, and the whole compile's time against tcc's.
+**Measured on SQLite,** which compiles now: the whole compile's time and the generated code's run time and size
+against clang -O0's and tcc's, on its shell ([#136's
+measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)) and on `speedtest1`, SQLite's
+own benchmark ("Measurements", below).
 
-**Waits for #133, #145 and #146:**
+**Still to do:** Tier 0's own costs on `sqlite3.c`'s functions, `benchmark-backend`'s measurement on real code.
 
-- the corpora and `sqlite3.c`.
-
-Until then, generated programs (below) stand in for #142's random programs.
+Generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 
