@@ -110,7 +110,26 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"movq %1, %0\" : \"=r\"(d) : \"m\"(e));float f=(float)n,g=2.5f,h;__asm__(\"addps %1, %0\" : \"=x\"(h) : \"x\"(f), \"0\"(g));"
         "return (int)r+(int)(m>>32)*1000+(int)k*10+(int)d*7+(int)(h*2);}",
         "asm-fixed-registers-and-constants", clang);
+    // Matching inputs of other widths than their outputs', in templates of no instructions and of one: a narrower one
+    // zero-extended from its own width, as GCC and clang place it ("=r"(long) : "0"(-1) is 4294967295), and a wider one's
+    // low bits; the inputs run below 0.
+    check_test_program_source(test,
+        "int tested(int n){long a;__asm__(\"\" : \"=r\"(a) : \"0\"(n));int b;__asm__(\"\" : \"=r\"(b) : \"0\"((signed char)n));"
+        "long c;__asm__(\"\" : \"=r\"(c) : \"0\"((short)(n*3)));unsigned long d;__asm__(\"\" : \"=r\"(d) : \"0\"((unsigned char)(n+200)));"
+        "long e;__asm__(\"nop\" : \"=r\"(e) : \"0\"(n));int t;__asm__(\"\" : \"=r\"(t) : \"0\"((long)n*0x100000001L));"
+        "return (int)(a>>32)*1000+(int)a+b*3+(int)(c>>16)*7+(int)c+(int)d+(int)(e>>32)*100+t;}",
+        "asm-tied-widths", clang);
+    // Z's constants, which clang's backend checks by their zero-extended bits and prints sign-extended, as every constant.
+    check_test_program_source(test,
+        "int tested(int n){long a,b,c,d;__asm__(\"movq %1, %0\" : \"=r\"(a) : \"Z\"(0xffffffffu));__asm__(\"movq %1, %0\" : \"=r\"(b) : \"Z\"(0x80000000u));"
+        "__asm__(\"movq %1, %0\" : \"=r\"(c) : \"Z\"((signed char)-1));__asm__(\"movl %1, %k0\" : \"=r\"(d) : \"Z\"((unsigned long)0xffffffff));"
+        "return n+(int)(a>>32)*3+(int)(b>>40)*5+(int)c*7+(int)(d>>8);}",
+        "asm-z-constants", clang);
     // What the lowering refuses, by name.
+    check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
+                                       "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
+    check_test_program_boundary_reason(test, "int tested(int n){int r;__asm__(\"movl %1, %0\" : \"=r\"(r) : \"N\"((unsigned char)255));return r+n;}",
+                                       "asm-n-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
     check_test_program_boundary_reason(test, "int tested(int n){_Bool z;__asm__(\"testl %1, %1\" : \"=@ccz\"(z) : \"r\"(n));return z;}",
                                        "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
     check_test_program_boundary_reason(test, "int tested(int n){double d=n;__asm__(\"fsqrt\" : \"+t\"(d));return (int)d;}",

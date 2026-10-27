@@ -4161,9 +4161,17 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             if (place->tied < statement->output_count)
             {
+                // The input in its output's register, as GCC and clang place it (check_asm_tied_type): a narrower integer
+                // zero-extended from its own width, so "=r"(long) : "0"(-1) is 4294967295.
                 const CheckAsmPlace* output = plan->places + place->tied;
-                check_lower_instruction(writer, BUSTER_TYPED_SET, check_lower_class(types, output->type), 0);
-                check_lower_expression(writer, node, false, output->type);
+                const uint8_t output_class = check_lower_class(types, output->type);
+                const TypeId placed = check_asm_tied_type(types, place->type, output->type);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, 0);
+                if (placed != output->type)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, output_class, 0);
+                }
+                check_lower_expression(writer, node, false, placed);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, addresses[place->tied]);
             }
             else if (place->written && matched)

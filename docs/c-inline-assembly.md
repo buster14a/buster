@@ -19,9 +19,12 @@ unwind entry.
 A template that assembles to no instructions makes no helper and no call. These
 are the compiler barriers, `asm volatile("" : : "r"(x) : "memory")`, and comments
 with operands substituted into them. Their operands are evaluated in the same
-order as a helper's. A matching input's value is stored into its output, and a
-`+` output's value is loaded and stored back, as clang's code does. An output
-that nothing writes keeps its value; GCC and clang leave it unspecified.
+order as a helper's. A matching input's value is stored into its output as the
+register would hold it: an integer narrower than its output is zero-extended
+from its own width, as GCC and clang place it (`"=r"(long) : "0"(-1)` is
+4294967295), as a helper's narrower loads extend it too. A `+` output's value is
+loaded and stored back, as clang's code does. An output that nothing writes
+keeps its value; GCC and clang leave it unspecified.
 
 Why a call rather than records in Tier 0's own code:
 
@@ -90,8 +93,11 @@ syntax:
 | `{att|intel}` | the AT&T alternative |
 
 A constant prints its type's bits, sign-extended, as clang prints it:
-`"i"(0xffffffffu)` is `$-1`. A basic `asm` statement's template is printed as it
-is, without substitution.
+`"i"(0xffffffffu)` is `$-1`. Its letter's range is checked as clang checks it:
+on that sign-extended value, so `"N"((unsigned char)255)` is refused, as clang
+refuses it, but `Z`'s on the zero-extended bits, as clang's backend checks `Z`,
+so `"Z"(0xffffffffu)` is taken and prints `$-1`. A basic `asm` statement's
+template is printed as it is, without substitution.
 
 ## Assembly
 
@@ -202,7 +208,10 @@ has the commands, the logs and the default path's numbers against main.
   - the operands' order of evaluation, each once, through functions that
     record their calls;
   - rdi and rsi as operands, constants sign-extended as clang prints them, a
-    memory input after a register output, and an XMM matching input.
+    memory input after a register output, and an XMM matching input;
+  - matching inputs narrower and wider than their outputs, in templates of no
+    instructions and of one, below 0 too;
+  - `Z`'s constants at its boundaries.
 
   Each refusal above is checked by name.
 - `test-assembler` checks `asm_assemble_code` by both paths: the records, the

@@ -97,8 +97,9 @@ struct CheckProgramAsms
 };
 
 // A constraint's first alternative: the general registers it allows (a bit each), whether it allows an XMM register,
-// memory or an integer constant (in [low, high]), the output a matching input is tied to (BUSTER_CHECK_NONE for
-// none), and the first letter the lowering doesn't place, as the feature it names.
+// memory or an integer constant (`ranged`: in [low, high], by its sign-extended value; `unsigned32`: Z's, by its
+// zero-extended one, check_asm_constant_fits), the output a matching input is tied to (BUSTER_CHECK_NONE for none), and
+// the first letter the lowering doesn't place, as the feature it names.
 typedef struct CheckAsmConstraint CheckAsmConstraint;
 struct CheckAsmConstraint
 {
@@ -110,6 +111,8 @@ struct CheckAsmConstraint
     bool vector;
     bool memory;
     bool immediate;
+    bool ranged;
+    bool unsigned32;
 };
 
 static const char* const check_asm_registers[4][16] = {
@@ -192,7 +195,6 @@ static int32_t check_asm_clobber(CheckAsmText text)
 static CheckAsmConstraint check_asm_constraint_parse(const CheckInputAsm* statement, const InternTable* names, CheckAsmText text, bool output)
 {
     CheckAsmConstraint result = { .tied = BUSTER_CHECK_NONE };
-    bool bounded = false;
     for (uint32_t at = output ? 1 : 0; at < text.length && text.bytes[at] != ','; at += 1)
     {
         const uint8_t byte = text.bytes[at];
@@ -255,10 +257,15 @@ static CheckAsmConstraint check_asm_constraint_parse(const CheckInputAsm* statem
             low = INT64_MIN;
             high = INT64_MAX;
         }
-        else if (byte == 'e' || byte == 'Z')
+        else if (byte == 'e')
         {
-            low = byte == 'e' ? INT32_MIN : 0;
-            high = byte == 'e' ? INT32_MAX : (int64_t)UINT32_MAX;
+            low = INT32_MIN;
+            high = INT32_MAX;
+        }
+        else if (byte == 'Z')
+        {
+            result.unsigned32 = true;
+            result.immediate = true;
         }
         else if (strchr("IJKMNO", byte) != NULL)
         {
@@ -283,13 +290,37 @@ static CheckAsmConstraint check_asm_constraint_parse(const CheckInputAsm* statem
         }
         if (high >= low)
         {
-            result.low = bounded && result.low < low ? result.low : low;
-            result.high = bounded && result.high > high ? result.high : high;
+            result.low = result.ranged && result.low < low ? result.low : low;
+            result.high = result.ranged && result.high > high ? result.high : high;
             result.immediate = true;
-            bounded = true;
+            result.ranged = true;
         }
     }
     return result;
+}
+
+// Whether `constraint` takes the integer constant `extended`, its type's `bits` sign-extended (as clang prints it), as
+// clang checks it: a letter's range by that value (so "N"((unsigned char)255) is refused, as clang refuses it), and Z's
+// by the zero-extended bits, as clang's backend checks Z (so "Z"(0xffffffffu) is taken, and printed $-1).
+static bool check_asm_constant_fits(const CheckAsmConstraint* constraint, int64_t extended, uint32_t bits)
+{
+    const uint64_t zero_extended = bits >= 64 ? (uint64_t)extended : (uint64_t)extended & ((UINT64_C(1) << bits) - 1);
+    return (constraint->ranged && extended >= constraint->low && extended <= constraint->high) || (constraint->unsigned32 && zero_extended <= UINT32_MAX);
+}
+
+// The type a matching input of `input`'s type takes its output's register in, for an output of `output`'s type, as GCC
+// and clang place it: an integer or a pointer narrower than the output zero-extended from its own width (clang's zext,
+// which the helper's narrower loads make too), so its unsigned type, whose value the output's conversion then widens;
+// otherwise the output's own, a floating input converted as clang converts it.
+static TypeId check_asm_tied_type(const TypeTable* types, TypeId input, TypeId output)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = check_action_integer_type(types, input, &width, &is_signed) || check_action_kind(types, input) == BUSTER_TYPE_KIND_POINTER;
+    const uint64_t size = type_is_complete(types, input) ? type_size(types, input) : 0;
+    const uint64_t output_size = type_is_complete(types, output) ? type_size(types, output) : 0;
+    const TypeId widened = size == 1 ? BUSTER_TYPE_UCHAR : size == 2 ? BUSTER_TYPE_USHORT : size == 4 ? BUSTER_TYPE_UINT : output;
+    return integer && size < output_size ? widened : output;
 }
 
 // A general register of `allowed` that no other operand and no clobber has (`taken`), in check_asm_order's order: its
@@ -768,7 +799,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             const int64_t extended = bits >= 64 ? (int64_t)raw : (int64_t)(raw << (64 - bits)) >> (64 - bits);
             place->kind = BUSTER_CHECK_ASM_CONSTANT;
             place->constant = extended;
-            reason = extended < constraint->low || extended > constraint->high ? "inline assembly constants outside their constraint's range" : NULL;
+            reason = check_asm_constant_fits(constraint, extended, bits) ? NULL : "inline assembly constants outside their constraint's range";
         }
         else if (constraint->general != 0 && registered)
         {
