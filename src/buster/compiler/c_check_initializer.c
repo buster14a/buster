@@ -1114,10 +1114,10 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // identifier's declared type, a compound literal's (at its opening parenthesis), the third operand's of a ?:, a
 // parenthesized expression's, and a call's result where it calls a function by its name; and a subscript's, a member's
 // (`.` and `->`) and an indirection's of such an expression (`x[1]`, `p->a.b`, `*p`), from its base's type; a `-`, `+`
-// or `~`'s, its operand's; and a binary operator's (multiplicative to bitwise or), its left operand's where that is a
-// vector, a pointer or an array (pointer arithmetic, GNU's vector operators), else its right one's where that is, as for
-// a subscript's operands below (`ha + (short)n` is a vector, `*(p + 1)` a struct). 0 for another expression, which the
-// caller leaves to the last typed token in it. A compound literal's own tokens (a
+// or `~`'s, its operand's; and a binary operator's (multiplicative to bitwise or), from both operands' as
+// check_init_binary_type combines them: a vector where either is one, a pointer for pointer arithmetic, and a scalar for
+// the rest (`ha + (short)n` is a vector, `*(p + 1)` a struct, `(p - q) * h` a vector). 0 for another expression, which
+// the caller leaves to the last typed token in it. A compound literal's own tokens (a
 // member's value) don't count: `(struct L){ .target = n }` is a struct L, not n's type. One pass over the expression
 // gives each of its nodes its first and last children and its opening bracket, and the walk follows them down from the
 // root, so that it reads each token once however deeply the expression nests (#480's review: a rescan of the range at
@@ -1129,6 +1129,38 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // steps under the subscript, whose subtree it leaves for the index's, so that each token is still read once.
 // A binary operator's step (CheckInitWalker's walk keeps a token's kind for the others), past every token kind.
 #define BUSTER_CHECK_INIT_ROOT_BINARY PARSE_KIND_COUNT
+
+// A binary operator's value's type from its operands' (0 for one the walk has no type for), as far as the walk needs it:
+// a vector's where either operand is one (GNU's operators, a compare's mask among them); for `+`, its one pointer or
+// array operand's, and for `-`, its left one's where the right one is no pointer (a difference of two pointers is a
+// ptrdiff_t); else 0, a scalar's: a compare of pointers is an int, and no other operator takes a pointer.
+static TypeId check_init_binary_type(const TypeTable* types, uint8_t operator_kind, TypeId left, TypeId right)
+{
+    const TypeId left_base = left != 0 ? type_strip_aligned(types, left) : 0;
+    const TypeId right_base = right != 0 ? type_strip_aligned(types, right) : 0;
+    const uint8_t left_kind = left_base != 0 ? type_kind(types, left_base) : 0;
+    const uint8_t right_kind = right_base != 0 ? type_kind(types, right_base) : 0;
+    const bool left_pointer = left_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(left_kind);
+    const bool right_pointer = right_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(right_kind);
+    TypeId result = 0;
+    if (left_base != 0 && check_vector_type(types, left_base))
+    {
+        result = left;
+    }
+    else if (right_base != 0 && check_vector_type(types, right_base))
+    {
+        result = right;
+    }
+    else if (operator_kind == PARSE_KIND_PLUS && left_pointer != right_pointer)
+    {
+        result = left_pointer ? left : right;
+    }
+    else if (operator_kind == PARSE_KIND_MINUS && left_pointer && !right_pointer)
+    {
+        result = left;
+    }
+    return result;
+}
 _Static_assert(PARSE_KIND_COUNT <= UINT8_MAX, "a step's kind fits a byte");
 
 static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint32_t end)
@@ -1140,15 +1172,17 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
     const uint32_t count = valid ? end - begin : 0;
     const uint64_t mark = walker->scratch->length;
     // The links (each node's first and last child and its opener), then the steps: a step's member token for a `.` or a
-    // `->` (BUSTER_CHECK_NONE for a subscript or a `*`), its operator's kind, and a subscript's other operand, its index's
-    // root, while the walk hasn't taken it (BUSTER_CHECK_NONE otherwise).
-    uint32_t* links = valid ? arena_push_array(walker->scratch, (uint64_t)count * 5, sizeof(uint32_t), 4) : 0;
+    // `->` (a binary operator's own token; BUSTER_CHECK_NONE for a subscript or a `*`), its operator's kind, a subscript's
+    // or a binary operator's other operand, its root, while the walk hasn't taken it (BUSTER_CHECK_NONE otherwise), and a
+    // binary operator's left operand's type, kept while the walk goes down the right one.
+    uint32_t* links = valid ? arena_push_array(walker->scratch, (uint64_t)count * 6, sizeof(uint32_t), 4) : 0;
     uint8_t* operators = links != 0 ? arena_push_array(walker->scratch, count, sizeof(uint8_t), 1) : 0;
     uint32_t* first = links;
     uint32_t* last = links != 0 ? links + count : 0;
     uint32_t* opener = links != 0 ? links + 2 * (uint64_t)count : 0;
     uint32_t* members = links != 0 ? links + 3 * (uint64_t)count : 0;
     uint32_t* alternates = links != 0 ? links + 4 * (uint64_t)count : 0;
+    TypeId* lefts = links != 0 ? links + 5 * (uint64_t)count : 0;
     uint32_t steps = 0;
     uint32_t root = BUSTER_CHECK_NONE;
     uint32_t roots = 0;
@@ -1260,8 +1294,8 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             else if (steps < count && role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_BITWISE_OR && first[slot] != BUSTER_CHECK_NONE &&
                      first[slot] < root && last[slot] != BUSTER_CHECK_NONE && last[slot] > root)
             {
-                // The left operand, the first child; the right one, the last, the step's alternate.
-                members[steps] = BUSTER_CHECK_NONE;
+                // The left operand, the first child, then the right one, the last, the step's alternate.
+                members[steps] = root;
                 operators[steps] = BUSTER_CHECK_INIT_ROOT_BINARY;
                 alternates[steps] = last[slot];
                 steps += 1;
@@ -1282,8 +1316,10 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             const bool indirect = operators[step] != PARSE_KIND_PERIOD;
             const bool element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind);
             const bool binary = operators[step] == BUSTER_CHECK_INIT_ROOT_BINARY;
-            if ((operators[step] == PARSE_KIND_L_SQUARE || binary) && !element && !check_vector_type(walker->types, base) && alternates[step] != BUSTER_CHECK_NONE)
+            if (binary && alternates[step] != BUSTER_CHECK_NONE)
             {
+                // Both operands, whatever the left one's type: `p - q` is no pointer, and `(p - q) * h` a vector.
+                lefts[step] = result;
                 root = alternates[step];
                 alternates[step] = BUSTER_CHECK_NONE;
                 steps = step + 1;
@@ -1291,8 +1327,14 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             }
             else if (binary)
             {
-                // A binary operator's value is a vector's or a pointer's (an array's, which decays), or neither: 0.
-                result = element || check_vector_type(walker->types, base) ? result : 0;
+                result = check_init_binary_type(walker->types, parser->tokens.kinds[members[step]], lefts[step], result);
+            }
+            else if (operators[step] == PARSE_KIND_L_SQUARE && !element && alternates[step] != BUSTER_CHECK_NONE)
+            {
+                root = alternates[step];
+                alternates[step] = BUSTER_CHECK_NONE;
+                steps = step + 1;
+                walking = true;
             }
             else
             {

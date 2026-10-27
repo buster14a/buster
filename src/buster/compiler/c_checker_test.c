@@ -3669,10 +3669,11 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         // Operators' values: pointer arithmetic under an indirection, GNU's vector operators with a cast's or a negated
-        // operand, and scalars, which brace elision takes into the vector.
+        // operand, vectors past a difference and compares of pointers, which are scalars (#555's review), and scalars,
+        // which brace elision takes into the vector.
         {
             "operators' values in an inferred array",
-            "typedef struct { int a, b; } S;\ntypedef short v16hi __attribute__((vector_size(32)));\nint f(S* p, int n, v16hi h, v16hi k)\n{\n    S a[] = { *(p + 1), *(1 + p), p[0], *(p - n) };\n    _Static_assert(sizeof a == 4 * sizeof(S), \"four\");\n    v16hi b[] = { h + (short)n, -h, ~k, h * k + (short)1, (short)n * h, -h + (short)n, h << 2 };\n    _Static_assert(sizeof b == 7 * sizeof(v16hi), \"seven\");\n    v16hi c[] = { (short)n + (short)1, 2 };\n    _Static_assert(sizeof c == sizeof(v16hi), \"one\");\n    return a[3].b + b[6][0] + c[0][1];\n}\n",
+            "typedef struct { int a, b; } S;\ntypedef short v16hi __attribute__((vector_size(32)));\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, int n, v16hi h, v16hi k, long* l, long* m, v4di d)\n{\n    S a[] = { *(p + 1), *(1 + p), p[0], *(p - n), *(p + (l - m)), p[l == m] };\n    _Static_assert(sizeof a == 6 * sizeof(S), \"six\");\n    v16hi b[] = { h + (short)n, -h, ~k, h * k + (short)1, (short)n * h, -h + (short)n, h << 2 };\n    _Static_assert(sizeof b == 7 * sizeof(v16hi), \"seven\");\n    v16hi c[] = { (short)n + (short)1, 2 };\n    _Static_assert(sizeof c == sizeof(v16hi), \"one\");\n    v4di e[] = { (l - m) * d, d, (l == m) * d, (l < m) + d };\n    _Static_assert(sizeof e == 4 * sizeof(v4di), \"four vectors past pointers' differences and compares\");\n    return a[5].b + b[6][0] + c[0][1] + (int)e[3][0];\n}\n",
             false,
             false
         },
