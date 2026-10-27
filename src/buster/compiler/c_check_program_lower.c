@@ -4388,6 +4388,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         lowered->status = lowered->helpers.status;
         lowered->token = lowered->helpers.token;
+        lowered->reason = lowered->helpers.reason;
         valid = false;
     }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;
