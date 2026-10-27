@@ -1644,6 +1644,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 }
 
 #include "c_check_packed_test.c"
+#include "c_check_x86_diagnostic_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.

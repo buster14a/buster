@@ -528,8 +528,7 @@ prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
 `__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
 this checker doesn't give); they take the x86 path, which adds no rule for
 them. Neither path folds a call in a constant context, nor takes one as
-`_Generic`'s controlling expression yet (#488), and a direct range's
-violation is an event nothing reports yet (#487).
+`_Generic`'s controlling expression yet (#488).
 The producer attests exact catalogue membership and successful ordinary
 prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
@@ -541,6 +540,29 @@ default error severity. Source constant-evaluated context skips only these
 ranges. Runtime suppression and proven call reachability independently select
 ready, deferred or suppressed events. Unknown reachability cannot silently
 discard one. These checks establish no target-feature or runtime capability.
+
+For #487, `check_program_x86_diagnostics` resolves pending range events after
+the checked program's control columns are complete, before any lowering. Its
+worklist follows each function's entry, jumps, loops, switch dispatch and
+expression evaluation edges. Constant conditions select their executable
+edges; unknown conditions retain both. `sizeof`, `alignof`, short-circuited
+operands and unreachable statements do not make a call executable. Initializer
+parts, assembly operands and statement-expression regions supply their own
+roots. The driver reports each surviving event at the builtin's source
+location, with the converted immediate and its valid bounds, through
+`-Wargument-outside-range`'s default-error policy. Diagnostic pragmas can
+downgrade or suppress it; `-w` suppresses it too. A failed or incomplete program
+leaves unknown events for conservative reporting rather than dropping them.
+
+Only an actual range event allocates the temporary reachability worklist.
+It uses one visited byte and one 64-bit stack slot per graph node/control,
+each queued at most once, and restores scratch on success and failure. The
+scalar walk handles the dependent edges of this exceptional diagnostic path;
+ordinary valid inputs retain the existing scalar/vector checking kernels.
+`test-checker` compares independent source fixtures with Clang, one translation
+unit per fixture, through both production driver schedules. It checks
+acceptance, severity, complete range messages and source locations, including
+negative immediates, dead control flow, unevaluated operands and pragma state.
 
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
