@@ -264,6 +264,21 @@ static void ci_test_lease_and_state(void)
 static void ci_test_controller(void)
 {
     ci_fixture_init();
+    CiRun run = {0};
+    ci_expect(ci_command_run(ci_fixture.native.id, &run) && run.workflow == 42, "API: a ref-qualified PR workflow path remains a valid command target");
+    ci_fixture.run_path = BUSTER_CI_WORKFLOW;
+    ci_expect(ci_get_run(ci_fixture.native.id).id == ci_fixture.native.id && ci_command_run(ci_fixture.native.id, &run), "API: bare workflow paths remain supported");
+    ci_fixture.run_path = BUSTER_CI_WORKFLOW "@main";
+    ci_expect(ci_get_run(ci_fixture.native.id).id == ci_fixture.native.id, "API: the documented ref-qualified run path is accepted");
+    ci_fixture.native.workflow = 43;
+    ci_expect(!ci_command_run(ci_fixture.native.id, &run), "API: a matching path cannot substitute an unrelated workflow ID");
+    ci_fixture.native.workflow = 42;
+    ci_fixture.run_path = BUSTER_CI_WORKFLOW ".other@main";
+    ci_expect(!ci_command_run(ci_fixture.native.id, &run), "API: a lookalike workflow path is rejected even with the expected ID");
+    ci_fixture.run_path = BUSTER_CI_WORKFLOW "@";
+    ci_expect(!ci_command_run(ci_fixture.native.id, &run), "API: an empty ref qualifier is rejected");
+
+    ci_fixture_init();
     ci_fixture.current.mergeable = 0;
     ci_reconcile(false);
     ci_expect(ci_fixture.dispatches == 0 && strcmp(ci_fixture.required_conclusion, "action_required") == 0, "API: already-conflicting PR never dispatches and cannot get a green required check");

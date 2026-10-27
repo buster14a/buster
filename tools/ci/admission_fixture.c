@@ -25,6 +25,7 @@ struct CiFixture
     const char* events;
     const char* executor_conclusion;
     const char* guard_conclusion;
+    const char* run_path;
     char* worker_event;
     unsigned dispatches;
     unsigned cancellations;
@@ -66,7 +67,19 @@ static Http ci_fixture_response(int status, const char* body)
 
 static void ci_fixture_run_json(Buffer* out, const CiRun* run)
 {
-    buffer_printf(out, "{\"id\":%" PRIu64 ",\"workflow_id\":42,\"run_attempt\":%" PRIu64 ",\"path\":\"%s\",\"created_at\":", run->id, run->attempt, BUSTER_CI_WORKFLOW);
+    buffer_printf(out, "{\"id\":%" PRIu64 ",\"workflow_id\":%" PRIu64 ",\"run_attempt\":%" PRIu64 ",\"path\":", run->id, run->workflow, run->attempt);
+    if (ci_fixture.run_path != NULL)
+    {
+        json_quote(out, ci_fixture.run_path);
+    }
+    else
+    {
+        Buffer qualified = {0};
+        buffer_printf(&qualified, "%s@%s", BUSTER_CI_WORKFLOW, run->branch);
+        json_quote(out, qualified.data);
+        free(qualified.data);
+    }
+    buffer_printf(out, ",\"created_at\":");
     ci_fixture_date(out, run->created_at);
     buffer_add(out, ",", 1);
     ci_json_string(out, "head_sha", run->head);
@@ -386,6 +399,7 @@ static void ci_fixture_init(void)
 {
     free(ci_fixture.worker_event);
     memset(&ci_fixture, 0, sizeof(ci_fixture));
+    ci_workflow_id = 0;
     ci_fixture_http = true;
     ci_fixture_clock = UINT64_C(1793095583);
     ci_fixture.current.number = 546;

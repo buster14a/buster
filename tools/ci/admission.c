@@ -32,7 +32,9 @@ struct Http
 static bool ci_read_only;
 static bool ci_fixture_http;
 static uint64_t ci_fixture_clock;
+static uint64_t ci_workflow_id;
 static Http ci_fixture_request(const char* method, const char* path, const char* body);
+static uint64_t ci_workflow(void);
 
 static const char* ci_env(const char* name)
 {
@@ -528,13 +530,27 @@ static CiRun ci_run_parse(const Json* json, size_t row)
     return run;
 }
 
+static bool ci_run_path(const char* path)
+{
+    // Workflow runs may use the REST API's ref-qualified path. The suffix is not a source
+    // attestation: the workflow ID and each caller's event/branch/head/lease checks remain required.
+    size_t length = strlen(BUSTER_CI_WORKFLOW);
+    return strncmp(path, BUSTER_CI_WORKFLOW, length) == 0 &&
+           (path[length] == 0 || (path[length] == '@' && path[length + 1] != 0));
+}
+
+static bool ci_run_workflow(const Json* json)
+{
+    return ci_run_path(json_field(json, 0, "path")) && json_number(json, 0, "workflow_id") == ci_workflow();
+}
+
 static CiRun ci_get_run(uint64_t id)
 {
     char path[100];
     snprintf(path, sizeof(path), "actions/runs/%" PRIu64, id);
     Http response = ci_api("GET", path, NULL);
     CiRun result = ci_run_parse(&response.json, 0);
-    if (strcmp(json_field(&response.json, 0, "path"), BUSTER_CI_WORKFLOW) != 0)
+    if (!ci_run_workflow(&response.json))
     {
         ci_die("run does not belong to the 9700X qualification workflow");
     }
@@ -551,7 +567,7 @@ static bool ci_command_run(uint64_t id, CiRun* run)
     {
         ci_die("cannot verify command's run identity (HTTP %d)", response.status);
     }
-    bool valid = response.status == 200 && strcmp(json_field(&response.json, 0, "path"), BUSTER_CI_WORKFLOW) == 0;
+    bool valid = response.status == 200 && ci_run_workflow(&response.json);
     if (valid)
     {
         *run = ci_run_parse(&response.json, 0);
@@ -1208,6 +1224,10 @@ static CiIdentity* ci_identity(CiIdentity* identities, size_t count, uint64_t nu
 
 static uint64_t ci_workflow(void)
 {
+    if (ci_workflow_id != 0)
+    {
+        return ci_workflow_id;
+    }
     Http response = ci_api("GET", "actions/workflows/9700x.yml", NULL);
     uint64_t result = json_number(&response.json, 0, "id");
     if (result == 0 || strcmp(json_field(&response.json, 0, "path"), BUSTER_CI_WORKFLOW) != 0 || strcmp(json_field(&response.json, 0, "state"), "active") != 0)
@@ -1215,6 +1235,7 @@ static uint64_t ci_workflow(void)
         ci_die("qualification workflow unavailable; no new admission");
     }
     json_free(&response.json);
+    ci_workflow_id = result;
     return result;
 }
 
