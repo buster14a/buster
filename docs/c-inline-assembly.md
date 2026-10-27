@@ -108,7 +108,8 @@ syntax directives. It refuses:
 
 The matcher's index admits every form the assembler's syntax takes, whatever
 the unit's target. GNU as and clang's integrated assembler take any instruction
-in a template.
+in a template. The lowering makes the index on its scratch arena, once per unit
+with asm statements, and frees it after the planning.
 
 The matcher admits `cpuid`, `xgetbv`, `xchg`, `fnstcw`, `fldcw`, `fnstsw`,
 `fnclex`, `stmxcsr`, `ldmxcsr` and SSE2's `pcmpeqd`, which `main.c`'s statements
@@ -154,6 +155,26 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - templates that refer to symbols, and templates the assembler refuses, with its
   message;
 - naked functions.
+
+## Why it is scalar
+
+The planning, the substitution and the helper's records are scalar, a statement
+at a time. The assembler's lexer, parser and matcher run by the checker's path.
+A unit has few statements: each of `main.c`'s units has 58, of which 30 make
+helpers. On the 9700X, pinned to CPU 2, `-c` of 1,000 functions of four
+statements each (registers with a modifier, a barrier, cpuid's fixed registers,
+a memory output: 3,000 helpers) takes 29.0 ms. The same functions with C in the
+statements' place take 18.2 ms (medians of 21 runs each). That is 2.7 µs and
+47,000 user instructions a statement.
+
+Most of it is what any function costs: the helpers are 3,000 more functions to
+size, encode, describe and emit. A profile of the user cycles puts 7.6% of the
+compile in the statements' own work: the planning and substitution 3.9%, the
+assembler's passes 3.4% (most of it `asm_section_index`'s setup per template)
+and the plan's walk 0.3%. That is about 0.55 µs a statement. The matcher's
+index costs its initialization once per unit, 0.7 to 0.9 ms in
+`benchmark-assembler`. For `main.c`'s 58 statements, the statements' own work
+is about 30 µs. Vectorizing it across statements would save no more than that.
 
 ## Tests
 
