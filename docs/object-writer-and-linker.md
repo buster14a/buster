@@ -2883,6 +2883,18 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   numbered after the loader's (`runtime_export_library`), and the snapshot
   keeps its versions, its exports' versions and types, its path and its
   soname as it keeps the loader's (format 7, after #490's 6).
+- **Deferred validation (#489's follow-up, format 8).** `runtime_find_gcc_s`
+  marks its search probes deferred, without growing `RuntimeProbe`. The
+  snapshot retains that flag in its hashed directory. `runtime_open` checks
+  the other probes; binding checks the deferred paths once when it takes a
+  strong `libgcc_s` import, retains it for a named library's reference, or
+  checks a named library's version need from it. Undefined-name errors also
+  check those paths, since a library installed since the snapshot could
+  define the missing name. A shared library's permitted strong undefined
+  names do the same. A stale path gives `BIND_ERROR_SNAPSHOT`; existing
+  callers discard the snapshot and re-import before retrying. Links that
+  use none of these facts, including weak-only unwinder references, do not
+  check the deferred paths. Imported runtimes already read the files.
 - **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
   -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
   which exports most of the members' names too (`__udivti3`), so binding
@@ -2902,6 +2914,12 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   definition of one of its names with default visibility is exported, as lld
   exports it whether or not the library is needed (GNU ld doesn't when it
   isn't), as the loader's are.
+  The pass computes each library's lowest and highest version index once,
+  then classifies imports with range comparisons. `runtime_move_versions`
+  gives the libraries disjoint ranges, including when a library's own
+  version indices have gaps or appear out of order. This removes a full
+  version scan for each import in each of the pass's two loops; the exact
+  membership scan remains available to the independent tests.
 - **A named library's references.** GNU ld's `--as-needed` also keeps a
   library for a needed library's strong reference that the referring
   library's own `DT_NEEDED` entries don't cover, nor those of another
