@@ -518,6 +518,10 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 #include "buster/compiler/profile.c"
 #include "buster/compiler/profile_test.c"
 
+// measure-compile (#518): whole compiles timed as processes against a reference compiler, with --time-stages' report of
+// where their time goes.
+#include "buster/compiler/compile_measure.c"
+
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
 #include "buster/compiler/parallel.c"
@@ -1282,6 +1286,10 @@ static int main_command(int argc, char** argv, bool* found)
               strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-compile") == 0)
+    {
+        result = run_measure_compile_command(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
