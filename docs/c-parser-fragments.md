@@ -13,7 +13,9 @@ fastest of the four paths. What was measured is an adapter: the checker kept
 walking the tree, and the fragments supplied only each operator's operands. The
 result is about fragments beside this checker's tree, not about a one-pass
 prefix-driven checker or a parser that skips the tree ("What the decision
-covers"). By #107's rule the fragment code was then removed;
+covers"); #544 then decided those, by the checker's contract and the tree's
+measured cost: they can't pay at this checker's contract ("A checker without
+the expression tree (#544)"). By #107's rule the fragment code was then removed;
 commit [`6c5b21a1`](https://github.com/buster14a/buster/tree/6c5b21a18eda1dd620322d889295980178a97999/src/buster/compiler)
 has all of it, consumer and benchmark included, for anyone who wants to run it
 again ("Reproducing"), and [the record](https://github.com/buster14a/buster-performance/tree/cbf9a269b02e21705c21c173f914d36835e28f30/docs/measurements/parser-fragments-107-2026-10-26) has the measurements' logs,
@@ -23,7 +25,7 @@ scripts and inputs.
 
 | Variant | Construction | Consumer |
 | --- | --- | --- |
-| A, postorder | the scalar parser's tree and its postorder (`parse_postorder_sorted`) | the checker's postorder reader, `check_input_expressions` |
+| A, postorder | the scalar parser's tree and its postorder (`parse_postorder_sorted`, since #544 `parse_tree_columns`) | the checker's postorder reader, `check_input_expressions` |
 | B, prefix | the scalar parser with the fragment sink; each expression flattened into prefix kinds | the fragment reader, over the flat array |
 | C, fragments | the same sink | the fragment reader, straight from the fragments' windows |
 | D, sorted | the vector parser's parents and depths, ordered by the same counting sort | the postorder reader |
@@ -342,11 +344,79 @@ measure #106's one-pass prefix-driven checker, or a parser that skips the tree
 for expressions: both would need the checker's semantic actions written for
 fragment kinds, and both stay untested; the paragraph before this section says
 what would reopen them, and
-[#544](https://github.com/buster14a/buster/issues/544) tracks them. Nor did the
+[#544](https://github.com/buster14a/buster/issues/544) decided them ("A checker
+without the expression tree (#544)", below). Nor did the
 identity criterion of #106 pass in full: the results were identical up to the
 checked program, while the lowered IR and the `-c` objects weren't compared.
 Keeping A didn't depend on them, since #107's rule asks identical results only
 of a variant fast enough to adopt.
+
+## A checker without the expression tree (#544)
+
+[#544](https://github.com/buster14a/buster/issues/544) asked what the adapter above leaves open. The issue's design is
+a checker that reads expressions in preorder from the fragments, in one pass with the postorder of declarations and
+statements, over a parser that doesn't build the tree for expressions. Its fragments would replace work rather than
+add it. The issue asked for the contract first: what of the tree today's checker reads, and what would replace each.
+Then it asked for the most dropping the tree could save, against the fragments' own cost. Both answers say no. The
+design wasn't built, and the work went where the tree's cost was: the parser now derives the tree's columns once,
+for the checker to read (`docs/c-parser.md`, "The postorder and the tree's columns").
+
+### What the checker reads of the tree
+
+Counted at `43030b89`, outside the tests, benchmarks and corpus tools:
+
+| What | Reads | Files | Where, among them |
+| --- | ---: | ---: | --- |
+| a token's parent (`tree.parents`) | 194 | 30 | the reader and its passes; the constant evaluator, 42; `check_program`, 15, and the program's other passes (lowering, emission, selection, diagnostics, debug rows), 9 more |
+| a token's first child or next sibling | 48 | 9 | the walk's operands and keywords, the constant evaluator, regions, controls, asm operands, naked functions, packed members, selections, VLAs |
+| a subtree's end | 15, and every graph node's source position | 6 | expression ends and diagnostics' cuts, the constant evaluator, loops, VLAs, packed members, selections |
+| the postorder | 5 loops | 4 | the walk, the constant evaluator, the selections, the pack pragmas |
+
+Besides these, the walk gives nodes to, or reads, the tokens the fragments leave out, which the issue lists: a group's
+`)`, a statement expression's closer, a designator's bracket and a builtin's keyword. GNU's `[0 ... 1] +1` also makes
+a bracket an operand of the prefix `+`.
+
+A checker fed by fragments would need all of these in fragment terms. That isn't only the walk's operands: the
+constant evaluator reads expressions' parents 42 times and their links 10 times, and the passes after the reader
+read parents too. The design in the issue rewrites none of them. So the parse can't drop the tree for expressions.
+At most the walk could take its operands from fragments, and that is what #539's adapter measured.
+
+### The most the tree costs
+
+The bound on the 9700X, CPU 2. The tree's items are from `benchmark-parser` on `sqlite3.c` (706,586 tokens), the
+walk's from `perf record` of `-c` of the frozen `sqlite3.c`, and the compile's from `perf stat`, all at main
+`43030b89`. Cycles a token:
+
+| The tree's work | cycles a token |
+| --- | ---: |
+| the kernels that build it, for every token: K4's parents, K5's statements, K1's second part | 7.1 |
+| the parser's postorder with the subtree sizes, five passes | 13.4 |
+| the reader's links, ends and positions, two passes and three fills | 15.1 |
+| the walk's gathering of each token's children's values: 1.08% of `-c`'s samples | about 13 |
+| together | about 49, 4.7% of `-c`'s user cycles |
+| the whole `-c`'s user cycles, for scale | 1,043 |
+
+The fragments' own costs, from #539's record (TSC ticks, at 3.8 GHz, while the core runs near 5.5):
+- the sink took 55 ticks a token on the scalar parse, about 80 cycles;
+- the reader's index took 58, about 84;
+- the prefix walk took 302 to 313 ticks, against the postorder walk's 138.
+
+The sink alone costs more than everything the tree costs. The bound also includes the kernels, which the
+declarations and statements need anyway. And the walk's gathering is a few loads and stores a token. The rest of the
+walk, 8.6% of the compile's samples, is the per-token semantic work every reader does.
+
+### The decision
+
+The tree-less checker isn't built: it can't pay at this checker's contract, by the counts and the bound above.
+
+Where the tree did cost, the parser and the reader now derive the traversal once:
+- the parser's five passes and the reader's two (and three fills) became three passes;
+- on the 9700X they took 7.2 to 7.6 TSC ticks a token on `sqlite3.c`'s tree, against 24 before;
+- `-c` of the frozen `sqlite3.c` took 1.7% fewer user cycles (737.0 M against 724.8 M) and 2.2% fewer user
+  instructions, and the parse 2.05 ms less (`docs/c-parser.md`, "The tree's columns (2026-10-27)").
+
+The idea would come back with a checker whose passes read no parent, link or end of an expression's tokens, and a
+fragment builder that costs less than the tree's columns (now 10.8 cycles a token on `sqlite3.c`).
 
 ## Reproducing
 

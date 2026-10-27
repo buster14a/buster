@@ -16,7 +16,9 @@ checker's tree walk, lost: the parser keeps the postorder.
 On the 9700X the vector path parses `sqlite3.c` (707,153 tokens) in 3.54 ms,
 27.6 cycles a token, 2.37 times as fast as the scalar parser (65.4), and the
 libc corpus at 21.5 cycles a token, 2.37 times as fast (50.6); with the
-postorder and its subtree sizes, 41.1 and 32.9. Both paths build the same tree
+postorder and its subtree sizes, 41.1 and 32.9 then. The tree's columns, which
+replaced those passes and the checker's own (#186, #544), take 10.8 and 8.3.
+Both paths build the same tree
 on every file of `sqlite3.c`, the libc corpus, Lua and this repository, which
 they accept as clang does, and agree with clang on 22,200 mutations of them.
 "Measurements" has the tables; #115's budget for the parser, 2 ms for
@@ -39,10 +41,16 @@ The output, in `Parser`:
   whose node is its parent, or `BUSTER_PARSE_ROOT` for the node of a top-level
   declaration), its role (`ParseRole`, 84: what the token is to the grammar)
   and its node depth.
-- **The postorder**, for a unit without errors: the token at each position, and
-  each position's subtree size (the subtree is the `sizes[k]` positions ending
-  at `k`), what #133's single-pass type checker reads. `ParseOptions.tree_only`
-  leaves these two pointers null; the zero-initialized default produces them.
+- **The postorder and the tree's columns**, for a unit without errors
+  (`parse_tree_columns`): the token at each position, and each token's
+  position in the postorder, its subtree's end, its first child and its next
+  sibling, what the checker's reader reads besides the parents and roles; with
+  `ParseOptions.sizes`, also each position's subtree size (the subtree is the
+  `sizes[k]` positions ending at `k`), which nothing in the compile reads.
+  `ParseOptions.tree_only` leaves these pointers null; the zero-initialized
+  default produces all but the sizes. The C driver parses `tree_only`, and the
+  checker's reader derives the same columns into its own scratch ("The postorder
+  and the tree's columns").
 - **Diagnostics**: clang's message at clang's place for the first error of
   each top-level declaration, and `fatal` for what stopped the parse where no
   diagnostic says it (out of memory, or past the parser's token limit).
@@ -329,18 +337,74 @@ benchmark's counts; `test-parser --explain` says why for each):
 | libc corpus (733 files) | 142 | 7,827 | 0.20% | asm statements; `__restrict` in glibc's parameters' array declarators; block-scope typedef names (musl's string functions); definitions whose declarator has a group (`signal`'s kind) |
 | `main.c` | 47 | 22,088 | 1.29% | asm statements (clang's intrinsics headers, the compiler's own); `_Alignas(64)` before a typedef name; `__restrict` in glibc's `spawn.h`; a block's variable named `va_list` |
 
-## The postorder
+## The postorder and the tree's columns
 
-`parse_postorder_sorted` derives the postorder from the parents in passes
-without a branch on the tree: each token's subtree end, from its last child
-after it, backward; how many subtrees end at each token; an exclusive prefix
-sum; and each token's position, `C(v) + end(v) - v`. With the sizes, each
-token's subtree start comes from its first child before it, forward, and its
-position gets `end(v) - start(v) + 1`. `parse_postorder` is the walk the spike
-measured the passes against (each token with no child after it, then the climb
-through the ancestors it ends), without the sizes: it mispredicts where the tree
-is irregular, as on `sqlite3.c`, and costs less where its branches predict, as
-on libc ("Measurements"). The benchmark times both.
+`parse_tree_columns` (#186, #544) derives from the parents, in three passes
+without a branch on the tree, everything the checker's reader reads of the tree
+but the parents and the roles:
+
+- each token's last child, forward (each parent's last write);
+- backward, each token's next sibling and its parent's first child (each token
+  pushes itself on its parent's list, which leaves the first child at the
+  head), each token's subtree end (its last child's, where that child comes
+  after it, else its own), and how many subtrees end at each token;
+- forward, the exclusive prefix sum of those counts, `C(v)`, and each token's
+  postorder position, `C(v) + end(v) - v`, which places it in the postorder.
+
+With `ParseOptions.sizes` the last pass also takes each token's subtree start
+from its first child before it and writes the position's size,
+`end(v) - start(v) + 1`. `parse_tree_links` is the twin: the checker's reader's
+derivation before this change (each token's children linked from the last, then
+its position and its parent's end from a postorder in order).
+`parse_postorder` is the walk the spike measured the passes against (each token
+with no child after it, then the climb through the ancestors it ends): it
+mispredicts where the tree is irregular, as on `sqlite3.c`, and costs less where
+its branches predict, as on libc ("Measurements"). `test-parser` checks the
+columns of both paths' parses and of the twin against a depth-first walk of its
+own, and the benchmark times the four.
+
+Where the columns are made. Before, the parser derived its postorder and the
+subtree sizes in five passes (`parse_postorder_sorted`), and the checker's reader
+then derived the links, the ends and the positions again, in two passes and three
+fills; nothing read the sizes. Now a parse that isn't `tree_only` publishes the
+columns and the reader reads them as they are, and the C driver parses
+`tree_only`: the reader derives the columns once, with `parse_tree_columns`
+(with `--scalar`, the walk and `parse_tree_links`), into its own scratch, whose
+pages the parse's temporaries already touched, so that no column of the parser's
+is faulted in for them. The prefix and repair views (`c_check_prefix.c`,
+`c_check_repair.c`) bring their own postorder, and the reader derives the rest
+from it with the twin.
+
+Why scalar. The passes are a scatter's loads and stores: per token, two of the
+backward pass's loads and a read-modify-write land at the token's parent, its
+last child and its subtree's end, and each forward pass makes a store at its
+parent or its position. On Zen 5 a zmm `vpgatherdd` takes about 12.6 cycles for
+16 lanes and a `vpscatterdd` 17 (the coding style's costs), against three scalar
+loads and two stores a cycle, and a block's writes to one parent conflict, as a
+parent's children are near it. The variants measured on the 9700X, CPU 2, on
+`sqlite3.c`'s tree (706,586 tokens), in TSC ticks a token, 31 runs each, every
+one checked against the old passes' columns:
+
+| Variant | TSC ticks a token |
+| --- | ---: |
+| the parser's five passes and the reader's two, before | 23.9 to 24.1 |
+| the three passes, as built | 7.2 to 7.6 |
+| the three, with the counts kept in the positions column | 8.7 |
+| the three, with the counts in the positions column and the last pass in AVX-512 (its prefix sum in registers, the positions a vector store, the postorder a `vpscatterdd` or a scalar loop) | 9.4 to 9.8 |
+| one backward pass that leaves each end at its parent through a store to a selected address | 9.1 to 9.3 |
+| that pass with the counts in the positions column and the last pass in AVX-512 | 9.2 to 9.8 |
+| the links and the ends in two backward passes, after the last children's | 8.1 to 11.8 |
+| two backward passes, the counts in the positions column and the last pass in AVX-512 | 7.7 to 9.2 |
+| last children kept by a read-modify-write at the parent, in the one backward pass | 13.0 |
+| that, with each end's count a plain store of its chain's length | 11.1 to 11.5 |
+
+In the three passes every load's address is known early, as the last child
+comes from its own forward pass; the one-pass version leaves each end at its
+parent through a store whose address is a select of loaded values. On the
+laptop's Zen 4 the variants rank otherwise and vary more from process to process
+(the old passes took 43 TSC ticks a token there, the others 17 to 28), so the
+9700X decides. The forward pass in AVX-512 saved nothing: its scatter of the
+postorder costs what the scalar pass does.
 
 ## The driver
 
@@ -356,14 +420,16 @@ compiler's own sources need clang's predefines for their target options
 (`--predefines`, from `clang -dM -E -march=native ...`), as for -E.
 
 The producer `parse_translation_unit` has two output contracts. By default it
-produces the tree, diagnostics, postorder and subtree sizes described above.
-With `ParseOptions.tree_only`, it produces the same token stream, tree and
-diagnostics, and leaves `postorder` and `sizes` null. The tree has `count` byte
-roles and `count` 32-bit parents and depths, in disjoint, 64-byte-aligned
-columns with `BUSTER_PARSE_TOKEN_PADDING` entries of padding on either side.
-The parser owns the columns and diagnostics until its next parse or release;
-the full contract's traversal columns have `count` entries of `uint32_t`, with
-the same alignment and padding. Rendering diagnostics also needs the originating
+produces the tree, diagnostics, postorder and the tree's columns described
+above (and with `ParseOptions.sizes` the subtree sizes). With
+`ParseOptions.tree_only`, it produces the same token stream, tree and
+diagnostics, and leaves the postorder, the columns and the sizes null. The tree
+has `count` byte roles and `count` 32-bit parents and depths, in disjoint,
+64-byte-aligned columns with `BUSTER_PARSE_TOKEN_PADDING` entries of padding on
+either side. The parser owns the columns and diagnostics until its next parse
+or release; the full contract's traversal columns have `count` entries of
+`uint32_t` (the tree's columns `count + 1`, the last a sentinel), with the same
+alignment and padding. Rendering diagnostics also needs the originating
 preprocessor and intern table. Empty
 units and erroneous units follow the same success and diagnostic rules in both
 modes. Each parse clears the optional output pointers before processing its
@@ -371,11 +437,11 @@ new unit.
 
 `run_parse_command` requests the tree-only contract because its consumer,
 `parse_print_diagnostics`, uses the tokens and diagnostics. This avoids building
-two output columns and five temporary columns, about 28 bytes per token before
-padding, plus their construction and teardown. The default API and
-`benchmark-parser` still produce the traversal that #130/#133 will consume.
-Code-generation throughput awaits those consumers' integration; the available
-whole-process measurement is the current syntax-checking driver.
+the traversal's columns and their temporaries, plus their construction and
+teardown. The C driver (`run_check_command`) requests it too, since its checker's
+reader derives the traversal it reads into its own scratch ("The postorder and
+the tree's columns"). The default API and `benchmark-parser` still produce the
+traversal, for the tests and the checker's other callers.
 
 ### Driver measurements, 2026-10-23
 
@@ -603,15 +669,66 @@ direction, so these runs establish no end-to-end timing effect. The
 [driver raw output and commands](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/simd-301-2026-10-23/parser-driver.txt)
 isolate the parser change over the same frozen source as the kernel runs.
 
+### The tree's columns (2026-10-27)
+
+#186's last lead and #544's alternative ("The postorder and the tree's columns"). On the 9700X (CPU 2, the shared
+lock), main `43030b89` against the branch, both built without `-g` (`BUSTER_DEBUG_INFO=0`, as the 9700X job builds).
+
+`benchmark-parser --only stages`, 21 passes, cycles a token (main's postorder passes the median of two processes,
+the derivation's of three, the branch's one):
+
+| Input | before: the parser's postorder passes, with the sizes | the reader's derivation (`tree-links`) | together | after: `tree` | `tree-sizes` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 13.43 | 15.09 | 28.52 | 10.82 | 11.79 |
+| the libc corpus | 11.41 | 8.10 | 19.51 | 8.26 | 11.06 |
+| `main.c` | 14.74 | 15.35 | 30.09 | 12.18 | 15.15 |
+
+The reader's derivation is `parse_tree_links`, the code the reader ran, timed in the benchmark's harness. In the
+compile it ran inside `check_input_run`, after its fills.
+
+`-c` of the frozen `sqlite3.c` (#520's options), 8 rounds of `perf stat -r 3` in one hold of the lock, the order
+alternating by round; every object byte for byte main's:
+
+| | main | the branch | change |
+| --- | ---: | ---: | ---: |
+| user instructions | 1,751.69 M | 1,713.41 M | -2.19% |
+| user cycles | 737.04 M | 724.81 M | -1.66% |
+| task-clock | 154.48 ms | 152.28 ms | -1.42% |
+| kernel cycles | 119.34 M | 118.72 M | -0.52% |
+| page faults | 2,070 | 1,890 | -8.70% |
+
+Every round's user cycles were lower, by 8.5 M to 14.8 M. A build of the same work before its last commit (which only
+pops the derivation's temporaries earlier) took 720.30 M against main's 737.48 M in another hold (-2.33%, rounds
+-1.4 M to -20.2 M), and 1,713.05 M instructions: the spread between builds is the code's placement, as the
+checker's unchanged stages show below.
+
+The stages, `--time-stages --lanes 1`, the median of 11 runs each, interleaved in the same hold:
+
+| stage | main ms | the branch ms | change |
+| --- | ---: | ---: | ---: |
+| preprocess | 9.719 | 9.688 | -0.031 |
+| parse | 9.480 | 7.427 | -2.053 |
+| check-input | 63.824 | 63.088 | -0.736 |
+| check-expressions | 20.082 | 20.196 | +0.114 |
+| check-declarations | 5.321 | 5.312 | -0.009 |
+| check-program | 15.950 | 16.308 | +0.358 |
+| lower | 15.597 | 15.690 | +0.093 |
+
+`check-program`'s code is unchanged; the other build of the same work ran it 0.10 ms faster than main.
+
+The parse loses the postorder's five passes and its two columns, and the reader's two passes and three fills become
+the three passes, in pages the parse's temporaries already touched.
+
 ## What's left
 
 - #115's budget for the parser, 2 ms for `sqlite3.c` (about 16 cycles a token):
-  the vector path takes 3.54 ms, and with the input's conversion and the
-  postorder 5.42 ms. K6 (9.4 cycles a token, its check of function bodies a
-  scalar scan back from each, which masks over the 64 tokens before a body
-  would replace) and the postorder's sizes (the passes' 13.5 against the walk's
-  15.0 without sizes) come first, then K3's classification, and then the
-  spike's leads: K2's round and K4's window search.
+  the vector path takes 3.54 ms, and with the input's conversion it is the C
+  driver's parse, whose checker now derives the tree's columns (10.8
+  cycles a token, "The tree's columns (2026-10-27)"). K6 (9.4 cycles a token,
+  its check of function bodies a scalar scan back from each, which masks over
+  the 64 tokens before a body would replace) comes first, then K3's
+  classification, and then the spike's leads: K2's round and K4's window
+  search.
 - The checks' misses on valid code, which cost only the fallback's time:
   qualifiers in a parameter's array declarator (glibc's headers), a typedef
   name after `_Alignas(...)` (K2 takes it for a declarator's name), and asm
@@ -658,9 +775,10 @@ the tree's roles, node depths and parents (which are its columns), the scalar
 parser's stacks and the postorder's passes. They go in `ParseOptions.scratch`,
 the caller's arena, or without it in the parser's own, and each step pops them.
 The C driver passes its checker's scratch, whose reader then takes the same
-pages: `sqlite3.c`'s vector path takes 63 MB of them, and the postorder's passes
-14 MB, which the parser held to the end of the compile in arenas of its own
-until #528. So a parse's temporaries may hold what an earlier one left: where
+pages: `sqlite3.c`'s vector path takes 63 MB of them, which the parser held to
+the end of the compile in arenas of its own until #528, and the reader derives
+the tree's columns into them (its `tree_only` parse makes none: "The postorder
+and the tree's columns"). So a parse's temporaries may hold what an earlier one left: where
 the vector path gives up on a unit (unbalanced brackets, a typedef K3 can't
 read, statements K5 can't settle), the kernels before K6 leave some of what it
 reads unwritten, so it is skipped, and the unit, whole to the scalar parser,
