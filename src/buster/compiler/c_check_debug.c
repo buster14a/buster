@@ -642,16 +642,17 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     uint32_t* addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_OBJECT_DEBUG_FIELDS) : 0;
     debug->output = (DebugOutput){ .line_addresses = addresses, .address_capacity = count };
-    // Measured first (DEBUG_ERROR_CAPACITY gives each section's size), then written.
-    valid = valid && addresses != 0 && fields != 0 && debug_write(&debug->unit, &debug->output, exact) == DEBUG_ERROR_CAPACITY;
+    // The unit and its borrowed slices stay unchanged across allocation: validate and size once, then emit once.
+    DebugPlan plan;
+    valid = valid && addresses != 0 && fields != 0 && debug_prepare(&debug->unit, debug->output.bases, &plan, exact) == DEBUG_OK;
     for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         DebugSection* written = &debug->output.sections[section];
-        written->capacity = written->size;
-        written->bytes = arena_push(arena, written->size, 16);
+        written->capacity = plan.sizes[section];
+        written->bytes = arena_push(arena, plan.sizes[section], 16);
         valid = written->bytes != 0;
     }
-    valid = valid && debug_write(&debug->unit, &debug->output, exact) == DEBUG_OK;
+    valid = valid && debug_emit(&plan, &debug->output) == DEBUG_OK;
     if (valid)
     {
         debug->attach = (ExecutableDebug){

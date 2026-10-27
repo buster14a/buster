@@ -45,6 +45,18 @@ sets the required section sizes and leaves byte buffers and address offsets
 untouched. Invalid input and format-limit failures change nothing. No buffer
 padding is assumed, including for vector tails.
 
+The C producer (`check_debug_build`) uses `debug_prepare` followed by
+`debug_emit`. Preparation validates and measures once into a stack-held
+`DebugPlan`: a copy of the unit descriptor, the five bases and sizes, and the
+scalar/vector encoder choice. It allocates no storage and retains no per-row
+encoding. After allocating the five sections from those sizes, emission checks
+their capacities and writes once. The plan and every borrowed name, file,
+function and row must stay unchanged until emission finishes; changes require
+a fresh preparation. Emission rejects different output bases before changing
+anything. Capacity failures publish sizes only and permit a retry with new
+buffers. Failed preparation leaves the plan unchanged. `debug_write` retains
+the defensive validate/measure/write entry point for other callers.
+
 After a successful write, `debug_finalize` takes that same unit, its unmodified
 output, and one `uint64_t` final address per function. It checks all
 address-plus-size additions before patching anything. The caller may finalize
