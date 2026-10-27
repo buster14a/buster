@@ -533,6 +533,8 @@ and replaces the old definition either way.
 Parameter validation keeps a bounded source-list scan for up to 16 names
 (#615). The seventeenth parameter materializes a temporary name-to-ordinal
 index, with a geometrically grown, half-full hash table in scratch memory.
+Its descriptor also lives in scratch memory, so ordinary macros carry no
+inline index arrays in their stack frame.
 Duplicate checks stay in source order, and the same index validates every
 `#parameter` in a large replacement list. The count stays 32-bit until the
 4,096-parameter limit has been checked, including malformed longer lists.
@@ -545,7 +547,7 @@ is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
 
 That first expansion stores the parameter ids as before. Small lists look
-them up in place: 0--4 names use a bounded scalar lookup, and 5--16 a masked
+them up in place through a cached id view and count: 0--4 names use a bounded scalar lookup, and 5--16 a masked
 AVX-512 comparison with its scalar twin. Larger lists rebuild the temporary
 index to resolve replacement identifiers and stringizing operands. The
 implicit `__VA_ARGS__` keeps an earlier explicit parameter's ordinal;

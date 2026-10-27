@@ -5698,27 +5698,57 @@ static bool pp_test_parameter_index(void)
         IdentId* names = (IdentId*)(guarded + page_size) - count;
         for (uint32_t p = 0; p < count; p += 1)
         {
-            names[p] = p * 8192;
+            names[p] = (p + 1) * 8192;
         }
         for (uint32_t mode = 0; result && mode < 2; mode += 1)
         {
             for (uint32_t p = 0; result && p <= count; p += 1)
             {
                 const uint32_t wanted = p < count ? p : BUSTER_PP_NONE;
-                result = pp_parameter_index_small(names, count, p * 8192, mode == 0) == wanted &&
-                         pp_parameter_index_small(names, count, p * 8192 + 1, mode == 0) == BUSTER_PP_NONE;
+                result = pp_parameter_index_small(names, count, (p + 1) * 8192, mode == 0) == wanted &&
+                         pp_parameter_index_small(names, count, (p + 1) * 8192 + 1, mode == 0) == BUSTER_PP_NONE &&
+                         pp_parameter_index_small(names, count, 0, mode == 0) == BUSTER_PP_NONE;
             }
             if (result && count > 1)
             {
                 names[count - 1] = names[0];
                 result = pp_parameter_index_small(names, count, names[0], mode == 0) == 0;
-                names[count - 1] = (count - 1) * 8192;
+                names[count - 1] = count * 8192;
             }
         }
     }
     if (guarded != MAP_FAILED)
     {
         munmap(guarded, (size_t)page_size * 2);
+    }
+    Scratch descriptor = scratch_begin(0);
+    const uint64_t descriptor_capacity = descriptor.arena->capacity;
+    descriptor.arena->capacity = descriptor.arena->length;
+    PPParameterIndex* allocated = 0;
+    const bool made = pp_parameter_index_allocate(&allocated, true);
+    result = result && !made && allocated == 0 && descriptor.arena->length == descriptor.length;
+    descriptor.arena->capacity = descriptor_capacity;
+    scratch_end(descriptor);
+    if (result)
+    {
+        Scratch outer = scratch_begin(0);
+        result = pp_parameter_index_allocate(&allocated, true);
+        for (uint32_t p = 0; result && p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
+        {
+            uint32_t previous;
+            result = pp_parameter_insert(allocated, p, p, &previous);
+        }
+        const uint64_t capacity = outer.arena->capacity;
+        outer.arena->capacity = outer.arena->length;
+        uint32_t previous;
+        result = result && !pp_parameter_insert(allocated, BUSTER_PP_SMALL_PARAMETERS, BUSTER_PP_SMALL_PARAMETERS, &previous);
+        outer.arena->capacity = capacity;
+        if (allocated != 0)
+        {
+            pp_parameter_index_end(allocated);
+        }
+        result = result && outer.arena->length == outer.length;
+        scratch_end(outer);
     }
     for (uint32_t mode = 0; mode < 2; mode += 1)
     {
