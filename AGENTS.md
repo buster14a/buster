@@ -1186,7 +1186,9 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every pull request's job queues behind every other's, so keep the job short.
+- Keep each qualification short. With admission enabled, the hosted controller
+  chooses priority before a job enters the physical queue ("9700X admission"
+  below); the shared host lock still protects every measurement.
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
@@ -1235,6 +1237,76 @@ there at a time, so everything takes one lock:
   benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## 9700X admission
+
+`tools/ci/admission.c` and `.github/workflows/9700x-control.yml` implement the
+default-branch eligibility/priority controller for #546-#548.
+[The admission guide](docs/ci-9700x-admission.md) describes the version-1
+interface, required-check attribution, recovery and the live rollout gates.
+Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
+ordinary qualification and restricted runner-group access have been verified.
+Verify this repository's exact default-workflow entrypoint and the existing
+single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
+with legacy, use the documented root-owned Buster-only job-start source guard;
+do not narrow legacy's group-wide access, broaden access or change other jobs.
+
+When enabled, confirmed conflicting PRs are blocked and their own outstanding
+qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
+to be a conflict. Behind-but-clean PRs remain eligible. The controller preserves
+the `buster-fast-9700x-` per-PR/ref concurrency groups and the shared host lock.
+It admits one job, rather than flooding the self-hosted queue. P0 critical,
+P1 high/current approval, P2 ordinary, P3 background and explicit P4 low are FIFO
+within class, with the guide's reserved aging slots and two-hour main/daily
+deadline. The default backlog threshold is three waiting eligible PRs.
+
+Maintainers with verified repository write/maintain/admin permission can post
+one standalone command in a PR conversation:
+
+```text
+/ci priority critical|high|normal|low
+/ci hold
+/ci resume
+/ci retry
+/ci status
+```
+
+The priority words above are alternatives. Append `run RUN_ID` for a current
+request-specific control, or use the controller's `workflow_dispatch` form on
+`main` with a PR/run ID. `normal`/`clear` removes an override; automatic approval
+priority can apply again. PR overrides/holds persist across commits until
+reset/resume or closure. Run overrides are bound to that request ID/SHA and expire
+on supersession/completion. Hold/promote never preempts admitted work. Retry
+qualifies only the current revision and is a no-op while its run is active.
+
+Automatic P1 requires a trusted current-head `APPROVED` review, or a comment
+consisting of `LGTM`, `APPROVED`, `SHIP IT`, `READY TO MERGE` or `/ci approve`.
+Quotes, code blocks, incidental/negated text and untrusted actors do not approve.
+Comment approval binds only a head already observed by the controller; edit or
+repost after observation, or use a commit-associated review, when ambiguous.
+Edits/deletions, dismissed reviews and new heads remove derived approval. Manual
+priority persists independently. Public fork revisions need a trusted current
+approval before any physical execution; a persistent priority alone is not one.
+
+The required context keeps its name, `Build and execute on Ryzen 7 9700X`, and
+GitHub Actions integration. In active mode the controller publishes both its
+Check Run and same-name commit status on the PR head after the exact current
+head/base/merge qualification; the native default-branch dispatch is not the PR
+result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
+status green. Documentation-only clean PRs retain success without hardware work.
+The check and controller summary expose priority, position, blocked reason,
+command result, admitted SHA/run, state and expiry. Raw real-run scheduling
+measurements belong in `buster-performance`, not here.
+
+Run `cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o /tmp/admission`
+and `/tmp/admission --self-test` after changing this policy, and rerun the existing
+`changes --self-test` after any workflow gate/benchmark edit. The policy/fixtures
+are original C; the privileged workflow never runs PR code or consumes a PR cache
+or artifact as authority. Guard binaries are compiled on hosted capacity and
+checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
+block new admission; never clear a live lease merely because it expired.
+`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
+backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 
