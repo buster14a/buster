@@ -180,8 +180,8 @@ Nonzero levels and unsupported wide/complex cases remain explicit metadata,
 not fabricated frame addresses or successful generated code.
 
 `c_builtin_misc_lower.c` consumes the already evaluated locals. It expands
-`memcpy` and `memmove` through baseline SSE 16-byte `COPY` operations, `memset`
-through repeated 8-byte integer patterns and `memcmp` through equal 8-byte
+`memcpy` through baseline SSE 16-byte `COPY` operations, `memmove` through
+8-byte loads/stores, `memset` through repeated 8-byte integer patterns and `memcmp` through equal 8-byte
 words. Exact byte tails handle the remainder; a differing comparison word
 falls into the unsigned-byte comparison at that word's first byte. A higher
 overlapping move copies backward, loading each whole chunk before storing it.
@@ -189,13 +189,17 @@ All branches have absolute enclosing-stream targets and preserve live values.
 Zero-length operations perform no memory accesses. `memcmp` returns the first
 unsigned-byte difference, independently of the host's integer byte order.
 
-The source producer retains a checked constant size of at most 32 in
+The source producer retains a checked constant size that fits a `uint32_t` in
 `CBuiltinMiscLowerCall.constant_size`, guarded by `constant_size_known`, while
 still evaluating every argument once. Known copies and fills up to 32 bytes
 expand directly. Moves up to 16 bytes load one or two pieces before either
 store, so close overlap is safe in either direction. Comparisons of zero or
 one byte have direct results. Larger constants use the bounded runtime loops;
-no recipe grows with an unbounded source length. The recipe caller supplies
+no recipe grows with an unbounded source length. Unknown lengths have direct
+zero-, one- and eight-byte paths before loop setup and overlap classification.
+A move's word is loaded before it is stored even on that fast path; it does
+not rely on `COPY`, whose shared-IR contract requires equal or disjoint ranges.
+Known larger sizes omit these small-size tests. The recipe caller supplies
 locals with the usual pointer, size and value classes; size metadata is its
 proof about the converted size local, not a request to skip source effects.
 

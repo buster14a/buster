@@ -7,7 +7,7 @@
 // Optional hint integers retain their checked integer machine class. Alignment promises remain producer metadata.
 // PREFETCH is a valid hint no-op; x86-64 extract/frob return-address representations are the pointer identity.
 //
-// Runtime copies use baseline SSE's 16-byte COPY, fills and comparisons use 8-byte integer words, with exact byte
+// Runtime memcpy uses baseline SSE's 16-byte COPY; moves, fills and comparisons use 8-byte integer words, with exact byte
 // tails. Small constant sizes have bounded straight-line recipes. No runtime call or optional output ISA is needed.
 // Zero length performs no memory access; memmove selects its backward loop only for an overlapping higher destination.
 // memcmp compares equal words then resolves a differing word in byte order. strlen scans aligned 8-byte words after
@@ -110,11 +110,39 @@ static void cbuiltin_misc_lower_copy_word(CBuiltinLowerRecipe* recipe, const CBu
         cbuiltin_lower_local(recipe, pattern);
         cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
     }
-    else
+    else if (call->id == CBUILTIN_MEMCPY)
     {
         cbuiltin_misc_lower_address(recipe, call->arguments[1], index);
         cbuiltin_lower_emit(recipe, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, 16);
     }
+    else
+    {
+        // COPY's shared-IR contract requires equal or disjoint ranges. A machine word's LOAD before SET also
+        // handles close overlap, without depending on COPY's present instruction selection for one chunk.
+        cbuiltin_misc_lower_address(recipe, call->arguments[1], index);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+static void cbuiltin_misc_lower_copy_single(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t class, uint32_t pattern)
+{
+    cbuiltin_lower_local(recipe, call->arguments[0]);
+    if (call->id == CBUILTIN_MEMSET && class == BUSTER_TYPED_CLASS_U8)
+    {
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, call->arguments[1]);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+    }
+    else if (call->id == CBUILTIN_MEMSET)
+    {
+        cbuiltin_lower_local(recipe, pattern);
+    }
+    else
+    {
+        cbuiltin_lower_local(recipe, call->arguments[1]);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, class, 0);
+    }
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, class, 0);
 }
 
 static void cbuiltin_misc_lower_offset(CBuiltinLowerRecipe* recipe, uint32_t pointer, uint32_t offset)
@@ -185,7 +213,37 @@ static void cbuiltin_misc_lower_copy(CBuiltinLowerRecipe* recipe, const CBuiltin
     const uint32_t index = cbuiltin_lower_temporary(recipe);
     const uint32_t end = cbuiltin_lower_temporary(recipe);
     const uint32_t pattern = call->id == CBUILTIN_MEMSET ? cbuiltin_lower_temporary(recipe) : 0;
-    const uint32_t bytes = call->id == CBUILTIN_MEMSET ? 8 : 16;
+    const uint32_t bytes = call->id == CBUILTIN_MEMCPY ? 16 : 8;
+    uint32_t empty = UINT32_MAX;
+    uint32_t one_end = UINT32_MAX;
+    uint32_t eight_end = UINT32_MAX;
+    if (!call->constant_size_known)
+    {
+        // Measured short dynamic operations need neither loop setup nor overlap classification. Each nonzero
+        // fast case is a single exact load/store, which is safe for a move in either direction too.
+        cbuiltin_lower_local(recipe, call->arguments[2]);
+        cbuiltin_lower_constant(recipe, 0);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+        empty = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_TRUE);
+        cbuiltin_lower_local(recipe, call->arguments[2]);
+        cbuiltin_lower_constant(recipe, 1);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+        const uint32_t not_one = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+        cbuiltin_misc_lower_copy_single(recipe, call, BUSTER_TYPED_CLASS_U8, pattern);
+        one_end = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_JUMP);
+        cbuiltin_misc_lower_patch(recipe, not_one, first);
+        cbuiltin_lower_local(recipe, call->arguments[2]);
+        cbuiltin_lower_constant(recipe, 8);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+        const uint32_t not_eight = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+        if (call->id == CBUILTIN_MEMSET)
+        {
+            cbuiltin_misc_lower_pattern(recipe, call, pattern);
+        }
+        cbuiltin_misc_lower_copy_single(recipe, call, BUSTER_TYPED_CLASS_U64, pattern);
+        eight_end = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_JUMP);
+        cbuiltin_misc_lower_patch(recipe, not_eight, first);
+    }
     if (call->id == CBUILTIN_MEMSET)
     {
         cbuiltin_misc_lower_pattern(recipe, call, pattern);
@@ -249,6 +307,9 @@ static void cbuiltin_misc_lower_copy(CBuiltinLowerRecipe* recipe, const CBuiltin
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
     cbuiltin_misc_lower_patch(recipe, zero, first);
     cbuiltin_misc_lower_patch(recipe, backward_end, first);
+    cbuiltin_misc_lower_patch(recipe, empty, first);
+    cbuiltin_misc_lower_patch(recipe, one_end, first);
+    cbuiltin_misc_lower_patch(recipe, eight_end, first);
     cbuiltin_lower_local(recipe, call->arguments[0]);
 }
 

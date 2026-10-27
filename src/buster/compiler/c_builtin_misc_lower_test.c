@@ -335,7 +335,13 @@ static void cbuiltin_misc_lower_test_constants(CBuiltinMiscLowerTestTally* tally
 
 static void cbuiltin_misc_lower_test_large(CBuiltinMiscLowerTestTally* tally, CBuiltinMiscLowerTestProgram programs[BUSTER_CBUILTIN_MISC_TEST_PROGRAMS], uint32_t path)
 {
-    static const uint32_t lengths[] = { 256, 4095, 4096, 1048576 };
+    static const uint32_t lengths[] =
+    {
+        256,
+        4095,
+        4096,
+        1048576,
+    };
     const uint32_t capacity = 1048576 + 256;
     uint8_t* source = malloc(capacity);
     uint8_t* actual = malloc(capacity);
