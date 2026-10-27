@@ -8251,17 +8251,13 @@ static uint32_t tier0_stack_class(uint32_t entry)
     return entry >= BUSTER_TYPED_CLASS_LIMIT ? BUSTER_TYPED_CLASS_VECTOR : entry;
 }
 
-// An operand of an entry tier0_validate_vector doesn't take: its class, with a vector's refused. Those entries' kinds
-// take no vector (a vector's arithmetic, compares and conversions are X86 entries), and a vector's byte would pass where
-// a kind asks for no more than a class other than VOID (CONVERT's operand) or two operands alike (a compare's).
-static uint32_t tier0_pop_class(Tier0Validator* validator, uint32_t node)
+// Whether entry i takes its last operand (tier0_takes_last) from a stack whose top has another class than the entry
+// before it, which both paths read for it: in postorder that entry is the operand itself, and a value left under a store
+// of its class (an increment's DUP leaves one) has it too. At a target, every way control arrives brings the same stack
+// (tier0_arrive), the top's class among it.
+static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier0Function* function, const Tier0Validator* validator, uint32_t i)
 {
-    const uint32_t entry = tier0_pop(validator, node);
-    if (tier0_stack_class(entry) == BUSTER_TYPED_CLASS_VECTOR)
-    {
-        tier0_reject(validator, node, "a vector operand of an entry of another class (a vector's conversions and compares are X86 entries)");
-    }
-    return entry;
+    return tier0_takes_last(function, i) && validator->depth != 0 && tier0_stack_class(validator->stack[validator->depth - 1]) != function->classes[i - 1];
 }
 
 // Whether a form may be a row's (tier0_operation_valid): a VEX or EVEX one, without a segment override, a symbol or a
@@ -8701,10 +8697,25 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 validator.depth = 0;
                 validator.reachable = true;
             }
-            if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASSES)
+            // An unknown kind or class and the vectors' (X86 and VECTOR, the last of each) take one test, so that the
+            // other entries run no test of their own for vectors: the lowering validates every function it lowers, and
+            // a second test per entry cost sqlite3.c's -c 1.5 million instructions (#556's review). A vector's entry
+            // checks its last operand as the others do below (tier0_last_mismatch), then the vectors' rules; none of the
+            // memory classes' checks applies to it.
+            if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_X86 || class >= BUSTER_TYPED_CLASS_VECTOR)
             {
-                tier0_reject(&validator, i, "an unknown kind or class");
-                break;
+                if (kind == BUSTER_TYPED_NONE || kind >= BUSTER_TYPED_KINDS || class >= BUSTER_TYPED_CLASSES)
+                {
+                    tier0_reject(&validator, i, "an unknown kind or class");
+                    break;
+                }
+                if (tier0_last_mismatch(function, &validator, i))
+                {
+                    tier0_reject(&validator, i, "a last operand of another class than the entry before it, which both paths read for it");
+                    break;
+                }
+                tier0_validate_vector(function, &validator, hashes, seen, i);
+                continue;
             }
             if (tier0_class_x87(class) && !function->x87)
             {
@@ -8721,18 +8732,10 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 tier0_reject(&validator, i, "a symbol past the access column, or an access that doesn't exist");
                 break;
             }
-            // The last operand's class, which both paths read from the entry before it: in postorder that entry is the
-            // operand itself, and a value left under a store of its class (an increment's DUP leaves one) has it too.
-            // At a target, every way control arrives brings the same stack (tier0_arrive), the top's class among it.
-            if (tier0_takes_last(function, i) && validator.depth != 0 && tier0_stack_class(validator.stack[validator.depth - 1]) != function->classes[i - 1])
+            if (tier0_last_mismatch(function, &validator, i))
             {
                 tier0_reject(&validator, i, "a last operand of another class than the entry before it, which both paths read for it");
                 break;
-            }
-            if (kind == BUSTER_TYPED_X86 || tier0_class_vector(class))
-            {
-                tier0_validate_vector(function, &validator, hashes, seen, i);
-                continue;
             }
             const uint32_t operand = i > 0 ? function->classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
             switch (kind)
@@ -8781,7 +8784,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_NEG:
             case BUSTER_TYPED_NOT:
-                if (tier0_pop_class(&validator, i) != class || class == BUSTER_TYPED_CLASS_VOID ||
+                if (tier0_pop(&validator, i) != class || class == BUSTER_TYPED_CLASS_VOID ||
                     (kind == BUSTER_TYPED_NOT && !tier0_class_integer(class) && !tier0_class_int128(class)))
                 {
                     tier0_reject(&validator, i, "NEG or NOT of another class");
@@ -8790,10 +8793,16 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_CONVERT:
             {
-                const uint32_t from = tier0_pop_class(&validator, i);
+                const uint32_t from = tier0_pop(&validator, i);
                 if (from == BUSTER_TYPED_CLASS_VOID || class == BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_reject(&validator, i, "CONVERT from or to VOID");
+                }
+                // A vector's stack byte, which is no class, would pass the check above: a vector's conversions are X86
+                // entries (#556's review). The kinds that compare an operand with a class refuse one already.
+                if (tier0_stack_class(from) == BUSTER_TYPED_CLASS_VECTOR)
+                {
+                    tier0_reject(&validator, i, "a CONVERT of a vector, whose conversions are X86 entries");
                 }
                 // A 128-bit integer converts to and from the other integers alone: a front end calls its runtime's
                 // functions for the floating classes, as clang's code does.
@@ -8806,7 +8815,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             }
             case BUSTER_TYPED_LOAD:
-                if (tier0_pop_class(&validator, i) != BUSTER_TYPED_CLASS_U64 || class == BUSTER_TYPED_CLASS_VOID)
+                if (tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64 || class == BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_reject(&validator, i, "LOAD from something that isn't U64");
                 }
@@ -8814,8 +8823,8 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_PTR_ADD:
             {
-                const uint32_t index = tier0_pop_class(&validator, i);
-                const uint32_t pointer = tier0_pop_class(&validator, i);
+                const uint32_t index = tier0_pop(&validator, i);
+                const uint32_t pointer = tier0_pop(&validator, i);
                 if (class != BUSTER_TYPED_CLASS_U64 || pointer != BUSTER_TYPED_CLASS_U64 || (index != BUSTER_TYPED_CLASS_I64 && index != BUSTER_TYPED_CLASS_U64) || value == 0)
                 {
                     tier0_reject(&validator, i, "PTR_ADD's operands or size");
@@ -8826,8 +8835,8 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             case BUSTER_TYPED_STORE:
             case BUSTER_TYPED_SET:
             {
-                const uint32_t stored = tier0_pop_class(&validator, i);
-                const uint32_t address = tier0_pop_class(&validator, i);
+                const uint32_t stored = tier0_pop(&validator, i);
+                const uint32_t address = tier0_pop(&validator, i);
                 if (address != BUSTER_TYPED_CLASS_U64 || stored != class || class == BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_reject(&validator, i, "a store's address or value");
@@ -8849,7 +8858,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                                                      (function->local_classes[value] != class || tier0_is_object(function, value) ||
                                                       (function->local_flags[value] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) != 0))
                                               : value == 0 || value > UINT32_MAX || tier0_class_memory(class);
-                if (tier0_pop_class(&validator, i) != class || bad_target)
+                if (tier0_pop(&validator, i) != class || bad_target)
                 {
                     tier0_reject(&validator, i, "a store to a local or a global that doesn't match");
                 }
@@ -8870,12 +8879,12 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 const uint32_t arguments = function->call_argument_counts[value];
                 for (uint32_t a = arguments; a > 0; a -= 1)
                 {
-                    if (tier0_pop_class(&validator, i) != function->argument_classes[first + a - 1])
+                    if (tier0_pop(&validator, i) != function->argument_classes[first + a - 1])
                     {
                         tier0_reject(&validator, i, "a call's argument of another class");
                     }
                 }
-                if (function->call_targets[value] == 0 && tier0_pop_class(&validator, i) != BUSTER_TYPED_CLASS_U64)
+                if (function->call_targets[value] == 0 && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64)
                 {
                     tier0_reject(&validator, i, "an indirect call's callee that isn't U64");
                 }
@@ -8905,7 +8914,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             }
             case BUSTER_TYPED_DISCARD:
             case BUSTER_TYPED_JUMP_VALUE:
-                if (tier0_pop_class(&validator, i) != class || class == BUSTER_TYPED_CLASS_VOID)
+                if (tier0_pop(&validator, i) != class || class == BUSTER_TYPED_CLASS_VOID)
                 {
                     tier0_reject(&validator, i, "DISCARD or JUMP_VALUE of another class");
                 }
@@ -8919,7 +8928,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_BRANCH_FALSE:
             case BUSTER_TYPED_BRANCH_TRUE:
-                if (tier0_pop_class(&validator, i) != class || !tier0_class_integer(class))
+                if (tier0_pop(&validator, i) != class || !tier0_class_integer(class))
                 {
                     tier0_reject(&validator, i, "a branch on something that isn't an integer of its class");
                 }
@@ -8931,7 +8940,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_JUMP_INDIRECT:
                 // To one of the labels, which tier0_arrive found reached with nothing on the stacks.
-                if (tier0_pop_class(&validator, i) != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+                if (tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_U64 || value != 0)
                 {
                     tier0_reject(&validator, i, "an indirect jump to something that isn't an address (U64), or with a value");
                 }
@@ -8942,7 +8951,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 validator.reachable = false;
                 break;
             case BUSTER_TYPED_RETURN:
-                if (class != BUSTER_TYPED_CLASS_VOID && tier0_pop_class(&validator, i) != class)
+                if (class != BUSTER_TYPED_CLASS_VOID && tier0_pop(&validator, i) != class)
                 {
                     tier0_reject(&validator, i, "a return of another class");
                 }
@@ -8967,8 +8976,8 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 break;
             case BUSTER_TYPED_COPY:
             {
-                const uint32_t source = tier0_pop_class(&validator, i);
-                const uint32_t destination = tier0_pop_class(&validator, i);
+                const uint32_t source = tier0_pop(&validator, i);
+                const uint32_t destination = tier0_pop(&validator, i);
                 if (source != BUSTER_TYPED_CLASS_U64 || destination != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_VOID || value == 0 ||
                     value > BUSTER_TIER0_MAX_COPY_BYTES)
                 {
@@ -8980,7 +8989,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             case BUSTER_TYPED_STACK_SAVE:
             case BUSTER_TYPED_STACK_RESTORE:
                 // A byte count in, an address out; a position out; a position in.
-                if ((kind != BUSTER_TYPED_STACK_SAVE && tier0_pop_class(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+                if ((kind != BUSTER_TYPED_STACK_SAVE && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
                 {
                     tier0_reject(&validator, i, "an allocation, or a stack position saved or restored, that isn't U64 or has a value");
                 }
@@ -8992,12 +9001,15 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
             default:
             {
                 // The binary operations and the compares.
-                const uint32_t last = tier0_pop_class(&validator, i);
-                const uint32_t first = tier0_pop_class(&validator, i);
+                const uint32_t last = tier0_pop(&validator, i);
+                const uint32_t first = tier0_pop(&validator, i);
                 const bool compare = kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE;
                 const bool shift = kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR;
                 const bool integer_only = shift || kind == BUSTER_TYPED_MOD || kind == BUSTER_TYPED_AND || kind == BUSTER_TYPED_OR || kind == BUSTER_TYPED_XOR;
-                bool valid = compare ? first == last && class == BUSTER_TYPED_CLASS_I32 && first != BUSTER_TYPED_CLASS_VOID
+                // A compare's operands are alike, and two vectors' stack bytes are too, which a vector's compares (X86
+                // entries) don't leave here (#556's review).
+                bool valid = compare ? first == last && class == BUSTER_TYPED_CLASS_I32 && first != BUSTER_TYPED_CLASS_VOID &&
+                                           tier0_stack_class(first) != BUSTER_TYPED_CLASS_VECTOR
                                      : first == class && (shift ? tier0_class_integer(last) : last == class) && class != BUSTER_TYPED_CLASS_VOID;
                 valid &= !integer_only || tier0_class_integer(class) || (tier0_class_int128(class) && kind != BUSTER_TYPED_MOD);
                 valid &= compare || tier0_class_bytes(class) >= 4;
