@@ -15,16 +15,19 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
     ExecutableLibrary libraries[260] = { 0 };
     if (built)
     {
+        // The runtime's libgcc_s.so.1, libc.so.6 and loader (dynamic_inputs): the first selected by no version, since
+        // the program needs none of its names.
         libraries[1] = (ExecutableLibrary){ .name = BUSTER_S8("libm.so.6"), .required = true };
-        libraries[258] = dynamic.libraries[0];
-        libraries[259] = dynamic.libraries[1];
+        libraries[257] = dynamic.libraries[0];
+        libraries[258] = dynamic.libraries[1];
+        libraries[259] = dynamic.libraries[2];
         libraries[259].required = true;
         ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableVersion, dynamic.version_count);
         built = versions != 0;
         for (uint32_t v = 0; built && v < dynamic.version_count; v += 1)
         {
             versions[v] = dynamic.versions[v];
-            versions[v].library += 258;
+            versions[v].library += 257;
         }
         dynamic.versions = versions;
         dynamic.libraries = libraries;

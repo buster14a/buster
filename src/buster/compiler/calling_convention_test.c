@@ -3941,6 +3941,28 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                 const uint32_t vector_count = abi_classify_all(&vector, table);
                 const uint32_t scalar_count = abi_classify_all_scalar(&scalar, table);
                 abi_test_expect(&tally, vector_count == scalar_count && vector_count != 0, "worlds", "the paths classified different counts");
+                // A table of the world's types alone (#442's lowering, which makes none) classifies them as the whole one does,
+                // and one with fewer rows than the types, or more than the room, is refused with its arena as it was.
+                Arena counted_arena = arena_reserve(abi_capacity_bytes(table->types.count));
+                AbiTable counted;
+                const uint64_t empty = counted_arena.length;
+                const bool refused = !abi_initialize_types(&counted, &counted_arena, table, width, table->types.count - 1) && counted_arena.length == empty &&
+                                     !abi_initialize_types(&counted, &counted_arena, table, width, table->types.capacity + 1) && counted_arena.length == empty;
+                abi_test_expect(&tally, refused, "worlds", "a table of fewer rows than types, or more than the room, was made");
+                const bool counted_made = abi_initialize_types(&counted, &counted_arena, table, width, table->types.count);
+                abi_test_expect(&tally, counted_made && abi_classify_all(&counted, table) == vector_count, "worlds", "the table of the types alone classified another count");
+                for (uint32_t index = 1; counted_made && index < table->types.count; index += 1)
+                {
+                    const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, counted.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
+                                             BUSTER_ABI_ROW_BYTES) == 0 &&
+                                      vector.pass[index] == counted.pass[index] && vector.stack_bytes[index] == counted.stack_bytes[index] &&
+                                      vector.alignment_log2[index] == counted.alignment_log2[index] && vector.storage[index] == counted.storage[index] &&
+                                      vector.layout[index] == counted.layout[index] && memcmp(&vector.results[index], &counted.results[index], sizeof(AbiReturn)) == 0;
+                    // Only a classified type's columns are written; an unclassified one's pass is clear in both.
+                    const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+                    snprintf(detail, sizeof(detail), "type %u: the table of the types alone differs from the whole table's", index);
+                    abi_test_expect(&tally, vector.pass[index] == counted.pass[index] && (!classified || same), "worlds", detail);
+                }
                 for (uint32_t index = 1; index < table->types.count; index += 1)
                 {
                     const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
@@ -4030,6 +4052,21 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     abi_test_expect(&tally, same, "worlds", detail);
                 }
                 free(again);
+                // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
+                // with room for them, and touches nothing past its own rows, while the whole table classifies them.
+                const uint32_t before = table->types.count;
+                TypeId pointer = (TypeId)(before - 1) << BUSTER_TYPE_INDEX_SHIFT;
+                for (uint32_t step = 0; step < 4 && table->types.count < before + 2; step += 1)
+                {
+                    pointer = type_pointer(&world.types.test.table, pointer);
+                }
+                const uint64_t counted_length = counted_arena.length;
+                const bool skipped = counted_made && table->types.count > before && abi_classify_all(&counted, table) == 0 &&
+                                     abi_classify_all_scalar(&counted, table) == 0 && counted_arena.length == counted_length;
+                abi_test_expect(&tally, skipped, "worlds", "the table of the types alone classified a type made after it");
+                abi_test_expect(&tally, abi_classify_all(&vector, table) == table->types.count - before, "worlds",
+                                "the whole table didn't classify the types made after the table of the types alone");
+                arena_release(&counted_arena);
             }
             arena_release(&vector_arena);
             arena_release(&scalar_arena);

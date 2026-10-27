@@ -2715,21 +2715,21 @@ round, as it joins `libc_nonshared.a`'s:
   none of the names `libc.so.6` and the loader export, which `test-import`
   checks on the system's files; a system where it did would need the members
   first.
-- **`libgcc_s.so.1`,** which the driver names as needed, isn't linked. Of the
-  names `libgcc.a`'s members refer to that neither it nor libc defines, it has
-  the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`), which only the
-  split-stack member (`morestack.o`) refers to: split-stack code
-  (`-fsplit-stack`, whose prologues call `__morestack`) and its API
+- **`libgcc_s.so.1`,** which the driver names as needed, wasn't linked by
+  #483. Of the names `libgcc.a`'s members refer to that neither it nor libc
+  defines, it has the unwinder's (`_Unwind_Resume`, `__gcc_personality_v0`),
+  which only the split-stack member (`morestack.o`) refers to: split-stack
+  code (`-fsplit-stack`, whose prologues call `__morestack`) and its API
   (`__splitstack_getcontext`) make it join. A PIE and a shared library that
-  join it are refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong reference
-  to a name nothing defines that only the members which joined refer to,
-  naming the first such member), where the shared library left the names to
-  the loader, as `-shared` leaves a program's own: it would load only beside
-  a library that defines them. GCC's and lld's links of such a library need
-  `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc but not
-  `libgcc_s.so.1` doesn't load into a process without it ("undefined symbol:
-  __gcc_personality_v0"). Linking it as needed, its exports a third library
-  of the snapshot's after `libc.so.6` and the loader, is #489.
+  joined it were refused alike (`BIND_ERROR_MEMBER_UNDEFINED`: a strong
+  reference to a name nothing defines that only the members which joined
+  refer to, naming the first such member), where the shared library left the
+  names to the loader, as `-shared` leaves a program's own: it would load
+  only beside a library that defines them. GCC's and lld's links of such a
+  library need `libgcc_s.so.1` and load alone; lld's with `libgcc.a` and libc
+  but not `libgcc_s.so.1` doesn't load into a process without it ("undefined
+  symbol: __gcc_personality_v0"). #489 links it as needed ("`libgcc_s.so.1`
+  as needed", below); the refusal stays for a system without it.
 - **Hidden helpers.** The integer and binary floating helpers are hidden, so a
   shared library exports none of them. Only the decimal floating-point and
   split-stack members define names with default visibility, which GNU ld and
@@ -2838,12 +2838,14 @@ must join exactly their three members (with `--cross-check`, ld.lld's and
 ld.bfd's links of it run, and lld extracts the same members). Its room check
 binds, against a PIE's runtime and a shared library's, a link of each
 member's first name that no library exports, which must bind (or be refused
-for `morestack.o`'s unwinder) within `bind_capacity_needed`'s room for the
-name; its rules refuse references to `__morestack` and
-`__splitstack_getcontext`, and bind one beside the program's own unwinder;
-and with `--cross-check` it refuses C compiled with `-fsplit-stack`, as a
-library and as a PIE, by both paths, where cc's links with GNU ld and lld
-need `libgcc_s.so.1`, load into a harness that doesn't and run.
+for `morestack.o`'s unwinder without `libgcc_s.so.1`) within
+`bind_capacity_needed`'s room for the name; its rules bind references to
+`__morestack` and `__splitstack_getcontext` (refused without
+`libgcc_s.so.1`), and bind one beside the program's own unwinder; and with
+`--cross-check` it binds C compiled with `-fsplit-stack`, as a library and as
+a PIE, by both paths (refused without `libgcc_s.so.1`), where cc's links with
+GNU ld and lld need `libgcc_s.so.1`, load into a harness that doesn't and
+run.
 `test-snapshot` damages a byte of the pieces' records at 171 places of each
 kind's snapshot, and each damaged copy must give a link of every member's
 names the room the whole snapshot gives it. `test-dynamic` writes the libgcc
@@ -2853,9 +2855,219 @@ compiles and links a C program of 128-bit division and conversions by both
 paths into the same bytes, which needs `libc.so.6` alone and prints what the
 test's own code computes, links it again over a snapshot whose `__udivti3`
 member's first atom has an alignment of 2^255 and a size of 2^64 - 1 (which
-must import the runtime again, silently, and leave the first link's snapshot),
-and refuses a call of `__splitstack_getcontext` with the one error and no
-executable.
+must import the runtime again, silently, and leave the first link's snapshot);
+#483 refused a call of `__splitstack_getcontext` with the one error and no
+executable, which #489 changes (below).
+
+#### `libgcc_s.so.1` as needed
+
+GCC's driver names `libgcc_s.so.1` as needed after each `libgcc.a`
+(`-lgcc_s_asneeded`, GCC 16; `--push-state --as-needed -lgcc_s --pop-state`
+before it): the unwinder (`_Unwind_Resume`, `_Unwind_Backtrace`,
+`_Unwind_GetIP`, `__gcc_personality_v0`), which split-stack code's
+`morestack.o` and a program's own code refer to, and a copy of most of
+`libgcc.a`'s functions. Since #489 a dynamic PIE's and a shared library's
+runtimes import it as a third library beside `libc.so.6` and the loader:
+
+- **Finding it.** `runtime_find_gcc_s` looks for `libgcc_s.so.1` in GCC's
+  installation, where `-lgcc_s` finds GCC's `libgcc_s.so` first, then in the
+  library directories, which that script or link names (`GROUP (
+  libgcc_s.so.1 -lgcc )` on Debian and Ubuntu, an absolute path elsewhere).
+  Both paths are probes, so that installing one later leaves the snapshot
+  stale. A system without it has a runtime without it, which refuses a
+  member's reference to the unwinder as #483 did.
+- **Its exports and versions.** `import_library` reads it as it reads
+  `libc.so.6`; its version indices are moved past `libc.so.6`'s and the
+  loader's (`runtime_move_versions`, which the loader's move shares), so that
+  a link's version index names one library's. Its exports are global names
+  numbered after the loader's (`runtime_export_library`), and the snapshot
+  keeps its versions, its exports' versions and types, its path and its
+  soname as it keeps the loader's (format 7, after #490's 6).
+- **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
+  -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
+  which exports most of the members' names too (`__udivti3`), so binding
+  takes `libgcc_s.so.1`'s export only after the members
+  (`runtime_export_after_members`): for a strong reference that no member
+  defines, and for a weak one, which loads no member. And `libgcc_s.so.1`
+  comes before `libc.so`: it exports none of the names `libc.so.6` and the
+  loader export (`test-import` checks it on the system's files), so that
+  binding theirs first agrees with the line.
+- **As needed.** As GNU ld and lld take `--as-needed`, the link needs it only
+  for a strong reference that binds to it; without one, the weak references
+  to its names are left to nothing, unversioned, as the loader's are
+  (`bind_keep_as_needed`, which the loader's pass shares). A shared library's
+  strong reference to one of its names (its own `_Unwind_Backtrace`, or
+  `morestack.o`'s `_Unwind_Resume`) binds to it too, rather than being left
+  to the loader, so the library loads alone, as `cc -shared`'s does. A
+  definition of one of its names with default visibility is exported, as lld
+  exports it whether or not the library is needed (GNU ld doesn't when it
+  isn't), as the loader's are.
+- **A named library's references.** GNU ld's `--as-needed` also keeps a
+  library for a needed library's strong reference that the referring
+  library's own `DT_NEEDED` entries don't cover, nor those of another
+  library the program loads: `libhelper.so`, linked by
+  `ld -shared` alone, calling `_Unwind_Backtrace`, makes GNU ld keep
+  `libgcc_s.so.1` for a program that calls it, where lld drops it and the
+  program fails to load ("undefined symbol: _Unwind_Backtrace"). Binding
+  follows GNU ld (#511's review): the closure over the `-l` libraries'
+  references (`bind_needed_libraries`) records an edge to the loader or
+  `libgcc_s.so.1` for such a reference, unless the executable's own exported
+  definition satisfies it, and the libraries a needed library's edges reach
+  are needed (`Bind.runtime_needed`), whatever the program's own references,
+  but for one that a `DT_NEEDED` entry of a library the program loads names
+  (`bind_runtime_covered`: `-lhelper -lplain`, `libplain.so` naming
+  `libgcc_s.so.1`, gives GNU ld's executable no entry of its own for it):
+  `bind_keep_as_needed` keeps their imports, and `dynamic_inputs` makes them
+  required, so that their `DT_NEEDED` entries are written without a version
+  of theirs an import uses, as GNU ld writes them. Without `libgcc_s.so.1`,
+  such a reference is one nothing defines, refused as before
+  (`BIND_ERROR_LIBRARY_UNDEFINED`).
+- **The writer.** `dynamic_inputs` lists it before `libc.so.6` and the
+  loader, as GNU ld and lld write `DT_NEEDED`: a library that a used version
+  selects (`ExecutableLibrary.required` false), so that only a link with an
+  import of its names gets its `DT_NEEDED` entry and its versions'
+  `.gnu.version_r` entries.
+- **Split-stack code in a dynamic PIE.** `morestack.o` binds now, and makes
+  `generic-morestack.o` join, whose thread-locals it reaches by general- and
+  local-dynamic accesses, which the writer relaxes in a dynamic PIE since
+  #515 (below, "General- and local-dynamic TLS in a dynamic PIE"), as it does
+  in a static executable; a shared library keeps them, with GOT pairs.
+  Split-stack PIEs and libraries link and run.
+
+**The cost**, on the 9700X against #511's merge base (e04462c), with #483's
+harness in three alternating rounds
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)):
+the dynamic runtime's snapshot grew from 3,282,344 bytes to 3,286,696 (45
+more global names, 3,432, and four more probes: `libgcc_s.so.1` in GCC's
+installation and in the library directories). A link that doesn't import
+`libgcc_s.so.1` pays 0.8 us in `runtime_open` (11.7 to 11.9 us before, 12.6
+to 12.7 after), nearly all of it the probes' `stat`s, and 0.02 to 0.04 us in
+`bind_end` (1,919 instructions for one worker: the as-needed pass over a third
+library); `bind_begin`, the write and the direct link's resident memory are
+the same. The C driver's hello world took 0.08 to 0.10 ms and 2 MB more, all
+of it one transparent huge page of `.bss`: the larger code moves `.bss`, and
+`unwind.c`'s `unwind_indices`, which every link clears whole, then straddles
+a 2 MB boundary. With huge pages disabled the two builds' runs take memory
+within 20 KB and, in two rounds of three, time within 0.01 ms. That page follows
+the executable's layout, which any change can move.
+
+`test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
+libraries' and its exports apart from theirs, `__udivti3` a member's of
+`libgcc.a` and `libgcc_s.so.1`'s after it, `_Unwind_Backtrace`
+`libgcc_s.so.1`'s, morestack.o's `_Unwind_Resume` bound to it in a shared
+library's runtime, and with `--cross-check` its exports against readelf's.
+`test-snapshot` compares its versions, exports and path through the
+snapshot. `test-bind`'s rules and its split-stack cross-check bind split-stack
+code by both paths, `_Unwind_Resume` a strong import of `libgcc_s.so.1`'s,
+whose bound objects lld and GNU ld link with it as needed into a PIE and a
+library that run, the library in a harness that doesn't need it; and refuse
+it against a copy of the runtime without `libgcc_s.so.1`
+(`bind_test_without_gcc_s`). `test-dynamic` writes a PIE whose `main` calls
+`_Unwind_Backtrace`, the split-stack library and a compiled library whose
+code walks its stack, each with `DT_NEEDED` `libgcc_s.so.1` before
+`libc.so.6` and its version need, compared with lld's links, and runs them;
+and `test-checker-driver` links a program that calls `_Unwind_Backtrace` by
+both paths into the same bytes, which name `libgcc_s.so.1` and run, and one
+that calls `__splitstack_getcontext` too (#515).
+
+#### General- and local-dynamic TLS in a dynamic PIE
+
+Split-stack code joins `libgcc.a`'s `generic-morestack.o` (above), which
+reaches its thread-locals (`__morestack_initial_sp` and others) by
+general- and local-dynamic accesses, `TLSGD` and `TLSLD` fixups whose
+sequences call the loader's `__tls_get_addr`. A static executable relaxes
+them to local-exec and a shared library gives them GOT pairs (above); a
+dynamic PIE refused them until #515 (`EXECUTABLE_ERROR_FIXUP`), so the
+direct path couldn't link a split-stack PIE. It relaxes them now, as GNU ld
+and lld do in an executable (lld's `handleTlsRelocation` with its
+`execOptimize`, which skips the call's relocation):
+
+- **To local-exec** for the image's own thread-locals: the general-dynamic
+  sequence becomes `mov %fs:0, %rax; lea x@tpoff(%rax), %rax`, the
+  local-dynamic one `mov %fs:0, %rax` after three or four `0x66` prefixes,
+  and its `DTPOFF32` fields offsets from the thread pointer: the static
+  executable's relaxation (`executable_relax_tls`), unchanged.
+- **To initial-exec** for an imported thread-local (a symbol of the
+  executable's dynamic bitset, `ExecutablePatch.imports`), whose offset from
+  the thread pointer only the loader knows: `mov %fs:0, %rax; add
+  x@gottpoff(%rip), %rax` (`64 48 8b 04 25 00 00 00 00 48 03 05`), its field
+  the import's GOT slot, which a `TPOFF64` relocation against the symbol
+  fills, as an initial-exec access's slot already had. The count marks the
+  slot where it tells a fixup to a dynamic symbol from the rest
+  (`executable_check_direct`, and `executable_is_refused` for the exact
+  report), on both paths, so a `TLSGD` to an import is no longer refused.
+  A local-dynamic access to an import stays refused: its module is the
+  image's, and the representation can't hold one (`link_check` refuses a
+  `TLSLD` or `DTPOFF32` to a shared library's symbol, `LINK_ERROR_BINDING`,
+  as lld refuses it).
+- **`__tls_get_addr`** is `ExecutableDynamic.tls_get_addr`, which
+  `dynamic_inputs` names (`dynamic_global`), 0 when the link doesn't refer to
+  it. Each call of it must be an access's, which consumes it, as in a static
+  executable: the count compares every fixup's target with it, 16 at a time,
+  beside the accesses' count by a compare of 64 kinds, and a link whose counts
+  differ (a call of `__tls_get_addr` of the program's own) is refused
+  (`EXECUTABLE_ERROR_UNSUPPORTED`). Its calls get no stub or slot: the count
+  clears its bits in the lane's rows of both bitsets, as the static runtime's
+  clears its slot's. It stays an import of the loader's in `.dynsym`, and the
+  loader stays needed, as lld leaves them (binding made the reference strong).
+  A shared library keeps its calls (`dynamic_shared_inputs` names none).
+- **Producers that don't name it**: `link-foreign`'s dynamic PIEs, whose
+  conversion doesn't yet give the writer its `__tls_get_addr`
+  (`foreign_link.c`'s `ExecutableDynamic`), relax nothing and refuse their
+  accesses as before (`ExecutableShared.relaxes_tls` is false for them): a
+  general-dynamic access to an import gets no slot and is refused by the
+  relocations' check (`EXECUTABLE_ERROR_RELOCATION`), before the patch
+  (#521's review).
+
+The relaxation rewrites the atoms' bytes, so a link with such accesses can't
+be written twice from the same bytes: the tests write it each time from the
+bytes binding left (`dynamic_test_lanes` and `dynamic_test_variants`), as
+`test-static` writes its links.
+
+`test-dynamic` writes test-bind's split-stack PIE (`bind_test_split_source`
+with `BUSTER_SPLIT_MAIN`, in `dynamic_test_libgcc_s`), whose
+`generic-morestack.o` has general- and local-dynamic accesses, and an
+assembly fixture with each sequence through the PLT and the GOT, to its own
+thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
+status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
+bytes, and without RELR; every access's bytes in the file must be the
+relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
+are compared with lld's links with `--cross-check`, and both run. A call of
+`__tls_get_addr` that no access makes (one whose fixup doesn't follow a
+`TLSGD` or `TLSLD` fixup, `executable_relaxed_call`'s rule) is an ordinary
+call of the loader's function, through its stub or its GOT slot, as it was
+before the relaxation and as GNU ld and lld link it (#511's review): a
+fixture calls it both ways with the executable's own module and offset,
+beside an access whose call the relaxation consumes (status 120). Only a
+static executable, where nothing defines it, still refuses such a call
+(`EXECUTABLE_ERROR_UNSUPPORTED`). `dynamic_test_tls_refusals` writes what a
+PIE refuses, by every lane count and the exact twins, without an output: the
+fixture without `__tls_get_addr` named (`EXECUTABLE_ERROR_RELOCATION` at its
+first access to `errno`); a local-dynamic access to `errno` binds, and
+`link_check` refuses it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
+call of `__splitstack_getcontext` by both paths into the same bytes, which
+name `libgcc_s.so.1` and run.
+
+**The cost.** A dynamic PIE that doesn't refer to `__tls_get_addr` (every
+program the direct path compiled before split-stack code: Tier 0 reaches
+thread-locals by local-exec and initial-exec) does no new work: its count
+neither compares targets with `__tls_get_addr` nor counts accesses. One that
+does pays what a static executable pays: a compare of 16 targets per 16
+fixups and of 64 kinds per 64, and a scalar relaxation per access in the
+patch's path for the other kinds (the static executable's 0.89 us for 47
+accesses of a 125 us write, "Relaxing general- and local-dynamic TLS
+accesses" below). On the 9700X, `benchmark-executable`'s TLS modes (`--tls`)
+against their control, a probe of the same bytes, atoms and fixups without
+TLS, add about 19 ns to the write per general-dynamic access to the program's
+own thread-local, 21 ns per access to `libc.so.6`'s `errno` and 23 ns per
+local-dynamic access with its `DTPOFF32`, on one lane at 2,000 and 180,000
+workers: the count and the symbols' pass about 3 ns each, and the chunks 12 ns
+(16 ns with the `DTPOFF32`). These are the whole writer's deltas between the
+programs, whose fixups' kinds and sections differ, not the relaxation's code
+alone ([#515's record](https://github.com/buster14a/buster-performance/blob/c5c33148b8d0a891ec7f8eb94faabc748139b3ef/docs/measurements/tls-relaxation-515-2026-10-27/README.md)).
+`benchmark-executable --only dynamic`, whose programs have no TLS accesses,
+wrote them in the same time before and after, its count within the rounds'
+spread ([#489's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)).
 
 #### The unwind tables
 

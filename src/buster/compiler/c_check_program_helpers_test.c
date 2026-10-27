@@ -523,28 +523,12 @@ static void check_test_program_helpers(CheckTest* test)
                 }
             }
         }
-        // Only a well-formed effect, its rule's fixed arguments evaluated and its rmw bit as its operation has it, is
-        // unsupported (until the producer calls its leaf); any other is invalid.
-        static const CheckProgramHelperRmwCase rmw_cases[] = {
-            { CBUILTIN_ATOMIC_FETCH_ADD, 7, true, CHECK_PROGRAM_UNSUPPORTED },
-            { CBUILTIN_ATOMIC_FETCH_ADD, 0, true, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_ATOMIC_FETCH_ADD, 3, true, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_ATOMIC_FETCH_ADD, 7, false, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_UNSUPPORTED },
-            { CBUILTIN_SYNC_FETCH_AND_ADD, 7, true, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 63, true, CHECK_PROGRAM_UNSUPPORTED },
-            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 7, true, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_SYNC_LOCK_RELEASE, 1, false, CHECK_PROGRAM_UNSUPPORTED },
-            { CBUILTIN_SYNC_LOCK_RELEASE, 1, true, CHECK_PROGRAM_INVALID },
-            { CBUILTIN_SYNC_LOCK_RELEASE, 3, false, CHECK_PROGRAM_INVALID },
-        };
         const uint64_t full = output.length;
         arena_pop_to(&output, 64);
-        for (uint32_t test_case = 0; test_case < 11 + BUSTER_ARRAY_LENGTH(rmw_cases); test_case += 1)
+        for (uint32_t test_case = 0; test_case < 11; test_case += 1)
         {
             CheckProgram changed = program;
             CheckBuiltinAtomicEffect saved = atomics[1];
-            const uint32_t saved_member = members[1];
             const CheckBuiltinFloatEffect saved_float = floating[0];
             Arena bounded = output;
             CheckProgramStatus status = CHECK_PROGRAM_UNSUPPORTED;
@@ -595,19 +579,10 @@ static void check_test_program_helpers(CheckTest* test)
                 floating[0].reads_fp_environment = false;
                 status = CHECK_PROGRAM_INVALID;
             }
-            else if (test_case == 10)
+            else
             {
                 floating[0].compiler_barrier = false;
                 status = CHECK_PROGRAM_INVALID;
-            }
-            else
-            {
-                const CheckProgramHelperRmwCase* rmw = rmw_cases + (test_case - 11);
-                members[1] = rmw->id;
-                atomics[1].runtime_builtin = rmw->id;
-                atomics[1].evaluated_operands = rmw->operands;
-                atomics[1].rmw = rmw->rmw;
-                status = rmw->status;
             }
             CheckProgramHelpers rejected = { 0 };
             const bool accepted = check_program_helpers(&rejected, &changed, &bounded, &scratch);
@@ -619,13 +594,67 @@ static void check_test_program_helpers(CheckTest* test)
             check_test_expect(test, !accepted && rejected.status == status && rejected.items == 0 && rejected.uses == 0 &&
                                    rejected.count == 0 && rejected.use_count == 0 && untouched,
                               "unsupported metadata and partial helper allocation fail without publishing output or touching live prefixes");
-            check_test_expect(test, (rejected.reason != NULL) == (test_case >= 11 && status == CHECK_PROGRAM_UNSUPPORTED),
-                              "only a well-formed read/modify/write's refusal names what it lacks");
+            check_test_expect(test, (rejected.reason != NULL) == (status == CHECK_PROGRAM_UNSUPPORTED),
+                              "an unsupported helper's refusal names what it lacks, and no other does");
             atomics[1] = saved;
-            members[1] = saved_member;
             floating[0] = saved_float;
             active[0] = 1;
         }
+        // A read/modify/write's effect at the load's node, with the call's fixed arguments and a long object: only a
+        // well-formed one, its rule's fixed arguments evaluated and its rmw bit as its operation has it, is planned, its
+        // helper the builtin's leaf; any other is invalid.
+        static const CheckProgramHelperRmwCase rmw_cases[] = {
+            { CBUILTIN_ATOMIC_FETCH_ADD, 7, true, CHECK_PROGRAM_OK },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 0, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 3, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 7, false, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_OK },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 63, true, CHECK_PROGRAM_OK },
+            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 1, false, CHECK_PROGRAM_OK },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 1, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 3, false, CHECK_PROGRAM_INVALID },
+        };
+        CheckTestTypes types = { 0 };
+        const bool typed = check_test_types_open(&types);
+        check_test_expect(test, typed, "read/modify/write planner test types");
+        uint32_t argument_counts[BUSTER_ARRAY_LENGTH(ops)] = { 0 };
+        CheckInput counted = input;
+        counted.graph.argument_counts = argument_counts;
+        for (uint32_t i = 0; typed && i < BUSTER_ARRAY_LENGTH(rmw_cases); i += 1)
+        {
+            const CheckProgramHelperRmwCase* rmw = rmw_cases + i;
+            const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(rmw->id);
+            const CheckBuiltinAtomicEffect saved = atomics[1];
+            const uint32_t saved_member = members[1];
+            CheckProgram changed = program;
+            changed.input = &counted;
+            changed.types = &types.table;
+            argument_counts[1] = rule->fixed_count;
+            members[1] = rmw->id;
+            atomics[1].runtime_builtin = rmw->id;
+            atomics[1].value_type = BUSTER_TYPE_LONG;
+            atomics[1].evaluated_operands = rmw->operands;
+            atomics[1].rmw = rmw->rmw;
+            Arena bounded = output;
+            CheckProgramHelpers plan = { 0 };
+            const bool accepted = check_program_helpers(&plan, &changed, &bounded, &scratch);
+            bool leaf = false;
+            for (uint32_t h = 0; accepted && h < plan.count; h += 1)
+            {
+                const CheckProgramHelper* helper = plan.items + h;
+                leaf |= helper->id == rmw->id && helper->rmw && helper->bytes == 8 && helper->parameter_count == rule->fixed_count &&
+                        helper->code.count != 0;
+            }
+            check_test_expect(test, accepted == (rmw->status == CHECK_PROGRAM_OK) && plan.status == rmw->status && plan.reason == NULL &&
+                                   (accepted ? leaf : plan.count == 0 && plan.items == 0 && bounded.length == 64) && scratch.length == 64,
+                              "a read/modify/write's effect is planned as its leaf only when its shape is its rule's");
+            atomics[1] = saved;
+            members[1] = saved_member;
+            argument_counts[1] = 0;
+        }
+        check_test_types_close(&types);
         program.builtin_count = 0;
         CheckProgramHelpers empty = { 0 };
         check_test_expect(test, check_program_helpers(&empty, &program, &output, &scratch) && empty.count == 0 && empty.use_count == 0 &&
