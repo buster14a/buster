@@ -96,9 +96,54 @@ static void check_test_x86_diagnostic_storage(CheckTest* test)
     arena_release(&scratch);
 }
 
+static void check_test_x86_context_storage(CheckTest* test)
+{
+    Arena scratch = arena_reserve(4096);
+    check_test_expect(test, scratch.base != NULL, "x86 source context scratch allocation");
+    if (scratch.base != NULL)
+    {
+        uint8_t kinds[4] = { 0 };
+        uint32_t selections[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        uint32_t token = 0;
+        Parser parser = { .tokens = { .count = 4, .kinds = kinds } };
+        CheckX86Call call = { .reachability = CHECK_BUILTIN_X86_UNKNOWN };
+        CheckInput input = { .graph = { .tokens = &token, .x86_calls = &call, .x86_count = 1 } };
+        CheckInputReader reader = { .parser = &parser, .output = &input, .scratch = &scratch, .selected_tokens = selections };
+        const uint64_t capacity = scratch.capacity;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            parser.options.scalar = scalar != 0;
+            bool succeeded = false;
+            for (uint32_t limit = 17; limit <= 96; limit += 1)
+            {
+                memset(scratch.base, 0xa5, capacity);
+                scratch.length = 17;
+                scratch.capacity = limit;
+                input.resource = false;
+                call.unselected_context = true;
+                call.runtime_diagnostic_suppressed = true;
+                check_input_x86_contexts(&reader);
+                bool prefix = scratch.length == 17;
+                for (uint32_t i = 0; i < 17; i += 1)
+                {
+                    prefix &= scratch.base[i] == 0xa5;
+                }
+                succeeded |= !input.resource;
+                check_test_expect(test, prefix && call.unselected_context == input.resource &&
+                                       call.runtime_diagnostic_suppressed == input.resource && call.reachability == CHECK_BUILTIN_X86_UNKNOWN,
+                                  "x86 source context exhaustion preserves metadata, executable reachability and scratch prefix");
+            }
+            check_test_expect(test, succeeded, "x86 source context columns fit their bounded allocation");
+        }
+        scratch.capacity = capacity;
+    }
+    arena_release(&scratch);
+}
+
 static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
 {
     check_test_x86_diagnostic_storage(test);
+    check_test_x86_context_storage(test);
     static const struct
     {
         const char* name;
@@ -137,6 +182,38 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang)
         { "sizeof", "unsigned f(V a){return sizeof(BAD);}", 0, false },
         { "alignof", "unsigned f(V a){return __alignof__(BAD);}", 0, false },
         { "selected choose", "unsigned f(V a){return __builtin_choose_expr(1,BAD,0);}", 1, true },
+        { "selected false choose", "unsigned f(V a){return __builtin_choose_expr(0,0,BAD);}", 1, true },
+        { "unselected true choose", "unsigned f(V a){return __builtin_choose_expr(0,BAD,0);}", 1, true },
+        { "unselected false choose", "unsigned f(V a){return __builtin_choose_expr(1,0,BAD);}", 1, true },
+        { "in-range unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,__builtin_ia32_cmpb128_mask(a,a,7,65535),0);}", 0, false },
+        { "dead selected choose", "unsigned f(V a){if(0)return __builtin_choose_expr(1,BAD,0);return 0;}", 0, false },
+        { "dead unselected choose", "unsigned f(V a){if(0)return __builtin_choose_expr(0,BAD,0);return 0;}", 1, true },
+        { "unselected choose after return", "unsigned f(V a){return 0;return __builtin_choose_expr(0,BAD,0);}", 1, true },
+        { "unselected choose after goto", "unsigned f(V a){goto out;return __builtin_choose_expr(1,0,BAD);out:return 0;}", 1, true },
+        { "short-circuited selected choose", "unsigned f(V a){return 0&&__builtin_choose_expr(1,BAD,0);}", 0, false },
+        { "short-circuited unselected choose", "unsigned f(V a){return 0&&__builtin_choose_expr(0,BAD,0);}", 1, true },
+        { "short circuit in unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,0&&BAD,0);}", 1, true },
+        { "conditional in unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,1?0:BAD,0);}", 1, true },
+        { "statement in unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,({if(0)BAD;0;}),0);}", 1, true },
+        { "compound literal in unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,(unsigned){BAD},0);}", 1, true },
+        { "nested unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,__builtin_choose_expr(0,BAD,0),0);}", 1, true },
+        { "selected choose inside unselected choose", "unsigned f(V a){return __builtin_choose_expr(1,0,__builtin_choose_expr(1,BAD,0));}", 1, true },
+        { "unselected choose inside selected choose", "unsigned f(V a){return __builtin_choose_expr(1,__builtin_choose_expr(1,0,BAD),0);}", 1, true },
+        { "sizeof selected choose", "unsigned f(V a){return sizeof(__builtin_choose_expr(1,BAD,0));}", 0, false },
+        { "sizeof unselected choose", "unsigned f(V a){return sizeof(__builtin_choose_expr(0,BAD,0));}", 0, false },
+        { "alignof unselected choose", "unsigned f(V a){return __alignof__(__builtin_choose_expr(0,BAD,0));}", 0, false },
+        { "sizeof inside unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,sizeof(BAD),0);}", 0, false },
+        { "choose inside unselected sizeof", "unsigned f(V a){return __builtin_choose_expr(0,sizeof(__builtin_choose_expr(0,BAD,0)),0);}", 0, false },
+        { "dead sizeof unselected choose", "unsigned f(V a){if(0)return sizeof(__builtin_choose_expr(0,BAD,0));return 0;}", 0, false },
+        { "typeof unselected choose", "unsigned f(V a){typeof(__builtin_choose_expr(0,BAD,0)) x=0;return x;}", 0, false },
+        { "unselected generic association", "unsigned f(V a){return _Generic(0,int:0,default:BAD);}", 1, true },
+        { "choose in generic control", "unsigned f(V a){return _Generic(__builtin_choose_expr(0,BAD,0),int:0,default:1);}", 0, false },
+        { "sizeof generic association", "unsigned f(V a){return sizeof(_Generic(0,int:0,default:BAD));}", 0, false },
+        { "ignored unselected choose", "#pragma clang diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return __builtin_choose_expr(0,BAD,0);}", 0, false },
+        { "warning unselected choose", "#pragma clang diagnostic warning \"-Wargument-outside-range\"\nunsigned f(V a){if(0)return __builtin_choose_expr(1,0,BAD);return 0;}", 1, false },
+        { "push pop unselected choose", "#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored \"-Wargument-outside-range\"\nunsigned f(V a){return __builtin_choose_expr(0,BAD,0);}\n#pragma GCC diagnostic pop\nunsigned g(V a){return __builtin_choose_expr(0,BAD,0);}", 1, true },
+        { "-w suppresses unselected choose", "unsigned f(V a){return __builtin_choose_expr(0,BAD,0);}", 0, false, true },
+        { "ICE stays hard in unselected choose", "unsigned f(V a,int n){return __builtin_choose_expr(0,__builtin_ia32_cmpb128_mask(a,a,n,65535),0);}", 0, true },
         { "initializer", "unsigned f(V a){unsigned x=BAD;return x;}", 1, true },
         { "dead initializer", "unsigned f(V a){if(0){unsigned x=BAD;return x;}return 0;}", 0, false },
         { "scalar compound literal", "unsigned f(V a){return (unsigned){BAD};}", 1, true },

@@ -602,6 +602,27 @@ unit per fixture, through both production driver schedules. It checks
 acceptance, severity, complete range messages and source locations, including
 negative immediates, dead control flow, unevaluated operands and pragma state.
 
+For #562, `check_input_x86_contexts` supplies source diagnostic context before
+`check_x86_action` consumes the sparse `CheckX86Call` records. An unselected
+`__builtin_choose_expr` arm (or `_Generic` association) diagnoses its range
+violations eagerly, even inside a dead statement or a short circuit. This is
+separate from the call's executable reachability. Enclosing `sizeof`, `alignof`,
+`typeof` and generic controlling operands still suppress range diagnostics;
+hard immediate constraints and source-point pragma policy keep their existing
+behavior. Selected arms continue through the deferred executable-graph walk.
+
+The producer uses the retained selection roots and parser subtree bounds,
+without reparsing or changing executable operands. Only inputs containing both
+selections and x86 calls allocate its scratch: one u32 difference column with
+one sentinel and two byte columns, six bytes per token plus four bytes. The
+two bounded interval scans reuse the packed-member diagnostic's vector prefix
+kernel and its scalar twin. Each x86 record receives `unselected_context` and
+`runtime_diagnostic_suppressed`; these booleans need no token-wide retained
+storage. Allocation failure marks the source input as a resource failure,
+leaves call metadata untouched and restores scratch. Differential fixtures
+exercise both driver schedules, nested selections, dead statements, unevaluated
+contexts and pragma/`-w` policy; storage tests cover every allocation cut.
+
 `c_check_builtin_vector.c` checks the 23 observed elementwise, reduction,
 shuffle, conversion, nondeterministic and nontemporal spellings. Its exact
 type relations are separate from #147's ordinary vector operators. Shuffle

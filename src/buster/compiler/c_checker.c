@@ -66,6 +66,9 @@ struct CheckX86Call
     uint64_t required_ice_arguments;
     uint64_t ice_arguments;
     CheckBuiltinX86Reachability reachability;
+    // Unselected source arms diagnose eagerly, independently of executable reachability. An enclosing
+    // unevaluated context still takes precedence through runtime_diagnostic_suppressed.
+    bool unselected_context;
     bool constant_evaluated_context;
     bool runtime_diagnostic_suppressed;
 };
@@ -1011,7 +1014,7 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
         .ice_arguments = call->ice_arguments,
         .node = node,
         .typed_call = *result,
-        .reachability = call->reachability,
+        .reachability = call->unselected_context ? CHECK_BUILTIN_X86_REACHABLE : call->reachability,
         // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
         .name_in_scope = builtin_intrinsic_own_main_prototype_in_scope(call->info->name, call->info->name_length),
         .constant_evaluated_context = call->constant_evaluated_context,

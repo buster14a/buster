@@ -56,7 +56,7 @@ static __attribute__((unused)) bool check_x86_call_equal(const CheckX86Call* a, 
     return a->node == b->node && a->info == b->info && a->required_ice_arguments == b->required_ice_arguments &&
            a->ice_arguments == b->ice_arguments && a->reachability == b->reachability &&
            a->constant_evaluated_context == b->constant_evaluated_context &&
-           a->runtime_diagnostic_suppressed == b->runtime_diagnostic_suppressed;
+           a->runtime_diagnostic_suppressed == b->runtime_diagnostic_suppressed && a->unselected_context == b->unselected_context;
 }
 
 static __attribute__((unused)) bool check_builtin_x86_effect_equal(const CheckBuiltinX86Effect* a, const CheckBuiltinX86Effect* b,
