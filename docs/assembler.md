@@ -113,7 +113,17 @@ The admitted families are:
   its memory operand first in Intel order, as the catalogue has it. The operand
   grammar has no accumulator role, so `fnstsw` takes memory, not `%ax`, and an
   `xchg` of the accumulator with another register takes the two-byte form,
-  where GNU as takes the one-byte one.
+  where GNU as takes the one-byte one;
+- what naked functions' templates use (#147): `pushfq/popfq`, SSE2's `movq`
+  between an XMM register and a general one or memory, the x87's `fld` and
+  `fstp` of 4, 8 and 10 bytes (AT&T's `flds/fldl/fldt` and
+  `fstps/fstpl/fstpt`), the string instructions `movs/stos/lods` alone and with
+  `rep` and `cmps/scas` alone and with `repe/repne` (`rep` and its prefix's
+  aliases one mnemonic with the instruction, AT&T's `l` the dword form), and
+  AVX-512F's `vmovdqa64/vmovdqu64`. In AT&T syntax `movq` is SSE2's when an
+  operand is an XMM register and `mov`'s 64-bit form otherwise. Between memory
+  and an XMM register it takes SSE2's own forms (`F3 0F 7E`, `66 0F D6`), as GNU
+  as does, rather than the general register's `REX.W` ones of the same length.
 
 Only forms covered by the frontend's operand-role grammar are admitted.
 Missing families, rounding/SAE, explicit instruction-prefix syntax, far
@@ -212,16 +222,22 @@ lowering substitutes its operands ([the inline assembly guide](c-inline-assembly
 It returns `AsmCode`:
 
 - the instructions' records, in order;
-- each branch to the source's own label as branch sizing's columns: a rel8 at
-  displacement 0, its target the label's next record or the count for the end;
-- each symbolic field as a reference by name, with its field, kind and addend,
-  the record marked `BUSTER_X86_FORM_FIXUP`.
+- each `jmp` and `jcc` to the source's own label without an addend as branch
+  sizing's columns: a rel8 at displacement 0, its target the label's next
+  record or the count for the end;
+- each other symbolic field as a reference by name, with its field, kind and
+  addend, the record marked `BUSTER_X86_FORM_FIXUP`: a name the source doesn't
+  define (`.L` ones among them, which another source may define), or one of its
+  own named labels as data, as a call's target or with an addend (a branch's
+  from its rel32 form);
+- its named labels, each with its next record: the caller makes them symbols.
 
 It takes instructions, labels and the syntax directives, and refuses:
 
 - every other directive: the code has no sections, data or symbols of its own;
-- its own labels, but as a `jmp`'s or `jcc`'s target without an addend;
-- undefined local labels.
+- its numeric labels and `.` but as a `jmp`'s or `jcc`'s target without an
+  addend, and `loop` and `jrcxz` to its labels;
+- undefined numeric labels.
 
 Lexing, parsing and matching are `asm_assemble`'s, by `AsmOptions.vectorized`'s
 path. The parser's tables come from `scratch`, which is as it was after. The

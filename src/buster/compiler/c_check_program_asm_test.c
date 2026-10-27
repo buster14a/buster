@@ -134,6 +134,114 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"shll %b1, %0\" : \"+r\"(y) : \"cI\"(40));int c=n;__asm__(\"subl %1, %0\" : \"+r\"(c) : \"Kr\"(-200));"
         "return a+b*3+x*5+y+c*7;}",
         "asm-register-or-immediate", clang);
+    // Naked functions: their templates, in AT&T syntax, are their whole code, with an integer constant operand.
+    check_test_program_source(test,
+        "__attribute__((naked)) long add3(long a,long b,long c){__asm__(\"leaq (%rdi,%rsi), %rax\\n\\taddq %rdx, %rax\\n\\tret\");}"
+        "__attribute__((naked)) long seven(void){__asm__(\"movl %0, %%eax\\n\\tret\" : : \"i\"(7));}"
+        "int tested(int n){return (int)add3(n,2*n,7)+(int)seven()*100;}",
+        "asm-naked-att", clang);
+    // A label in a naked function's template, a second entry that another function's template takes the address of.
+    check_test_program_source(test,
+        "static __attribute__((naked,noinline)) long twice(long x){__asm__(\"leaq (%rdi,%rdi), %rax\\n\\tret\\nthrice_entry:\\n\\tleaq (%rdi,%rdi,2), %rax\\n\\tret\\n\");}"
+        "static long thrice_address(void){long a;__asm__(\"leaq thrice_entry(%%rip), %0\" : \"=r\"(a));return a;}"
+        "int tested(int n){long (*f)(long)=(long (*)(long))thrice_address();return (int)(twice(n)*10+f(n));}",
+        "asm-naked-entries", clang);
+    // interpreter_native_bridge's shape: a frame of its own, the flags, a string copy, SSE2's movq, the x87's load and
+    // store, a call through a register and a numeric label's branch.
+    check_test_program_source(test,
+        "struct frame{long (*target)(long,double);long argument;double value;long result;double back;char bytes[16];char copy[16];long double ext;};"
+        "_Static_assert(__builtin_offsetof(struct frame,bytes)==40,\"bytes\");"
+        "_Static_assert(__builtin_offsetof(struct frame,copy)==56,\"copy\");"
+        "_Static_assert(__builtin_offsetof(struct frame,ext)==80,\"ext\");"
+        "static long target(long a,double d){return a*10+(long)(d*2);}"
+        "static __attribute__((naked,noinline)) void bridge(struct frame* f){__asm__("
+        "\"pushq %rbp\\n\\tmovq %rsp, %rbp\\n\\tpushq %r12\\n\\tmovq %rdi, %r12\\n\\tandq $-16, %rsp\\n\\tpushfq\\n\\tpopfq\\n\\tcld\\n\\t\""
+        "\"leaq 40(%r12), %rsi\\n\\tleaq 56(%r12), %rdi\\n\\tmovq $16, %rcx\\n\\trep movsb\\n\\t\""
+        "\"movq 8(%r12), %rdi\\n\\tmovq 16(%r12), %xmm0\\n\\tmovq %xmm0, 32(%r12)\\n\\tfldl 16(%r12)\\n\\tfstpt 80(%r12)\\n\\t\""
+        "\"movq 0(%r12), %r11\\n\\tcallq *%r11\\n\\tmovq %rax, 24(%r12)\\n\\tcmpq $0, 8(%r12)\\n\\tje 1f\\n\\tincq 24(%r12)\\n1:\\n\\t\""
+        "\"leaq -8(%rbp), %rsp\\n\\tpopq %r12\\n\\tpopq %rbp\\n\\tretq\\n\");}"
+        "int tested(int n){struct frame f={target,n,n*0.5,0,0,{0},{0},0};for(int i=0;i<16;i++)f.bytes[i]=(char)(n+i);bridge(&f);"
+        "int s=0;for(int i=0;i<16;i++)s+=f.copy[i];return (int)f.result*3+(int)(f.back*4)+s+(int)(f.ext*8);}",
+        "asm-naked-bridge", clang);
+    // x86_semantics_test_enter's shape, in Intel syntax: statics RIP-relative, a jump through one to another naked
+    // function, whose template jumps back to the first one's label, and AVX-512's moves.
+    check_test_program_source(test,
+        "static __attribute__((used)) long saved_rsp;"
+        "static __attribute__((used)) long saved_arg;"
+        "static __attribute__((used)) long continuation;"
+        "static __attribute__((naked,noinline)) long enter(long x){__asm__(\".intel_syntax noprefix\\n\""
+        "\"push rbx\\nmov qword ptr [rip + saved_rsp], rsp\\nmov qword ptr [rip + saved_arg], rdi\\nlea rbx, [rdi + 5]\\n\""
+        "\"vmovdqu64 zmm16, zmm17\\nvmovdqa64 zmm17, zmm16\\njmp qword ptr [rip + continuation]\\n\""
+        "\"enter_return:\\nmov rax, rbx\\nadd rax, qword ptr [rip + saved_arg]\\nvzeroupper\\npop rbx\\nret\\n.att_syntax prefix\\n\");}"
+        "static __attribute__((used,naked,noinline)) void bounce(void){__asm__(\"addq $100, %rbx\\n\\tjmp enter_return\\n\");}"
+        "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
+        "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
+        "asm-naked-intel", clang);
+    // A naked function whose attribute isn't on its first declaration (#565's review): an unannotated prototype before a
+    // naked definition that returns by its own ret, and a naked redeclaration between a prototype and an unannotated
+    // definition, both naked as clang takes them; and a naked redeclaration after a definition, which clang ignores with
+    // a warning: an ordinary function.
+    check_test_program_source(test,
+        "static long first_plain(long);"
+        "static __attribute__((naked,noinline)) long first_plain(long x){__asm__(\"leaq 1(%rdi), %rax\\n\\tret\\n\");}"
+        "static long middle_naked(long);"
+        "static __attribute__((naked)) long middle_naked(long);"
+        "static __attribute__((noinline)) long middle_naked(long x){__asm__(\"leaq 2(%rdi), %rax\\n\\tret\\n\");}"
+        "static long after_definition(long x){return x+3;}"
+        "static __attribute__((naked)) long after_definition(long);"
+        "int tested(int n){return (int)(first_plain(n)*7+middle_naked(n)*5+after_definition(n));}",
+        "asm-naked-redeclared", clang);
+    // Templates that name symbols: the harness's function and data, the unit's static function and data, and a .L label
+    // one statement's template defines and another's takes the address of.
+    check_test_program_source(test,
+        "extern int external_data;int external_helper(int);"
+        "static __attribute__((used)) int counter;"
+        "static __attribute__((used)) int bump(int x){return x+1;}"
+        "int tested(int n){int r,s;long here,there;"
+        "__asm__ volatile(\"movl %1, %%edi\\n\\tcall external_helper\\n\\taddl external_data(%%rip), %%eax\\n\\tmovl %%eax, %0\" : \"=r\"(r) : \"r\"(n)"
+        ": \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"xmm0\",\"xmm1\",\"xmm2\",\"xmm3\",\"xmm4\",\"xmm5\",\"xmm6\",\"xmm7\",\"xmm8\",\"xmm9\",\"xmm10\",\"xmm11\",\"xmm12\",\"xmm13\",\"xmm14\",\"xmm15\",\"memory\",\"cc\");"
+        "__asm__ volatile(\"movl %1, %%edi\\n\\tcall bump\\n\\taddl %%eax, counter(%%rip)\\n\\tmovl counter(%%rip), %0\" : \"=r\"(s) : \"r\"(n)"
+        ": \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"xmm0\",\"xmm1\",\"xmm2\",\"xmm3\",\"xmm4\",\"xmm5\",\"xmm6\",\"xmm7\",\"xmm8\",\"xmm9\",\"xmm10\",\"xmm11\",\"xmm12\",\"xmm13\",\"xmm14\",\"xmm15\",\"memory\",\"cc\");"
+        "__asm__(\"leaq .Lshared_point(%%rip), %0\\n.Lshared_point:\\n\\tnop\" : \"=r\"(here));"
+        "__asm__(\"leaq .Lshared_point(%%rip), %0\" : \"=r\"(there));"
+        "return r*7+s+(here==there)+external_helper(0);}",
+        "asm-symbol-references", clang);
+    // A label inside a helper's template at its exact record: another statement's template calls the snippet it marks,
+    // which the first template jumps over.
+    check_test_program_source(test,
+        "extern int external_data;int external_helper(int);int tested(int n){int v;"
+        "__asm__ volatile(\"jmp 1f\\n.Lforty_two:\\n\\tmovl $42, %%eax\\n\\taddl %%edi, %%eax\\n\\tret\\n1:\" ::: \"rax\");"
+        "__asm__ volatile(\"movl %1, %%edi\\n\\tcall .Lforty_two\\n\\tmovl %%eax, %0\" : \"=r\"(v) : \"r\"(n)"
+        ": \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"memory\",\"cc\");"
+        "return v+external_helper(0);}",
+        "asm-helper-labels", clang);
+    // A naked function's references beside a body's call of a runtime function (__divti3), in a unit of so few symbols
+    // that its names' indices fall among the runtime's provisional symbols, which aren't theirs.
+    check_test_program_source(test,
+        "static __attribute__((naked,noinline)) long pick(long x){__asm__("
+        "\"testq %rdi, %rdi\\n\\tjz l0\\n\\tcmpq $1, %rdi\\n\\tje l1\\n\\tcmpq $2, %rdi\\n\\tje l2\\n\\tcmpq $3, %rdi\\n\\tje l3\\n\\tjmp l4\\n\""
+        "\"l0:\\n\\tmovq $10, %rax\\n\\tret\\nl1:\\n\\tmovq $11, %rax\\n\\tret\\nl2:\\n\\tmovq $12, %rax\\n\\tret\\nl3:\\n\\tmovq $13, %rax\\n\\tret\\n\""
+        "\"l4:\\n\\tleaq l5(%rip), %rax\\n\\tleaq l0(%rip), %rdx\\n\\tsubq %rdx, %rax\\n\\tret\\nl5:\\n\");}"
+        "int tested(int n){__int128 w=(__int128)n*1000000007;long q=(long)(w/(__int128)(n|1));return (int)pick(n&7)+(int)(q&0xff);}",
+        "asm-naked-runtime", clang);
+    // A jump table beside the templates' names, in one unit: the function whose switch takes a table has templates that
+    // call the unit's static function, update its static and take the address of a label a naked function's template
+    // defines. The names' own symbols come after the tables' and their labels' (CheckProgramLowered.case_symbol_base),
+    // and neither's references are the other's to rewrite.
+    static const char* const asm_tables =
+        "static __attribute__((used)) int bump(int x){return x+1;}"
+        "static int total;"
+        "static __attribute__((naked,noinline)) int relay(int x){__asm__(\"addl $2, %edi\\nrelay_tail:\\n\\tjmp bump\\n\");}"
+        "static int dense(int x){int r;long tail,start;"
+        "switch(x){case 0:r=3;break;case 1:r=5;break;case 2:r=7;break;case 3:r=11;break;case 5:r=13;break;default:r=-1;}"
+        "__asm__ volatile(\"movl %1, %%edi\\n\\tcall bump\\n\\taddl %%eax, total(%%rip)\\n\\tmovl %%eax, %0\" : \"=r\"(r) : \"r\"(r)"
+        ": \"rax\",\"rcx\",\"rdx\",\"rsi\",\"rdi\",\"r8\",\"r9\",\"r10\",\"r11\",\"xmm0\",\"xmm1\",\"xmm2\",\"xmm3\",\"xmm4\",\"xmm5\",\"xmm6\",\"xmm7\",\"xmm8\",\"xmm9\",\"xmm10\",\"xmm11\",\"xmm12\",\"xmm13\",\"xmm14\",\"xmm15\",\"memory\",\"cc\");"
+        "__asm__(\"leaq relay_tail(%%rip), %0\" : \"=r\"(tail));"
+        "__asm__(\"leaq relay(%%rip), %0\" : \"=r\"(start));"
+        "return r+(int)(tail-start)+bump(0);}"
+        "int tested(int n){unsigned s=0;for(int i=-3;i<9;i++)s=s*7+(unsigned)dense(i+n)+(unsigned)relay(i);return (int)s+total;}";
+    check_test_program_source(test, asm_tables, "asm-names-switch-tables", clang);
+    check_test_program_tables(test, asm_tables, "asm-names-switch-tables", 1, 6);
     // What the lowering refuses, by name.
     check_test_program_boundary_reason(test, "int tested(int n){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"Z\"(0x100000000ull));return (int)r+n;}",
                                        "asm-z-range", true, false, 0, 0, "inline assembly constants outside their constraint's range");
@@ -143,14 +251,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-flag-output", true, false, 0, 0, "inline assembly flag outputs");
     check_test_program_boundary_reason(test, "int tested(int n){double d=n;__asm__(\"fsqrt\" : \"+t\"(d));return (int)d;}",
                                        "asm-x87-operand", true, false, 0, 1, "inline assembly operands in x87 registers");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\");}int tested(int n){return n;}",
-                                       "asm-naked-function", true, false, 0, 0, "naked functions");
-    check_test_program_boundary_reason(test, "int global;int tested(int n){int r;__asm__(\"movl global(%%rip), %0\" : \"=r\"(r));return r+n;}",
-                                       "asm-symbol-reference", true, false, 0, 0, "inline assembly that refers to symbols");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".byte 0x90\");return n;}",
                                        "asm-directive", true, false, 0, 0, "inline assembly takes no directive but .intel_syntax and .att_syntax");
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__(\"\" : \"+r\"(r));return (int)r;}",
                                        "asm-register-variable", true, false, 0, 1, "explicit register variables as inline assembly operands");
+    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\");return;}int tested(int n){return n;}",
+                                       "asm-naked-statement", true, false, 0, 0, "statements other than asm statements in naked functions");
+    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(int n){__asm__(\"ret\" : : \"r\"(n));}int tested(int n){return n;}",
+                                       "asm-naked-operand", true, false, 0, 0, "naked functions' inline assembly operands other than integer constants");
+    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){}int tested(int n){return n;}",
+                                       "asm-naked-empty", true, false, 0, 0, "naked functions of no instructions");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"twice: nop\");__asm__(\"twice: nop\");return n;}",
+                                       "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",
+                                       "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"lonely:\");return n;}",
+                                       "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
+    check_test_program_boundary_reason(test, "int tested(int n){long a;__asm__(\"leaq 1f(%%rip), %0\\n1:\" : \"=r\"(a));return n+(int)a;}",
+                                       "asm-numeric-data", true, false, 0, 0, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
 }
 
 #endif
