@@ -4911,7 +4911,9 @@ its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
 one past it and a scratch register past the integer table, which both paths
 refuse; functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
 registers and on the stack, called from C and calling C (a vector argument on
-the stack among them); and `--count` random programs of vector, integer and
+the stack among them), a float parameter's register that a row of no records
+loads its vector operand into, and a 16-byte operand that a ZMM form reads
+whole, its upper bytes zero; and `--count` random programs of vector, integer and
 float statements, masked stores and dropped vectors over the rows (operands and
 results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
 operands, a row of no records), constants, frame objects of each width, DUP,

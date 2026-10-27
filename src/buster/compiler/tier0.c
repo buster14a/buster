@@ -6088,8 +6088,11 @@ static X86Instruction tier0_operation_place(X86Instruction record, const Tier0Pl
     return record;
 }
 
-// What a row's records reach (tier0_operation_reach): one past the highest VECTOR register any form names and one past
-// the highest a VEX form names (an /is4 operand's among them), and one past the highest scratch register; 0 for none.
+// What a row's records reach (tier0_operation_reach), with the loads and the store tier0_emit_operation writes around
+// them: one past the highest VECTOR register any form names, a VECTOR operand j's load writes (VECTOR(j)) or a VECTOR
+// result's store reads (VECTOR(0)), and one past the highest a VEX form names (an /is4 operand's among them), and one
+// past the highest scratch register; 0 for none. A row of no records writes its operands' registers too (#556's review:
+// a floating home in one of them was lost).
 typedef struct Tier0Reach Tier0Reach;
 struct Tier0Reach
 {
@@ -6123,12 +6126,18 @@ static Tier0Reach tier0_operation_reach(const Tier0Operation* operation)
             reach.vex_vectors = vex && past > reach.vex_vectors ? past : reach.vex_vectors;
         }
     }
+    for (uint32_t j = 0; j < operation->operand_count; j += 1)
+    {
+        reach.vectors = tier0_class_vector(operation->operand_classes[j]) && j + 1 > reach.vectors ? j + 1 : reach.vectors;
+    }
+    reach.vectors = tier0_class_vector(operation->result_class) && reach.vectors == 0 ? 1 : reach.vectors;
     return reach;
 }
 
-// An X86 entry's records (tier0_vector_entry's): each VECTOR operand j's slot loaded whole into VECTOR(j), the row's
-// records with their roles placed (tier0_operation_placement), and a VECTOR result stored whole from VECTOR(0) into its
-// slot.
+// An X86 entry's records (tier0_vector_entry's): each VECTOR operand j's slot loaded into VECTOR(j) at its width, which
+// zeroes the register past the operand's bytes, so that a form that reads it wider reads zeros rather than the slot's
+// unspecified bytes past the value (#556's review); the row's records with their roles placed
+// (tier0_operation_placement); and a VECTOR result stored whole from VECTOR(0) into its slot.
 static void tier0_emit_operation(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const Tier0Operation* operation = &function->operations[function->values[i]];
@@ -6137,7 +6146,7 @@ static void tier0_emit_operation(const Tier0Function* function, const Tier0Entri
     {
         if (tier0_class_vector(operation->operand_classes[j]))
         {
-            tier0_put(writer, tier0_vector_slot(X86_FORM_VMOVDQU64_Z_ZM512, frame, placement.operands[j], (uint8_t)(placement.vector + j)));
+            tier0_put(writer, tier0_vector_slot(tier0_vector_load(operation->operand_bytes[j]), frame, placement.operands[j], (uint8_t)(placement.vector + j)));
         }
     }
     for (uint32_t r = 0; r < operation->record_count; r += 1)

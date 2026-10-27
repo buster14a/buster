@@ -429,12 +429,14 @@ up to 8 records each with their operands' classes (integers, floating values and
 their result's, which the entry pops and pushes as `CALL` pops its arguments. A row's records name registers by role
 (`BUSTER_TIER0_ROLE_*`), never by number, and Tier 0 places each role at the entry (`tier0_operation_placement`):
 
-- `VECTOR(j)`, the row's vector register j, which holds VECTOR operand j (loaded from its slot whole) when the records
-  start, and whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others
-  are free. The VECTOR registers are the floating stack's free ones from its depth on (one further past a floating
-  result's where no floating operand takes its place), so a VEX form (which names registers below 16) reaches them
-  where the floating stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 is
-  refused at its depth (`TIER0_ERROR_DEPTH`), as an integer depth past the table is;
+- `VECTOR(j)`, the row's vector register j, which holds VECTOR operand j (loaded from its slot at its width, the
+  register's bytes past the operand's zero, so that a form that reads it wider reads zeros) when the records start, and
+  whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others are free. The
+  VECTOR registers are the floating stack's free ones from its depth on (one further past a floating result's where no
+  floating operand takes its place), so a VEX form (which names registers below 16) reaches them where the floating
+  stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 is refused at its depth
+  (`TIER0_ERROR_DEPTH`), as an integer depth past the table is. The selections count the registers the operands' loads
+  write and the result's store reads among a row's, whatever its records name, so that no floating home is kept in one;
 - `FLOATING(j)` and `FLOATING_RESULT`, a floating operand's XMM register and the floating result's;
 - `INTEGER(j)`, `INTEGER_RESULT` and `SCRATCH(k)`, an integer operand's register (an address among them), the integer
   result's, and up to four free ones, the depth registers past the entry's. An operand's is in a field no wider than its
