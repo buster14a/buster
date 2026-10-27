@@ -266,9 +266,9 @@ struct CheckInput
 // constant, a selection, a va_arg call, a designator, a variable array's bound or an asm statement.
 #define BUSTER_CHECK_EXPRESSION_SPARSE 0x02u
 
-// The walks' tests of a token's role and kind, a bit each, as tables a 64-token pass looks up 64 tokens' roles or kinds
-// in at once (_mm512_permutex2var_epi8, a 128-byte table: roles and kinds are below 128). The scalar twins of the passes
-// that read them make the walks' own tests instead (check_input_visit_of, check_input_expression_class).
+// The walks' tests of a token's role and of its kind, a bit each, in tables that a pass looks 64 tokens up in at once
+// (_mm512_permutex2var_epi8 of a 128-byte table: roles and kinds are below 128). The scalar twins of the passes that read
+// them make the walks' own tests instead (check_input_visit_of, check_input_expression_class).
 // The walk in source order acts at a token of the role (check_input_resolve_range).
 #define BUSTER_CHECK_ROLE_RESOLVE 0x01u
 // An identifier of the role is no name the walk in source order resolves: a member's, a tag's or an asm label's.
@@ -3291,8 +3291,8 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
     bool missed = false;
     if (token != reader->resolve_limit)
     {
-        // The unit's count, a whole unit's last token, has no syntax.
         const uint8_t marks = reader->visits[token];
+        // The unit's count, a whole unit's last token, has no syntax.
         const bool syntax = token < reader->parser->tokens.count && check_input_visit_of(reader->parser, reader->syntax[token], token);
         const bool scope = reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < token;
         const bool finish = reader->initializer_finish_heads[token] != BUSTER_CHECK_NONE;
@@ -3310,7 +3310,7 @@ static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t 
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
 // after its closing brace, where its scopes end and nothing else of the token is its. The vector path visits only the
-// tokens marked (check_input_resolve_next): about a quarter of them. At each token it visits, the walk first ends the
+// tokens marked (check_input_resolve_next): about a third of sqlite3.c's. At each token it visits, the walk first ends the
 // function it has left (function_end), which only a visit reads; and it makes only the tests the token's marks give
 // reasons for (check_input_resolve_tests): those of its syntax, and of the columns it writes ahead of itself.
 static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
