@@ -184,7 +184,7 @@ typedef enum CheckProgramAgain
 
 // A lane's arenas past the first lane's, which are the caller's: its functions' lowered columns (`output`), its writer's
 // columns, its functions' Tier 0 code and what their fixups and rows need until the merge (`scratch`), and its
-// functions' bytes (`bytes`). The first lane's writer's columns are in its `scratch` here too.
+// functions' bytes (`bytes`).
 typedef struct CheckProgramLaneArenas CheckProgramLaneArenas;
 struct CheckProgramLaneArenas
 {
@@ -281,8 +281,7 @@ struct CheckEmitPart
 };
 
 // A lane's writer of its parts' lowering (check_lower_writer_begin's), made when it takes its first part, and its arenas:
-// the caller's for lane 0, CheckProgramLanes.arenas' for the others; and the arena of its writer's columns (`columns`),
-// its scratch but for lane 0's, which with CheckProgramLanes is CheckProgramLanes.arenas[0].scratch.
+// the caller's for lane 0, CheckProgramLanes.arenas' for the others.
 typedef struct CheckEmitLane CheckEmitLane;
 struct CheckEmitLane
 {
@@ -292,7 +291,6 @@ struct CheckEmitLane
     Arena* output;
     Arena* scratch;
     Arena* bytes;
-    Arena* columns;
     bool prepared;
     bool ready;
 };
@@ -472,9 +470,8 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
-// Lane `index`'s arenas, for its first part: the caller's for lane 0, but for its writer's columns with `lanes` (below),
-// and for another lane its own, reserved the first time and otherwise put back (the emission before this one's are done
-// with). Returns false if one can't be reserved.
+// Lane `index`'s arenas, for its first part: the caller's for lane 0, and for another lane its own, reserved the first
+// time and otherwise put back (the emission before this one's are done with). Returns false if one can't be reserved.
 static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     bool valid = true;
@@ -483,21 +480,6 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = run->output;
         lane->scratch = run->scratch;
         lane->bytes = run->bytes;
-        lane->columns = run->scratch;
-        if (run->lanes != NULL)
-        {
-            // Lane 0's writer's columns are as far apart as any lane's (below), past what the checker touched of the
-            // caller's scratch, whose pages are huge: in base pages of their own too, which took 46 MB off a pinned -c of
-            // sqlite3.c, one lane's (#528). The rest of its scratch stays the caller's, whose pages the checker cleared.
-            Arena* columns = &run->lanes->arenas[0].scratch;
-            if (columns->base == 0)
-            {
-                *columns = arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36);
-            }
-            arena_pop_to(columns, 0);
-            valid = columns->base != 0;
-            lane->columns = columns;
-        }
     }
     else
     {
@@ -519,7 +501,6 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = &arenas->output;
         lane->scratch = &arenas->scratch;
         lane->bytes = &arenas->bytes;
-        lane->columns = &arenas->scratch;
     }
     return valid;
 }
@@ -528,7 +509,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
 static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     return check_program_emit_lane_arenas(run, lane, index) &&
-           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
+           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
 }
 
 // A part's failure before it lowered anything: its lane had no room for its writer.
@@ -555,18 +536,16 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
 {
     CheckProgramLanes* lanes = run->lanes;
     const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
-    // Lane 0's writer's columns, in an arena apart from its scratch with `lanes`, are squeezed with its scratch.
-    const uint32_t count = arenas && lane->columns != lane->scratch ? 4 : 3;
-    Arena* each[4] = { lane->output, lane->scratch, lane->bytes, lane->columns };
-    uint64_t capacities[4] = { 0, 0, 0, 0 };
-    for (uint32_t i = 0; arenas && i < count; i += 1)
+    Arena* each[3] = { lane->output, lane->scratch, lane->bytes };
+    uint64_t capacities[3] = { 0, 0, 0 };
+    for (uint32_t i = 0; arenas && i < 3; i += 1)
     {
         capacities[i] = each[i]->capacity;
-        const bool named = (lanes->squeeze_arenas & (UINT32_C(1) << (i < 3 ? i : 1))) != 0;
+        const bool named = (lanes->squeeze_arenas & (UINT32_C(1) << i)) != 0;
         each[i]->capacity = named && lanes->squeeze_room < capacities[i] - each[i]->length ? each[i]->length + lanes->squeeze_room : capacities[i];
     }
     lane->ready = lane->prepared ? lane->ready :
-                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
+                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
     lane->prepared = true;
     if (lane->ready)
     {
@@ -576,7 +555,7 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     {
         check_program_emit_part_refused(part);
     }
-    for (uint32_t i = 0; arenas && i < count; i += 1)
+    for (uint32_t i = 0; arenas && i < 3; i += 1)
     {
         each[i]->capacity = capacities[i];
     }
@@ -1449,7 +1428,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             *rows = (CheckProgramRows){ 0 };
         }
-        for (uint32_t lane = 0; lanes != NULL && lane < BUSTER_CHECK_EMIT_MAX_LANES; lane += 1)
+        for (uint32_t lane = 1; lanes != NULL && lane < BUSTER_CHECK_EMIT_MAX_LANES; lane += 1)
         {
             arena_pop_to(&lanes->arenas[lane].output, 0);
             arena_pop_to(&lanes->arenas[lane].scratch, 0);
