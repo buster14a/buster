@@ -159,6 +159,23 @@ static void check_program_needed_number_vector(const uint8_t* needed, uint32_t o
     }
 }
 
+static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar)
+{
+    return scalar ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+}
+
+static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar)
+{
+    if (scalar)
+    {
+        check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
+    }
+    else
+    {
+        check_program_needed_number_vector(needed, objects, object_symbols, symbol_objects);
+    }
+}
+
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                       bool scalar, Arena* output, Arena* scratch)
 {
@@ -427,16 +444,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-        candidate.program.symbol_count = scalar ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+        candidate.program.symbol_count = check_program_needed_count(needed, objects, scalar);
         candidate.program.symbol_objects = candidate.program.symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.symbol_count) : 0;
         valid = valid && (candidate.program.symbol_count == 0 || candidate.program.symbol_objects != 0);
-        if (valid && scalar)
+        if (valid)
         {
-            check_program_needed_number_scalar(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects);
-        }
-        else if (valid)
-        {
-            check_program_needed_number_vector(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects);
+            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, scalar);
         }
     }
     if (valid)

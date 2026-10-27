@@ -145,17 +145,13 @@ static void check_test_program_declaring(CheckTest* test)
             }
             for (uint32_t path = 0; ready && path < 2; path += 1)
             {
-                const uint32_t got = path == 0 ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+                const uint32_t got = check_program_needed_count(needed, objects, path == 0);
                 // The symbols' objects exactly as many as the needed objects, ending at the protected page.
                 uint32_t* symbol_objects = got == want ? (uint32_t*)check_test_program_guarded(&maps[6], &sizes[6], (uint64_t)want * sizeof(uint32_t)) : 0;
                 memset(object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-                if (symbol_objects != 0 && path == 0)
+                if (symbol_objects != 0)
                 {
-                    check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
-                }
-                else if (symbol_objects != 0)
-                {
-                    check_program_needed_number_vector(needed, objects, object_symbols, symbol_objects);
+                    check_program_needed_number(needed, objects, object_symbols, symbol_objects, path == 0);
                 }
                 bool same = symbol_objects != 0 && object_symbols[0] == 0;
                 SymbolId symbol = 0;

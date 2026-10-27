@@ -3948,7 +3948,6 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     snprintf(detail, sizeof(detail), "type %u: the table of the types alone differs from the whole table's", index);
                     abi_test_expect(&tally, vector.pass[index] == counted.pass[index] && (!classified || same), "worlds", detail);
                 }
-                arena_release(&counted_arena);
                 for (uint32_t index = 1; index < table->types.count; index += 1)
                 {
                     const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
@@ -4038,6 +4037,21 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     abi_test_expect(&tally, same, "worlds", detail);
                 }
                 free(again);
+                // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
+                // with room for them, and touches nothing past its own rows, while the whole table classifies them.
+                const uint32_t before = table->types.count;
+                TypeId pointer = (TypeId)(before - 1) << BUSTER_TYPE_INDEX_SHIFT;
+                for (uint32_t step = 0; step < 4 && table->types.count < before + 2; step += 1)
+                {
+                    pointer = type_pointer(&world.types.test.table, pointer);
+                }
+                const uint64_t counted_length = counted_arena.length;
+                const bool skipped = counted_made && table->types.count > before && abi_classify_all(&counted, table) == 0 &&
+                                     abi_classify_all_scalar(&counted, table) == 0 && counted_arena.length == counted_length;
+                abi_test_expect(&tally, skipped, "worlds", "the table of the types alone classified a type made after it");
+                abi_test_expect(&tally, abi_classify_all(&vector, table) == table->types.count - before, "worlds",
+                                "the whole table didn't classify the types made after the table of the types alone");
+                arena_release(&counted_arena);
             }
             arena_release(&vector_arena);
             arena_release(&scalar_arena);

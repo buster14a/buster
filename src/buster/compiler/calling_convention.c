@@ -436,7 +436,8 @@ static __attribute__((unused)) uint64_t abi_capacity_bytes(uint32_t types);
 static __attribute__((unused)) bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes);
 // The same for the table's first `types` types alone, from its count to its capacity: a table no type will be made in
 // after it (a code generator's whose front end has finished) needs no columns for the room past its types, which
-// abi_initialize would clear (#442: the checker's room is four times a unit's tokens).
+// abi_initialize would clear (#442: the checker's room is four times a unit's tokens). abi_classify_all leaves a type
+// made after it unclassified; abi_classify, abi_classes and the rest must be given types below `types` alone.
 static __attribute__((unused)) bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types);
 // Classifies every complete type the table has that isn't yet, a level at a time (each level's types depend only on
 // types classified before it): with the vector path, or its twin. Returns how many types it classified.
@@ -3078,7 +3079,9 @@ static bool abi_is_larger_root(const TypeTable* table, uint32_t index)
 static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool scalar)
 {
     Scratch scratch = scratch_begin(0);
-    const uint32_t count = table->types.count;
+    // The types the table has rows for: a table of abi_initialize_types' leaves the types made after it alone (a type's
+    // members are made before it, so none of the types it classifies waits for one of them).
+    const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
     uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
     TypeId* ready = pending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count) : 0;
     uint32_t classified = 0;

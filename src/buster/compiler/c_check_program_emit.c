@@ -210,16 +210,35 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
-    // The tokens that declare, which the passes below visit rather than every token of the unit.
-    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
+    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
+    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
+    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
+    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
+    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image.
+    const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count + 1;
+    uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
+    uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declaring != 0 && (count == 0 || (codes != 0 && result->function_atoms != 0));
+    // The tokens that declare, which the passes below visit rather than every token of the unit: pushed last, and given
+    // back once those passes have read them, before Tier 0 and the link take scratch.
+    const uint64_t declaring_mark = scratch->length;
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && access != 0 && defined != 0 && declaring != 0 &&
+            (count == 0 || (codes != 0 && result->function_atoms != 0));
     const uint32_t declaring_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(retained_objects, 0, program->object_count);
+        memset(defined, 0, (uint64_t)program->object_count + 1);
+        for (uint32_t b = 0; b < count; b += 1)
+        {
+            defined[program->bodies[b].object] = 1;
+        }
+        // The objects retained by an attribute (which the attributes' pass below reads whole, so a pass of their own) and
+        // those the unit defines.
         for (uint32_t d = 0; d < declaring_count; d += 1)
         {
             const uint32_t token = declaring[d];
@@ -229,6 +248,11 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                 bool gnu_inline = false;
                 retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
+            }
+            if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (program->input->defined[token] || program->input->tentative[token]))
+            {
+                defined[object] = 1;
             }
         }
         for (uint32_t d = 0; valid && d < declaring_count; d += 1)
@@ -279,37 +303,13 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
             }
         }
     }
-    // How Tier 0 reaches each symbol (Tier0Function.symbol_access), one column for every body: a symbol this unit doesn't
-    // define may be a shared library's, which the direct path, without copy relocations, reaches only through its GOT
-    // slot (an executable's writer relaxes the load where the symbol is in the image), and a thread-local is the image's
-    // by local-exec, or another's by initial-exec. The unit defines its bodies' functions, the objects it defines or
-    // tentatively defines (as check_data_prepare selects them), its literals and whatever has no external linkage. The
-    // helpers are the unit's, and the C runtime's errno function isn't; libgcc's functions are linked into the image.
-    const uint32_t access_count = program->symbol_count + result->lowered.helpers.count + result->lowered.runtime_symbol_count + 1;
-    uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
-    uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
-    valid = valid && access != 0 && defined != 0;
+    arena_pop_to(scratch, declaring_mark);
     // Whether the unit makes a symbol's name (check_program_emit_makes_name), which most don't: only such a unit needs
     // the table of the names a made one must not be, below. The symbols' pass for their accesses finds it.
     bool makes = false;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        memset(defined, 0, (uint64_t)program->object_count + 1);
-        for (uint32_t b = 0; b < count; b += 1)
-        {
-            defined[program->bodies[b].object] = 1;
-        }
-        for (uint32_t d = 0; d < declaring_count; d += 1)
-        {
-            const uint32_t token = declaring[d];
-            const uint32_t object = program->input->objects[token];
-            if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (program->input->defined[token] || program->input->tentative[token]))
-            {
-                defined[object] = 1;
-            }
-        }
         for (uint32_t s = 0; s < program->symbol_count; s += 1)
         {
             const uint32_t object = program->symbol_objects[s];
