@@ -573,6 +573,269 @@ static void identifiers(unsigned n)
     functions(n, prefix);
 }
 
+
+static void enum_chain(unsigned n)
+{
+    printf("enum\n{\n    E0 = 1,\n");
+    for (unsigned i = 1; i < n; i++)
+        printf("    E%u = E%u + 1,\n", i, i - 1);
+    printf("};\nint get(void)\n{\n    return E%u;\n}\n", n - 1);
+}
+
+static void right_deep(unsigned n)
+{
+    printf("int f(int a)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf("a + (");
+    printf("a");
+    for (unsigned i = 0; i < n; i++)
+        printf(")");
+    printf(";\n}\n");
+}
+
+static void left_deep(unsigned n)
+{
+    printf("int f(int a)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf("(");
+    printf("a");
+    for (unsigned i = 0; i < n; i++)
+        printf(" + %u)", i);
+    printf(";\n}\n");
+}
+
+static void nested_blocks(unsigned n)
+{
+    printf("int f(int x)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("{ x += %u;\n", i % 7);
+    for (unsigned i = 0; i < n; i++)
+        printf("}\n");
+    printf("    return x;\n}\n");
+}
+
+static void nested_ifs(unsigned n)
+{
+    printf("int f(int x)\n{\n    int y = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("if (x > %u) { y += %u;\n", i, i % 5);
+    for (unsigned i = 0; i < n; i++)
+        printf("}\n");
+    printf("    return y;\n}\n");
+}
+
+static void nested_loops(unsigned n)
+{
+    printf("int f(int x)\n{\n    int y = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("while (x > %u) { x -= 1;\n", i);
+    printf("y += x;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("}\n");
+    printf("    return y;\n}\n");
+}
+
+static void case_ranges(unsigned n)
+{
+    printf("int f(int x)\n{\n    switch (x)\n    {\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    case %u ... %u: return %u;\n", 10 * i, 10 * i + 5, i);
+    printf("    default: return -1;\n    }\n}\n");
+}
+
+static void if_expression(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("#define D%u %u\n", i, i);
+    printf("#if 0");
+    for (unsigned i = 0; i < n; i++)
+        printf(" + D%u", i);
+    printf(" > 0 && (defined(D0)");
+    for (unsigned i = 1; i < n; i++)
+        printf(" || defined(D%u)", i);
+    printf(")\nint x = 1;\n#endif\nint get(void)\n{\n    return x;\n}\n");
+}
+
+static void one_line(unsigned n)
+{
+    printf("int a[] = {");
+    for (unsigned i = 0; i < n; i++)
+        printf("%u,", i * 7 + 1);
+    printf("};\nint get(int i)\n{\n    return a[i];\n}\n");
+}
+
+static void splice_macro(unsigned n)
+{
+    printf("#define BIG \\\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    + %u \\\n", i % 10);
+    printf("    + 0\nint x = 0 BIG;\nint get(void)\n{\n    return x;\n}\n");
+}
+
+static void utf8_identifiers(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("int caf\xc3\xa9_%u(int x\xc3\xa9)\n{\n    return x\xc3\xa9 + %u;\n}\n", i, i);
+}
+
+static void syntax_errors(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("int x_%u = ;\n", i);
+}
+
+static void semantic_errors(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("int f_%u(void)\n{\n    return undeclared_%u;\n}\n", i, i);
+}
+
+static void nested_calls(unsigned n)
+{
+    printf("int g(int x)\n{\n    return x + 1;\n}\nint f(int a)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf("g(");
+    printf("a");
+    for (unsigned i = 0; i < n; i++)
+        printf(")");
+    printf(";\n}\n");
+}
+
+static void unary_chain(unsigned n)
+{
+    printf("int f(int a)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf(i % 2 ? "-" : "~");
+    printf("a;\n}\n");
+}
+
+static void cast_chain(unsigned n)
+{
+    printf("int f(int a)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf(i % 2 ? "(int)" : "(long)");
+    printf("a;\n}\n");
+}
+
+static void index_chain(unsigned n)
+{
+    printf("int a[16];\nint f(void)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf("a[");
+    printf("0");
+    for (unsigned i = 0; i < n; i++)
+        printf(" & 15]");
+    printf(";\n}\n");
+}
+
+static void assign_chain(unsigned n)
+{
+    printf("int f(void)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    int v%u;\n", i);
+    printf("    ");
+    for (unsigned i = 0; i < n; i++)
+        printf("v%u = ", i);
+    printf("7;\n    return v0;\n}\n");
+}
+
+static void many_args(unsigned n)
+{
+    printf("int sum(int n, ...);\nint f(void)\n{\n    return sum(%u", n);
+    for (unsigned i = 0; i < n; i++)
+        printf(", %u", i);
+    printf(");\n}\n");
+}
+
+static void long_double_ops(unsigned n)
+{
+    printf("long double f(long double a, long double b)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    a = a * 1.5L + b / %u.0L;\n", i + 1);
+    printf("    return a;\n}\n");
+}
+
+static void int128_ops(unsigned n)
+{
+    printf("__int128 f(__int128 a, __int128 b)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    a = a * 3 + (b >> %u);\n", i % 100);
+    printf("    return a;\n}\n");
+}
+
+static void double_ops(unsigned n)
+{
+    printf("double f(double a, double b)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    a = a * 1.5 + b / %u.0;\n", i + 1);
+    printf("    return a;\n}\n");
+}
+
+static void atomic_ops(unsigned n)
+{
+    printf("_Atomic int counter;\nint f(int x)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    counter += x + %u;\n", i);
+    printf("    return counter;\n}\n");
+}
+
+static void struct_returns(unsigned n)
+{
+    printf("struct P { long a, b, c; };\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("struct P r_%u(struct P p)\n{\n    p.a += %u;\n    return p;\n}\n", i, i);
+    printf("long f(struct P p)\n{\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("    p = r_%u(p);\n", i);
+    printf("    return p.a;\n}\n");
+}
+
+static void kr_functions(unsigned n)
+{
+    for (unsigned i = 0; i < n; i++)
+        printf("int k_%u(a, b, c)\n    int a;\n    long b;\n    char c;\n{\n    return a + (int)b + c + %u;\n}\n", i, i);
+}
+
+static void pointer_depth(unsigned n)
+{
+    printf("int f(int ");
+    for (unsigned i = 0; i < n; i++)
+        printf("*");
+    printf("p)\n{\n    return ");
+    for (unsigned i = 0; i < n; i++)
+        printf("*");
+    printf("p;\n}\n");
+}
+
+static void function_pointer_parameters(unsigned n)
+{
+    printf("typedef int (*fp)(int");
+    for (unsigned i = 1; i < n; i++)
+        printf(", int");
+    printf(");\nint f(fp g)\n{\n    return g(0");
+    for (unsigned i = 1; i < n; i++)
+        printf(", %u", i);
+    printf(");\n}\n");
+}
+
+static void nested_switches(unsigned n)
+{
+    printf("int f(int x)\n{\n    int y = 0;\n");
+    for (unsigned i = 0; i < n; i++)
+        printf("switch (x & %u) { case 0: y += %u;\n", i % 7 + 1, i % 3);
+    for (unsigned i = 0; i < n; i++)
+        printf("break; default: y -= 1; }\n");
+    printf("    return y;\n}\n");
+}
+
+static void stringify(unsigned n)
+{
+    printf("#define S(...) #__VA_ARGS__\nconst char* get(void)\n{\n    return S(");
+    for (unsigned i = 0; i < n; i++)
+        printf("word%u, ", i);
+    printf("end);\n}\n");
+}
+
 int main(int count, char** arguments)
 {
     if (count < 3)
@@ -647,6 +910,35 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "loops") == 0) loops(n);
     else if (strcmp(mode, "includes") == 0 && count > 3) includes(n, arguments[3]);
     else if (strcmp(mode, "identifiers") == 0) identifiers(n);
+    else if (strcmp(mode, "enum-chain") == 0) enum_chain(n);
+    else if (strcmp(mode, "right-deep") == 0) right_deep(n);
+    else if (strcmp(mode, "left-deep") == 0) left_deep(n);
+    else if (strcmp(mode, "nested-blocks") == 0) nested_blocks(n);
+    else if (strcmp(mode, "nested-ifs") == 0) nested_ifs(n);
+    else if (strcmp(mode, "nested-loops") == 0) nested_loops(n);
+    else if (strcmp(mode, "case-ranges") == 0) case_ranges(n);
+    else if (strcmp(mode, "if-expression") == 0) if_expression(n);
+    else if (strcmp(mode, "one-line") == 0) one_line(n);
+    else if (strcmp(mode, "splice-macro") == 0) splice_macro(n);
+    else if (strcmp(mode, "utf8-identifiers") == 0) utf8_identifiers(n);
+    else if (strcmp(mode, "syntax-errors") == 0) syntax_errors(n);
+    else if (strcmp(mode, "semantic-errors") == 0) semantic_errors(n);
+    else if (strcmp(mode, "nested-calls") == 0) nested_calls(n);
+    else if (strcmp(mode, "unary-chain") == 0) unary_chain(n);
+    else if (strcmp(mode, "cast-chain") == 0) cast_chain(n);
+    else if (strcmp(mode, "index-chain") == 0) index_chain(n);
+    else if (strcmp(mode, "assign-chain") == 0) assign_chain(n);
+    else if (strcmp(mode, "many-args") == 0) many_args(n);
+    else if (strcmp(mode, "long-double-ops") == 0) long_double_ops(n);
+    else if (strcmp(mode, "int128-ops") == 0) int128_ops(n);
+    else if (strcmp(mode, "double-ops") == 0) double_ops(n);
+    else if (strcmp(mode, "atomic-ops") == 0) atomic_ops(n);
+    else if (strcmp(mode, "struct-returns") == 0) struct_returns(n);
+    else if (strcmp(mode, "kr-functions") == 0) kr_functions(n);
+    else if (strcmp(mode, "pointer-depth") == 0) pointer_depth(n);
+    else if (strcmp(mode, "function-pointer-parameters") == 0) function_pointer_parameters(n);
+    else if (strcmp(mode, "nested-switches") == 0) nested_switches(n);
+    else if (strcmp(mode, "stringify") == 0) stringify(n);
     else
     {
         fprintf(stderr, "gen: unknown mode %s\n", mode);
