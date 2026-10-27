@@ -1687,16 +1687,22 @@ SHA-256 of:
 A compiler's run of one source (`OracleRun.dependencies`) also has `-MD -MF
 FILE`, which its key doesn't, and its entry lists what it read: each file its
 dependency file names (its source, the headers, `#embed`'s resources and what
-`__has_include` found, which clang 23 lists) with SHA-256 of its bytes and of
-which of them is the same file (a hard link, which `#pragma once` takes once),
-and of their modification times where one of them has `__TIMESTAMP__`; and the
-names in each directory under a root that its arguments name, as the run found
-them, so that a file added where it looked for one and found none runs it
-again. An entry is taken only if all of these are as they were. A run isn't
-kept whose dependency file can't be read (a compiler writes none when an
-`#include` fails), that has `-M` options of its own, whose files or input have
+`__has_include` found, which clang 23 lists) with SHA-256 of its bytes if it is
+in one of the run's roots (below), which tests write anew for each run, and
+otherwise of its identity (what `stat` gives of it, as the runtime snapshot's
+probes: the system's headers, the repository's sources and the frozen corpora
+keep theirs from one run to the next until they change), of which of them is
+the same file (a hard link, which `#pragma once` takes once), and of their
+modification times where a rooted one has `__TIMESTAMP__`; and the names in
+each directory under a root that its arguments name, as the run found them, so
+that a file added where it looked for one and found none runs it again. An
+entry is taken only if all of these are as they were. A run isn't kept whose
+dependency file can't be read (a compiler writes none when an `#include`
+fails), that has `-M` options of its own, whose rooted files or input have
 `__DATE__` or `__TIME__` without `SOURCE_DATE_EPOCH`, or that has more than 8
-roots.
+roots. On the first run with an empty cache, hashing what each run read added
+16 s to test-preprocessor's cases, mostly system headers' bytes, which their
+identities now stand for.
 
 The roots: a test makes its files in directories of `mkdtemp`'s under
 `$TMPDIR` (or `/tmp`), whose names differ from one run to the next. A root is
@@ -1771,7 +1777,9 @@ one template beside it:
   resource or what `__has_include` found changes; errors naming absolute
   paths, taken with the other directory's; a missing `#include` and `-M`
   options, not kept;
-- what a run reads besides bytes: a hard link replaced by a copy of its bytes,
+- what a run reads besides bytes: a dependency in no root, checked by its
+  identity (rewritten, even with its own bytes, it is another file); a hard
+  link replaced by a copy of its bytes,
   `__TIMESTAMP__`'s files' times, and `__DATE__` without `SOURCE_DATE_EPOCH`
   (not kept) and with it (kept); shared directories, where a file added beside
   the source leaves the entry taken and a changed dependency doesn't; a run

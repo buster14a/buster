@@ -1362,7 +1362,8 @@ static bool oracle_entry_fits(const OracleEntry* entry, const OracleRun* run)
     return result;
 }
 
-// A dependency's state as the run reads it: SHA-256 of its bytes, its device and inode, and its modification time.
+// A dependency's state as the run reads it: SHA-256 of its bytes or of its identity, its device and inode, and its
+// modification time.
 typedef struct OracleState OracleState;
 struct OracleState
 {
@@ -1372,11 +1373,26 @@ struct OracleState
     int64_t time[2];
 };
 
-// What a run reads of `count` files it names, into `digests` (BUSTER_ORACLE_KEY_BYTES each): SHA-256 of each one's
-// bytes, of the place of the first of them that is the same file (by device and inode: #pragma once and include guards
-// take a file once, whatever names reach it), and if any of them has __TIMESTAMP__ (the modification time of the file
-// it expands in), of its modification time. False if a file can't be read, or the run's result depends on when it runs:
-// __DATE__ or __TIME__ in one of them, without SOURCE_DATE_EPOCH in its environment.
+// Whether `path` is one of the run's roots or is in one.
+static bool oracle_run_rooted(const OracleRun* run, const char* path)
+{
+    bool result = false;
+    for (uint32_t r = 0; r < run->roots.count && !result; r += 1)
+    {
+        const OracleRoot* root = &run->roots.roots[r];
+        result = strncmp(path, root->name, root->length) == 0 && (path[root->length] == '/' || path[root->length] == 0);
+    }
+    return result;
+}
+
+// What a run reads of `count` files it names, into `digests` (BUSTER_ORACLE_KEY_BYTES each): SHA-256 of a file's bytes
+// if it is in one of the run's roots (which tests write anew for each run), and otherwise of its identity, what stat
+// gives of it (device, inode, size, modification and change times), as the runtime snapshot's probes (the system's
+// headers, the repository's sources and the frozen corpora, which keep theirs from one run to the next until they
+// change); of the place of the first of them that is the same file (by device and inode: #pragma once and include
+// guards take a file once, whatever names reach it); and if a rooted one has __TIMESTAMP__ (the modification time of
+// the file it expands in), of its modification time. False if a file can't be read, or the run's result depends on when
+// it runs: __DATE__ or __TIME__ in a rooted one, without SOURCE_DATE_EPOCH in its environment.
 static bool oracle_dependency_digests(const OracleRun* run, char* const* names, uint32_t count, uint8_t* digests)
 {
     OracleState* states = calloc((size_t)count + 1, sizeof(OracleState));
@@ -1389,12 +1405,23 @@ static bool oracle_dependency_digests(const OracleRun* run, char* const* names, 
         OracleBuffer bytes = { 0 };
         struct stat status;
         result = oracle_run_path(run, names[i], path, sizeof(path)) && stat(path, &status) == 0;
-        result = result && (strcmp(path, "/dev/null") == 0 || (S_ISREG(status.st_mode) && oracle_buffer_file(&bytes, path)));
+        const bool rooted = result && oracle_run_rooted(run, path);
+        result = result && (!rooted || (S_ISREG(status.st_mode) && oracle_buffer_file(&bytes, path)));
         if (result)
         {
+            const int64_t identity[7] = {
+                (int64_t)status.st_dev,
+                (int64_t)status.st_ino,
+                (int64_t)status.st_size,
+                (int64_t)status.st_mtim.tv_sec,
+                (int64_t)status.st_mtim.tv_nsec,
+                (int64_t)status.st_ctim.tv_sec,
+                (int64_t)status.st_ctim.tv_nsec,
+            };
             OracleHash hash;
             oracle_sha256_begin(&hash);
-            oracle_hash_raw(&hash, bytes.bytes, bytes.length);
+            oracle_hash_bytes(&hash, rooted ? "bytes" : "identity", rooted ? 5 : 8);
+            oracle_hash_bytes(&hash, rooted ? (const void*)bytes.bytes : (const void*)identity, rooted ? bytes.length : sizeof(identity));
             const OracleKey key = oracle_hash_end(&hash);
             memcpy(states[i].bytes, key.bytes, sizeof(key.bytes));
             states[i].device = (uint64_t)status.st_dev;

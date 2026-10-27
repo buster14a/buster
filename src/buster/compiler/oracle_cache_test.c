@@ -600,6 +600,30 @@ static void oracle_test_identities(OracleTest* test)
     shared &= oracle_run(&run) && !run.taken;
     oracle_run_release(&run);
     oracle_test_expect(test, shared, "identities: shared directories, their names left out and the dependencies kept");
+    // A dependency in no root (a directory whose name isn't mkdtemp's) is checked by its identity: rewritten, even with
+    // its own bytes, it is another file.
+    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    char fixed[BUSTER_ORACLE_PATH_BYTES];
+    char option[BUSTER_ORACLE_PATH_BYTES + 8];
+    char header[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(fixed, sizeof(fixed), "%s/buster_oracle_identity_%ld_x", temporary, (long)getpid());
+    snprintf(option, sizeof(option), "-I%s", fixed);
+    snprintf(header, sizeof(header), "%s/fixed.h", fixed);
+    char* identified[] = { "clang", "-fsyntax-only", "-fno-color-diagnostics", option, "fixed.c", 0 };
+    bool identity = (mkdir(fixed, 0700) == 0 || errno == EEXIST) && oracle_test_write_text(fixed, "fixed.h", "int fixed;\n") &&
+                    oracle_test_write_text(directory, "fixed.c", "#include \"fixed.h\"\n");
+    for (uint32_t i = 0; i < 5; i += 1)
+    {
+        // Kept, taken, rewritten with other bytes (run), with the same bytes (run), and taken.
+        const bool rewrite = i == 2 || i == 3;
+        identity &= !rewrite || oracle_test_write_text(fixed, "fixed.h", "int fixed2;\n");
+        run = (OracleRun){ .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
+        identity &= oracle_run(&run) && run.status == 0 && run.taken == (i == 1 || i == 4);
+        oracle_run_release(&run);
+    }
+    unlink(header);
+    rmdir(fixed);
+    oracle_test_expect(test, identity, "identities: a dependency in no root, checked by its identity, a rewrite another file");
     // A run past its time limit is killed, fails, and isn't kept.
     char* slow[] = { "sleep", "20", 0 };
     const uint64_t before = cache.counts->unkept;
