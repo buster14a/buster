@@ -611,6 +611,14 @@ separate from the call's executable reachability. Enclosing `sizeof`, `alignof`,
 hard immediate constraints and source-point pragma policy keep their existing
 behavior. Selected arms continue through the deferred executable-graph walk.
 
+This source diagnostic policy also covers bounds written inside `sizeof` VLA
+type names: the recorded Clang 23 references accept `sizeof(int[n + BAD])`
+without the range diagnostic, including selected and unselected choose arms
+inside the bound. This does not make the VLA bound unevaluated at runtime;
+the existing explicit VLA captures still execute. Isolated differential
+fixtures pin this distinction, including the review reproducer with an
+unrelated choose expression elsewhere in the same function.
+
 The producer uses the retained selection roots and parser subtree bounds,
 without reparsing or changing executable operands. Only inputs containing both
 selections and x86 calls allocate its scratch: one u32 difference column with

@@ -53,6 +53,9 @@ static void check_input_x86_contexts(CheckInputReader* reader)
                 const uint8_t kind = parser->tokens.kinds[token];
                 if (kind == PARSE_KIND_SIZEOF)
                 {
+                    // This is diagnostic context, not executable deadness. Clang 23 also suppresses these
+                    // range diagnostics in sizeof VLA bounds, even when the bound executes. Keep the
+                    // runtime VLA captures intact; the differential fixtures pin the separate policy.
                     check_input_packed_exclude(events, count, token + 1, reader->ends[token] + 1);
                 }
                 else if (kind == PARSE_KIND_TYPEOF && token + 1 < count)
