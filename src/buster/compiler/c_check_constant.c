@@ -1837,6 +1837,33 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         check_x86_action(reader->types, &call, &typed, &result);
         *checked = result.action;
     }
+    else if (action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type))
+    {
+        // Type queries run before the retained graph supplies its vector-member records. Give the ordinary
+        // member action the same decoded selector here, with lane storage borrowed only for this action.
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* bytes = intern_bytes(reader->pp->table, action->member);
+        const uint32_t length = intern_length(reader->pp->table, action->member);
+        CheckVectorMember member;
+        bool decoded = check_vector_member_decode(bytes, length, 0, 0, &member);
+        if (!decoded)
+        {
+            uint8_t* lanes = arena_push_array(reader->scratch, length, sizeof(uint8_t), 1);
+            decoded = lanes != 0 && check_vector_member_decode(bytes, length, lanes, length, &member);
+        }
+        if (decoded)
+        {
+            CheckAction typed = *action;
+            typed.vector_member = &member;
+            check_action_scalar(reader->types, &typed, checked);
+        }
+        else
+        {
+            reader->output->resource = true;
+            *checked = (CheckActionResult){ .diagnostic = CHECK_DIAG_RESOURCE };
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
     else if (head != 0 || pending_arguments)
     {
         const CheckGraph* graph = &reader->output->graph;

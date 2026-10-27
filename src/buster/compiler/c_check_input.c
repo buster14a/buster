@@ -4358,6 +4358,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
+#include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
@@ -5229,6 +5230,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (check_input_region_initialize(&reader))
                 {
                     check_input_expressions(&reader);
+                }
+                if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
+                {
+                    check_input_x86_contexts(&reader);
                 }
                 if (!input->resource)
                 {

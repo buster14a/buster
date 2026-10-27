@@ -499,12 +499,30 @@ Irregular types and operations, integer multiplication/division/remainder,
 folding use the scalar semantic action. Singleton frontiers execute directly
 without packing a vector batch.
 
+The vector path completes each leaf without an overload set, a `VALUE` that
+reads no operand and interns no type (about 45% of `sqlite3.c`'s body nodes),
+without running its action (`check_graph_leaf`, #530). The record is the one
+the action gives: the leaf with its type as operand 0's conversion, or for an
+invalid type, that type's diagnostic and a zero value. It writes the records in
+node order: the barrier's leaves in the walk, a region's in its level pass,
+which then schedules only the rest. A separate pass of leaves wrote each
+output cache line twice. The vector path also validates the graph 16 nodes at a
+time (`check_graph_validate_vector`): the operators' classes come from one
+`vpermi2b` table built from the scalar rules, and each argument slice's offset
+from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
+or a sideband entry goes to `check_graph_validate_node`, the scalar
+validator's step. Most of that validation's time is the leaves' records it
+reads: two cache lines of each 96-byte record. `test-checker` compares the two
+validators on random graphs whole, with each rule broken, and with their
+columns ending at `PROT_NONE` pages.
+
 Both schedules call the same semantic-action contract. Scalar fixtures with
 independently stated expected results and the external source oracle therefore
 remain necessary: scalar/vector equality alone cannot validate shared C rules.
 `CheckStatistics` reports nodes, levels, batches, actual scalar/vector node
 counts, and arena bytes. The node counts describe the path executed, not merely
-which operations could theoretically use SIMD. The schedule is currently
+which operations could theoretically use SIMD: `vector_nodes` counts the vector
+path's leaves and its batches' vector-eligible arithmetic. The schedule is currently
 single-threaded; it does not establish useful multicore scaling.
 `query_proof_nodes` counts visits across the three constant-query proof lanes;
 `query_replay_nodes` counts the subsequent graph replay. These are additional
