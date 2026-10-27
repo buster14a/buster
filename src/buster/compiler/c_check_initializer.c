@@ -78,7 +78,8 @@ static __attribute__((unused)) bool check_initializer_run(TypeTable* types, cons
 
 static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
                                           const uint64_t* designator_indices, const uint8_t* designator_valid,
-                                          const TypeId* expression_types, Arena* scratch, TypeId* completed, uint32_t* failed_token, CheckInitStatus* status);
+                                          const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
+                                          uint32_t* failed_token, CheckInitStatus* status);
 
 static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits);
 
@@ -179,6 +180,8 @@ struct CheckInitWalker
     const uint64_t* indices;
     const uint8_t* index_valid;
     const TypeId* expression_types;
+    // An inferring walk's casts' types, at their `)`s (the reader's query types), or null.
+    const TypeId* cast_types;
     CheckInitFrame* frames;
     uint32_t depth;
     uint32_t capacity;
@@ -1112,12 +1115,15 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // The type of the expression from `begin` to `end` that an inferring walk (check_initializer_infer_array, before the
 // expressions are checked) reads from the tree, at the expression's root, the one token whose parent is outside it: an
 // identifier's declared type, a compound literal's (at its opening parenthesis), the third operand's of a ?:, a
-// parenthesized expression's, and a call's result where it calls a function by its name; and a subscript's, a member's
-// (`.` and `->`) and an indirection's of such an expression (`x[1]`, `p->a.b`, `*p`), from its base's type; a `-`, `+`
-// or `~`'s, its operand's; and a binary operator's (multiplicative to bitwise or), from both operands' as
-// check_init_binary_type combines them: a vector where either is one, a pointer for pointer arithmetic, and a scalar for
-// the rest (`ha + (short)n` is a vector, `*(p + 1)` a struct, `(p - q) * h` a vector). 0 for another expression, which
-// the caller leaves to the last typed token in it. A compound literal's own tokens (a
+// parenthesized expression's, a call's result where it calls a function by its name, and a cast's (the reader's, at its
+// `)`); an int, for which one stands for every scalar (the callers ask only whether the value is a record, a vector or
+// neither), for a constant, a `sizeof` or `_Alignof`, a `!`, a `&&` and a `||`; a subscript's, a member's (`.` and `->`)
+// and an indirection's of such an expression (`x[1]`, `p->a.b`, `*p`), from its base's type; a `-`, `+` or `~`'s, its
+// operand's; and a binary operator's (multiplicative to bitwise or), from both operands' as check_init_binary_type
+// combines them: a vector where either is one, a pointer for pointer arithmetic, and a scalar for the rest (`ha +
+// (short)n` is a vector, `*(p + 1)` a struct, `(p - q) * h` a vector, `*(p + (p - (S*)q))` a struct). 0 for another
+// expression (a call through a pointer's expression), which the caller leaves to the last typed token in it, and which
+// check_init_binary_type takes for neither a scalar nor a pointer (#555's second review). A compound literal's own tokens (a
 // member's value) don't count: `(struct L){ .target = n }` is a struct L, not n's type. One pass over the expression
 // gives each of its nodes its first and last children and its opening bracket, and the walk follows them down from the
 // root, so that it reads each token once however deeply the expression nests (#480's review: a rescan of the range at
@@ -1130,10 +1136,15 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
 // A binary operator's step (CheckInitWalker's walk keeps a token's kind for the others), past every token kind.
 #define BUSTER_CHECK_INIT_ROOT_BINARY PARSE_KIND_COUNT
 
-// A binary operator's value's type from its operands' (0 for one the walk has no type for), as far as the walk needs it:
-// a vector's where either operand is one (GNU's operators, a compare's mask among them); for `+`, its one pointer or
-// array operand's, and for `-`, its left one's where the right one is no pointer (a difference of two pointers is a
-// ptrdiff_t); else 0, a scalar's: a compare of pointers is an int, and no other operator takes a pointer.
+// A binary operator's value's type from its operands' (0 for one the walk has no type for), as far as the walk needs it,
+// and 0 where they leave it open, so that an operand of no type is taken for no scalar (#555's second review):
+// - a vector's where either operand is one (GNU's operators, a compare's mask among them);
+// - for `+` with one pointer or array operand, that one's (in valid C the other is an integer, whatever the walk has for
+//   it);
+// - for `-` with a pointer or an array on the left, its type where the right one is a scalar, a scalar's where it is a
+//   pointer too (a ptrdiff_t), and 0 where the walk has no type for it; a scalar's where only the right one is a pointer
+//   (in valid C, the left one is one too);
+// - else, where the walk has both operands' types, a scalar's (an int: a compare's, of pointers too); 0 otherwise.
 static TypeId check_init_binary_type(const TypeTable* types, uint8_t operator_kind, TypeId left, TypeId right)
 {
     const TypeId left_base = left != 0 ? type_strip_aligned(types, left) : 0;
@@ -1151,13 +1162,21 @@ static TypeId check_init_binary_type(const TypeTable* types, uint8_t operator_ki
     {
         result = right;
     }
-    else if (operator_kind == PARSE_KIND_PLUS && left_pointer != right_pointer)
+    else if (operator_kind == PARSE_KIND_PLUS && (left_pointer || right_pointer))
     {
-        result = left_pointer ? left : right;
+        result = left_pointer && right_pointer ? 0 : left_pointer ? left : right;
     }
-    else if (operator_kind == PARSE_KIND_MINUS && left_pointer && !right_pointer)
+    else if (operator_kind == PARSE_KIND_MINUS && left_pointer)
     {
-        result = left;
+        result = right_pointer ? BUSTER_TYPE_INT : right != 0 ? left : 0;
+    }
+    else if (right_pointer && operator_kind == PARSE_KIND_MINUS)
+    {
+        result = BUSTER_TYPE_INT;
+    }
+    else if (left != 0 && right != 0)
+    {
+        result = BUSTER_TYPE_INT;
     }
     return result;
 }
@@ -1227,6 +1246,16 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
             if (role == PARSE_ROLE_OPERAND && parser->tokens.kinds[root] == PARSE_KIND_IDENTIFIER)
             {
                 result = types[root];
+            }
+            else if (role == PARSE_ROLE_CLOSE_CAST)
+            {
+                result = walker->cast_types != 0 ? walker->cast_types[root] : 0;
+            }
+            else if ((role == PARSE_ROLE_OPERAND && (parser->tokens.kinds[root] == PARSE_KIND_NUMBER || parser->tokens.kinds[root] == PARSE_KIND_CHARACTER)) ||
+                     (role == PARSE_ROLE_PREFIX && (parser->tokens.kinds[root] == PARSE_KIND_SIZEOF || parser->tokens.kinds[root] == PARSE_KIND_EXCLAIM)) ||
+                     role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR)
+            {
+                result = BUSTER_TYPE_INT;
             }
             else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY && first[slot] != BUSTER_CHECK_NONE)
             {
@@ -2024,7 +2053,8 @@ static __attribute__((unused)) bool check_initializer_source(TypeTable* types, c
 
 static bool check_initializer_infer_array(TypeTable* types, const Parser* parser, TypeId type, uint32_t begin, uint32_t end,
                                           const uint64_t* designator_indices, const uint8_t* designator_valid,
-                                          const TypeId* expression_types, Arena* scratch, TypeId* completed, uint32_t* failed_token, CheckInitStatus* status)
+                                          const TypeId* expression_types, const TypeId* cast_types, Arena* scratch, TypeId* completed,
+                                          uint32_t* failed_token, CheckInitStatus* status)
 {
     CheckInitializer result = {
         .type = type,
@@ -2041,6 +2071,7 @@ static bool check_initializer_infer_array(TypeTable* types, const Parser* parser
             .indices = designator_indices,
             .index_valid = designator_valid,
             .expression_types = expression_types,
+            .cast_types = cast_types,
             .infer = true,
             .ignore_excess = true,
             .scratch = scratch,

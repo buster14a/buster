@@ -3677,6 +3677,15 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // Casts' types (the reader's, at their `)`s), on either side; an operand the walk has no type for (a call through a
+        // pointer's expression), which leaves a difference with a pointer open, not a pointer (#555's second review); and
+        // constants, `sizeof` and `!`, scalars on a difference's right.
+        {
+            "casts and operands of no type in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, S* q, long* l, long* m, v4di d, long* (*get)(void))\n{\n    S x[] = { *(p + (p - (S*)q)), p[0], *((S*)q + (l - m)), *(p + (l - (*get)())), *((S*)l + 1), *(p - 1), *(p - sizeof(S)), *(p - !m), *(p - 'a') };\n    _Static_assert(sizeof x == 9 * sizeof(S), \"nine\");\n    v4di e[] = { (v4di)d * (l - m), (l - (long*)q) * d, d };\n    _Static_assert(sizeof e == 3 * sizeof(v4di), \"three\");\n    return x[8].a + (int)e[2][0];\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
