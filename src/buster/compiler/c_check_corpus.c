@@ -902,15 +902,19 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
 //   unselected operands counted and a constant if's dead arm left out (CheckProgramOptions.folded_ifs). clang -O0
 //   doesn't emit the arm an integer constant condition never runs (CodeGenFunction::EmitIfStmt), and so leaves out
 //   what only it calls, as of musl's FORCE_EVAL; Tier 0 lowers it, and the selection counts it.
+// - inlined: a local function only ours has, whose definition has always_inline: clang -O0 inlines it at its calls
+//   (its always-inliner) and emits none of a local one it inlined everywhere, as of SQLite's SQLITE_INLINE
+//   allocateSpace; Tier 0 calls it.
 typedef enum CheckCorpusSymbolReason
 {
     CHECK_CORPUS_SYMBOL_FOLDED,
     CHECK_CORPUS_SYMBOL_UNSELECTED,
     CHECK_CORPUS_SYMBOL_DROPPED,
+    CHECK_CORPUS_SYMBOL_INLINED,
     CHECK_CORPUS_SYMBOL_REASONS,
 } CheckCorpusSymbolReason;
 
-static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped" };
+static const char* const check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_REASONS] = { "folded", "unselected", "dropped", "inlined" };
 
 typedef struct CheckCorpusSymbols CheckCorpusSymbols;
 struct CheckCorpusSymbols
@@ -1104,6 +1108,18 @@ static CheckCorpusSymbolReason check_corpus_symbol_reason(const LoweringDifferen
         }
         reason = !theirs && declaration < input->token_count && check_corpus_symbol_named(input, parser, identifiers, declaration, name) ?
                  CHECK_CORPUS_SYMBOL_DROPPED : reason;
+    }
+    const bool local_function = name->binding == BUSTER_LINK_SYMBOL_LOCAL && name->type == BUSTER_LINK_SYMBOL_FUNCTION;
+    for (uint32_t body = 0; difference->first && local_function && reason == CHECK_CORPUS_SYMBOL_REASONS && body < selected->program.body_count; body += 1)
+    {
+        const CheckProgramBody* definition = selected->program.bodies + body;
+        const CheckInputAttributes* attributes = input->attributes[definition->declaration];
+        bool always_inline = false;
+        for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+        {
+            always_inline |= attributes->records[i].kind == CHECK_ATTRIBUTE_ALWAYS_INLINE && !attributes->records[i].ignored;
+        }
+        reason = always_inline && check_corpus_symbol_named(input, parser, identifiers, definition->declaration, name) ? CHECK_CORPUS_SYMBOL_INLINED : reason;
     }
     return reason;
 }
@@ -3077,10 +3093,11 @@ static int run_checker_corpus(int count, char** arguments)
     if (symbols_requested)
     {
         printf("checker-corpus: symbols compared=%" PRIu64 " minimum=%" PRIu64 " different=%" PRIu64 " unexplained=%" PRIu64 " documented_%s=%" PRIu64
-               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
+               " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " documented_%s=%" PRIu64 " unsupported=%" PRIu64 " failures=%" PRIu64 "\n", symbols.compared, symbols_minimum,
                symbols.different, symbols.unexplained, check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_FOLDED], symbols.documented[CHECK_CORPUS_SYMBOL_FOLDED],
                check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_UNSELECTED], symbols.documented[CHECK_CORPUS_SYMBOL_UNSELECTED],
-               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED], symbols.unsupported, symbols.failures);
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_DROPPED], symbols.documented[CHECK_CORPUS_SYMBOL_DROPPED],
+               check_corpus_symbol_reasons[CHECK_CORPUS_SYMBOL_INLINED], symbols.documented[CHECK_CORPUS_SYMBOL_INLINED], symbols.unsupported, symbols.failures);
         for (uint32_t i = 0; i < symbols.feature_count; i += 1)
         {
             printf("checker-corpus: symbols unsupported=%" PRIu64 " feature=%s\n", symbols.feature_counts[i], symbols.features[i]);

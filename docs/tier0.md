@@ -29,6 +29,9 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **128-bit integers** (#136): `__int128`'s and `unsigned __int128`'s classes, I128 and U128, whose values live in the
   slots long double's do ("128-bit integers", below), which #133's producer lowers `__int128` to ([the checker
   guide](c-checker.md)'s "Backend handoff").
+- **Vectors** (#136): GNU C's vector types and the intrinsics' `__m128` to `__m512i`, one class, VECTOR, whose values
+  live in 64-byte slots, and machine operations (the `X86` kind's rows, which name their registers by role), for a
+  target with AVX-512 ("Vectors", below).
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
@@ -390,6 +393,71 @@ of anything but an object of at least 16 bytes (a value's local, a smaller objec
 value, `DIV` and `MOD` of them,
 a conversion between them and a floating class, a call's argument or result of them, a `RETURN` of them, and an entry
 of the classes in a function without `int128`. `interpreter.c` and `ir_lower.c` refuse them, as they refuse F80.
+
+## Vectors (#136)
+
+GNU C's vector types and the intrinsics' (`__m128`, `__m256i`, `__m512d` and the rest) are one class, VECTOR
+(`BUSTER_TYPED_CLASS_VECTOR`, 14), of 16, 32 or 64 bytes. Like the memory classes, a value takes an integer depth and
+lives in that depth's slot (`Tier0Frame.vector_area`, 64 bytes per depth), its bytes from the slot's first, so that
+calls and the arms of `?:` need nothing of their own for it. The class doesn't carry the width (one class was left
+below the vector path's 16): each entry that makes or moves one has its own, and `tier0_validate` follows each depth's
+width as a class (`BUSTER_TIER0_STACK_VECTOR`), so that a value of other bytes than an entry's is refused, not
+miscompiled.
+
+- **The kinds:** `CONST` (`value` an index into `Tier0Function.vector_constants`, 64 bytes each, with each one's bytes in
+  `vector_constant_bytes`), `DUP`, `LOAD`, `STORE` and `SET` (`value` the vector's bytes at the address), `LOCAL`,
+  `STORE_LOCAL` and `SET_LOCAL` (of an object of the vector's bytes, all of which they read or write), `DISCARD` and
+  `JUMP_VALUE`. Their operations are `X86` entries, below. Their globals are reached through their addresses, as long
+  double's are.
+- **Their code,** every entry deferred (`tier0_emit_vector_value`, counted by `tier0_count_vector_value`), through zmm16,
+  which no value of the floating stack's is in: `vmovdqu64` of the value's bytes between memory (the address, the
+  object) and zmm16, and of all 64 between zmm16 and a slot, whose bytes past the value's are then unspecified, as a
+  narrow integer's register's are; a constant of zeros by `vpxord` and a store, any other by its words as immediates
+  (`mov qword` of a sign-extended imm32, or two `mov dword`); `DISCARD` and `JUMP_VALUE` nothing.
+- **Calls pass and return them as aggregates,** as `__int128`'s: an argument is an object passed by its address
+  (`argument_sizes` its bytes), a call's result comes back into its result object, and a function returns one by its
+  object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
+  register: `tier0_parts_of`'s parts of 16, 32 and 64 bytes, which a struct of one vector takes too), or on the stack.
+  A parameter is an object the prologue stores its register in.
+- **A function says whether it has vectors** (`Tier0Function.vectors`: VECTOR values or `X86` entries), which gives it
+  the vectors' slots and the copies of selection, measuring and the deferred entries' emitter that look for their
+  entries (`tier0_memory_function`), as `x87` and `int128` do. Tier 0's own records for them are EVEX ones, so a front
+  end gives it to a unit whose target has AVX-512 (F, VL, BW and DQ), as the intrinsics of 64-byte vectors need.
+
+**Machine operations (`X86`).** An `X86` entry's `value` indexes `Tier0Function.operations`, rows (`Tier0Operation`) of
+up to 8 records each with their operands' classes (integers, floating values and VECTORs, each VECTOR one's bytes) and
+their result's, which the entry pops and pushes as `CALL` pops its arguments. A row's records name registers by role
+(`BUSTER_TIER0_ROLE_*`), never by number, and Tier 0 places each role at the entry (`tier0_operation_placement`):
+
+- `VECTOR(j)`, the row's vector register j, which holds VECTOR operand j (loaded from its slot at its width, the
+  register's bytes past the operand's zero, so that a form that reads it wider reads zeros) when the records start, and
+  whose register 0 holds the VECTOR result (stored into the result's slot whole) when they end; the others are free. The
+  VECTOR registers are the floating stack's free ones from its depth on (one further past a floating result's where no
+  floating operand takes its place), so a VEX form (which names registers below 16) reaches them where the floating
+  stack leaves room, and an EVEX one past it, to 31; a row whose VEX forms would reach past 16 is refused at its depth
+  (`TIER0_ERROR_DEPTH`), as an integer depth past the table is. The selections count the registers the operands' loads
+  write and the result's store reads among a row's, whatever its records name, so that no floating home is kept in one;
+- `FLOATING(j)` and `FLOATING_RESULT`, a floating operand's XMM register and the floating result's;
+- `INTEGER(j)`, `INTEGER_RESULT` and `SCRATCH(k)`, an integer operand's register (an address among them), the integer
+  result's, and up to four free ones, the depth registers past the entry's. An operand's is in a field no wider than its
+  class, whose register's bits past the class's are unspecified: a base or an index a 64-bit integer's, a 32-bit field a
+  32- or 64-bit one's, so a front end extends a narrower operand first (`CONVERT`);
+- the opmask registers by number, k0 to k7, which no value keeps between entries.
+
+`tier0_operation_valid` checks each row: VEX and EVEX forms alone, their operands in their fields (no implicit
+register: `vzeroupper`, `vmaskmovdqu`, `mulx` and the string compares are refused, as are pairs and blocks of
+registers), no branch, symbol or RIP-relative address, each field's role of its class (an integer operand's no
+narrower than its field), and each record `x86_validate` takes with its roles placed. So a row reads and writes its operands, its result, its scratch registers, the opmask
+registers and memory through its addresses, and nothing else; which forms a unit's target allows is the front end's to
+decide (#180's policy), as the instruction set of its rows is.
+
+`tier0_validate` refuses a vector entry in a function without `vectors`, a local of the class that isn't an object, a
+`LOCAL`, `STORE_LOCAL` or `SET_LOCAL` of anything but an object of 16, 32 or 64 bytes, a `LOAD`, `STORE` or `SET` of
+other bytes or of a value of other bytes, a constant past `vector_constants` or of other bytes, an `X86` entry past
+the operations, of another class than its row's result or of an operand of another class or width, the arms of a
+`?:` of two widths, a call's argument or result of the class, `RETURN` of it, the kinds vectors don't take, and a
+vector operand of an entry of another class, a `CONVERT`'s or a compare's among them (their arithmetic, compares and
+conversions are `X86` entries). `interpreter.c` and `ir_lower.c` refuse the class and the kind.
 
 ## Conversions between U64 and floating values (#136's item 5)
 
@@ -1247,16 +1315,17 @@ path's 11.1.
   any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
   are the same bytes as main's.
 - **Realigned frames (#136)** at about one instruction per entry to code without them. On these programs, which have no
-  object aligned past 16, the 9700X measured the branch with main merged in (`acb5131`) against main's `bbe59b7` in six
-  rounds in alternating order: the vector path at 170.86 instructions per entry against 169.85, its cycles (80.36 to
-  80.74 against 80.45 to 80.79) and alone (78.70 to 79.06 against 78.93 to 79.27) within main's spread, and the scalar
-  path at 573.75 instructions against 570.95 (233.06 cycles against 230.70). The instruction is each function's: the
-  frame alignment's scan before selection, the frame's added fields, and the prologue's and the layout's checks of the
-  realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head ran the vector path 1.15% and the scalar
-  one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after `main.c`'s) sat 14,928 bytes further on, and
-  main moved by as much (`.skip` before the unit's code, no code changed) ran its vector path 0.8% slower. `-c
-  sqlite3.c`'s objects are main's, and its time within main's spread
-  ([the record](https://github.com/buster14a/buster-performance/tree/0373f98c785caface34a91546b277ef57d816344/docs/measurements/aligned-objects-136-2026-10-27)).
+  object aligned past 16, the 9700X measured the branch with main merged in against main twice, six rounds each in
+  alternating order: the vector path at 170.86 instructions per entry against 169.85 both times, its cycles 80.63
+  against 79.83 against main's `51bf882` (1.0% more, and 1.2% alone) and 80.49 against 80.62 against `bbe59b7` (within
+  main's spread), and the scalar path at 573.75 instructions against 570.95 (1.5% and 1.0% more cycles). The
+  instruction is each function's: the frame alignment's scan before selection, the frame's added fields, and the
+  prologue's and the layout's checks of the realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head
+  ran the vector path 1.15% and the scalar one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after
+  `main.c`'s) sat 14,928 bytes further on, and main moved by as much (`.skip` before the unit's code, no code changed)
+  ran its vector path 0.8% slower. `-c sqlite3.c`'s objects are main's and its time within main's spread, at 0.09% more
+  instructions, most of them clang's code for the lowering's `check_lower_part`, which moves with any edit of its body
+  ([the record](https://github.com/buster14a/buster-performance/tree/12adf9e72419f5352e10088edef316bdfaa0624d/docs/measurements/aligned-objects-136-2026-10-27)).
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   On the generated programs the vector path's cycles per entry are about 2.3 times that. On `sqlite3.c` (below) the
   three stages take 41 to 42 cycles per output token, 1.3 times the budget: it is not met.
@@ -1296,12 +1365,14 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
 
 **SQLite's speedtest1 against clang -O0 and tcc**
-([record](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
+([record](https://github.com/buster14a/buster-performance/tree/c1bbfb2e56f58deb4972ff16d50221d7cd82f0fd/docs/measurements/speedtest1-tables-136-2026-10-27);
+[before the jump tables](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
 The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. They are built with SQLite's own
-`test/speedtest.tcl` options four ways:
+`test/speedtest.tcl` options:
 
-- by `-c` (main at `e04462c1`), linked by cc;
-- by the direct path, both files as one unit;
+- by `-c`, linked by cc, on main at `ad408cf2`, where `switch` dispatches through jump tables (#536), and at its first
+  parent `b7f444eb`, before them;
+- by each tree's direct path, both files as one unit;
 - by clang -O0, linked by cc;
 - by tcc.
 
@@ -1309,24 +1380,27 @@ Each build runs with that script's options at `--size 5`, from a database on tmp
 gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
 instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
-| | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
-| --- | --- | --- | --- | --- |
-| Run time | 294.4 ms | 295.7 ms | 293.3 ms | 271.5 ms |
-| User-space instructions | 6,866 M | 6,865 M | 3,922 M | 4,833 M |
-| Instructions per cycle | 4.47 | 4.46 | 2.59 | 3.45 |
-| `.text` of the executable | 1,331,336 B | 1,331,216 B | 1,024,342 B | 1,295,452 B |
-| `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
+| | Tier 0, `-c` | Tier 0, `-c`, before the tables | Tier 0, direct path | clang -O0 | tcc |
+| --- | --- | --- | --- | --- | --- |
+| Run time | 256.7 ms | 295.0 ms | 255.4 ms | 295.9 ms | 271.6 ms |
+| User-space instructions | 5,686 M | 6,866 M | 5,686 M | 3,922 M | 4,833 M |
+| Instructions per cycle | 4.31 | 4.49 | 4.32 | 2.57 | 3.45 |
+| `.text` of the executable | 1,319,528 B | 1,331,336 B | 1,319,408 B | 1,024,342 B | 1,295,452 B |
+| `sqlite3.c` compiled | 191.4 ms | 191.9 ms | | 577.4 ms | 42.2 ms |
 
-- **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
-  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
+- **Run time:** Tier 0's code takes 13.3% less time than clang -O0's, in 1.45 times its instructions, and 5.5% less
+  than tcc's. Before the jump tables it ran at clang's speed, in 1.75 times its instructions: the tables cut its time by
+  13.0%, its instructions by 17.2% and its cycles by 13.8%.
 - **Code size:**
-  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `.text` is 1.29 times clang's, in `sqlite3.o` and in the executable; the tables took 11,808 bytes out of
+    `sqlite3.o`'s and added 11,232 to its `.rodata`, 2,808 entries;
   - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
     sizes known before writing.
-- **`switch`** is a chain of compares in case order:
-  - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
-  - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
-  - jump tables (#136's item 7) will change both, and the record's scripts can measure them again.
+- **`switch`** dispatches through a jump table where clang -O0's does (`docs/c-checker.md`, "Switches"):
+  - `sqlite3VdbeExec`'s dispatch on the opcode is a bounds check and a table, as clang's is, where before the tables it
+    was 184 compare-and-branch pairs;
+  - it and the parser's `yy_reduce` account for 938 M of the 1,180 M instructions the tables saved (the record's
+    profiles): 767 M and 100 M now, against clang's 628 M and 47 M.
 
 ## Follow-ups
 
@@ -1343,7 +1417,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");
   - inline assembly, `setjmp` and atomics;
-  - `switch` (no kind yet: a compare sequence or a jump table).
+  - `switch` needs no entry of its own: the checker's lowering dispatches it by compares or, where clang -O0 would,
+    through a jump table and `JUMP_INDIRECT` to its cases' labels (`docs/c-checker.md`, "Switches").
 - **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
   padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store

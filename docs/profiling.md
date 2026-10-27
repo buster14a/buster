@@ -302,7 +302,18 @@ has its own code, and a change to a later unit's strings moves `lea`s in unrelat
   than it learns, and report a corpus of code beside one of declarations.
 - **Placement.** Branchy scalar loops run slower at some 64-byte offsets, in states that differ between processes, and
   stack slots or rows that share their low 12 bits with stores alias. A difference that comes and goes between builds of
-  the same source is probably one of these (dataflow.md, "Where the scalar twin's code falls").
+  the same source is probably one of these (dataflow.md, "Where the scalar twin's code falls"). The whole driver feels
+  it too (#502): with the same instructions, `-fsyntax-only` of `sqlite3.c` took 670 to 685 million user cycles as the
+  checker's unit was moved by 16 to 2,048 bytes, with more op-cache misses and front-end stalls in the slow placements.
+  So the checker's own code is in a section of its own, `.text.buster_checker`, which starts on a page (`main.c`, around
+  the checker's includes): code compiled before it, in its unit or another, moves it only by whole pages, and moving
+  that code by 0 to 1,024 bytes changed the driver by 0.24%; by #509's method ("Comparing two versions"), the
+  section's build read −0.14%, −0.01% and −0.03% against main in user cycles ([the
+  record](https://github.com/buster14a/buster-performance/tree/dd92b91a/docs/measurements/checker-placement-502-2026-10-27)).
+  A new source of the checker goes between those pragmas.
+  Two floors stay whatever the layout: a byte-identical copy of an executable ran 0.3% faster or slower than the
+  original (the physical pages its code gets), and one executable drifted by up to 2% between `perf stat` sessions.
+  Read a whole driver's difference against them, over copies and sessions.
 - **The stack's page offset.** Address space randomization starts each process's stack at another offset in its page,
   and a stage can then run fast in some processes of one build and slow in others. With the stack placed at every 64th
   byte of its page, `benchmark-checker-source`'s body checking on `sqlite3.c` ran 3 to 13% slower at seven offsets from

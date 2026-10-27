@@ -6,9 +6,10 @@
 // unsupported. The producer owns argument graph identities, evaluation order and address provenance. Every listed
 // argument is evaluated exactly once, including dynamic memory orders; no action reads the source program's memory.
 //
-// alignment_known supplies a positive power-of-two lower bound proved for the actual addressed object, including
-// packed members and reduced alignment. A pointer type alone is not supplied address-provenance evidence. Unknown
-// or insufficient alignment leaves valid source semantics intact and marks the native-helper path unsupported.
+// alignment_known supplies the addressed object's alignment as clang's code generation gives its address (c_checker.c's
+// check_graph_atomic_alignment): a pointer value's pointee type's, and a packed member's, a declaration's or an element's
+// from an address's path. Unknown or insufficient alignment, for which clang calls libatomic, leaves valid source
+// semantics intact and marks the native-helper path unsupported.
 // The helper path requires naturally aligned 1/2/4/8-byte objects, preserves volatile accesses and must use true
 // atomic helpers through unknown-effect calls (or atomic typed operations), never optimizer-visible ordinary loads.
 //

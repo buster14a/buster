@@ -68,6 +68,75 @@ static bool check_input_intrinsic_call_shape(const Parser* parser, uint32_t keyw
     return call;
 }
 
+// A call's source-position identity survives declaration-query suspension and binding replay. Do not look up
+// its spelling in the current scope when a type-only consumer resumes after that scope has changed.
+static TypeId check_input_intrinsic_type(const CheckInputReader* reader, uint32_t keyword)
+{
+    TypeId type = 0;
+    if (reader->output->intrinsic_ids != 0 && check_input_intrinsic_call_shape(reader->parser, keyword))
+    {
+        const uint32_t close = reader->parser->tree.parents[keyword];
+        const uint32_t id = reader->output->intrinsic_ids[close];
+        if (id != 0)
+        {
+            const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + id - 1;
+            type = reader->output->intrinsic_declarations[call->declaration].types.function_type;
+        }
+    }
+    return type;
+}
+
+// The tokens from `first` of the next 64 (a bit each) that are identifier operands outside the deferred bodies, which
+// the intrinsics' tables are sized for. The vector path tests 64 at once; the scalar path, its twin, takes every token,
+// and the caller tests each.
+static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, uint32_t first)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* deferred_tokens = reader->output->deferred_tokens;
+    uint64_t result = check_input_scan_all(first, count);
+    if (!parser->options.scalar)
+    {
+        result = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_IDENTIFIER) &
+                 check_input_scan_equal(parser->tree.roles, first, count, PARSE_ROLE_OPERAND);
+        if (deferred_tokens != 0 && reader->deferred == 0)
+        {
+            result &= ~check_input_scan_nonzero(deferred_tokens, first, count);
+        }
+    }
+    return result;
+}
+
+static bool check_input_intrinsic_operand(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* deferred_tokens = reader->output->deferred_tokens;
+    return parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
+           (deferred_tokens == 0 || reader->deferred != 0 || !deferred_tokens[token]);
+}
+
+// Looks the batch's `lanes` names up, and records each intrinsic found in the cache: false without a cache to record it.
+static bool check_input_intrinsic_lookup(const Parser* parser, BuiltinIntrinsicName* names, const uint32_t* names_in_batch, uint32_t lanes,
+                                         uint32_t* cache, uint32_t* declarations)
+{
+    const BuiltinIntrinsicInfo* infos[8];
+    builtin_intrinsic_lookup_batch(names, infos, lanes, parser->options.scalar);
+    bool valid = true;
+    for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
+    {
+        if (infos[lane] != 0)
+        {
+            valid = cache != 0;
+            if (valid)
+            {
+                cache[names_in_batch[lane]] = UINT32_C(0x80000000) | (uint32_t)(infos[lane] - builtin_intrinsic_infos);
+                *declarations += 1;
+            }
+        }
+    }
+    return valid;
+}
+
 static bool check_input_intrinsic_initialize(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -76,7 +145,6 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     const uint64_t mark = reader->arena->length;
     const uint64_t scratch_mark = reader->scratch->length;
     BuiltinIntrinsicName names[8];
-    const BuiltinIntrinsicInfo* infos[8];
     uint32_t names_in_batch[8];
     uint32_t* cache = 0;
     uint32_t lanes = 0;
@@ -84,64 +152,63 @@ static bool check_input_intrinsic_initialize(CheckInputReader* reader)
     uint32_t calls = 0;
     bool valid = true;
     bool without_cache = false;
-    for (uint32_t token = 0; valid && token <= parser->tokens.count; token += 1)
+    // #113's deferred bodies are read after this pass, which sizes the tables for them too, as source order does.
+    for (uint32_t first = 0; valid && first < parser->tokens.count; first += 64)
     {
-        if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
-            parser->tree.roles[token] == PARSE_ROLE_OPERAND && (output->deferred_tokens == 0 || reader->deferred != 0 || !output->deferred_tokens[token]))
+        for (uint64_t selected = check_input_intrinsic_operands(reader, first); valid && selected != 0; selected &= selected - 1)
         {
-            // #113's deferred bodies are read after this pass, which sizes the tables for them too, as source order does.
-            const uint32_t name = parser->tokens.names[token];
-            if (cache == 0 && !without_cache)
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            if (check_input_intrinsic_operand(reader, token))
             {
-                cache = arena_push_array(reader->scratch, table->count, sizeof(uint32_t), 64);
-                without_cache = cache == 0;
-                if (!without_cache)
+                const uint32_t name = parser->tokens.names[token];
+                if (cache == 0 && !without_cache)
                 {
-                    memset(cache, 0xff, (uint64_t)table->count * sizeof(uint32_t));
-                }
-            }
-            // Without scratch, look up every operand, including repeated names. A hit fails immediately because its
-            // tables need the cache; an all-miss unit succeeds without a quadratic search of earlier operands.
-            const bool first = without_cache || cache[name] == UINT32_MAX;
-            if (first)
-            {
-                const InternSpan span = table->spans[name];
-                names[lanes] = (BuiltinIntrinsicName){ (const char*)table->records + span.offset, span.length };
-                names_in_batch[lanes] = name;
-                if (!without_cache)
-                {
-                    cache[name] = 0;
-                }
-                lanes += 1;
-            }
-        }
-        if (lanes == BUSTER_ARRAY_LENGTH(names) || (token == parser->tokens.count && lanes != 0))
-        {
-            builtin_intrinsic_lookup_batch(names, infos, lanes, parser->options.scalar);
-            for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
-            {
-                if (infos[lane] != 0)
-                {
-                    valid = !without_cache;
-                    if (valid)
+                    cache = arena_push_array(reader->scratch, table->count, sizeof(uint32_t), 64);
+                    without_cache = cache == 0;
+                    if (!without_cache)
                     {
-                        cache[names_in_batch[lane]] = UINT32_C(0x80000000) | (uint32_t)(infos[lane] - builtin_intrinsic_infos);
-                        declarations += 1;
+                        memset(cache, 0xff, (uint64_t)table->count * sizeof(uint32_t));
                     }
                 }
+                // Without scratch, look up every operand, including repeated names. A hit fails immediately because its
+                // tables need the cache; an all-miss unit succeeds without a quadratic search of earlier operands.
+                const bool fresh = without_cache || cache[name] == UINT32_MAX;
+                if (fresh)
+                {
+                    const InternSpan span = table->spans[name];
+                    names[lanes] = (BuiltinIntrinsicName){ (const char*)table->records + span.offset, span.length };
+                    names_in_batch[lanes] = name;
+                    if (!without_cache)
+                    {
+                        cache[name] = 0;
+                    }
+                    lanes += 1;
+                }
             }
-            lanes = 0;
+            if (lanes == BUSTER_ARRAY_LENGTH(names))
+            {
+                valid = check_input_intrinsic_lookup(parser, names, names_in_batch, lanes, cache, &declarations);
+                lanes = 0;
+            }
         }
+    }
+    if (valid && lanes != 0)
+    {
+        valid = check_input_intrinsic_lookup(parser, names, names_in_batch, lanes, cache, &declarations);
+        lanes = 0;
     }
     if (valid && declarations != 0)
     {
-        for (uint32_t token = 0; token < parser->tokens.count; token += 1)
+        for (uint32_t first = 0; first < parser->tokens.count; first += 64)
         {
-            if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND &&
-                (output->deferred_tokens == 0 || reader->deferred != 0 || !output->deferred_tokens[token]) &&
-                cache[parser->tokens.names[token]] != UINT32_MAX && (cache[parser->tokens.names[token]] & UINT32_C(0x80000000)) != 0)
+            for (uint64_t selected = check_input_intrinsic_operands(reader, first); selected != 0; selected &= selected - 1)
             {
-                calls += check_input_intrinsic_call_shape(parser, token);
+                const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+                if (check_input_intrinsic_operand(reader, token) && cache[parser->tokens.names[token]] != UINT32_MAX &&
+                    (cache[parser->tokens.names[token]] & UINT32_C(0x80000000)) != 0)
+                {
+                    calls += check_input_intrinsic_call_shape(parser, token);
+                }
             }
         }
         uint32_t* ids = arena_push_array(reader->arena, (uint64_t)parser->tokens.count + 1, sizeof(uint32_t), 64);
