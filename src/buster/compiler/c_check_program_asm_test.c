@@ -177,6 +177,20 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
         "asm-naked-intel", clang);
+    // A naked function whose attribute isn't on its first declaration (#565's review): an unannotated prototype before a
+    // naked definition that returns by its own ret, and a naked redeclaration between a prototype and an unannotated
+    // definition, both naked as clang takes them; and a naked redeclaration after a definition, which clang ignores with
+    // a warning: an ordinary function.
+    check_test_program_source(test,
+        "static long first_plain(long);"
+        "static __attribute__((naked,noinline)) long first_plain(long x){__asm__(\"leaq 1(%rdi), %rax\\n\\tret\\n\");}"
+        "static long middle_naked(long);"
+        "static __attribute__((naked)) long middle_naked(long);"
+        "static __attribute__((noinline)) long middle_naked(long x){__asm__(\"leaq 2(%rdi), %rax\\n\\tret\\n\");}"
+        "static long after_definition(long x){return x+3;}"
+        "static __attribute__((naked)) long after_definition(long);"
+        "int tested(int n){return (int)(first_plain(n)*7+middle_naked(n)*5+after_definition(n));}",
+        "asm-naked-redeclared", clang);
     // Templates that name symbols: the harness's function and data, the unit's static function and data, and a .L label
     // one statement's template defines and another's takes the address of.
     check_test_program_source(test,

@@ -43,6 +43,14 @@ follow-up, if a measurement shows the call matters.
 
 ## Naked functions
 
+A function is naked when any of its declarations up to its definition has the
+attribute, as clang takes it. That includes an unannotated prototype before a
+naked definition, and a naked redeclaration before an unannotated definition.
+Clang ignores the attribute after the definition, with a warning, and so does
+the lowering. `check_program`'s pass over the declarations keeps each
+function's first declaration with the attribute (`CheckProgram.object_naked`),
+in a column it makes only for a unit that has one.
+
 A naked function's body may hold only `asm` statements: basic ones, and
 extended ones whose operands are integer constants (`"i"(7)`).
 `check_program_asm_plan_naked` substitutes their templates and joins them in
@@ -248,8 +256,9 @@ The names are scalar too: a unit's templates have few of them (`main.c`'s units
 have 6). `check_program_asm_names` makes one hash table of them, and the
 emission makes one pass over the program's symbols. That pass looks up only
 names of the asm names' lengths, and only in a unit whose templates name
-anything. Every program's planning reads one attribute list per body, to find
-its naked functions. [The second part's record](https://github.com/buster14a/buster-performance/tree/dd7e140f93f23d4300e36eb4de7f7b126c4b4d93/docs/measurements/inline-asm-naked-147-2026-10-27)
+anything. Finding the naked functions costs a unit without one a test of each
+function declaration's attributes, in a pass over the declarations that
+`check_program` makes anyway. [The second part's record](https://github.com/buster14a/buster-performance/tree/dd7e140f93f23d4300e36eb4de7f7b126c4b4d93/docs/measurements/inline-asm-naked-147-2026-10-27)
 has its default path's numbers against main: `sqlite3.c`'s `-c` writes the same
 object, in 0.28% less wall time and 0.083% fewer user instructions.
 [The measurement record](https://github.com/buster14a/buster-performance/tree/681f0282cc14230610b11c8defd91afc6cbc910b/docs/measurements/inline-asm-147-2026-10-27)

@@ -1083,21 +1083,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     return valid;
 }
 
-// Whether body `b` is a naked function's: the attribute on its function's first declaration (its object's token), where
-// the checker keeps the function's attributes.
+// Whether body `b` is a naked function's: some declaration of its function up to its definition has the attribute
+// (CheckProgram.object_naked), as clang takes it; clang ignores one after the definition, with a warning.
 static bool check_program_asm_naked(const CheckProgram* program, uint32_t b)
 {
-    const CheckInput* input = program->input;
-    const uint32_t object = program->bodies[b].object;
-    const uint32_t declaration = object - 1;
-    const bool first = object != 0 && declaration < input->token_count && input->declarations[declaration] == declaration && input->objects[declaration] == object;
-    const CheckInputAttributes* attributes = first ? input->attributes[declaration] : 0;
-    bool naked = false;
-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-    {
-        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
-    }
-    return naked;
+    const CheckProgramBody body = program->bodies[b];
+    return program->object_naked != 0 && body.object < program->object_count && program->object_naked[body.object] <= body.declaration;
 }
 
 // Plans naked body `b` (CheckProgramNaked): its statements, each an asm statement whose operands are integer constants
@@ -1355,10 +1346,9 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             statements += program->controls[program->bodies[b].first + i].kind == CHECK_CONTROL_ASM;
         }
     }
-    // The naked functions: a pass over the bodies, which every program takes, since a naked function needs no asm
-    // statement to be one.
+    // The naked functions: a pass over the bodies of a unit that declares one, which needs no asm statement to be one.
     uint32_t naked_count = 0;
-    for (uint32_t b = 0; b < program->body_count; b += 1)
+    for (uint32_t b = 0; program->object_naked != 0 && b < program->body_count; b += 1)
     {
         naked_count += check_program_asm_naked(program, b);
     }
