@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Graph contract regressions for #133: partial allocation rollback, protected call-argument tails, independently
-// expected type creation/diagnostic order, and single-LHS update conversions. Include after shared fixture helpers.
+// expected type creation/diagnostic order, and single-LHS update conversions; and #530's vector validator against its exact
+// twin, on random and broken graphs and at page edges. Include after shared fixture helpers.
 
 static bool check_test_graph_cleared(const CheckGraph* graph)
 {
@@ -409,6 +410,407 @@ static void check_test_graph_updates(CheckTest* test, TypeTable* table, Arena* s
     arena_pop_to(storage, storage_mark);
 }
 
+// The validators' generator (#530): a random graph of `count` nodes over every operator class check_graph_validate_vector
+// classifies, valid by construction: leaves of builtin, pointer and invalid types, edges within each operator's arity, casts
+// to builtin, void and pointer types, sizeof of a type and of an operand, calls' argument slices, and the byte columns'
+// bits. With `builtins`, also builtins' slices, statement values and variable-length arrays' bounds, which check_graph_run
+// needs their metadata for; with `sideband`, the nodes only the exact path checks: VARARGS, x86 builtins and builtin,
+// vector-member and overload entries. The graph has room for count nodes and 4 * count arguments.
+static void check_test_graph_validation_world(CheckTest* test, CheckGraph* graph, uint32_t count, TypeId pointer, bool builtins, bool sideband)
+{
+    static const CheckOp unary[] =
+    {
+        CHECK_OP_POSITIVE,
+        CHECK_OP_NEGATIVE,
+        CHECK_OP_NOT,
+        CHECK_OP_BIT_NOT,
+        CHECK_OP_ADDRESS,
+        CHECK_OP_DEREFERENCE,
+        CHECK_OP_CONDITION,
+        CHECK_OP_PRE_INCREMENT,
+        CHECK_OP_POST_DECREMENT,
+        CHECK_OP_SELECT,
+        CHECK_OP_MEMBER,
+        CHECK_OP_REAL,
+    };
+    static const CheckOp binary[] =
+    {
+        CHECK_OP_ADD,
+        CHECK_OP_SUBTRACT,
+        CHECK_OP_MULTIPLY,
+        CHECK_OP_SHIFT_LEFT,
+        CHECK_OP_LESS,
+        CHECK_OP_EQUAL,
+        CHECK_OP_BIT_AND,
+        CHECK_OP_LOGICAL_OR,
+        CHECK_OP_ASSIGN,
+        CHECK_OP_COMMA,
+        CHECK_OP_SUBSCRIPT,
+        CHECK_OP_ADD_ASSIGN,
+        CHECK_OP_BIT_XOR_ASSIGN,
+    };
+    const TypeId requested[] =
+    {
+        BUSTER_TYPE_INT,
+        BUSTER_TYPE_DOUBLE | BUSTER_TYPE_CONST,
+        BUSTER_TYPE_VOID,
+        pointer,
+        BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT128),
+    };
+    graph->count = 0;
+    graph->argument_count = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t draw = check_test_random(test) % 20;
+        const uint32_t a = i != 0 ? check_test_random(test) % i : BUSTER_CHECK_NONE;
+        const uint32_t b = i != 0 ? check_test_random(test) % i : BUSTER_CHECK_NONE;
+        const uint32_t c = i != 0 ? check_test_random(test) % i : BUSTER_CHECK_NONE;
+        const TypeId type = requested[check_test_random(test) % BUSTER_ARRAY_LENGTH(requested)];
+        uint32_t node = BUSTER_CHECK_NONE;
+        if (i < 2 || draw < 6)
+        {
+            const TypeId leaves[] =
+            {
+                BUSTER_TYPE_INT,
+                BUSTER_TYPE_ULONG | BUSTER_TYPE_VOLATILE,
+                BUSTER_TYPE_LONG_DOUBLE,
+                pointer,
+                0,
+            };
+            CheckValue value = check_test_integer(leaves[check_test_random(test) % BUSTER_ARRAY_LENGTH(leaves)], i);
+            value.category = (check_test_random(test) & 1) != 0 ? CHECK_LVALUE : CHECK_RVALUE;
+            node = check_test_leaf(graph, i, value);
+        }
+        else if (draw < 9)
+        {
+            node = check_graph_add(graph, unary[check_test_random(test) % BUSTER_ARRAY_LENGTH(unary)], i, a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+        else if (draw < 12)
+        {
+            node = check_graph_add(graph, binary[check_test_random(test) % BUSTER_ARRAY_LENGTH(binary)], i, a, b, BUSTER_CHECK_NONE);
+        }
+        else if (draw == 12)
+        {
+            node = check_graph_add(graph, builtins && (check_test_random(test) & 1) != 0 ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_CONDITIONAL, i, a, b, c);
+        }
+        else if (draw == 13)
+        {
+            const CheckOp casts[] =
+            {
+                CHECK_OP_CAST,
+                CHECK_OP_INITIALIZE,
+                CHECK_OP_CONVERT,
+            };
+            node = check_graph_add(graph, casts[check_test_random(test) % BUSTER_ARRAY_LENGTH(casts)], i, a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->types[node] = type;
+        }
+        else if (draw == 14)
+        {
+            const bool named = (check_test_random(test) & 1) != 0;
+            node = check_graph_add(graph, (check_test_random(test) & 1) != 0 ? CHECK_OP_SIZEOF : CHECK_OP_ALIGNOF, i, named ? BUSTER_CHECK_NONE : a, BUSTER_CHECK_NONE,
+                                   BUSTER_CHECK_NONE);
+            graph->types[node] = named ? type : 0;
+        }
+        else if (draw == 15 || draw == 16)
+        {
+            const CheckOp sliced[] =
+            {
+                CHECK_OP_CALL,
+                CHECK_OP_BUILTIN_MISC,
+                CHECK_OP_BUILTIN_FLOAT,
+                CHECK_OP_BUILTIN_BIT_CAST,
+            };
+            const CheckOp op = builtins ? sliced[check_test_random(test) % BUSTER_ARRAY_LENGTH(sliced)] : CHECK_OP_CALL;
+            const uint32_t arguments = check_test_random(test) % 5;
+            node = check_graph_add(graph, op, i, op == CHECK_OP_CALL ? a : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->argument_offsets[node] = graph->argument_count;
+            graph->argument_counts[node] = arguments;
+            for (uint32_t k = 0; k < arguments; k += 1)
+            {
+                graph->argument_nodes[graph->argument_count++] = check_test_random(test) % i;
+            }
+        }
+        else if (builtins && draw == 17)
+        {
+            node = check_graph_add(graph, CHECK_OP_STATEMENT_VALUE, i, a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->members[node] = (check_test_random(test) & 1) != 0 ? BUSTER_CHECK_SIDE_EFFECT : 0;
+        }
+        else if (builtins && draw == 18)
+        {
+            const bool extent = (check_test_random(test) & 1) != 0;
+            node = check_graph_add(graph, extent ? CHECK_OP_VLA_EXTENT : CHECK_OP_VLA_BOUND, i, extent ? BUSTER_CHECK_NONE : a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->members[node] = 1 + check_test_random(test) % 7;
+        }
+        else if (sideband && graph->varargs_count < graph->varargs_capacity && (check_test_random(test) & 3) == 0)
+        {
+            const bool type_name = (check_test_random(test) & 1) != 0;
+            node = check_graph_add(graph, CHECK_OP_VARARGS, i, a, type_name ? BUSTER_CHECK_NONE : b, BUSTER_CHECK_NONE);
+            graph->members[node] = type_name ? CBUILTIN_VA_ARG : CBUILTIN_VA_COPY;
+            graph->argument_offsets[node] = graph->varargs_count;
+            graph->argument_counts[node] = type_name ? 1 : 2;
+            graph->varargs_calls[graph->varargs_count++] = (CheckVarargsCall){ .node = node };
+        }
+        else if (sideband && graph->x86_count < graph->x86_capacity && (check_test_random(test) & 3) == 0)
+        {
+            node = check_graph_add(graph, CHECK_OP_BUILTIN_X86, i, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->x86_calls[graph->x86_count++] = (CheckX86Call){ .node = node, .info = (const BuiltinIntrinsicInfo*)graph };
+        }
+        else if (sideband && graph->builtin_count < graph->builtin_capacity && (check_test_random(test) & 1) == 0)
+        {
+            node = check_graph_add(graph, CHECK_OP_BUILTIN_QUERY, i, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->builtin_calls[graph->builtin_count++] = (CheckBuiltinCall){ .node = node };
+        }
+        else if (sideband && graph->vector_member_count < graph->vector_member_capacity && (check_test_random(test) & 1) == 0)
+        {
+            node = check_graph_add(graph, CHECK_OP_MEMBER, i, a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->vector_members[graph->vector_member_count++] = (CheckVectorCall){ .node = node };
+        }
+        else if (sideband && graph->overload_count < graph->overload_capacity)
+        {
+            node = check_graph_add(graph, CHECK_OP_CALL, i, a, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+            graph->argument_offsets[node] = graph->argument_count;
+            graph->overload_calls[graph->overload_count++] = (CheckOverloadCall){ .node = node, .head = 0 };
+        }
+        else
+        {
+            node = check_graph_add(graph, CHECK_OP_COMMA, i, a, b, BUSTER_CHECK_NONE);
+        }
+        // Offsets past a slice's end are valid for an operator without arguments while they stay within the slots.
+        graph->argument_offsets[node] = graph->argument_counts[node] == 0 && graph->ops[node] != CHECK_OP_VARARGS ? check_test_random(test) % (graph->argument_count + 1) :
+                                        graph->argument_offsets[node];
+        graph->contexts[node] = (uint8_t)(check_test_random(test) & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_GNU_CONSTANT));
+        if (graph->fp_environments != NULL)
+        {
+            graph->fp_environments[node] = (uint8_t)(check_test_random(test) & BUSTER_CHECK_FP_ENV_ACCESS);
+        }
+        if (graph->warning_suppressed != NULL)
+        {
+            graph->warning_suppressed[node] = (uint8_t)(check_test_random(test) & (CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE));
+        }
+        if (graph->tag_completions != NULL)
+        {
+            graph->source_positions[node] = i;
+        }
+    }
+}
+
+// check_graph_validate_vector and its exact twin on one graph: the same result and failed node, and for a valid graph the
+// same purity and counters.
+static void check_test_graph_validators_agree(CheckTest* test, const CheckGraph* graph, uint8_t* scalar_pure, uint8_t* vector_pure, const char* description)
+{
+    CheckGraphValidation scalar_state;
+    CheckGraphValidation vector_state;
+    uint32_t scalar_failed = 0;
+    uint32_t vector_failed = 0;
+    const bool scalar = check_graph_validate(graph, scalar_pure, &scalar_state, &scalar_failed);
+    const bool vector = check_graph_validate_vector(graph, vector_pure, &vector_state, &vector_failed);
+    bool equal = scalar == vector && scalar_failed == vector_failed;
+    if (equal && scalar)
+    {
+        equal = memcmp(scalar_pure, vector_pure, graph->count) == 0 && memcmp(&scalar_state, &vector_state, sizeof(scalar_state)) == 0;
+    }
+    check_test_expect(test, equal, description);
+}
+
+// One of the rules a node can break, applied at `node`: each breaks a rule of a different column or list (a node without the
+// field the rule reads stays valid).
+static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t node, uint32_t rule)
+{
+    switch (rule)
+    {
+        case 0: graph->ops[node] = (CheckOp)(CHECK_OP_COUNT + check_test_random(test) % 200); break;
+        case 1: graph->operand0[node] = node; break;
+        case 2: graph->operand1[node] = graph->operand1[node] == BUSTER_CHECK_NONE ? (node != 0 ? node - 1 : 0) : BUSTER_CHECK_NONE; break;
+        case 3: graph->operand2[node] = graph->operand2[node] == BUSTER_CHECK_NONE ? 0 : node + 1; break;
+        case 4: graph->contexts[node] |= 0x10; break;
+        case 5: graph->fp_environments[node] |= 0x02; break;
+        case 6: graph->warning_suppressed[node] |= (uint8_t)CHECK_WARNING_DISCARDED_QUALIFIERS; break;
+        case 7: graph->members[node] = graph->ops[node] == CHECK_OP_STATEMENT_VALUE ? 0x20 : 0; break;
+        case 8: graph->argument_offsets[node] += 1; break;
+        case 9: graph->argument_counts[node] += 1 + check_test_random(test) % 3; break;
+        case 10:
+        {
+            if (graph->argument_counts[node] != 0 && graph->ops[node] != CHECK_OP_VARARGS)
+            {
+                graph->argument_nodes[graph->argument_offsets[node] + graph->argument_counts[node] - 1] = node;
+            }
+        } break;
+        case 11: graph->leaves[node].overload_head = 1 + check_test_random(test) % 3; break;
+        case 12: graph->source_positions[node] = BUSTER_CHECK_NONE; break;
+        case 13: graph->types[node] = graph->types[node] == 0 ? BUSTER_TYPE_INT : 0; break;
+        case 14: graph->argument_offsets[node] = graph->argument_count + 1 + check_test_random(test) % 3; break;
+        default: graph->operand0[node] = graph->operand0[node] == BUSTER_CHECK_NONE ? node : BUSTER_CHECK_NONE; break;
+    }
+}
+
+#define BUSTER_CHECK_TEST_GRAPH_RULES 16u
+
+// #530: check_graph_validate_vector against check_graph_validate, its exact twin, on random graphs of every count to 70
+// and of 4,099 nodes, with and without the exact path's sideband nodes, the optional byte columns and tag history: each
+// graph whole, and once per rule broken at a random node.
+static void check_test_graph_validation(CheckTest* test, Arena* storage)
+{
+    const uint64_t mark = storage->length;
+    const uint32_t capacity = 4099;
+    CheckGraph graph;
+    bool ready = check_graph_initialize(&graph, storage, capacity, capacity * 4);
+    uint8_t* fp_environments = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity);
+    uint8_t* suppressed = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity);
+    uint8_t* scalar_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity + 1);
+    uint8_t* vector_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, capacity + 1);
+    CheckVarargsCall* varargs = BUSTER_ARENA_PUSH_ARRAY(storage, CheckVarargsCall, 64);
+    CheckX86Call* x86 = BUSTER_ARENA_PUSH_ARRAY(storage, CheckX86Call, 64);
+    CheckBuiltinCall* builtins = BUSTER_ARENA_PUSH_ARRAY(storage, CheckBuiltinCall, 64);
+    CheckVectorCall* vectors = BUSTER_ARENA_PUSH_ARRAY(storage, CheckVectorCall, 64);
+    CheckOverloadCall* overloads = BUSTER_ARENA_PUSH_ARRAY(storage, CheckOverloadCall, 64);
+    const CheckOverloadCandidate candidate = {
+        .previous = BUSTER_CHECK_NONE,
+    };
+    const uint32_t tags[1] = { 0 };
+    ready = ready && fp_environments != NULL && suppressed != NULL && scalar_pure != NULL && vector_pure != NULL && varargs != NULL && x86 != NULL &&
+            builtins != NULL && vectors != NULL && overloads != NULL;
+    check_test_expect(test, ready, "validator comparison graph allocation");
+    const TypeId pointer = BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_COUNT) + (3u << BUSTER_TYPE_INDEX_SHIFT);
+    for (uint32_t world = 0; ready && world < 160; world += 1)
+    {
+        const uint32_t count = world < 71 ? world : world < 150 ? 16 * (world % 9) + world % 3 : capacity;
+        const bool sideband = (world & 1) != 0;
+        graph.fp_environments = (world & 2) != 0 ? fp_environments : NULL;
+        graph.warning_suppressed = (world & 4) != 0 ? suppressed : NULL;
+        graph.tag_completions = (world & 8) != 0 ? tags : NULL;
+        graph.tag_completion_count = (world & 8) != 0 ? 1 : 0;
+        graph.varargs_calls = varargs;
+        graph.varargs_capacity = sideband ? 64 : 0;
+        graph.varargs_count = 0;
+        graph.x86_calls = x86;
+        graph.x86_capacity = sideband ? 64 : 0;
+        graph.x86_count = 0;
+        graph.builtin_calls = builtins;
+        graph.builtin_capacity = sideband ? 64 : 0;
+        graph.builtin_count = 0;
+        graph.vector_members = vectors;
+        graph.vector_member_capacity = sideband ? 64 : 0;
+        graph.vector_member_count = 0;
+        graph.overload_calls = overloads;
+        graph.overload_capacity = sideband ? 64 : 0;
+        graph.overload_count = 0;
+        graph.overload_candidates = &candidate;
+        graph.overload_candidate_count = sideband ? 1 : 0;
+        check_test_graph_validation_world(test, &graph, count, pointer, true, sideband);
+        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation differs from its exact twin on a valid graph");
+        for (uint32_t rule = 0; count != 0 && rule < BUSTER_CHECK_TEST_GRAPH_RULES; rule += 1)
+        {
+            const uint32_t node = check_test_random(test) % count;
+            const bool column = (rule != 5 || graph.fp_environments != NULL) && (rule != 6 || graph.warning_suppressed != NULL) &&
+                                (rule != 11 || graph.ops[node] == CHECK_OP_VALUE) && (rule != 12 || graph.tag_completions != NULL);
+            if (column)
+            {
+                const uint32_t saved_ops = graph.ops[node];
+                const uint32_t saved_operands[3] = { graph.operand0[node], graph.operand1[node], graph.operand2[node] };
+                const uint8_t saved_bytes[3] = { graph.contexts[node], fp_environments[node], suppressed[node] };
+                const uint32_t saved_words[5] = { graph.members[node], graph.argument_offsets[node], graph.argument_counts[node], graph.source_positions[node], graph.types[node] };
+                const uint32_t last_argument = graph.argument_count != 0 ? graph.argument_nodes[graph.argument_count - 1] : 0;
+                const uint32_t slot = graph.argument_counts[node] != 0 && graph.ops[node] != CHECK_OP_VARARGS ? graph.argument_offsets[node] + graph.argument_counts[node] - 1 : 0;
+                const uint32_t saved_argument = graph.argument_count != 0 ? graph.argument_nodes[slot] : 0;
+                const uint32_t saved_head = graph.leaves[node].overload_head;
+                check_test_graph_break(test, &graph, node, rule);
+                check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation differs from its exact twin on a broken rule");
+                graph.ops[node] = (CheckOp)saved_ops;
+                graph.operand0[node] = saved_operands[0];
+                graph.operand1[node] = saved_operands[1];
+                graph.operand2[node] = saved_operands[2];
+                graph.contexts[node] = saved_bytes[0];
+                fp_environments[node] = saved_bytes[1];
+                suppressed[node] = saved_bytes[2];
+                graph.members[node] = saved_words[0];
+                graph.argument_offsets[node] = saved_words[1];
+                graph.argument_counts[node] = saved_words[2];
+                graph.source_positions[node] = saved_words[3];
+                graph.types[node] = saved_words[4];
+                if (graph.argument_count != 0)
+                {
+                    graph.argument_nodes[slot] = saved_argument;
+                    graph.argument_nodes[graph.argument_count - 1] = last_argument;
+                }
+                graph.leaves[node].overload_head = saved_head;
+            }
+        }
+        // Without an optional column the blocks read, the vector path is the exact one throughout.
+        uint32_t* members = graph.members;
+        graph.members = NULL;
+        check_test_graph_validators_agree(test, &graph, scalar_pure, vector_pure, "vector graph validation without member column differs from its exact twin");
+        graph.members = members;
+    }
+    arena_pop_to(storage, mark);
+}
+
+// A copy of `bytes` bytes that ends where a PROT_NONE page starts, in its own mapping (for check_test_graph_validation_edges).
+static void* check_test_graph_validation_page(const void* source, uint64_t bytes, uint64_t page, void** mapping, uint64_t* length)
+{
+    const uint64_t rounded = (bytes + page - 1) / page * page;
+    *length = rounded + page;
+    uint8_t* base = mmap(0, *length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* result = NULL;
+    if (base != MAP_FAILED && mprotect(base + rounded, page, PROT_NONE) == 0)
+    {
+        result = base + rounded - bytes;
+        memcpy(result, source, bytes);
+    }
+    *mapping = base != MAP_FAILED ? base : NULL;
+    return result;
+}
+
+// #530: the vector validator and the leaf pass at page edges: every count to 70 with each column the blocks and the leaf pass
+// read ending at a PROT_NONE page, through both validators and both of check_graph_run's paths, whose streams must agree.
+static void check_test_graph_validation_edges(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = storage->length;
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    CheckGraph graph;
+    const bool ready = check_graph_initialize(&graph, storage, 70, 280);
+    uint8_t* scalar_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, 71);
+    uint8_t* vector_pure = BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, 71);
+    check_test_expect(test, ready && scalar_pure != NULL && vector_pure != NULL, "guarded validator graph allocation");
+    const TypeId pointer = type_pointer(table, BUSTER_TYPE_INT);
+    for (uint32_t count = 0; ready && scalar_pure != NULL && vector_pure != NULL && count <= 70; count += 1)
+    {
+        check_test_graph_validation_world(test, &graph, count, pointer, false, false);
+        CheckGraph guarded = graph;
+        void* mappings[11] = { 0 };
+        uint64_t lengths[11] = { 0 };
+        guarded.ops = check_test_graph_validation_page(graph.ops, (uint64_t)count * sizeof(CheckOp), page, &mappings[0], &lengths[0]);
+        guarded.operand0 = check_test_graph_validation_page(graph.operand0, (uint64_t)count * sizeof(uint32_t), page, &mappings[1], &lengths[1]);
+        guarded.operand1 = check_test_graph_validation_page(graph.operand1, (uint64_t)count * sizeof(uint32_t), page, &mappings[2], &lengths[2]);
+        guarded.operand2 = check_test_graph_validation_page(graph.operand2, (uint64_t)count * sizeof(uint32_t), page, &mappings[3], &lengths[3]);
+        guarded.types = check_test_graph_validation_page(graph.types, (uint64_t)count * sizeof(TypeId), page, &mappings[4], &lengths[4]);
+        guarded.argument_offsets = check_test_graph_validation_page(graph.argument_offsets, (uint64_t)count * sizeof(uint32_t), page, &mappings[5], &lengths[5]);
+        guarded.argument_counts = check_test_graph_validation_page(graph.argument_counts, (uint64_t)count * sizeof(uint32_t), page, &mappings[6], &lengths[6]);
+        guarded.members = check_test_graph_validation_page(graph.members, (uint64_t)count * sizeof(uint32_t), page, &mappings[7], &lengths[7]);
+        guarded.contexts = check_test_graph_validation_page(graph.contexts, count, page, &mappings[8], &lengths[8]);
+        guarded.leaves = check_test_graph_validation_page(graph.leaves, (uint64_t)count * sizeof(CheckValue), page, &mappings[9], &lengths[9]);
+        guarded.argument_nodes = check_test_graph_validation_page(graph.argument_nodes, (uint64_t)graph.argument_count * sizeof(uint32_t), page, &mappings[10], &lengths[10]);
+        bool placed = true;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(mappings); i += 1)
+        {
+            placed &= mappings[i] != NULL;
+        }
+        check_test_expect(test, placed, "guarded validator columns");
+        if (placed)
+        {
+            check_test_graph_validators_agree(test, &guarded, scalar_pure, vector_pure, "vector graph validation differs from its exact twin at a page edge");
+            check_test_compare_graph(test, table, &guarded, output, scratch, false);
+        }
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(mappings); i += 1)
+        {
+            if (mappings[i] != NULL)
+            {
+                munmap(mappings[i], lengths[i]);
+            }
+        }
+    }
+    arena_pop_to(storage, mark);
+}
+
 static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
 {
     check_test_graph_partial_allocations(test, table, storage);
@@ -416,4 +818,6 @@ static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* te
     check_test_graph_barriers(test, storage, output, scratch);
     check_test_graph_report_order(test, table, storage, output, scratch);
     check_test_graph_updates(test, table, storage, output, scratch);
+    check_test_graph_validation(test, storage);
+    check_test_graph_validation_edges(test, table, storage, output, scratch);
 }
