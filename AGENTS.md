@@ -4787,9 +4787,11 @@ checker rejects, or whose checked program or emission refuses a feature by
 name, is left out with its reason; one that fails otherwise (it doesn't
 preprocess, a resource runs out, a function doesn't join the corpus) fails the
 command, and so does a run left with no function, or a timed run that failed
-on a function (both benchmarks: `tier0_benchmark_measure`). `test-checker`
-checks these outcomes (`tier0_source_benchmark_test.c`), with the resources'
-failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
+on a function (both benchmarks: `tier0_benchmark_measure`). Its last line
+totals the files measured, left out and failed and the measurement's outcome
+(`measurement=reported`, `failed` or `none`), as the exit status takes them.
+`test-checker` checks these outcomes (`tier0_source_benchmark_test.c`), with the
+resources' failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
 `taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
 to one allowed CPU, where a pull request changes what it measures.
 

@@ -51,6 +51,9 @@ struct BackendSource
     uint64_t files;
     uint64_t left_out;
     uint64_t failures;
+    // Whether the corpus's measurement reported (tier0_benchmark_measure), every run of it succeeding: false for one
+    // whose runs failed, and for none.
+    bool reported;
 };
 
 // The file's functions, added to the corpus, or what kept them out of it, printed: whether the options could be read.
@@ -177,8 +180,9 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     return valid;
 }
 
-// Adds each of `files` read with `options` to the corpus, with `fault` injected (zeros for none), then measures it: whether
-// the options could be read and the arenas reserved. A measurement whose runs failed counts as a failure.
+// Adds each of `files` read with `options` to the corpus, with `fault` injected (zeros for none), then measures it, and
+// prints the totals last, with the measurement's outcome, as the exit status takes them (backend_source_status):
+// whether the options could be read and the arenas reserved.
 static bool backend_source_files(BackendSource* source, char** files, uint32_t file_count, char** options, uint32_t option_count, uint32_t only,
                                  uint64_t after_scalar, BackendSourceFault fault)
 {
@@ -197,13 +201,11 @@ static bool backend_source_files(BackendSource* source, char** files, uint32_t f
     {
         printf("backend-source: no function was measured\n");
     }
+    source->reported = valid && source->corpus.count != 0 && tier0_benchmark_measure(&source->corpus, &scratch, only, after_scalar, "benchmark-backend-source");
     if (valid)
     {
-        printf("backend-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failures=%" PRIu64 "\n", source->files, source->left_out, source->failures);
-    }
-    if (valid && source->corpus.count != 0 && !tier0_benchmark_measure(&source->corpus, &scratch, only, after_scalar, "benchmark-backend-source"))
-    {
-        source->failures += 1;
+        printf("backend-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failures=%" PRIu64 " measurement=%s\n", source->files, source->left_out,
+               source->failures, source->corpus.count == 0 ? "none" : source->reported ? "reported" : "failed");
     }
     fflush(stdout);
     arena_release(&source->code);
@@ -213,10 +215,10 @@ static bool backend_source_files(BackendSource* source, char** files, uint32_t f
     return valid;
 }
 
-// The command's exit status: 0 when it measured a function and failed on no file.
+// The command's exit status: 0 when no file failed and the measurement of the corpus, of a function or more, reported.
 static int backend_source_status(bool valid, const BackendSource* source)
 {
-    return valid && source->failures == 0 && source->corpus.count != 0 ? 0 : 1;
+    return valid && source->failures == 0 && source->reported ? 0 : 1;
 }
 
 static int run_backend_source_benchmark(int count, char** arguments)

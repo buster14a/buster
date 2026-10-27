@@ -7,9 +7,9 @@
 // name are injected, as the lowering benchmark's tests inject them: which constructs it refuses changes as it grows. So
 // are resources that run out (#514's review): the arena the corpus's records are compiled into, the timed runs'
 // scratch, and the corpus's room for functions, full at the second of a file's two and not at its last. Each case's
-// corpus, counts, exit status and report lines are checked. Then tier0_benchmark_add at its corpus's capacity, which
-// must write nothing. Include after tier0_source_benchmark.c and c_lowering_source_benchmark_test.c; test-checker calls
-// this through its forward declaration.
+// corpus, counts, exit status and report lines are checked, the totals last with the measurement's outcome. Then
+// tier0_benchmark_add at its corpus's capacity, which must write nothing. Include after tier0_source_benchmark.c and
+// c_lowering_source_benchmark_test.c; test-checker calls this through its forward declaration.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_TEST_INCLUDED
 
@@ -138,14 +138,16 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .files = { 0, -1 },
             .functions = 2,
             .measured = 1,
-            .report = { "/0.c functions=2 entries=", "benchmark-backend-source: 2 functions, ", " totals files=1 left_out=0 failures=0\n", "\nencode " },
+            .report = { "/0.c functions=2 entries=", "benchmark-backend-source: 2 functions, ",
+                        " totals files=1 left_out=0 failures=0 measurement=reported\n", "\nencode " },
         },
         {
             .label = "two files' functions make one corpus",
             .files = { 0, 3, -1 },
             .functions = 4,
             .measured = 2,
-            .report = { "/0.c functions=2 entries=", "/3.c functions=2 entries=", "benchmark-backend-source: 4 functions, ", " totals files=2 left_out=0 failures=0\n" },
+            .report = { "/0.c functions=2 entries=", "/3.c functions=2 entries=", "benchmark-backend-source: 4 functions, ",
+                        " totals files=2 left_out=0 failures=0 measurement=reported\n" },
         },
         {
             .label = "the checker's rejection leaves the file out",
@@ -153,7 +155,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .functions = 2,
             .measured = 1,
             .left_out = 1,
-            .report = { "/1.c rejected=\"", "use of undeclared identifier\"\n", " totals files=1 left_out=1 failures=0\n" },
+            .report = { "/1.c rejected=\"", "use of undeclared identifier\"\n", " totals files=1 left_out=1 failures=0 measurement=reported\n" },
         },
         {
             .label = "a file that doesn't preprocess fails the command",
@@ -162,7 +164,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .measured = 1,
             .failures = 1,
             .status = 1,
-            .report = { "/2.c failed=\"it couldn't be preprocessed\"\n", " totals files=1 left_out=0 failures=1\n" },
+            .report = { "/2.c failed=\"it couldn't be preprocessed\"\n", " totals files=1 left_out=0 failures=1 measurement=reported\n" },
         },
         {
             .label = "a refusal by name leaves the file out",
@@ -171,14 +173,15 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .functions = 2,
             .measured = 1,
             .left_out = 1,
-            .report = { "/0.c unsupported=\"the tests' injection\"\n", "/3.c functions=2 entries=", " totals files=1 left_out=1 failures=0\n" },
+            .report = { "/0.c unsupported=\"the tests' injection\"\n", "/3.c functions=2 entries=",
+                        " totals files=1 left_out=1 failures=0 measurement=reported\n" },
         },
         {
             .label = "a run with no function fails the command",
             .files = { 1, -1 },
             .left_out = 1,
             .status = 1,
-            .report = { "backend-source: no function was measured\n", " totals files=0 left_out=1 failures=0\n" },
+            .report = { "backend-source: no function was measured\n", " totals files=0 left_out=1 failures=0 measurement=none\n" },
         },
         {
             .label = "a compile that runs out of memory fails the command, its file left out",
@@ -187,7 +190,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .failures = 2,
             .status = 1,
             .report = { "/0.c failed=\"memory ran out\" function=0 of 2\n", "/3.c failed=\"memory ran out\" function=0 of 2\n",
-                        " totals files=0 left_out=0 failures=2\n" },
+                        " totals files=0 left_out=0 failures=2 measurement=none\n" },
         },
         {
             .label = "a corpus full at a file's second function fails the command",
@@ -195,7 +198,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .fault = { .capacity = 1 },
             .failures = 1,
             .status = 1,
-            .report = { "/0.c failed=\"memory ran out\" function=1 of 2\n", " totals files=0 left_out=0 failures=1\n" },
+            .report = { "/0.c failed=\"memory ran out\" function=1 of 2\n", " totals files=0 left_out=0 failures=1 measurement=none\n" },
         },
         {
             .label = "a corpus full with a file's last function measures it",
@@ -203,7 +206,8 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .fault = { .capacity = 2 },
             .functions = 2,
             .measured = 1,
-            .report = { "/0.c functions=2 entries=", "benchmark-backend-source: 2 functions, ", " totals files=1 left_out=0 failures=0\n" },
+            .report = { "/0.c functions=2 entries=", "benchmark-backend-source: 2 functions, ",
+                        " totals files=1 left_out=0 failures=0 measurement=reported\n" },
         },
         {
             .label = "a timed run that runs out of memory fails the command, with no report",
@@ -211,9 +215,9 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .fault = { .scratch_bytes = 64 },
             .functions = 2,
             .measured = 1,
-            .failures = 1,
             .status = 1,
-            .report = { "benchmark-backend-source: a function's vector path's compile failed, so its runs measured less than the corpus: no report\n" },
+            .report = { "benchmark-backend-source: a function's vector path's compile failed, so its runs measured less than the corpus: no report\n",
+                        " totals files=1 left_out=0 failures=0 measurement=failed\n" },
         },
     };
     char directory[] = "/tmp/buster-backend-source-XXXXXX";
@@ -245,10 +249,13 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             const char* found = strstr(report, item->report[i]);
             reported = found != 0 && strstr(found + 1, item->report[i]) == 0;
         }
+        // The totals come last, after the measurement's report or what failed it (#514's review).
+        const char* totals = report != 0 ? strstr(report, "backend-source: totals ") : 0;
+        const bool last = totals != 0 && strchr(totals, '\n') == report + strlen(report) - 1;
         // A corpus of functions has their entries and records.
         const bool corpus = source.corpus.count == item->functions && (source.corpus.count == 0 || (source.corpus.entries != 0 && source.corpus.records != 0));
         const bool expected = ran && corpus && source.files == item->measured && source.left_out == item->left_out && source.failures == item->failures &&
-                              status == item->status && reported;
+                              status == item->status && reported && last;
         check_test_expect(test, expected, item->label);
         if (!expected)
         {
