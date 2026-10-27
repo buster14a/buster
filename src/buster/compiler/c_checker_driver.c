@@ -465,12 +465,14 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     check_driver_diagnose(parser, pp, code->token, message);
 }
 
-// Writes the checked program's object at `output_path`. With `debug` (-g), the object carries DWARF: the unit the
-// executable's would (c_check_debug.c), relocated against the functions' sections (ObjectOptions.debug); and with
-// `unwind`, its functions' unwind tables (check_program_emit's). With `stage_clock` (--time-stages), its passes' times.
+// Writes the checked program's object at `output_path`, its functions compiled on `lanes` (check_program_emit_lanes).
+// With `debug` (-g), the object carries DWARF: the unit the executable's would (c_check_debug.c), relocated against the
+// functions' sections (ObjectOptions.debug); and with `unwind`, its functions' unwind tables (check_program_emit's). With
+// `stage_clock` (--time-stages), its passes' times.
 static bool check_driver_object(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                  Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, Arena* scratch, CheckClock* stage_clock)
+                                 bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
+                                 CheckClock* stage_clock)
 {
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
@@ -482,7 +484,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     bool valid = output.base != 0 && bytes.base != 0 &&
                  check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL,
-                                          unwind, verify, stage_clock);
+                                          unwind, verify, lanes, stage_clock);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -531,6 +533,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     arena_pop_to(scratch, mark);
+    check_program_lanes_release(lanes);
     arena_release(&bytes);
     arena_release(&output);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
@@ -653,10 +656,11 @@ static void check_driver_libraries_failed(const RuntimeLibraries* libraries, Run
 // when it is missing or stale) and which binding joins between the program's symbols and its atoms. A binding that finds
 // a piece of the snapshot damaged (BIND_ERROR_SNAPSHOT) discards the snapshot and emits once more from a fresh import.
 // With `debug` (-g), the executable carries DWARF: a unit of the program's functions with their source rows (#395,
-// c_check_debug.c); and with `unwind`, its functions' unwind tables, which .eh_frame_hdr indexes with the runtime's.
+// c_check_debug.c); and with `unwind`, its functions' unwind tables, which .eh_frame_hdr indexes with the runtime's. The
+// functions compile on `lanes` (check_program_emit_lanes).
 static bool check_driver_executable(const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
-                                     bool unwind, const CheckDriverLibraries* libraries, Arena* scratch, CheckClock* stage_clock)
+                                     bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock)
 {
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
@@ -705,7 +709,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         }
         check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
         if (valid && !check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding,
-                                               debug ? &rows : NULL, unwind, verify, stage_clock))
+                                               debug ? &rows : NULL, unwind, verify, lanes, stage_clock))
         {
             valid = false;
             again = bind.error == BIND_ERROR_SNAPSHOT;
@@ -853,6 +857,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             snapshot_discard(cache, RUNTIME_KIND_DYNAMIC);
         }
         arena_pop_to(scratch, mark);
+        check_program_lanes_release(lanes);
         arena_release(&arena);
         arena_release(&bytes);
         arena_release(&output);
@@ -863,6 +868,20 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         runtime_release(&runtime);
     }
     return valid;
+}
+
+// How many CPUs the process may run on (sched_getaffinity's), at most the lanes an emission runs: the functions' lanes'
+// default, of which the bodies' tokens then decide how many pay (check_program_emit_lanes).
+static uint32_t check_driver_cpus(void)
+{
+    uint64_t mask[16] = { 0 };
+    const long written = syscall(SYS_sched_getaffinity, 0, sizeof(mask), mask);
+    uint32_t cpus = 0;
+    for (long word = 0; word < 16 && word * 8 < written; word += 1)
+    {
+        cpus += (uint32_t)__builtin_popcountll(mask[word]);
+    }
+    return cpus == 0 ? 1 : cpus < BUSTER_CHECK_EMIT_MAX_LANES ? cpus : BUSTER_CHECK_EMIT_MAX_LANES;
 }
 
 static const char* check_driver_object_name(Arena* arena, const char* source)
@@ -926,6 +945,10 @@ static int run_check_command(int count, char** arguments, bool executable)
         .directories = arena_push_array(&arena, (uint64_t)count + 1, sizeof(String8), _Alignof(String8)),
     };
     bool missing_value = false;
+    // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
+    // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them.
+    CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    bool invalid_lanes = false;
     for (int i = 0; filtered != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
         scalar |= strcmp(arguments[i], "--scalar") == 0;
@@ -962,6 +985,15 @@ static int run_check_command(int count, char** arguments, bool executable)
         else if (strcmp(arguments[i], "--verify") == 0)
         {
             verify = true;
+        }
+        else if (strcmp(arguments[i], "--lanes") == 0 || strncmp(arguments[i], "--lanes=", 8) == 0)
+        {
+            const char* value = arguments[i][7] == '=' ? arguments[i] + 8 : i + 1 < count ? arguments[++i] : 0;
+            char* end = 0;
+            const unsigned long lane_count = value != 0 ? strtoul(value, &end, 10) : 0;
+            invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
+            lanes.lanes = (uint32_t)lane_count;
+            lanes.every_lane = true;
         }
         else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
@@ -1007,7 +1039,7 @@ static int run_check_command(int count, char** arguments, bool executable)
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const bool parsed = filtered != 0 && !missing_value && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+    const bool parsed = filtered != 0 && !missing_value && !invalid_lanes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     options.semantic_pragmas = true;
     options.timing = time_stages;
     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
@@ -1024,8 +1056,8 @@ static int run_check_command(int count, char** arguments, bool executable)
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
     if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--time-stages] [-fsyntax-only | -c] "
-                        "[-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
+                        "[--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1279,7 +1311,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             {
                                 const char* object_path = output != 0 ? output : check_driver_object_name(&arena, path);
                                 result = object_path != 0 && check_driver_object(&selected.program, &selected.data, checking, &pp, &types, path,
-                                                                               object_path, scalar, verify, dump_static, source_rows, unwind_tables, &scratch, stage_clock) ? 0 : 1;
+                                                                               object_path, scalar, verify, dump_static, source_rows, unwind_tables, &lanes,
+                                                                               &scratch, stage_clock) ? 0 : 1;
                             }
                             else
                             {
@@ -1296,7 +1329,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                             if (selection)
                             {
                                 result = check_driver_executable(&selected.program, &selected.data, checking, &pp, &types, output != 0 ? output : "a.out", scalar, verify,
-                                                                 source_rows, unwind_tables, &libraries, &scratch, stage_clock) ? 0 : 1;
+                                                                 source_rows, unwind_tables, &libraries, &lanes, &scratch, stage_clock) ? 0 : 1;
                                 check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
                             }
                             else

@@ -1284,39 +1284,39 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
     return result;
 }
 
-static CheckLiteral check_input_literal(CheckInputReader* reader, uint32_t token)
+// A literal token's type and value, into `result`, written into the caller's rather than returned (#510: see
+// check_literal_integer).
+static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckLiteral* result)
 {
     const uint64_t mark = reader->scratch->length;
     const uint8_t* bytes = 0;
     uint32_t length = 0;
-    CheckLiteral result = { 0 };
+    *result = (CheckLiteral){ 0 };
     const uint32_t name = reader->parser->tokens.names[token];
     if (name == C_NAME_TRUE || name == C_NAME_FALSE)
     {
-        result = (CheckLiteral)
-        {
-            .type = BUSTER_TYPE_BOOL,
-            .integer = name == C_NAME_TRUE,
-            .valid = true,
-        };
+        result->type = BUSTER_TYPE_BOOL;
+        result->integer = name == C_NAME_TRUE;
+        result->valid = true;
     }
     else if (name == C_NAME_NULLPTR || name == C_NAME_GNU_NULLPTR)
     {
-        result = (CheckLiteral)
-        {
-            .type = BUSTER_TYPE_NULLPTR,
-            .valid = true,
-        };
+        result->type = BUSTER_TYPE_NULLPTR;
+        result->valid = true;
     }
     else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
     {
-        result = reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER ?
-                     check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned) :
-                     check_literal_number(bytes, length, reader->scratch);
+        if (reader->parser->tokens.kinds[token] == PARSE_KIND_CHARACTER)
+        {
+            *result = check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned);
+        }
+        else
+        {
+            check_literal_number(bytes, length, reader->scratch, result);
+        }
     }
-    reader->output->resource |= result.resource;
+    reader->output->resource |= result->resource;
     arena_pop_to(reader->scratch, mark);
-    return result;
 }
 
 static CheckOp check_input_binary(uint8_t kind);
@@ -3670,7 +3670,8 @@ static void check_input_expressions(CheckInputReader* reader)
         }
         else if (role == PARSE_ROLE_OPERAND && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && !check_input_function_name_token(parser, token))
         {
-            const CheckLiteral literal = check_input_literal(reader, token);
+            CheckLiteral literal;
+            check_input_literal(reader, token, &literal);
             if (!literal.valid)
             {
                 check_input_report(reader, token, CHECK_INPUT_LITERAL);
@@ -4272,6 +4273,40 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     arena_pop_to(reader->scratch, mark);
 }
 
+// Whether a builtin's calls take one of the graph's builtin call records: a floating, query or atomic one's, or
+// __builtin_shufflevector's.
+static uint32_t check_input_builtin_recorded(uint16_t builtin)
+{
+    const CheckOp op = check_graph_builtin_op((CBuiltinId)builtin);
+    return op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+           (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_SHUFFLEVECTOR);
+}
+
+// The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly
+// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin; the scalar path,
+// its twin, reads every token's.
+static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t count, bool scalar)
+{
+    uint32_t result = 0;
+    uint32_t token = 0;
+    for (; !scalar && token < count; token += 32)
+    {
+        const __mmask32 lanes = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
+        const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
+        uint32_t present = (uint32_t)_mm512_test_epi16_mask(ids, ids);
+        while (present != 0)
+        {
+            result += check_input_builtin_recorded(builtins[token + (uint32_t)__builtin_ctz(present)]);
+            present &= present - 1;
+        }
+    }
+    for (; token < count; token += 1)
+    {
+        result += check_input_builtin_recorded(builtins[token]);
+    }
+    return result;
+}
+
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred)
@@ -4806,12 +4841,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         input->graph.transparent_unions = activations;
                     }
                 }
-                for (uint32_t token = 0; token < count; token += 1)
-                {
-                    const CheckOp op = check_graph_builtin_op((CBuiltinId)reader.builtins[token]);
-                    input->graph.builtin_capacity += op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                                                     (op == CHECK_OP_BUILTIN_VECTOR && reader.builtins[token] == CBUILTIN_SHUFFLEVECTOR);
-                }
+                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, parser->options.scalar);
                 if (input->graph.builtin_capacity != 0)
                 {
                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));

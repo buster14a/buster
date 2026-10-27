@@ -39,7 +39,8 @@ static void check_test_complex_literals(CheckTest* test)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
     {
         const uint64_t mark = scratch.length;
-        const CheckLiteral literal = check_literal_number((const uint8_t*)spellings[i], (uint32_t)strlen(spellings[i]), &scratch);
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)spellings[i], (uint32_t)strlen(spellings[i]), &scratch, &literal);
         const CheckValue value = check_literal_value(literal);
         const bool integer = i == 3 || i == 4;
         const bool correct = types[i] == 0 ? !literal.valid : literal.valid && literal.imaginary && literal.type == types[i] &&
@@ -53,7 +54,8 @@ static void check_test_complex_literals(CheckTest* test)
     {
         memset(storage, 0xa5, sizeof(storage));
         Arena bounded = { .base = storage, .capacity = capacity };
-        const CheckLiteral literal = check_literal_number((const uint8_t*)"1.0i", 4, &bounded);
+        CheckLiteral literal = { 0 };
+        check_literal_number((const uint8_t*)"1.0i", 4, &bounded, &literal);
         check_test_expect(test, !literal.valid && literal.resource && bounded.length == 0 &&
                                check_test_graph_canary(storage, capacity, sizeof(storage)),
                           "imaginary literal nested spelling allocation fails within every short scratch capacity");

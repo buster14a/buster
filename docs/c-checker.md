@@ -224,9 +224,20 @@ does, each rule checked against clang's answers on probes of it:
   before expressions have types, so whether an element initializes a whole
   struct, or starts brace elision, comes from the tree: the element's root's
   type, from an identifier's declaration, a compound literal's type, a `?:`'s
-  third operand, a parenthesized expression or a call of a function by its name.
-  It came from the last typed token in the element, and so a compound literal
-  with a member's value, `(struct L){ .target = n }`, read as `n`'s type.
+  third operand, a parenthesized expression or a call of a function by its name,
+  and a subscript's, a member's and an indirection's of these (`x[1]`,
+  `bind->runtime->libc.soname`, `*p`), each step applied to its base's type from
+  the innermost out. It came from the last typed token in the element, and so a
+  compound literal with a member's value, `(struct L){ .target = n }`, read as
+  `n`'s type, and `{ x[1], x[2] }` of structs as a struct's first two members:
+  one element where clang has two.
+- **Compound literals in a static object's initializer**, in a function too:
+  clang folds a block-scope compound literal's value, an automatic object's, as
+  GNU C does, into a `static` array's element or a `static` struct, where its
+  body's parts are constant (`(S8){ "a", 1 }`, not `(S8){ "a", n }`). The
+  initializer copies the literal's parts, as it did only for a file-scope
+  literal's. A scalar compound literal (`(int){ 1 }`) stays refused there, at
+  file scope too.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -604,7 +615,9 @@ constraints and initializer references. `c_check_program_lower.c` translates
 supported operations into `Tier0Function` records with explicit conversions,
 loads/stores, scaled pointer operations, control flow, locals, calls and ABI
 classes. `c_check_program_emit.c` compiles those functions, resolves shared
-symbols and publishes code/data together. Backend machine classes never
+symbols and publishes code/data together; the functions' lowering, Tier 0
+code and encoding run on lanes, into one lane's link
+([the lanes guide](function-lanes.md), #151). Backend machine classes never
 replace the full semantic `TypeId` in the checked stream. It also gives Tier 0
 the unit's access column (`Tier0Function.symbol_access`, docs/tier0.md): a
 symbol the unit doesn't define is reached through its GOT slot, since it may be

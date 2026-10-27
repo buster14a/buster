@@ -9,7 +9,9 @@
 // The clock reads the TSC, whose rate the report measures against CLOCK_MONOTONIC over the same span. A mark is a lap
 // that also reads the process's resource use (getrusage), charging the system time, minor page faults and growth of
 // the peak resident set since the last mark to its stage; a lap alone reads only the TSC, for the passes that run per
-// function (sizing, encoding, unwind and atoms), whose resource use the mark after their loop charges to its stage.
+// function (lowering, Tier 0, sizing, encoding, rows and unwind), whose resource use the mark after them charges to its
+// stage. Those laps run only when the functions compile on the calling thread alone (one lane, #151): on several
+// lanes their time is one stage, `lanes`, the lanes' span, since the stages of a thread don't add up across threads.
 // docs/compile-time.md has the stages and the 9700X's numbers.
 
 #include <sys/resource.h>
@@ -39,21 +41,27 @@ typedef enum CheckStage
     CHECK_STAGE_SELECT,
     // The encoder's, the semantics' and Tier 0's tables, initialized by the first emission.
     CHECK_STAGE_BACKEND_SETUP,
-    // check_program_lower: every selected function's typed stream.
+    // The lowering's preparation and merge (check_lower_prepare, check_lower_finish), and on one lane every selected
+    // function's typed stream (check_lower_part).
     CHECK_STAGE_LOWER,
-    // tier0_compile of every function.
+    // On one lane, tier0_compile of every function.
     CHECK_STAGE_TIER0,
-    // The emission's own passes: the symbols' attributes and access, names, the link's room and symbols.
+    // The emission's own passes: the access column and the lanes' room, the symbols' attributes, names, the link's room
+    // and symbols, and an executable's bind_begin.
     CHECK_STAGE_EMIT_SETUP,
-    // branch_sizing_validate and size_branches of every function.
+    // On several lanes (#151), the lanes' run: every function's lowering, Tier 0 code, sizing, encoding, rows and frame
+    // at once, which the stages from `lower` to `unwind` take on one lane.
+    CHECK_STAGE_LANES,
+    // On one lane, branch_sizing_validate and size_branches of every function (with --verify, x86_validate).
     CHECK_STAGE_BRANCH_SIZING,
-    // x86_encode of every function.
+    // On one lane, x86_encode of every function.
     CHECK_STAGE_ENCODE,
-    // Every function's frame for its unwind table, its source rows, and the tables written.
+    // On one lane, every function's frame for its unwind table; and the tables written.
     CHECK_STAGE_UNWIND,
-    // Every function's atom, symbol, labels and fixups added to the link, and its room (with --verify, x86_validate).
+    // Every function's atom, symbol, labels and fixups added to the link, the helpers' code, and on one lane each
+    // function's labels' offsets.
     CHECK_STAGE_CODE_ATOMS,
-    // -g's DWARF (check_debug_build).
+    // -g: on one lane each function's source rows; and the DWARF (check_debug_build).
     CHECK_STAGE_DEBUG,
     // check_data_publish: the static data's atoms and fixups.
     CHECK_STAGE_PUBLISH_DATA,
@@ -83,6 +91,7 @@ static const char* const check_stage_names[CHECK_STAGE_COUNT] = {
     [CHECK_STAGE_LOWER] = "lower",
     [CHECK_STAGE_TIER0] = "tier0",
     [CHECK_STAGE_EMIT_SETUP] = "emit-setup",
+    [CHECK_STAGE_LANES] = "lanes",
     [CHECK_STAGE_BRANCH_SIZING] = "branch-sizing",
     [CHECK_STAGE_ENCODE] = "encode",
     [CHECK_STAGE_UNWIND] = "unwind",

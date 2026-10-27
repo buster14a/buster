@@ -208,9 +208,17 @@ report, on standard error after the command, a row per stage.
   the driver's first instruction to its last release. The TSC's rate is
   measured against `CLOCK_MONOTONIC` over the same span.
 - **Marks.** The coarse laps read `getrusage` too, for each stage's system time,
-  minor faults and growth of the peak RSS. The per-function passes (branch
-  sizing, encoding, unwind, atoms) take TSC laps alone, and the mark after their
-  loop charges their resource use to `code-atoms`.
+  minor faults and growth of the peak RSS. The per-function passes (lowering,
+  Tier 0, branch sizing, encoding, `-g`'s rows, unwind frames) take TSC laps
+  alone, and the next mark charges their resource use to its stage.
+- **Lanes.** The driver compiles the functions on lanes (#151), by default as
+  many as their tokens pay for, up to one per CPU it may run on. On one lane, the
+  calling thread takes the per-function laps above. On several, a thread's laps
+  wouldn't add up across threads, so the lanes' whole run is one stage, `lanes`,
+  and the stages from `lower` to `unwind` keep only the calling thread's passes
+  around it. The 9700X step pins every compile to CPU 2, so its functions take
+  one lane. This document's figures were measured before the lanes merged, on
+  the calling thread alone, which a pinned compile still is.
 - **The preprocessor's phases** inside its stage come from its own `PPOptions.timing`.
 - **Off by default.** Without the option the driver reads no clock, and each lap
   is a test of a null pointer. With it, the report and the objects are checked

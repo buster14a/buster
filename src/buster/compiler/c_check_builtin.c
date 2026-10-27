@@ -106,7 +106,11 @@ static bool check_builtin_source_complete(const TypeTable* table, TypeId type, c
     return complete;
 }
 
-static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, const CheckBuiltinAction* action, CheckActionResult* result, uint32_t operand)
+// An overflow builtin's operand's descriptor for the 64-bit fold, or 0 with a diagnostic. One of 65 to 128 bits (an
+// __int128, a _BitInt) is valid but can't enter the fold by truncation: `wide` says so, and its action is a runtime one,
+// never folded, which C allows, since the builtin's store keeps it out of every constant expression.
+static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, const CheckBuiltinAction* action, CheckActionResult* result, uint32_t operand,
+                                         bool* wide)
 {
     uint32_t descriptor = 0;
     uint32_t width = 0;
@@ -119,14 +123,14 @@ static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, co
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, operand);
     }
-    else if (!check_action_integer_type(table, type, &width, &is_signed) || width > 64)
+    else if (!check_action_integer_type(table, type, &width, &is_signed) || width > 128)
     {
-        // Wider source integers must not enter the 64-bit action by truncation.
         check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, operand);
     }
     else
     {
-        descriptor = width | (is_signed ? BUSTER_CBUILTIN_SIGNED : 0);
+        *wide |= width > 64;
+        descriptor = width > 64 ? 0 : width | (is_signed ? BUSTER_CBUILTIN_SIGNED : 0);
     }
     return descriptor;
 }
@@ -206,8 +210,9 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
         else
         {
             result->value.flags |= BUSTER_CHECK_SIDE_EFFECT;
-            batch->a_types[lane] = check_builtin_descriptor(table, values[0].type, input, result, 0);
-            batch->b_types[lane] = check_builtin_descriptor(table, values[1].type, input, result, 1);
+            bool wide = false;
+            batch->a_types[lane] = check_builtin_descriptor(table, values[0].type, input, result, 0, &wide);
+            batch->b_types[lane] = check_builtin_descriptor(table, values[1].type, input, result, 1, &wide);
             if (check_action_kind(table, values[2].type) != BUSTER_TYPE_KIND_POINTER)
             {
                 check_action_diagnose(result, CHECK_DIAG_POINTER_REQUIRED, 2);
@@ -219,7 +224,7 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
                 {
                     check_action_diagnose(result, CHECK_DIAG_MODIFIABLE_REQUIRED, 2);
                 }
-                batch->result_types[lane] = check_builtin_descriptor(table, destination, input, result, 2);
+                batch->result_types[lane] = check_builtin_descriptor(table, destination, input, result, 2, &wide);
                 output->store_value.type = type_unqualified(destination);
                 output->store_value.category = CHECK_RVALUE;
                 output->store_destination = values[2];
@@ -229,7 +234,8 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
                 };
             }
             output->store = result->diagnostic == CHECK_DIAG_NONE;
-            ready = output->store && values[0].constant_kind == CHECK_CONSTANT_INTEGER && values[1].constant_kind == CHECK_CONSTANT_INTEGER && result->value.fault == CHECK_FAULT_NONE;
+            ready = output->store && !wide && values[0].constant_kind == CHECK_CONSTANT_INTEGER && values[1].constant_kind == CHECK_CONSTANT_INTEGER &&
+                    result->value.fault == CHECK_FAULT_NONE;
             batch->a[lane] = (uint64_t)values[0].integer;
             batch->b[lane] = (uint64_t)values[1].integer;
         }
