@@ -1179,9 +1179,11 @@ there at a time, so everything takes one lock:
   campaign (#336's binding handoff) has a module of its own, not the whole
   checker's. A step gated so also runs on the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
-  foreign phases, and the first-party performance readers' qualification
-  (`tools/performance`, `docs/performance`, `web/perf`, their pin; a change to
-  `docs/performance` alone runs the job for it). A push
+  foreign phases, `clang -E`'s times beside the preprocessor's benchmark
+  (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
+  performance readers' qualification (`tools/performance`, `docs/performance`,
+  `web/perf`, their pin; a change to `docs/performance` alone runs the job for
+  it). A push
   to main runs none of them: its pull request's run measured what it changes,
   and the full set took the job past its 10 minutes. The daily and dispatched
   runs have 25 minutes.
@@ -4046,7 +4048,11 @@ still replaces them (the benchmark leaves it out of clang's command line). The
 runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
-CPU; like the others, its measurements are informational.
+CPU, with `--clang` on the daily and dispatched runs and on pull requests that
+change `c_preprocessor_benchmark.c` (the `changes` job's `preprocessor_clang`),
+and without it on every other run that measures the preprocessor: clang's times,
+about 6 s of the step's 12, measure clang rather than this compiler. Like the
+others, its measurements are informational.
 
 `./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file

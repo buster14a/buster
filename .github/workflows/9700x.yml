@@ -37,7 +37,8 @@ jobs:
   # times and the floors (link_benchmark.c and floors_benchmark.c): they measure other programs and the machine, the same
   # for every pull request, so `test` measures them on the daily and dispatched runs and on pull requests that change
   # these harnesses, as when this job is skipped or fails. The same for benchmark-foreign's mold and wild
-  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases. And, per
+  # (foreign_benchmark.c's `--linkers`), apart, since its harness changes with the foreign path's phases, and for
+  # benchmark-preprocessor's `clang -E` (`--clang`, `preprocessor_clang`: c_preprocessor_benchmark.c). And, per
   # module, whether it changes the sources of a benchmark whose isolated and after-scalar samples (`--only`,
   # `--after-scalar 200`, repeated in separate processes) cost far more than its plain run: about 200 ms before each of
   # 21 samples per case, 150 s of a pull request's job in all. Those samples run on the daily and dispatched runs and on
@@ -68,6 +69,7 @@ jobs:
       baselines: ${{ steps.files.outputs.baselines }}
       foreign: ${{ steps.files.outputs.foreign }}
       branch_sizing: ${{ steps.files.outputs.branch_sizing }}
+      preprocessor_clang: ${{ steps.files.outputs.preprocessor_clang }}
       zen5: ${{ steps.files.outputs.zen5 }}
       ssa: ${{ steps.files.outputs.ssa }}
       parser_bindings: ${{ steps.files.outputs.parser_bindings }}
@@ -964,13 +966,23 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-refinement src
 
-      - name: Benchmark the preprocessor on main.c
+      - name: Benchmark the preprocessor on main.c against clang -E
         # The preprocessor's own predefines follow the options as clang's do (c_predefines.c): -march=native's and
-        # -funsigned-char's among them.
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
+        # -funsigned-char's among them. --clang also times `clang -E` on the same file after each timed pass, about
+        # 6 s of the step's 12, which measures clang rather than this compiler: it runs where `changes` doesn't rule
+        # it out (c_preprocessor_benchmark.c's harness).
+        if: needs.changes.outputs.preprocessor_clang != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+
+      - name: Benchmark the preprocessor on main.c
+        # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
+        # scalar twins, without clang's.
+        if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
+        run: |
+          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
 
       - name: Benchmark the directive tables on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,')
