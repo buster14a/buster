@@ -10,8 +10,9 @@
 //
 // The file holds the runtime's records as this executable lays them out in memory, the directory's regions each at a
 // multiple of 64 bytes and the pieces' at their elements' alignment: a header, then the directory, which every link
-// reads (from the second page: the probes, libc.so.6's and the loader's versions, the members, the strings, the pieces,
-// the global names with their index and filter, the two libraries' exports, the pieces' references and COMDAT groups),
+// reads (from the second page: the probes, libc.so.6's, the loader's and libgcc_s.so.1's versions, the members, the
+// strings, the pieces, the global names with their index and filter, the three libraries' exports, the pieces'
+// references and COMDAT groups),
 // then the pieces' records, of which a link reads only those of the pieces it joins. A piece is a crt object or a
 // member, as Runtime.pieces has them. Every link joins the crt objects, and most join no member, so their records come
 // first and together, in the pages after the directory's last (#490): each column binding reads (the link's and the
@@ -127,7 +128,7 @@ static __attribute__((unused)) bool snapshot_discard(const char* directory, Runt
 // The file
 
 #define BUSTER_SNAPSHOT_MAGIC 0x504e535254535542ull
-#define BUSTER_SNAPSHOT_VERSION 6
+#define BUSTER_SNAPSHOT_VERSION 7
 // Each kind's file: a dynamic PIE's runtime's, a static executable's, a static PIE's and a shared library's.
 #define BUSTER_SNAPSHOT_NAME "runtime.snapshot"
 #define BUSTER_SNAPSHOT_STATIC_NAME "runtime-static.snapshot"
@@ -162,6 +163,8 @@ typedef enum SnapshotPath
     SNAPSHOT_PATH_LOADER = SNAPSHOT_PATH_ARCHIVES + BUSTER_RUNTIME_ARCHIVES,
     SNAPSHOT_PATH_SONAME,
     SNAPSHOT_PATH_LOADER_SONAME,
+    SNAPSHOT_PATH_GCC_S,
+    SNAPSHOT_PATH_GCC_S_SONAME,
     SNAPSHOT_PATH_ABI_NOTE,
     SNAPSHOT_PATHS,
 } SnapshotPath;
@@ -178,6 +181,7 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_PROBES,
     SNAPSHOT_REGION_VERSIONS,
     SNAPSHOT_REGION_LOADER_VERSIONS,
+    SNAPSHOT_REGION_GCC_S_VERSIONS,
     SNAPSHOT_REGION_MEMBERS,
     SNAPSHOT_REGION_STRINGS,
     SNAPSHOT_REGION_PIECES,
@@ -199,6 +203,8 @@ typedef enum SnapshotRegion
     SNAPSHOT_REGION_EXPORT_FLAGS,
     SNAPSHOT_REGION_LOADER_EXPORT_VERSION,
     SNAPSHOT_REGION_LOADER_EXPORT_FLAGS,
+    SNAPSHOT_REGION_GCC_S_EXPORT_VERSION,
+    SNAPSHOT_REGION_GCC_S_EXPORT_FLAGS,
     SNAPSHOT_REGION_REFERENCE_BEGIN,
     SNAPSHOT_REGION_REFERENCES,
     SNAPSHOT_REGION_REFERENCE_MEMBERS,
@@ -316,9 +322,10 @@ struct SnapshotCounts
     uint32_t archives;
     uint32_t first_members[BUSTER_RUNTIME_ARCHIVES];
     uint32_t probes;
-    // libc.so.6's versions, and the loader's.
+    // libc.so.6's versions, the loader's and libgcc_s.so.1's.
     uint32_t versions;
     uint32_t loader_versions;
+    uint32_t gcc_s_versions;
     uint32_t members;
     // Each of the link's tables, record 0 among them.
     uint32_t names;
@@ -336,9 +343,10 @@ struct SnapshotCounts
     uint32_t globals;
     uint32_t bucket_bits;
     uint32_t filter_bits;
-    // libc.so.6's exports, and the loader's.
+    // libc.so.6's exports, the loader's and libgcc_s.so.1's.
     uint32_t exports;
     uint32_t loader_exports;
+    uint32_t gcc_s_exports;
     uint32_t member_unit;
     // The crt objects' records in each of the link's tables, from record 0: each table's records before the first
     // member's, at which the columns binding reads are split into two regions.
@@ -413,6 +421,7 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_PROBES] = (SnapshotColumn){ (void**)&runtime->probes, sizeof(RuntimeProbe), 0, counts->probes };
     columns[SNAPSHOT_REGION_VERSIONS] = (SnapshotColumn){ (void**)&runtime->libc.versions, sizeof(ImportVersion), 0, counts->versions };
     columns[SNAPSHOT_REGION_LOADER_VERSIONS] = (SnapshotColumn){ (void**)&runtime->loader.versions, sizeof(ImportVersion), 0, counts->loader_versions };
+    columns[SNAPSHOT_REGION_GCC_S_VERSIONS] = (SnapshotColumn){ (void**)&runtime->gcc_s.versions, sizeof(ImportVersion), 0, counts->gcc_s_versions };
     columns[SNAPSHOT_REGION_MEMBERS] = (SnapshotColumn){ (void**)&runtime->members, sizeof(ImportMember), 0, counts->members };
     columns[SNAPSHOT_REGION_STRINGS] = (SnapshotColumn){ 0, 1, 0, 0 };
     columns[SNAPSHOT_REGION_PIECES] = (SnapshotColumn){ (void**)&runtime->pieces, sizeof(RuntimePiece), 0, counts->pieces };
@@ -435,6 +444,9 @@ static void snapshot_columns(Runtime* runtime, const SnapshotCounts* counts, Sna
     columns[SNAPSHOT_REGION_LOADER_EXPORT_VERSION] =
         (SnapshotColumn){ (void**)&runtime->loader.exports.version, sizeof(*runtime->loader.exports.version), 0, counts->loader_exports };
     columns[SNAPSHOT_REGION_LOADER_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->loader.exports.flags, sizeof(*runtime->loader.exports.flags), 0, counts->loader_exports };
+    columns[SNAPSHOT_REGION_GCC_S_EXPORT_VERSION] =
+        (SnapshotColumn){ (void**)&runtime->gcc_s.exports.version, sizeof(*runtime->gcc_s.exports.version), 0, counts->gcc_s_exports };
+    columns[SNAPSHOT_REGION_GCC_S_EXPORT_FLAGS] = (SnapshotColumn){ (void**)&runtime->gcc_s.exports.flags, sizeof(*runtime->gcc_s.exports.flags), 0, counts->gcc_s_exports };
     columns[SNAPSHOT_REGION_REFERENCE_BEGIN] = (SnapshotColumn){ (void**)&runtime->reference_begin, sizeof(*runtime->reference_begin), 0, (uint64_t)counts->pieces + 1 };
     columns[SNAPSHOT_REGION_REFERENCES] = (SnapshotColumn){ (void**)&runtime->references, sizeof(*runtime->references), 0, counts->references };
     columns[SNAPSHOT_REGION_REFERENCE_MEMBERS] = (SnapshotColumn){ (void**)&runtime->reference_members, sizeof(*runtime->reference_members), 0, counts->references };
@@ -537,6 +549,8 @@ static void snapshot_paths(Runtime* runtime, String8** paths)
     paths[SNAPSHOT_PATH_LOADER] = &runtime->loader_path;
     paths[SNAPSHOT_PATH_SONAME] = &runtime->libc.soname;
     paths[SNAPSHOT_PATH_LOADER_SONAME] = &runtime->loader.soname;
+    paths[SNAPSHOT_PATH_GCC_S] = &runtime->gcc_s_path;
+    paths[SNAPSHOT_PATH_GCC_S_SONAME] = &runtime->gcc_s.soname;
     paths[SNAPSHOT_PATH_ABI_NOTE] = &runtime->abi_note;
 }
 
@@ -650,6 +664,8 @@ static void snapshot_view_columns(Runtime* runtime, uint8_t* file, uint64_t byte
     runtime->libc.exports.count = counts.exports;
     runtime->loader.version_count = counts.loader_versions;
     runtime->loader.exports.count = counts.loader_exports;
+    runtime->gcc_s.version_count = counts.gcc_s_versions;
+    runtime->gcc_s.exports.count = counts.gcc_s_exports;
     runtime->member_count = counts.members;
     runtime->member_unit = counts.member_unit;
     runtime->kind = (RuntimeKind)counts.kind;
@@ -728,6 +744,7 @@ static SnapshotCounts snapshot_counts(const Runtime* runtime)
         .probes = runtime->probe_count,
         .versions = runtime->libc.version_count,
         .loader_versions = runtime->loader.version_count,
+        .gcc_s_versions = runtime->gcc_s.version_count,
         .members = runtime->member_count,
         .names = link->names.count,
         .atoms = link->atoms.count,
@@ -745,6 +762,7 @@ static SnapshotCounts snapshot_counts(const Runtime* runtime)
         .filter_bits = runtime->global_names.filter_bits,
         .exports = runtime->libc.exports.count,
         .loader_exports = runtime->loader.exports.count,
+        .gcc_s_exports = runtime->gcc_s.exports.count,
         .member_unit = runtime->member_unit,
         .object_names = objects.names,
         .object_atoms = objects.atoms,
@@ -844,6 +862,10 @@ static uint64_t snapshot_strings_bytes(const Runtime* runtime)
     {
         result += runtime->loader.versions[v].name.length + 1;
     }
+    for (uint32_t v = 0; v < runtime->gcc_s.version_count; v += 1)
+    {
+        result += runtime->gcc_s.versions[v].name.length + 1;
+    }
     for (uint32_t m = 0; m < runtime->member_count; m += 1)
     {
         result += runtime->members[m].name.length + 1;
@@ -936,11 +958,13 @@ static uint8_t* snapshot_image(const Runtime* runtime, const RuntimeProbe* compi
             probes[p].changed_seconds = probe->changed_seconds;
             probes[p].changed_nanoseconds = probe->changed_nanoseconds;
         }
-        // libc.so.6's versions, then the loader's, each with its name in the strings.
-        for (uint32_t library = 0; library < 2; library += 1)
+        // libc.so.6's versions, then the loader's and libgcc_s.so.1's, each with its name in the strings.
+        const ImportLibrary* const libraries[] = { &runtime->libc, &runtime->loader, &runtime->gcc_s };
+        static const SnapshotRegion regions[] = { SNAPSHOT_REGION_VERSIONS, SNAPSHOT_REGION_LOADER_VERSIONS, SNAPSHOT_REGION_GCC_S_VERSIONS };
+        for (uint32_t library = 0; library < BUSTER_ARRAY_LENGTH(libraries); library += 1)
         {
-            const ImportLibrary* source = library == 0 ? &runtime->libc : &runtime->loader;
-            const SnapshotRegion region = library == 0 ? SNAPSHOT_REGION_VERSIONS : SNAPSHOT_REGION_LOADER_VERSIONS;
+            const ImportLibrary* source = libraries[library];
+            const SnapshotRegion region = regions[library];
             ImportVersion* versions = (ImportVersion*)(image + header.regions[region].offset);
             for (uint32_t v = 0; v < source->version_count; v += 1)
             {
@@ -1177,6 +1201,11 @@ static void snapshot_rebase(Runtime* runtime)
     for (uint32_t v = 0; v < runtime->loader.version_count; v += 1)
     {
         ImportVersion* version = &runtime->loader.versions[v];
+        version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
+    }
+    for (uint32_t v = 0; v < runtime->gcc_s.version_count; v += 1)
+    {
+        ImportVersion* version = &runtime->gcc_s.versions[v];
         version->name = snapshot_string(strings, (SnapshotString){ (uint64_t)(uintptr_t)version->name.pointer, version->name.length });
     }
 }

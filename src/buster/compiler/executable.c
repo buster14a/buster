@@ -19,7 +19,12 @@
 //     ExecutableDynamic holds (dynamic.c fills it): the program interpreter, libc.so.6 and its versions, Scrt1.o's ABI
 //     note, DT_INIT's and DT_FINI's functions and the definitions to export; and the IFUNCs it defines (a foreign
 //     link's, #394) get the static runtime's stubs, numbered before its imports', and IRELATIVE relocations, last in
-//     .rela.dyn, as lld's .iplt entries have them (ExecutableShared.ifuncs);
+//     .rela.dyn, as lld's .iplt entries have them (ExecutableShared.ifuncs); and its general- and local-dynamic TLS
+//     accesses (libgcc.a's generic-morestack.o's, which split-stack code joins: #515) relax without their calls of the
+//     loader's __tls_get_addr (ExecutableDynamic.tls_get_addr), to local-exec for its own thread-locals and, for an
+//     imported one, to initial-exec through its GOT slot, which a TPOFF64 relocation fills, as GNU ld and lld relax
+//     them (executable_relax_tls), while a call of __tls_get_addr that no access makes reaches it through its stub or
+//     its slot, as any import's does;
 //   - a static PIE (step 6), from a link that binding joined to the static PIE's runtime (rcrt1.o, crtbeginS.o and
 //     crtendS.o with the static executable's archives), with both: an ExecutableDynamic without an interpreter, a
 //     library, versions or exports, and the static executable's ExecutableRuntime (dynamic.c's
@@ -60,9 +65,10 @@
 // stub only calls reach has no slot of its own: its loads through the GOT read its stub's, as lld's read its .got.plt
 // entry. Every executable relaxes its CALL_GOT and LOAD_GOT fixups with the addend -4 to the image's symbols but
 // IFUNCs (executable_relaxes), as GNU ld and lld relax them in an executable, and their targets need no slot from
-// them; and the static runtime's general- and local-dynamic TLS accesses, which call __tls_get_addr, which nothing
-// there defines. On the direct path the code generator binds before it selects instructions, so the program's code
-// reaches its own symbols directly: the relaxation takes the C runtime's loads and calls, and the generated programs'.
+// them; and the static runtime's and a dynamic PIE's general- and local-dynamic TLS accesses, which call
+// __tls_get_addr, which nothing in a static executable defines, and which a dynamic PIE's relaxation needs no stub of.
+// On the direct path the code generator binds before it selects instructions, so the program's code reaches its own
+// symbols directly: the relaxation takes the C runtime's loads and calls, and the generated programs'.
 //
 // A static executable needs no dynamic relocations but its IFUNCs' IRELATIVE ones, which libc.a's startup applies
 // between __rela_iplt_start and __rela_iplt_end. A PIE's come from each target's relocation class
@@ -113,9 +119,9 @@
 // multiple of its alignment), or for a weak symbol defined nowhere the image offset of address 0, or 0 if the symbol is
 // thread-local, as GNU ld resolves one; in a PIE, a dynamic symbol's is its stub's image offset, or address 0's; and
 // with the C runtime, an IFUNC's with a stub is its stub's image offset (an IFUNC is one with a resolver: a weak one
-// defined nowhere is address 0, as any other is), and __tls_get_addr's 0, the relaxation consuming its calls; and an
-// absolute symbol's is its value less the base (one farther than int32 from the base is refused). Every fixup's field is
-// patched in place, in its atom's bytes.
+// defined nowhere is address 0, as any other is), and a static executable's __tls_get_addr's 0, the relaxation
+// consuming its calls; and an absolute symbol's is its value less the base (one farther than int32 from the base is
+// refused). Every fixup's field is patched in place, in its atom's bytes.
 //
 // Patching and writing go a chunk at a time (BUSTER_EXECUTABLE_CHUNK_BYTES, about 256 KB, a quarter of Zen 5's L2), in
 // chunks that never split a field or a TLS access's sequence (executable_fixup_extent): boundary k is at k chunks'
@@ -466,6 +472,12 @@ struct ExecutableDynamic
     // Whether the executable's RELATIVE relocations at even addresses are RELR's: a dynamic PIE's with
     // GLIBC_ABI_DT_RELR, and a static PIE's when libc.a relocates it with DT_RELR (dynamic.c).
     bool relr;
+    // A dynamic PIE's __tls_get_addr, or 0: each general- or local-dynamic TLS access relaxes with the call of it after
+    // it, to local-exec for a thread-local of the image's and to initial-exec through a TPOFF64 slot for an import's
+    // (executable_relax_tls), as GNU ld and lld relax them; any other call of it is an import's, through its stub or
+    // its slot. With 0, the writer refuses the accesses (a producer that doesn't name it: link-foreign's). A shared
+    // library keeps its calls.
+    SymbolId tls_get_addr;
     // Whether the output is a shared library (-shared): one without an interpreter or an entry point
     // (ExecutableOptions.entry may be 0), whose global and weak definitions of default visibility are preemptible and
     // whose strong references to nothing of default visibility the loader binds (executable_relocation_class), with its
@@ -767,9 +779,12 @@ struct ExecutablePatch
     // The image's base address (BUSTER_EXECUTABLE_BASE, or 0 for a dynamic PIE) and the GOT's image offset.
     uint64_t base;
     uint64_t got;
-    // With the static runtime, the link's __tls_get_addr, or 0: each call of it is a general- or local-dynamic access's,
-    // which the access's relaxation consumes (executable_relax_tls).
+    // With the static runtime and in a dynamic PIE, the link's __tls_get_addr, or 0: each call of it that follows a
+    // general- or local-dynamic access (executable_relaxed_call) is the access's, which its relaxation consumes
+    // (executable_relax_tls); a dynamic PIE's other calls of it are an import's.
     SymbolId relaxed;
+    // A dynamic PIE's bitset of its dynamic symbols, whose general-dynamic accesses relax to initial-exec, or 0.
+    const uint64_t* imports;
     // The bitset of the symbols that the GOT's loads and calls relax to (executable_relaxes), or 0 for none.
     const uint64_t* relaxable;
     // Whether every fixup goes through executable_patch_other, which checks each value's range.
@@ -806,8 +821,12 @@ static int64_t executable_address(const ExecutablePatch* patch, SymbolId symbol)
 // 66 48 ff 15 <__tls_get_addr@gotpcrel>, 16 bytes, becomes mov %fs:0, %rax; lea x@tpoff(%rax), %rax (64 48 8b 04 25
 // 00 00 00 00 48 8d 80 <x@tpoff>); the local-dynamic one, 48 8d 3d <x@tlsld> then e8 <...@plt> (12 bytes) or ff 15
 // <...@gotpcrel> (13), mov %fs:0, %rax after three or four 0x66 prefixes, so that its DTPOFF32 fields, which then add
-// to the thread pointer, hold offsets from it. The call's fixup patches nothing (executable_relaxed_call).
-static bool executable_relax_tls(const ExecutablePatch* patch, uint8_t* bytes, FixupId begin, FixupId end, FixupId fixup)
+// to the thread pointer, hold offsets from it. The call's fixup patches nothing (executable_relaxed_call). In a dynamic
+// PIE, a general-dynamic access to an import (patch->imports), whose offset from the thread pointer is the loader's to
+// know, becomes initial-exec instead, as GNU ld and lld relax it: mov %fs:0, %rax; add x@gottpoff(%rip), %rax (64 48 8b
+// 04 25 00 00 00 00 48 03 05 <x@gottpoff>), reading the import's GOT slot, which a TPOFF64 relocation fills. The atom is
+// at image offset `address`.
+static bool executable_relax_tls(const ExecutablePatch* patch, uint8_t* bytes, uint32_t address, FixupId begin, FixupId end, FixupId fixup)
 {
     static const uint8_t gd_lea[4] = { 0x66, 0x48, 0x8d, 0x3d };
     static const uint8_t gd_plt[4] = { 0x66, 0x66, 0x48, 0xe8 };
@@ -816,6 +835,7 @@ static bool executable_relax_tls(const ExecutablePatch* patch, uint8_t* bytes, F
     static const uint8_t ld_plt[1] = { 0xe8 };
     static const uint8_t ld_got[2] = { 0xff, 0x15 };
     static const uint8_t gd_le[12] = { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x8d, 0x80 };
+    static const uint8_t gd_ie[12] = { 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, 0x48, 0x03, 0x05 };
     static const uint8_t ld_le[13] = { 0x66, 0x66, 0x66, 0x66, 0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00 };
     const bool gd = (patch->kinds[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_TLSGD;
     const uint32_t offset = patch->offsets[fixup];
@@ -833,11 +853,16 @@ static bool executable_relax_tls(const ExecutablePatch* patch, uint8_t* bytes, F
                       offset >= lea_bytes && (patch->kinds[fixup] & BUSTER_LINK_FIXUP_WIDE) == 0 && patch->addends[fixup] == -4;
     const bool matches = call && memcmp(bytes + offset - lea_bytes, gd ? gd_lea : ld_lea, lea_bytes) == 0 &&
                          memcmp(bytes + offset + distance - call_bytes, call_form, call_bytes) == 0;
+    const SymbolId target = patch->targets[fixup];
+    const bool imported = patch->imports != 0 && (patch->imports[target / 64] >> (target % 64) & 1) != 0;
     if (matches && gd)
     {
-        const int32_t tpoff = (int32_t)patch->reference[patch->targets[fixup]];
-        memcpy(bytes + offset - lea_bytes, gd_le, sizeof(gd_le));
-        memcpy(bytes + offset + distance, &tpoff, sizeof(tpoff));
+        // The import's G - P, from the end of the add's field 8 bytes on (both are in the image), or the thread-local's
+        // offset from the thread pointer.
+        const int32_t field = imported ? (int32_t)(patch->got + 8 * (uint64_t)patch->got_slots[target] - (address + offset + distance + 4))
+                                       : (int32_t)patch->reference[target];
+        memcpy(bytes + offset - lea_bytes, imported ? gd_ie : gd_le, sizeof(gd_le));
+        memcpy(bytes + offset + distance, &field, sizeof(field));
     }
     else if (matches)
     {
@@ -984,9 +1009,9 @@ BUSTER_INLINE bool executable_patch_other(ExecutablePatch patch, uint8_t* bytes,
     }
     // A TLS access's relaxation, and its call, which writes nothing (the access did).
     const bool tls_access = patch.tlsgd_slots == 0 && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD);
-    const bool relaxed_call = !tls_access && patch.relaxed != 0 && target == patch.relaxed;
+    const bool relaxed_call = !tls_access && patch.relaxed != 0 && target == patch.relaxed && executable_relaxed_call(&patch, begin, fixup);
     width = tls_access || relaxed_call ? 0 : width;
-    const bool sequence = tls_access ? executable_relax_tls(&patch, bytes, begin, end, fixup) : relaxed_call && executable_relaxed_call(&patch, begin, fixup);
+    const bool sequence = tls_access ? executable_relax_tls(&patch, bytes, address, begin, end, fixup) : relaxed_call;
     const bool fits = sequence || width == 8 || (width == 4 && (zero_extended ? (uint64_t)value <= UINT32_MAX : value == (int32_t)value));
     // A value that doesn't fit fails the link, and its field is zeroed over what executable_patch_pc32 wrote, so that
     // either path leaves the same bytes.
@@ -2919,8 +2944,9 @@ struct ExecutableDynamicCounts
     // among its stubs, which go first in the stubs' section, each with a slot of its own after the GOT kinds'.
     uint64_t ifuncs;
     uint64_t ifunc_stubs;
-    // A static executable's general- and local-dynamic TLS accesses (TLSGD and TLSLD fixups), and its fixups to
-    // __tls_get_addr, which must be their calls.
+    // A static executable's and a dynamic PIE's general- and local-dynamic TLS accesses (TLSGD and TLSLD fixups), and
+    // the calls that must be theirs: a static executable's fixups to __tls_get_addr, all of them, and a dynamic PIE's
+    // that follow an access (executable_relaxed_call's rule).
     uint64_t tls_accesses;
     uint64_t relaxed_calls;
     // A shared library's initial-exec accesses (GOTTPOFF fixups), with which it needs static TLS (DF_STATIC_TLS).
@@ -3045,7 +3071,9 @@ struct ExecutableShared
     bool ifuncs;
     uint8_t scope;
     bool relr;
-    // With the static runtime, the link's __tls_get_addr (ExecutableRuntime.tls_get_addr), or 0.
+    // Whether the executable relaxes its general- and local-dynamic TLS accesses (with the static runtime, and a dynamic
+    // PIE), and its __tls_get_addr (ExecutableRuntime.tls_get_addr, ExecutableDynamic.tls_get_addr), or 0.
+    bool relaxes_tls;
     SymbolId relaxed;
     // ExecutableOptions.debug_sections, whose sections' bytes are the pieces of their sections, patched in place.
     const ExecutableDebugSections* debug_sections;
@@ -3617,12 +3645,14 @@ static void executable_mark_symbols(Link* link, ExecutableShared* shared, uint32
 
 // A PIE's fixup that doesn't read a GOT slot and isn't ABS64, whose target the filter (or with `exact`, its atom) says
 // may be outside the image. A CALL to a dynamic symbol goes to the symbol's stub, which reads its GOT slot: both are
-// marked in this lane's bitsets. Any other kind of fixup to a dynamic symbol can't be relocated (lld refuses it too: the
-// code isn't position-independent), and nor can a PC32 or PC64 to address 0 (executable_is_absolute_zero) or a CALL,
-// PC32 or PC64 to an absolute symbol (executable_refuses_absolute); they are only counted here, and
-// executable_check_relocations reports them. A CALL to address 0 is patched, as GNU ld and lld patch it: whatever it
-// reaches, the program can only call it after checking that the symbol has an address. Most of the filter's hits are
-// the image's symbols, whose bit in the RELATIVE bitset ends the check before their columns are read.
+// marked in this lane's bitsets. A dynamic PIE's general-dynamic access (TLSGD) to a dynamic symbol relaxes to
+// initial-exec, which reads the symbol's GOT slot (a TPOFF64 relocation fills it): the slot is marked. Any other kind
+// of fixup to a dynamic symbol can't be relocated (lld refuses it too: the code isn't position-independent), and nor
+// can a PC32 or PC64 to address 0 (executable_is_absolute_zero) or a CALL, PC32 or PC64 to an absolute symbol
+// (executable_refuses_absolute); they are only counted here, and executable_check_relocations reports them. A CALL to
+// address 0 is patched, as GNU ld and lld patch it: whatever it reaches, the program can only call it after checking
+// that the symbol has an address. Most of the filter's hits are the image's symbols, whose bit in the RELATIVE bitset
+// ends the check before their columns are read.
 static void executable_check_direct(const Link* link, ExecutableShared* shared, uint32_t lane, FixupId fixup, uint64_t* refused)
 {
     const SymbolId target = link->fixups.target[fixup];
@@ -3635,11 +3665,15 @@ static void executable_check_direct(const Link* link, ExecutableShared* shared, 
         const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
         const bool module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0;
         const bool missing_module_offset = shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] == 0;
+        // A shared library's count leaves its TLSGD fixups out, and a static PIE has no dynamic symbols. Only a PIE
+        // that relaxes its accesses (ExecutableShared.relaxes_tls) takes one to an import: without __tls_get_addr
+        // named, the access is refused here, as before #515, rather than once the patch can't relax it.
+        const bool initial_exec = dynamic && kind == BUSTER_LINK_FIXUP_TLSGD && shared->relaxes_tls;
         const uint64_t word = lane * shared->words_per_lane + target / 64;
         const uint64_t bit = dynamic && call ? 1ull << (target % 64) : 0;
-        shared->got_marks[word] |= bit;
+        shared->got_marks[word] |= bit | (initial_exec ? 1ull << (target % 64) : 0);
         shared->stub_marks[word] |= bit;
-        *refused += (dynamic && !call && !module_offset) || (relative && !dynamic && executable_is_absolute_zero(link, target, shared->scope)) ||
+        *refused += (dynamic && !call && !module_offset && !initial_exec) || (relative && !dynamic && executable_is_absolute_zero(link, target, shared->scope)) ||
                             (absolute && executable_refuses_absolute(kind)) || missing_module_offset
                         ? 1
                         : 0;
@@ -3901,8 +3935,8 @@ static void executable_count_frames(const Link* link, ExecutableShared* shared, 
 // atom is 0, one at a time). In an executable that defines IFUNCs (`ifuncs`), after executable_mark_ifuncs, it tests the
 // targets of the fixups that don't read a slot against `ifunc_filter` for the IFUNCs' stubs, telling the calls from the
 // others; a PIE tests both kinds of target against `ifunc_filter` alone, which has its symbols outside the image too.
-// With the static runtime, it counts the TLS accesses. Each 16 targets are loaded once for every test. Failures go to
-// `error`.
+// With the static runtime, and in a dynamic PIE, it counts the TLS accesses. Each 16 targets are loaded once for every
+// test. Failures go to `error`.
 static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane, bool dynamic, bool ifuncs, const ExecutableFilter* filter,
                              const ExecutableFilter* ifunc_filter, ExecutableLaneError* error)
 {
@@ -4039,9 +4073,24 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         const uint64_t relaxing = through_got & minus_four &
                                   (_mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL_GOT)) |
                                    _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(BUSTER_LINK_FIXUP_LOAD_GOT)));
+        // The fixups to __tls_get_addr, and of them the TLS accesses' calls, which the fixup before each is the access's
+        // (executable_relaxed_call's rule; fixup 0, before the first group, is no access): the relaxation consumes those,
+        // which read no slot and reach no stub. Any other is an ordinary call of the loader's function in a dynamic PIE,
+        // and in a static executable one that nothing defines, refused below.
+        uint64_t to_relaxed = 0;
+        for (uint32_t part = 0; shared->relaxed != 0 && part < 4; part += 1)
+        {
+            const __mmask16 lanes = (__mmask16)(valid >> (16 * part));
+            const __m512i targets = _mm512_maskz_loadu_epi32(lanes, fixups->target + group + 16 * part);
+            to_relaxed |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, targets, _mm512_set1_epi32((int)shared->relaxed)) << (16 * part);
+        }
+        const __m512i previous = _mm512_and_si512(_mm512_maskz_loadu_epi8(to_relaxed != 0 ? valid : 0, fixups->kind + group - 1), _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND));
+        const uint64_t consumed = to_relaxed & (_mm512_cmpeq_epi8_mask(previous, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD)) |
+                                                _mm512_cmpeq_epi8_mask(previous, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD)));
+        relaxed_calls += (uint64_t)__builtin_popcountll(shared->runtime ? to_relaxed : consumed);
         // Their targets get their bits in this lane's row of the candidates, the others' in its marks, one at a time;
         // executable_reduce_got marks the candidates whose targets don't relax, a word of symbols at a time.
-        for (uint64_t got = through_got; got != 0; got &= got - 1)
+        for (uint64_t got = through_got & ~consumed; got != 0; got &= got - 1)
         {
             const uint64_t bit = (uint64_t)__builtin_ctzll(got);
             const SymbolId target = fixups->target[group + (FixupId)bit];
@@ -4051,9 +4100,8 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         // A PIE's ABS64, ABS32 and ABS32S fixups counted, and its direct ones (neither through the GOT nor ABS64) to
         // be tested against the filter of the symbols outside the image; the static runtime's TLS accesses counted by a
         // compare of the kinds, and its direct ones (not through the GOT) to be tested against its IFUNCs' filter, the
-        // calls among them told from the others, and every fixup's target against __tls_get_addr, whose fixups must be
-        // the accesses' calls. Each 16 targets are loaded once for every test that takes them: a static PIE takes all
-        // three.
+        // calls among them told from the others. Each 16 targets are loaded once for every test that takes them: a
+        // static PIE takes both.
         uint64_t pie_direct = 0;
         uint64_t ifunc_direct = 0;
         uint64_t calls = 0;
@@ -4064,7 +4112,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
                 valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_ABS32)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_ABS32S)));
             abs64 += (uint64_t)__builtin_popcountll(abs64_mask);
             absolute32 += (uint64_t)__builtin_popcountll(absolute32_mask);
-            pie_direct = valid & ~(through_got | abs64_mask);
+            pie_direct = valid & ~(through_got | abs64_mask | consumed);
         }
         if (shared->scope == BUSTER_EXECUTABLE_SCOPE_SHARED)
         {
@@ -4086,7 +4134,7 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
             refused += (uint64_t)__builtin_popcountll(refused_kinds);
             initial_exec += (uint64_t)__builtin_popcountll(valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_GOTTPOFF)));
         }
-        if (shared->runtime)
+        if (shared->relaxes_tls)
         {
             const uint64_t accesses = valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSGD)) |
                                                _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_LINK_FIXUP_TLSLD)));
@@ -4099,12 +4147,11 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
         }
         // The filters' hits are told apart by executable_check_direct and executable_mark_ifunc_target (with `exact`,
         // every target whose atom is 0, and every IFUNC target, one at a time).
-        const uint64_t tested = (shared->exact ? 0 : pie_direct | ifunc_direct) | (shared->relaxed != 0 ? valid : 0);
+        const uint64_t tested = shared->exact ? 0 : pie_direct | ifunc_direct;
         for (uint32_t part = 0; tested != 0 && part < 4; part += 1)
         {
             const __mmask16 lanes = (__mmask16)(tested >> (16 * part));
             const __m512i targets = _mm512_maskz_loadu_epi32(lanes, fixups->target + group + 16 * part);
-            relaxed_calls += shared->relaxed != 0 ? (uint64_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, targets, _mm512_set1_epi32((int)shared->relaxed))) : 0;
             const __mmask16 pie_lanes = shared->exact ? 0 : (__mmask16)(pie_direct >> (16 * part));
             const __mmask16 ifunc_lanes = shared->exact ? 0 : (__mmask16)(ifunc_direct >> (16 * part));
             // A PIE's targets against the IFUNCs' filter alone when it defines IFUNCs, which has the symbols outside the
@@ -4140,11 +4187,18 @@ static void executable_count(Link* link, ExecutableShared* shared, uint32_t lane
     }
     // INT32_MIN's absolute value reads as 2^31, unsigned.
     shared->addend_magnitudes[lane] = _mm512_reduce_max_epu32(largest);
-    if (shared->runtime)
+    if (shared->relaxes_tls)
     {
-        // __tls_get_addr's calls are relaxed away: it gets no slot, whichever row its calls marked.
-        marks[shared->relaxed / 64] &= ~(shared->relaxed != 0 ? 1ull << (shared->relaxed % 64) : 0);
-        candidates[shared->relaxed / 64] &= ~(shared->relaxed != 0 ? 1ull << (shared->relaxed % 64) : 0);
+        // A static executable's __tls_get_addr gets no slot, and a static PIE's no stub, whichever row its calls marked:
+        // they must all be the accesses' (the check of the counts refuses the link otherwise). A dynamic PIE's other
+        // calls marked its slot and its stub as any import's.
+        const uint64_t relaxed = shared->runtime && shared->relaxed != 0 ? 1ull << (shared->relaxed % 64) : 0;
+        marks[shared->relaxed / 64] &= ~relaxed;
+        candidates[shared->relaxed / 64] &= ~relaxed;
+        if (dynamic)
+        {
+            shared->stub_marks[lane * shared->words_per_lane + shared->relaxed / 64] &= ~relaxed;
+        }
         shared->dynamic_counts[lane].tls_accesses = tls_accesses;
         shared->dynamic_counts[lane].relaxed_calls = relaxed_calls;
     }
@@ -4561,12 +4615,13 @@ static bool executable_shared_refuses(uint8_t kind)
     return kind == BUSTER_LINK_FIXUP_TPOFF32;
 }
 
-// Whether a PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that
-// needs a relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load
-// address fits it), a fixup of another kind to a dynamic symbol, but for a GOT kind and a CALL, which goes to the
-// symbol's stub, a PC32 or PC64 to address 0 (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute
-// symbol (executable_refuses_absolute). Every other fixup to an absolute symbol is its value, which needs no relocation.
-static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope)
+// Whether a PIE can't relocate a fixup of `kind` to `target` in an atom of class `atom_class`: an ABS64 that needs a
+// relocation outside the atoms the loader writes (a text relocation), an ABS32 or ABS32S that needs one (no load
+// address fits it), a fixup of another kind to a dynamic symbol, but for a GOT kind, a CALL, which goes to the symbol's
+// stub, and a TLSGD of a dynamic PIE that relaxes its accesses (`relaxes_tls`), which becomes initial-exec, a PC32 or
+// PC64 to address 0 (executable_is_absolute_zero), or a CALL, PC32 or PC64 to an absolute symbol
+// (executable_refuses_absolute). Every other fixup to an absolute symbol is its value, which needs no relocation.
+static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId target, uint8_t atom_class, uint8_t scope, bool relaxes_tls)
 {
     const uint8_t class = executable_relocation_class(link, target, scope);
     const bool relocated = class == BUSTER_EXECUTABLE_RELOCATION_RELATIVE || class == BUSTER_EXECUTABLE_RELOCATION_SYMBOLIC;
@@ -4574,7 +4629,10 @@ static bool executable_is_refused(const Link* link, uint8_t kind, SymbolId targe
     const bool text = kind == BUSTER_LINK_FIXUP_ABS64 && !executable_class_is_written(atom_class);
     const bool dynamic_tls = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD ||
                                                                        (kind == BUSTER_LINK_FIXUP_DTPOFF32 && link->symbols.atom[target] != 0));
-    const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL && !dynamic_tls;
+    // A dynamic PIE's general-dynamic access to an import relaxes to initial-exec through its GOT slot, when the PIE
+    // relaxes its accesses (executable_check_direct's rule).
+    const bool initial_exec = scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS && kind == BUSTER_LINK_FIXUP_TLSGD && relaxes_tls;
+    const bool direct = !executable_kind_reads_got(kind) && kind != BUSTER_LINK_FIXUP_ABS64 && kind != BUSTER_LINK_FIXUP_CALL && !dynamic_tls && !initial_exec;
     const bool relative = kind == BUSTER_LINK_FIXUP_PC32 || kind == BUSTER_LINK_FIXUP_PC64;
     const bool absolute = link->symbols.source[target] == BUSTER_LINK_SOURCE_ABSOLUTE;
     const bool missing_tls_pair = scope == BUSTER_EXECUTABLE_SCOPE_SHARED && kind == BUSTER_LINK_FIXUP_TLSGD &&
@@ -4609,7 +4667,7 @@ static void executable_check_relocations(const Link* link, const ExecutableShare
         {
             const uint8_t kind = fixups->kind[fixup] & BUSTER_LINK_FIXUP_KIND;
             const bool smaller = failed == 0 || fixup < failed;
-            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope) ? fixup : failed;
+            failed = smaller && executable_is_refused(link, kind, fixups->target[fixup], atoms->class[atom], shared->scope, shared->relaxes_tls) ? fixup : failed;
         }
     }
     if (failed != 0)
@@ -5976,7 +6034,11 @@ static ExecutableShared* executable_allocate(Arena* arena, const Link* link, uin
         shared->debug_sections = options->debug_sections;
         shared->crt = dynamic != 0 || shared->runtime;
         shared->scope = dynamic == 0 || shared->runtime ? BUSTER_EXECUTABLE_SCOPE_STATIC : dynamic->shared ? BUSTER_EXECUTABLE_SCOPE_SHARED : BUSTER_EXECUTABLE_SCOPE_IMPORTS;
-        shared->relaxed = shared->runtime && options->runtime->tls_get_addr < link->symbols.count ? options->runtime->tls_get_addr : 0;
+        // A dynamic PIE relaxes its accesses when its producer names __tls_get_addr (the direct path's dynamic_inputs; a
+        // link without the name has no access's call), and refuses them otherwise, as before #515 (link-foreign's).
+        const SymbolId tls_get_addr = shared->runtime ? options->runtime->tls_get_addr : shared->scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS ? dynamic->tls_get_addr : 0;
+        shared->relaxed = tls_get_addr < link->symbols.count ? tls_get_addr : 0;
+        shared->relaxes_tls = shared->runtime || shared->relaxed != 0;
         // The filters: a PIE's of the symbols outside the image, then the IFUNCs'.
         shared->ifunc_filter = dynamic != 0 ? BUSTER_EXECUTABLE_FILTER_WORDS : 0;
         shared->filter_words = shared->ifunc_filter + (shared->ifuncs ? 2 * BUSTER_EXECUTABLE_FILTER_WORDS : 0);
@@ -6896,14 +6958,16 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         executable_check_relocations(link, shared, lanes, executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes));
     }
     // A static executable's calls of __tls_get_addr must be its TLS accesses': one each, which their relaxation checks.
+    // A dynamic PIE's accesses must each have its call; its other calls are the loader's function's, through its stub.
+    const bool relaxes_tls = ok && shared->relaxes_tls;
     uint64_t tls_accesses = 0;
     uint64_t relaxed_calls = 0;
-    for (uint32_t other = 0; ok && runtime && other < lanes; other += 1)
+    for (uint32_t other = 0; relaxes_tls && other < lanes; other += 1)
     {
         tls_accesses += shared->dynamic_counts[other].tls_accesses;
         relaxed_calls += shared->dynamic_counts[other].relaxed_calls;
     }
-    if (ok && runtime && lane == 0 && tls_accesses != relaxed_calls)
+    if (relaxes_tls && lane == 0 && tls_accesses != relaxed_calls)
     {
         executable_lane_fail(executable_error(shared, EXECUTABLE_PHASE_LAYOUT, lane, lanes), EXECUTABLE_ERROR_UNSUPPORTED, 0, shared->relaxed, 0);
     }
@@ -7165,6 +7229,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
         .base = ok ? layout->base : 0,
         .got = ok ? layout->sections[EXECUTABLE_SECTION_GOT].address : 0,
         .relaxed = shared != 0 ? shared->relaxed : 0,
+        .imports = shared != 0 && shared->scope == BUSTER_EXECUTABLE_SCOPE_IMPORTS ? shared->dynamic_bits : 0,
         .relaxable = shared != 0 ? shared->relaxable_bits : 0,
         .checked = !proven,
     };
