@@ -46,6 +46,31 @@ what costs nothing to check: more records than `x86_encode` takes, a function
 that could pass `INT32_MAX` bytes with every branch long, or no scratch
 memory; then the records are as they were.
 
+`branch_sizing_validate_branches` is that check without `x86_validate`: the
+record count, then each branch, with the same first error, taking records
+`x86_validate` would reject. It is for a code generator whose records are valid
+by construction, but whose branch columns the two paths still read and write by:
+an index or a target past the function would have them read and write outside
+the records and the offsets. The C driver's emission runs it on Tier 0's code
+and runs `x86_validate` only under `--verify` (#532). On the 9700X, `-c` of the
+frozen `sqlite3.c` writes the same object with either check. #520's stage clock
+puts the driver's branch sizing at 5.620 ms with `x86_validate` of every record,
+14.4 times `x86_encode`'s 0.389 ms of the same records. With the columns alone
+it takes 0.517 ms, 1.33 times the encoder's time. The whole compile is 5.9 ms
+(3.1%) faster against main, and 5.0 ms faster on one executable with a switch
+between the checks, in 133 M fewer user instructions ([the
+record](https://github.com/buster14a/buster-performance/tree/518da9bd10a7e23b2d84bdd783f6feb0a6bceab7/docs/measurements/branch-columns-532-2026-10-27)).
+Its vector path takes 16 branches at a time: masks of the indices that aren't
+below the count or above the branch before (the vector before's last lane, by
+`valignd`), of the targets past the count and of the forms that aren't a
+branch's, then the first lane with an error, whose error is the first of the
+scalar order (the index's, the target's, the form's). It gathers the forms only
+for the records below the count, and looks each up in a bitmap of the 17 forms
+over the 512 form numbers from `JMP_REL8`'s: `vpermd` takes the dword and
+`vprorvd` rotates the form's bit to bit 0. Its twin,
+`branch_sizing_validate_branches_scalar`, a branch at a time over the list of
+forms, is `branch_sizing_validate`'s first part.
+
 ## Results
 
 The results below are from the original branch-sizing implementation, before
@@ -428,7 +453,11 @@ form number, `branch_sizing_validate`'s errors at every place, probes at every
 displacement around both rel8 limits over branches that grow or don't, random
 functions of every shape (with filler of every form, and with other round
 limits), chains of 1 to 1,000 links both ways, every column ending at a
-`PROT_NONE` page, and no scratch memory to spare. With `--cross-check`, GNU as
+`PROT_NONE` page, and no scratch memory to spare. Both paths of
+`branch_sizing_validate_branches` must take every function sized, give each of
+`branch_sizing_validate`'s errors but `x86_validate`'s on every form number and
+at every place, and on random functions broken 0 to 3 times at random, and stay
+inside columns that end at `PROT_NONE` pages. With `--cross-check`, GNU as
 relaxes 404 of the functions printed as source with labels, and its bytes must
 be `x86_encode_scalar`'s of the sized records.
 

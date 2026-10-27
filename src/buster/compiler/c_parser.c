@@ -7597,15 +7597,17 @@ static void parse_role_tables_init(void);
 static void parse_statement_tables_init(void);
 
 // Reserves the kernels' arrays for up to `capacity` tokens, with padding around each per-token array, and up to
-// `name_capacity` names.
-static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity)
+// `name_capacity` names, in `arena`, but for the tree's roles, node depths and parents with `tree`: its columns (each of
+// capacity + 2 * BUSTER_PARSE_TOKEN_PADDING entries, the first token's at the padding's end), which outlive the others,
+// a parse's temporaries.
+static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree)
 {
     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
     uint8_t* vkinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
-    uint8_t* roles = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+    uint8_t* roles = tree == 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots) : tree->roles != 0 ? tree->roles - BUSTER_PARSE_TOKEN_PADDING : 0;
     uint8_t* flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
-    uint32_t* node_depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    uint32_t* parents = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    uint32_t* node_depths = tree == 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots) : tree->depths != 0 ? tree->depths - BUSTER_PARSE_TOKEN_PADDING : 0;
+    uint32_t* parents = tree == 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots) : tree->parents != 0 ? tree->parents - BUSTER_PARSE_TOKEN_PADDING : 0;
     *kernels = (ParseKernels){
         .vkinds = vkinds != 0 ? vkinds + BUSTER_PARSE_TOKEN_PADDING : 0,
         .depths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
@@ -7661,6 +7663,12 @@ static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t 
     return result;
 }
 
+// parse_kernels_reserve_tree with the tree's arrays in `arena` too.
+static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity)
+{
+    return parse_kernels_reserve_tree(kernels, arena, capacity, name_capacity, 0);
+}
+
 // Marks clang's predeclared typedef names (parse_predeclared_typedefs, by their IdentIds in `predeclared`) as file-scope
 // type names for K3, or clears them after the parse.
 static void parse_kernels_predeclared(ParseKernels* kernels, const IdentId* predeclared, bool mark)
@@ -7695,16 +7703,19 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
     // K1's second part, and the roles after the colons it resolved.
     parse_secondary_scalar(kernels, count, kernels->stack);
     parse_after_colons(kernels, count);
-    // K4, K5 and K6.
+    // K4, K5 and K6, which a unit the kernels can't take skips, as parse_vector does.
     parse_parents_scalar(kernels, count);
     const bool statements_ok = parse_statements(kernels, count, statements);
-    const ParseCheckFrames frames = parse_check_frames(kernels);
-    parse_check_scalar(kernels, names, input->flags, count, typed, &frames, kernels->check_classes, 0, 0);
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        result.flagged_tokens += kernels->flags[i] != 0;
-    }
     result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    if (!result.everything)
+    {
+        const ParseCheckFrames frames = parse_check_frames(kernels);
+        parse_check_scalar(kernels, names, input->flags, count, typed, &frames, kernels->check_classes, 0, 0);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            result.flagged_tokens += kernels->flags[i] != 0;
+        }
+    }
     result.fallback = parse_fallback(kernels, input, result.everything);
     // The names this unit declared as typedefs, for the next one.
     parse_typedefs_clear(kernels);
@@ -11531,14 +11542,20 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     // K4, K5 and K6.
     parse_parents_vector(kernels, count, buffers);
     const bool statements_ok = parse_statements_vector(kernels, count, buffers);
-    parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
-    for (uint32_t block = 0; block < count; block += 64)
-    {
-        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
-        const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
-        result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
-    }
     result.everything = kernels->unbalanced || kernels->unsupported || !statements_ok;
+    // A unit the kernels can't take goes to the scalar parser whole, without K6's flags. Where its brackets don't
+    // balance, or K5 can't settle its statements, the kernels before K6 leave some of what it reads unwritten, so it
+    // would flag tokens by what a parse's reused temporaries held before (#528).
+    if (!result.everything)
+    {
+        parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
+        for (uint32_t block = 0; block < count; block += 64)
+        {
+            const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+            const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+            result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
+        }
+    }
     result.fallback = parse_fallback(kernels, input, result.everything);
     parse_typedefs_clear(kernels);
     parse_kernels_predeclared(kernels, predeclared, false);
@@ -11664,6 +11681,10 @@ struct ParseOptions
     bool tree_only;
     // Retain bounded GNU attribute and asm-label records for a semantic consumer; syntax-only callers leave it off.
     bool extension_metadata;
+    // Where a parse's temporaries go (the vector path's arrays, the scalar parser's stacks and the postorder's passes),
+    // which it pops at its end: the caller's arena, whose pages its next stage then takes again (the C driver's checker
+    // reads its scratch from where the parse's were), or null for the parser's own.
+    Arena* scratch;
 };
 
 // What a parse did, for benchmark-parser and test-parser.
@@ -11673,7 +11694,7 @@ struct ParseStatistics
     // Top-level declarations the scalar parser took on the vector path, and their tokens.
     uint64_t fallback_items;
     uint64_t fallback_tokens;
-    // Tokens the vector path flagged.
+    // Tokens the vector path flagged: none where the whole unit went to the scalar parser before K6.
     uint64_t flagged_tokens;
     // The whole unit went to the scalar parser: unbalanced brackets, a typedef the pass can't read, a do without its
     // while, or an error the fallback found (which the scalar parser then reports as it would alone).
@@ -11703,14 +11724,13 @@ struct Parser
     GnuSyntax gnu;
     Arena gnu_arena;
     // The token columns and the tree's, each in an arena of its own, so that their first pages are base pages
-    // (lane.c), and the scalar parser's stacks.
+    // (lane.c), and a parse's temporaries without ParseOptions.scratch.
     Arena columns[13];
     Arena scratch;
-    // The vector path's arrays (ParseKernels and ParseVectorBuffers), in an arena of their own, and clang's predeclared
-    // typedef names' IdentIds.
+    // The vector path's arrays (ParseKernels and ParseVectorBuffers): the tree's in its columns, the rest a parse's
+    // temporaries, which only the parse reads; and clang's predeclared typedef names' IdentIds.
     ParseKernels kernels;
     ParseVectorBuffers buffers;
-    Arena vector_arena;
     IdentId predeclared[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
 };
 
@@ -11752,7 +11772,6 @@ static void parse_release(Parser* parser)
         arena_release(&parser->columns[i]);
     }
     arena_release(&parser->scratch);
-    arena_release(&parser->vector_arena);
     arena_release(&parser->gnu_arena);
     *parser = (Parser){ 0 };
 }
@@ -11839,16 +11858,22 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         result = parser->diagnostics != 0 && parse_prepare_meanings(parser, pp->table);
         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
     }
+    // The parse's temporaries, each step's popped after it (ParseOptions.scratch).
+    Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
+    const uint64_t temporary_mark = temporary->length;
     bool scalar = result && parser->options.scalar;
     if (result && !scalar)
     {
         // The vector path, with the scalar parser on what it flags; an error there sends the whole unit to the scalar
-        // parser, for its diagnostics.
+        // parser, for its diagnostics. The kernels' tree is the tree's columns, and their other arrays temporaries:
+        // sqlite3.c's took 63 MB, which the C driver's checker takes again (#528).
         const uint32_t count = parser->tokens.count;
-        arena_release(&parser->vector_arena);
-        parser->vector_arena = arena_reserve(((uint64_t)count + 4096) * 512 + (uint64_t)parser->meanings.capacity + (64ull << 20));
-        const bool reserved = parse_kernels_reserve(&parser->kernels, &parser->vector_arena, count, parser->meanings.capacity) &&
-                              parse_vector_buffers_reserve(&parser->buffers, &parser->vector_arena, count);
+        ParseTree tree = { 0 };
+        tree.roles = parse_column(parser, 5, count, 1);
+        tree.parents = tree.roles != 0 ? parse_column(parser, 6, count, 4) : 0;
+        tree.depths = tree.parents != 0 ? parse_column(parser, 7, count, 4) : 0;
+        const bool reserved = tree.depths != 0 && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
+                              parse_vector_buffers_reserve(&parser->buffers, temporary, count);
         if (reserved)
         {
             const ParseInput input = {
@@ -11858,7 +11883,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .count = count,
                 .language = parser->language,
                 .meanings = &parser->meanings,
-                .scratch = &parser->scratch,
+                .scratch = temporary,
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
@@ -11876,6 +11901,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
             result = false;
         }
+        arena_pop_to(temporary, temporary_mark);
     }
     if (result && scalar && !parser->options.scalar)
     {
@@ -11890,7 +11916,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         parser->tree.depths = parser->tree.parents != 0 ? parse_column(parser, 7, parser->tokens.count, 4) : 0;
         const ParseScalarResult parsed = parser->tree.depths != 0 ?
             parse_scalar(parser->tokens.kinds, parser->tokens.names, parser->tokens.flags, parser->tokens.count, parser->language, &parser->meanings, &parser->tree,
-                         &parser->scratch, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
+                         temporary, parser->diagnostics, parser->diagnostic_capacity, &parser->diagnostic_count) :
             (ParseScalarResult){ .errors = 0, .out_of_memory = true, .retyped = false };
         parser->errors = parsed.errors + parsed.out_of_memory;
         parser->fatal = parsed.out_of_memory ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_NONE;
@@ -11917,16 +11943,15 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     }
     if (result && !parser->options.tree_only)
     {
-        // The postorder and the subtree sizes, with the scratch arena's room for the passes.
+        // The postorder and the subtree sizes, with the temporaries' room for the passes.
         const uint32_t count = parser->tokens.count;
-        const uint64_t mark = parser->scratch.length;
         parser->postorder = parse_column(parser, 11, count, 4);
         parser->sizes = parser->postorder != 0 ? parse_column(parser, 12, count, 4) : 0;
-        uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
-        uint32_t* first_children = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
-        uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
-        uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
-        uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(&parser->scratch, uint32_t, (uint64_t)count + 1);
+        uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
+        uint32_t* first_children = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
+        uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
+        uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
+        uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
         result = parser->postorder != 0 && parser->sizes != 0 && last_children != 0 && first_children != 0 && ends != 0 && starts != 0 && before != 0;
         if (result)
         {
@@ -11937,7 +11962,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parser->errors += 1;
             parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
         }
-        arena_pop_to(&parser->scratch, mark);
+        arena_pop_to(temporary, temporary_mark);
     }
     return result;
 }

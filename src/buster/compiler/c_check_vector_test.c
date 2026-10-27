@@ -259,7 +259,49 @@ static void check_test_vector_oracles(CheckTest* test, const char* clang)
         const char* source;
         bool rejected;
     };
+    // Each width is checked independently by Clang and both source paths. In particular, a two-lane half
+    // is a scalar, while odd widths round up; a lane list's length determines its type even with duplicates.
+#define BUSTER_CHECK_TYPEOF_SWIZZLES(width, half, lanes) \
+        { \
+            "typedef int V __attribute__((ext_vector_type(" #width ")));" \
+            "typedef int H __attribute__((ext_vector_type((" #width "+1)/2)));" \
+            "typedef int P __attribute__((ext_vector_type(2)));struct S{V m;};\n" \
+            "#define T(e,t) _Static_assert(__builtin_types_compatible_p(__typeof__(e),t),#e)\n" \
+            "void f(V v,struct S s,struct S *p){" \
+            "T(v.x,int);T(v.y,int);T(v.s0,int);T(v.S1,int);T(v.r,int);T(v.g,int);" \
+            "T(v.xy,P);T(v.yx,P);T(v.rg,P);T(v.xx,P);T(v.s00,P);T(v." #lanes ",V);" \
+            "T(v.lo," #half ");T(v.hi," #half ");T(v.even," #half ");T(v.odd," #half ");" \
+            "T(s.m.lo," #half ");T(s.m.hi," #half ");T(p->m.even," #half ");T(p->m.odd," #half ");" \
+            "T(s.m.x,int);T(p->m.yx,P);T((v+v).lo," #half ");" \
+            "__typeof__(v.lo) x;(void)x;}\n", \
+            false \
+        }
     const struct VectorSourceFixture fixtures[] = {
+        BUSTER_CHECK_TYPEOF_SWIZZLES(2, int, s01),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(3, H, s012),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(4, H, s0123),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(5, H, s01234),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(6, H, s012345),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(7, H, s0123456),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(8, H, s01234567),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(9, H, s012345678),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(10, H, s0123456789),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(11, H, s0123456789a),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(12, H, s0123456789ab),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(13, H, s0123456789abc),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(14, H, s0123456789abcd),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(15, H, s0123456789abcde),
+        BUSTER_CHECK_TYPEOF_SWIZZLES(16, H, S0123456789ABCDEF),
+        { "void f(E v){_Static_assert(__builtin_types_compatible_p(__typeof__(v.xyz),E3),\"three lanes\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(v.lo.yx.x),int),\"chained\");}\n", false },
+        { "typedef float P __attribute__((ext_vector_type(2)));struct S{const EF m;};void f(struct S s){"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(s.m.lo)*,const P*),\"qualified float half\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__(s.m.b)*,const float*),\"qualified float lane\");"
+          "_Static_assert(__builtin_types_compatible_p(__typeof__((+s.m).lo),P),\"rvalue half\");}\n", false },
+        { "void f(E v){__typeof__(v.s4) x;}\n", true },
+        { "void f(E v){__typeof__(v.xg) x;}\n", true },
+        { "void f(I v){__typeof__(v.xy) x;}\n", true },
+        { "void f(B v){__typeof__(v.x) x;}\n", true },
         { "I f(F x){return x;}\n", false },
         { "I f(S x){return x;}\n", false },
         { "I f(int x){return x;}\n", true },
@@ -375,6 +417,7 @@ static void check_test_vector_oracles(CheckTest* test, const char* clang)
         { "const I a={1};I b=(1/0,a);\n", true },
         { "const I a={1};void f(void){I a={2};static I b=a;}\n", true },
     };
+#undef BUSTER_CHECK_TYPEOF_SWIZZLES
     char directory[] = "/tmp/buster-check-vector-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
     char paths[BUSTER_ARRAY_LENGTH(fixtures)][160];

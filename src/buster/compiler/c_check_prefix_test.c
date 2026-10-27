@@ -212,7 +212,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
             {
                 const Parser* view = &prefix.parser;
                 const uint32_t count = view->tokens.count;
-                bool nonowning = view->scratch.base == 0 && view->vector_arena.base == 0;
+                bool nonowning = view->scratch.base == 0;
                 for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(view->columns); column += 1)
                 {
                     nonowning &= view->columns[column].base == 0;

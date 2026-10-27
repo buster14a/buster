@@ -322,13 +322,22 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_environment.c"
 #include "buster/compiler/c_environment_test.c"
 #include "buster/compiler/c_environment_benchmark.c"
+// The checker's own code goes in a section of its own, .text.buster_checker, which every unit starts on a page (#502):
+// the driver's time depends on where its hot loops fall in the instruction caches, and code compiled before them, in
+// their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
+// them. Its tests and the builtins' actions, which the driver seldom runs, stay in .text.
+__asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.text");
+#pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
 #include "buster/compiler/c_check_lazy.c"
+#pragma clang section text = ""
 
 #include "buster/compiler/c_builtin.c"
 #include "buster/compiler/c_builtin_test.c"
+#pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_actions.c"
+#pragma clang section text = ""
 #include "buster/compiler/c_check_builtin_x86.c"
 #include "buster/compiler/c_check_builtin.c"
 #include "buster/compiler/c_check_varargs.c"
@@ -342,6 +351,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_vector.c"
 #include "buster/compiler/c_check_builtin_typed_overflow.c"
 #include "buster/compiler/c_check_builtin_rounds.c"
+#pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_checker.c"
 #include "buster/compiler/c_check_literals.c"
 #include "buster/compiler/c_check_initializer.c"
@@ -352,6 +362,7 @@ int run_type_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_diagnostic.c"
 #include "buster/compiler/c_check_initializer_input.c"
 #include "buster/compiler/c_check_data_input.c"
+#pragma clang section text = ""
 int run_checker_benchmark(int argc, char** argv);
 int run_builtin_benchmark(int argc, char** argv);
 
@@ -408,14 +419,18 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
+#pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_program.c"
+#pragma clang section text = ""
 // #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
 // the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
 // --cross-check.
 #include "buster/compiler/c_lowering_symbols.c"
+#pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
+#pragma clang section text = ""
 #include "buster/compiler/c_checker_test.c"
 #include "buster/compiler/c_builtin_intrinsic_types_test.c"
 #include "buster/compiler/c_builtin_intrinsic_features_test.c"
@@ -517,6 +532,10 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // branch-misses) and their tests, for the test-profile command.
 #include "buster/compiler/profile.c"
 #include "buster/compiler/profile_test.c"
+
+// measure-compile (#518): whole compiles timed as processes against a reference compiler, with --time-stages' report of
+// where their time goes.
+#include "buster/compiler/compile_measure.c"
 
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
@@ -1282,6 +1301,10 @@ static int main_command(int argc, char** argv, bool* found)
               strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
     {
         result = run_profile_command(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-compile") == 0)
+    {
+        result = run_measure_compile_command(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {

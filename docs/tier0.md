@@ -1315,16 +1315,17 @@ path's 11.1.
   any change to them. The objects of c-testsuite's other 219 programs (both paths) and of the cross-check's 180 programs
   are the same bytes as main's.
 - **Realigned frames (#136)** at about one instruction per entry to code without them. On these programs, which have no
-  object aligned past 16, the 9700X measured the branch with main merged in (`acb5131`) against main's `bbe59b7` in six
-  rounds in alternating order: the vector path at 170.86 instructions per entry against 169.85, its cycles (80.36 to
-  80.74 against 80.45 to 80.79) and alone (78.70 to 79.06 against 78.93 to 79.27) within main's spread, and the scalar
-  path at 573.75 instructions against 570.95 (233.06 cycles against 230.70). The instruction is each function's: the
-  frame alignment's scan before selection, the frame's added fields, and the prologue's and the layout's checks of the
-  realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head ran the vector path 1.15% and the scalar
-  one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after `main.c`'s) sat 14,928 bytes further on, and
-  main moved by as much (`.skip` before the unit's code, no code changed) ran its vector path 0.8% slower. `-c
-  sqlite3.c`'s objects are main's, and its time within main's spread
-  ([the record](https://github.com/buster14a/buster-performance/tree/0373f98c785caface34a91546b277ef57d816344/docs/measurements/aligned-objects-136-2026-10-27)).
+  object aligned past 16, the 9700X measured the branch with main merged in against main twice, six rounds each in
+  alternating order: the vector path at 170.86 instructions per entry against 169.85 both times, its cycles 80.63
+  against 79.83 against main's `51bf882` (1.0% more, and 1.2% alone) and 80.49 against 80.62 against `bbe59b7` (within
+  main's spread), and the scalar path at 573.75 instructions against 570.95 (1.5% and 1.0% more cycles). The
+  instruction is each function's: the frame alignment's scan before selection, the frame's added fields, and the
+  prologue's and the layout's checks of the realignment. Against an earlier main (`b7b1f7a`), the branch's earlier head
+  ran the vector path 1.15% and the scalar one 3.8% slower: the benchmark's unit (`tier0_benchmark.c`, linked after
+  `main.c`'s) sat 14,928 bytes further on, and main moved by as much (`.skip` before the unit's code, no code changed)
+  ran its vector path 0.8% slower. `-c sqlite3.c`'s objects are main's and its time within main's spread, at 0.09% more
+  instructions, most of them clang's code for the lowering's `check_lower_part`, which moves with any edit of its body
+  ([the record](https://github.com/buster14a/buster-performance/tree/12adf9e72419f5352e10088edef316bdfaa0624d/docs/measurements/aligned-objects-136-2026-10-27)).
 - **Against #115's budget:** the budget is about 32 cycles per output token for selection, allocation and encoding.
   On the generated programs the vector path's cycles per entry are about 2.3 times that. On `sqlite3.c` (below) the
   three stages take 41 to 42 cycles per output token, 1.3 times the budget: it is not met.
@@ -1364,12 +1365,14 @@ functions, 400,995 typed entries and 366,044 records (0.91 per entry, against th
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
 
 **SQLite's speedtest1 against clang -O0 and tcc**
-([record](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
+([record](https://github.com/buster14a/buster-performance/tree/c1bbfb2e56f58deb4972ff16d50221d7cd82f0fd/docs/measurements/speedtest1-tables-136-2026-10-27);
+[before the jump tables](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
 The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. They are built with SQLite's own
-`test/speedtest.tcl` options four ways:
+`test/speedtest.tcl` options:
 
-- by `-c` (main at `e04462c1`), linked by cc;
-- by the direct path, both files as one unit;
+- by `-c`, linked by cc, on main at `ad408cf2`, where `switch` dispatches through jump tables (#536), and at its first
+  parent `b7f444eb`, before them;
+- by each tree's direct path, both files as one unit;
 - by clang -O0, linked by cc;
 - by tcc.
 
@@ -1377,24 +1380,27 @@ Each build runs with that script's options at `--size 5`, from a database on tmp
 gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
 instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
-| | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
-| --- | --- | --- | --- | --- |
-| Run time | 294.4 ms | 295.7 ms | 293.3 ms | 271.5 ms |
-| User-space instructions | 6,866 M | 6,865 M | 3,922 M | 4,833 M |
-| Instructions per cycle | 4.47 | 4.46 | 2.59 | 3.45 |
-| `.text` of the executable | 1,331,336 B | 1,331,216 B | 1,024,342 B | 1,295,452 B |
-| `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
+| | Tier 0, `-c` | Tier 0, `-c`, before the tables | Tier 0, direct path | clang -O0 | tcc |
+| --- | --- | --- | --- | --- | --- |
+| Run time | 256.7 ms | 295.0 ms | 255.4 ms | 295.9 ms | 271.6 ms |
+| User-space instructions | 5,686 M | 6,866 M | 5,686 M | 3,922 M | 4,833 M |
+| Instructions per cycle | 4.31 | 4.49 | 4.32 | 2.57 | 3.45 |
+| `.text` of the executable | 1,319,528 B | 1,331,336 B | 1,319,408 B | 1,024,342 B | 1,295,452 B |
+| `sqlite3.c` compiled | 191.4 ms | 191.9 ms | | 577.4 ms | 42.2 ms |
 
-- **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
-  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
+- **Run time:** Tier 0's code takes 13.3% less time than clang -O0's, in 1.45 times its instructions, and 5.5% less
+  than tcc's. Before the jump tables it ran at clang's speed, in 1.75 times its instructions: the tables cut its time by
+  13.0%, its instructions by 17.2% and its cycles by 13.8%.
 - **Code size:**
-  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `.text` is 1.29 times clang's, in `sqlite3.o` and in the executable; the tables took 11,808 bytes out of
+    `sqlite3.o`'s and added 11,232 to its `.rodata`, 2,808 entries;
   - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
     sizes known before writing.
-- **`switch`** is a chain of compares in case order:
-  - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
-  - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
-  - jump tables (#136's item 7) will change both, and the record's scripts can measure them again.
+- **`switch`** dispatches through a jump table where clang -O0's does (`docs/c-checker.md`, "Switches"):
+  - `sqlite3VdbeExec`'s dispatch on the opcode is a bounds check and a table, as clang's is, where before the tables it
+    was 184 compare-and-branch pairs;
+  - it and the parser's `yy_reduce` account for 938 M of the 1,180 M instructions the tables saved (the record's
+    profiles): 767 M and 100 M now, against clang's 628 M and 47 M.
 
 ## Follow-ups
 

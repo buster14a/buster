@@ -810,8 +810,40 @@ static void asm_test_code(AsmTest* test)
                           symbols.references[1].addend == 8 && symbols.references[2].field == X86_FIXUP_IMMEDIATE && symbols.references[2].kind == BUSTER_LINK_FIXUP_ABS32 &&
                           symbols.references[2].addend == 4;
     asm_test_check(test, marked && referred, "inline code: references' names, kinds, fields and addends", 0);
-    // What it refuses: directives but the syntax's, its own labels but as a jmp's or jcc's target without an addend,
-    // undefined local labels, and what the matcher doesn't take.
+    // Named labels, at their next records (the last one the end), in the order the source first names them; and the
+    // source's own named labels as data, a call's target and a branch's with an addend, which are references to them
+    // (the branch's from its rel32 form), beside a branch that branch sizing sizes.
+    const AsmCode labels = asm_test_code_pair(test, "leaq here(%rip), %rax\nhere: call here\njmp here+2\njmp here\n.Lend:", 4, "inline code: named labels");
+    const bool placed = labels.label_count == 2 && labels.labels[0].record == 1 && labels.labels[0].name.length == 4 &&
+                        memcmp(labels.labels[0].name.pointer, "here", 4) == 0 && labels.labels[1].record == 4 && labels.labels[1].name.length == 5 &&
+                        memcmp(labels.labels[1].name.pointer, ".Lend", 5) == 0;
+    const bool own = labels.reference_count == 3 && labels.references[0].record == 0 && labels.references[0].kind == BUSTER_LINK_FIXUP_PC32 &&
+                     labels.references[1].record == 1 && labels.references[1].kind == BUSTER_LINK_FIXUP_CALL && labels.references[2].record == 2 &&
+                     labels.references[2].kind == BUSTER_LINK_FIXUP_CALL && labels.references[2].addend == 2 &&
+                     (labels.records[2].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_JMP_REL32 && labels.branch_count == 1 && labels.branches[0] == 3 &&
+                     labels.targets[0] == 1 && (labels.records[3].form & BUSTER_X86_FORM_FIXUP) == 0;
+    asm_test_check(test, placed && own, "inline code: named labels and references to them", 0);
+    // Labels another source defines, a .L one among them: references by name, which the caller resolves.
+    const AsmCode others = asm_test_code_pair(test, "jne .Lother\n\tleaq x86_test_return(%rip), %rax", 2, "inline code: other sources' labels");
+    asm_test_check(test, others.reference_count == 2 && others.label_count == 0 && others.references[0].kind == BUSTER_LINK_FIXUP_CALL &&
+                         others.references[0].name.length == 7 && memcmp(others.references[0].name.pointer, ".Lother", 7) == 0 &&
+                         x86_form_description(others.records[0].form)->relative_bytes == 4 && others.references[1].kind == BUSTER_LINK_FIXUP_PC32,
+                   "inline code: other sources' labels by name", 0);
+    // What naked functions' templates take: SSE2's movq (mov's 64-bit form without an XMM operand), the x87's loads and
+    // stores of each width, the string instructions with their prefixes (AT&T's l the dword one), the flags, and in
+    // Intel syntax AVX-512's 64-bit element moves, memory pushes and pops and an indirect jump.
+    asm_test_code_pair(test, "movq 56(%r12), %xmm0\nmovq %xmm1, 160(%r12)\nmovq %rax, %xmm2\nmovq %xmm3, %rcx\nmovq %xmm4, %xmm5\nmovq %rsp, %rbp\n"
+                             "movq $5, 8(%rax)\nfstpt 176(%r12)\nfldt (%rax)\nfstpl 8(%rsp)\nflds 4(%rsp)\nrep movsb\nrep stosq\nrepe cmpsb\nrepnz scasw\n"
+                             "movsl\nlodsq\npushfq\npopfq\ncld",
+                       20, "inline code: naked functions' instructions");
+    const AsmCode intel = asm_test_code_pair(test, ".intel_syntax noprefix\nvmovdqu64 zmm0, zmmword ptr [rdi + 192]\nvmovdqa64 zmmword ptr [rdi], zmm15\n"
+                                                   "push qword ptr [rdi + 128]\npop qword ptr [rdi + 128]\njmp qword ptr [rip + target]\nrep movsb\n.att_syntax prefix\n",
+                                             6, "inline code: naked functions' Intel instructions");
+    asm_test_check(test, intel.reference_count == 1 && intel.references[0].record == 4 && intel.references[0].kind == BUSTER_LINK_FIXUP_PC32,
+                   "inline code: an indirect jump's RIP-relative reference", 0);
+    // What it refuses: directives but the syntax's, its numeric labels and `.` but as a jmp's or jcc's target without
+    // an addend, undefined numeric labels, a dword string instruction's l in Intel syntax, and what the matcher doesn't
+    // take.
     static const char* const refused[] = {
         ".byte 0x90",
         ".globl x\nx: nop",
@@ -821,8 +853,11 @@ static void asm_test_code(AsmTest* test)
         "call 1f\n1:",
         "jmp 1f+2\n1: nop",
         "leaq 1f(%rip), %rax\n1:",
+        "leaq .(%rip), %rax",
+        "loop here\nhere:",
         "jmp 9f",
-        "jmp .Lmissing",
+        ".intel_syntax noprefix\nrep movsl",
+        "fstp (%rax)",
         "bogus %eax",
         ".cfi_startproc\nnop\n.cfi_endproc",
     };
@@ -1320,6 +1355,16 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_oracle(&test, ".text\nstate: cpuid\nxgetbv\nxchgq %rbx,%rsi\nxchgq %rsi,%rbx\nxchgl %ecx,(%rdi)\nxchgb %al,%bl\n"
                                        "fnstcw (%rax)\nfldcw 2(%rsp)\nfnstsw (%rdx)\nfnclex\nstmxcsr -4(%rsp)\nldmxcsr (%r12)\n"
                                        "pcmpeqd %xmm1,%xmm2\npcmpeqd 16(%rax),%xmm15\nbswapl %eax\nbswapq %r9\nbswap %r11d\n", directory, X86_ARCH_V3);
+                // And naked functions' (#147): SSE2's movq, the x87's loads and stores, the string instructions, the flags,
+                // and AVX-512's 64-bit element moves.
+                asm_test_oracle(&test, ".text\nnaked: movq 56(%r12),%xmm0\nmovq %xmm1,160(%r12)\nmovq %rax,%xmm2\nmovq %xmm3,%rcx\nmovq %xmm4,%xmm5\n"
+                                       "movq %xmm9,%xmm12\nmovq (%rsp),%xmm15\nmovq %rsp,%rbp\nmovq $5,8(%rax)\nfstpt 176(%r12)\nfldt (%rax)\nfstpl 8(%rsp)\n"
+                                       "fldl -8(%rbp)\nflds 4(%rsp)\nfstps (%r9)\nrep movsb\nrep movsl\nrep movsq\nrep stosb\nrep stosw\nrep stosq\nrep lodsb\n"
+                                       "movsb\nmovsw\nmovsl\nmovsq\nstosl\nlodsq\ncmpsb\nscasq\nrepe cmpsb\nrepe cmpsq\nrepne cmpsl\nrepe scasb\nrepne scasw\n"
+                                       "repz scasl\nrepnz cmpsw\nrep cmpsb\npushfq\npopfq\n"
+                                       ".intel_syntax noprefix\nvmovdqu64 zmm0,zmmword ptr [rdi+192]\nvmovdqu64 zmmword ptr [rdi+1152],zmm15\n"
+                                       "vmovdqa64 zmm1,zmmword ptr [rax]\nvmovdqa64 zmmword ptr [rsp],zmm2\nvmovdqu64 zmm3,zmm4\npush qword ptr [rdi+128]\n"
+                                       "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);

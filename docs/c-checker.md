@@ -26,7 +26,13 @@ checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`executable_write`). A binding that finds the snapshot damaged discards it and
 links once more from a fresh import. `--verify` also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
-([the c-testsuite guide](c-testsuite.md)).
+([the c-testsuite guide](c-testsuite.md)), with `-c` too. Without it, the
+emission checks only each function's branch columns, which branch sizing reads
+and writes by (`branch_sizing_validate_branches`): Tier 0's records are valid by
+construction, and `x86_validate` of them all made branch sizing take 14 times
+the encoder's time on `sqlite3.c`, against 1.33 times without it
+([#532](https://github.com/buster14a/buster/issues/532),
+[the branch sizing guide's contract](branch-sizing.md#contract)).
 
 `-lNAME` (or `-l NAME`) links a shared library besides the C runtime's (the
 value of an option that takes the next argument stays that option's, as
@@ -493,12 +499,30 @@ Irregular types and operations, integer multiplication/division/remainder,
 folding use the scalar semantic action. Singleton frontiers execute directly
 without packing a vector batch.
 
+The vector path completes each leaf without an overload set, a `VALUE` that
+reads no operand and interns no type (about 45% of `sqlite3.c`'s body nodes),
+without running its action (`check_graph_leaf`, #530). The record is the one
+the action gives: the leaf with its type as operand 0's conversion, or for an
+invalid type, that type's diagnostic and a zero value. It writes the records in
+node order: the barrier's leaves in the walk, a region's in its level pass,
+which then schedules only the rest. A separate pass of leaves wrote each
+output cache line twice. The vector path also validates the graph 16 nodes at a
+time (`check_graph_validate_vector`): the operators' classes come from one
+`vpermi2b` table built from the scalar rules, and each argument slice's offset
+from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
+or a sideband entry goes to `check_graph_validate_node`, the scalar
+validator's step. Most of that validation's time is the leaves' records it
+reads: two cache lines of each 96-byte record. `test-checker` compares the two
+validators on random graphs whole, with each rule broken, and with their
+columns ending at `PROT_NONE` pages.
+
 Both schedules call the same semantic-action contract. Scalar fixtures with
 independently stated expected results and the external source oracle therefore
 remain necessary: scalar/vector equality alone cannot validate shared C rules.
 `CheckStatistics` reports nodes, levels, batches, actual scalar/vector node
 counts, and arena bytes. The node counts describe the path executed, not merely
-which operations could theoretically use SIMD. The schedule is currently
+which operations could theoretically use SIMD: `vector_nodes` counts the vector
+path's leaves and its batches' vector-eligible arithmetic. The schedule is currently
 single-threaded; it does not establish useful multicore scaling.
 `query_proof_nodes` counts visits across the three constant-query proof lanes;
 `query_replay_nodes` counts the subsequent graph replay. These are additional
@@ -952,6 +976,74 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+### What the lowering costs (#531)
+
+On the 9700X, the lowering (`check_lower_prepare`, then the bodies'
+`check_lower_part`) took 25.7 ms of `-c`'s 190 ms on the frozen `sqlite3.c`,
+five times Tier 0's compile of the same entries (#520's stage clock, with its
+step's options). Laps of its own phases on a Zen 4 laptop's build of main put
+69% of it in the tasks' loop, 12% in Tier 0's check of each lowered function
+(`tier0_validate`), 8% in each body's setup (half of it the first touches of the
+writer's columns), 7% in the program-wide preparation and 4% in each body's end
+(its branch targets and its columns' copy). On the laptop's copy of the file it
+ran about 740 instructions per typed entry, as many in a large body as in a
+small one.
+
+- **Every type's class, once.** The tasks' loop asked each node's types their
+  class, and whether they were aggregates, complex, pointers or `_Bool`, each
+  time by walking the type table (the aligned typedef's base, the enum's
+  underlying type, the integer's width and signedness): about a quarter of the
+  stage. `check_lower_classify_types` makes every type's class and facts
+  (`BUSTER_CHECK_LOWER_TYPE_*`) before the bodies, 64 types at a time: each
+  type's kind looks both up in 64-byte tables with `vpermb`, and the few whose
+  kind doesn't settle them (an aligned typedef's, an enum's, a `_BitInt`'s, a
+  complex type's, and the builtins) take the rules, `check_lower_type_class`
+  and `check_lower_type_facts`, which its twin,
+  `check_lower_classify_types_scalar`, applies to every type. The bodies read
+  the table (`check_lower_class`, `check_lower_facts`), which has a row per type
+  of the unit's table, as the lowering makes none: 4,740 for `sqlite3.c`.
+- **The checked value in place.** Each expansion copied its node's 96-byte
+  `CheckValue`; it reads it where it is.
+- **No task for an empty conversion.** A conversion that writes no entry and
+  can't fail (an array's decay, a pointer's to another, a change of qualifiers:
+  `check_lower_conversion_empty`) isn't pushed.
+- **An entry's append.** In a function that doesn't track its stack
+  (`CheckLowerWriter.track`: one without a statement expression, in a program
+  without a terminal helper), `check_lower_emit` appends without the operand
+  class's bookkeeping, and the function's memory classes (`Tier0Function.x87`
+  and `int128`) come from its entries' classes once it is lowered
+  (`check_lower_entry_classes`, 64 at a time, and its twin).
+- **Lane 0's writer's columns in base pages** ([the lanes
+  guide](function-lanes.md#memory)): in the caller's scratch, each cleared a
+  huge page.
+- **Each statement's nodes prefetched a statement ahead.** The tasks' loop
+  waited on its first touch of each node's checked value and conversions, two
+  arrays too large for the caches. A statement's nodes come before its root in
+  the graph, so before each statement the lowering prefetches the next one's,
+  up to its root (`check_lower_prefetch`, its last 64 nodes at most).
+
+The objects are the same bytes. On the 9700X, against main at `ad408cf2`
+(medians: the whole compile's of 10 rounds of `perf stat -r 3`, the two in
+turn, each after a warm-up of its executable; the stage's of 11 rounds of
+`measure-compile` with #520's clock, each build the other's reference; the
+emission's of `benchmark-check-lanes --lanes 1`'s 11 passes, twice each):
+
+| `sqlite3.c` | main | #531 |
+| --- | ---: | ---: |
+| `lower` stage | 25.6 ms | 17.5 ms |
+| its system time and peak RSS added | 2.9 ms, 56,044 KB | 0.0 ms, 9,824 KB |
+| `-c`, task-clock | 190.5 ms | 181.8 ms |
+| user cycles and instructions | 902M, 2,227M | 864M, 2,133M |
+| kernel cycles | 155M | 145M |
+| peak RSS | 674,216 KB | 627,200 KB |
+| the emission on one lane, warm memory | 37.1 ms | 30.0 ms |
+
+What is left is the tasks' loop's dispatch on tasks and operators, and the
+first touches the prefetch doesn't hide; `tier0_validate`'s check of every
+lowered function, a scalar walk of the stack with a mispredicted `switch` per
+entry, 16% of the stage (#569); and the preparation's passes over every token
+(#517).
+
 ## Correctness tests
 
 ```sh
@@ -1149,6 +1241,72 @@ What the mutants and the bases found, each fixed with its fixture:
 
 The 9700X job's test step checks 8 mutants of the frozen SQLite source and 96
 of the oracle's four musl sources with seed 133, on the frozen headers.
+
+## The source reader's passes over the tokens
+
+`check_input` reads the parser's tree in several passes over every token: the
+counts that size its tables, the walk in source order
+(`check_input_resolve_range`), the expression graph's walk in postorder
+(`check_input_expressions`), and the passes after them. #529 cut the work
+they do per token where little of it was per declaration or expression:
+
+- **Value chains.** The graph's walk gives each token the chain of its
+  values, its children's chains joined, and counted the chain by walking each
+  child's again. An initializer's separators are each a child of the next, so
+  a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
+  of the whole `-c`'s cycles. Each token now keeps its chain's length beside
+  its first and last values (`CheckInputReader.value_counts`), and a parent
+  adds its children's. The scalar path, `--scalar`, walks the chains: the
+  tests that compare the two paths compare the counts with the walks.
+- **One pass before reading.** `check_input_count_tokens` makes every count
+  `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
+  operators, operands and calls, and the names of the builtin constants, the
+  varargs, `transparent_union`, `overloadable`, `_Generic` and
+  `__builtin_choose_expr`) in one pass, 64 tokens' kinds and roles and 16
+  tokens' names at a time. The same pass writes each token's syntax bits
+  (`CheckInputReader.syntax`, `BUSTER_CHECK_SYNTAX_*`): one of the names whose
+  builtins the walk prepares, an attribute's start, and a string or
+  `__func__`. The walk in source order tests a bit where it compared the
+  token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
+  instructions fewer, about 70 a token. The scalar path computes each bit with
+  the walk's own tests (`check_input_syntax_of`).
+- **Scans for few tokens.** The passes that act on few tokens test 64 of them
+  at once (16 or 8, by the column's width) and visit only those
+  (`check_input_scan_*`): the constant contexts (static objects, static
+  assertions, case labels), the attribute items, the complete uses (tentative
+  definitions), the asm labels (tokens with attributes, then with
+  declarations) and the intrinsics' operands. Each scalar path visits every
+  token through the same body. The selections are skipped in a unit without
+  a `_Generic` or `__builtin_choose_expr` token, and the VLA finish's scans in
+  one without a variably modified declaration's lifetime.
+- **Builtins' names.** `cbuiltin_resolve`, which the reader asks of each
+  distinct identifier, refuses a name that doesn't start with `__` before it
+  scans its catalog, whose names all do (`test-preprocessor` checks it).
+
+`test-checker` checks every scan, count and syntax bit, by both paths,
+against its own reading of columns of every length to 200 that end at a
+`PROT_NONE` page (`c_check_input_scan_test.c`).
+
+On the 9700X (CPU 2, `-c` of the frozen `sqlite3.c` with #520's options, eight
+rounds of `perf stat -r 3` with main's and this change's executables in
+alternating order), the whole compile went from main's 903.3 million user
+cycles and 2,227.2 million user instructions to 820.9 million and 2,014.0
+million (−9.1% and −9.6%), and its task clock from 190.9 ms to 176.1 ms; every
+round's cycles were apart. #520's stage clock (`measure-compile`, 11 runs of
+each in rotating order, both executables with the clock merged in) puts the
+reader's stage, `check-input`, at 64.8 ms (64.3 to 65.3) against main's 80.3 ms
+(79.7 to 80.8), and the whole compile at 175.5 ms against 190.2 ms. The reader
+alone (`benchmark-checker-bindings --only direct`, 11 passes on warm pages)
+went from 67.3 ms to 54.4 ms (−19%). The object is main's, byte for byte, by
+both paths. The scratch the reader writes grew by 3.5 MB (`value_counts` and
+`syntax`), and the compile's peak RSS by 4.3 MB. [The measurement
+record](https://github.com/buster14a/buster-performance/tree/6929480812d31868d77a515f88ddca3bad408429/docs/measurements/check-input-529-2026-10-27)
+has the scripts, the raw outputs and the trees' manifests.
+
+What is left of the reader's per-token work is in its two walks, each of
+which still reads about ten sparse columns at every token, and in
+`check_input_run`'s fill of 22 columns with `NONE` (#528). Building the
+expression graph data-parallel is the next step for the walks.
 
 ## Benchmark and validation limits
 

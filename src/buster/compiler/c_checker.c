@@ -50,6 +50,11 @@ struct CheckBuiltinCall
     uint64_t object_sizes[4];
     uint64_t minimum_alignment;
     bool alignment_known;
+    // The first argument's leftmost identifier past its prefix operators, casts and parentheses, and its declaration's
+    // alignment as clang gives it (check_input_declaration_alignment), its log2 plus 1: 0 when it names no object. An
+    // atomic's address takes it where its lvalue path starts at that identifier (check_graph_atomic_alignment).
+    uint32_t base_token;
+    uint8_t base_alignment;
 };
 
 typedef struct CheckGraph CheckGraph;
@@ -61,6 +66,9 @@ struct CheckX86Call
     uint64_t required_ice_arguments;
     uint64_t ice_arguments;
     CheckBuiltinX86Reachability reachability;
+    // Unselected source arms diagnose eagerly, independently of executable reachability. An enclosing
+    // unevaluated context still takes precedence through runtime_diagnostic_suppressed.
+    bool unselected_context;
     bool constant_evaluated_context;
     bool runtime_diagnostic_suppressed;
 };
@@ -223,6 +231,8 @@ struct CheckStatistics
     uint32_t nodes;
     uint32_t levels;
     uint32_t batches;
+    // The nodes each path's action computed, and those the vector path completed without one: its leaves
+    // (check_graph_leaf) and its batches' vector-eligible arithmetic.
     uint32_t scalar_nodes;
     uint32_t vector_nodes;
     // Separate source/speculative/emitted lane visits and the ordered publication replay.
@@ -651,6 +661,19 @@ static bool check_graph_builtin(TypeId type)
     return index >= BUSTER_TYPE_CODE_BOOL && index <= BUSTER_TYPE_CODE_LONG_DOUBLE;
 }
 
+// The operators a region may reorder when their operands and results are of builtin arithmetic types (check_graph_pure).
+static bool check_graph_reorderable(CheckOp op)
+{
+    return (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_CONDITIONAL) || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) || op == CHECK_OP_COMMA ||
+           op == CHECK_OP_ASSIGN || op == CHECK_OP_CONDITION || op == CHECK_OP_CAST || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_SELECT;
+}
+
+// Those of them whose result is of the type the graph requests (types[node]).
+static bool check_graph_typed(CheckOp op)
+{
+    return op == CHECK_OP_CAST || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT;
+}
+
 // Only regions known to use builtin arithmetic types can be reordered. An address, decay, composite, or another
 // action that can intern a type is a source-order barrier. This preserves identical TypeIds in fresh tables, not
 // merely in a table already populated by the scalar oracle. A non-builtin value conservatively ends a region.
@@ -667,9 +690,9 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     {
         result = graph->operand0[node] == BUSTER_CHECK_NONE || pure[graph->operand0[node]] != 0;
     }
-    else if ((op >= CHECK_OP_POSITIVE && op <= CHECK_OP_CONDITIONAL) || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) || op == CHECK_OP_COMMA || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONDITION || op == CHECK_OP_CAST || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_SELECT)
+    else if (check_graph_reorderable(op))
     {
-        result = op != CHECK_OP_CAST && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT;
+        result = !check_graph_typed(op);
         result = result || check_graph_builtin(requested) || requested == BUSTER_TYPE_VOID;
         const uint32_t operands[] =
         {
@@ -688,7 +711,26 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     return result;
 }
 
-static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_t* maximum_arguments, uint32_t* maximum_effects, uint32_t builtins[6], uint32_t* failed)
+// What check_graph_validate counts as it goes: each argument slice's and sideband list's consumption, in node order, and the
+// maxima and counts check_graph_run sizes its outputs by. Only a valid graph's are defined.
+typedef struct CheckGraphValidation CheckGraphValidation;
+struct CheckGraphValidation
+{
+    uint32_t maximum_arguments;
+    uint32_t maximum_effects;
+    uint32_t builtins[6];
+    uint32_t arguments;
+    uint32_t varargs;
+    uint32_t builtin_calls;
+    uint32_t vectors;
+    uint32_t x86;
+    uint32_t overloads;
+    // The blocks check_graph_validate_vector decided itself, without the exact path (0 on that path).
+    uint32_t vector_blocks;
+};
+
+// The graph's own counts, its sideband lists and the columns every node needs, before any node.
+static bool check_graph_validate_lists(const CheckGraph* graph)
 {
     bool result = graph->count <= graph->capacity && graph->count <= (1u << 30) && graph->argument_count <= graph->argument_capacity && graph->argument_count <= (1u << 30);
     result = result && graph->varargs_count <= graph->varargs_capacity && graph->varargs_count <= graph->count &&
@@ -737,16 +779,6 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     result = result && (graph->tag_completions != 0 ? graph->source_positions != 0 : graph->tag_completion_count == 0);
     result = result && (graph->transparent_unions == NULL || graph->tag_completions != NULL);
     result = result && (graph->extensions & ~(BUSTER_CHECK_EXTENSION_GNU | BUSTER_CHECK_EXTENSION_GNU_CONSTANT)) == 0;
-    *maximum_arguments = 0;
-    *maximum_effects = 0;
-    memset(builtins, 0, 6 * sizeof(*builtins));
-    *failed = BUSTER_CHECK_NONE;
-    uint32_t consumed_arguments = 0;
-    uint32_t consumed_varargs = 0;
-    uint32_t consumed_builtins = 0;
-    uint32_t consumed_vectors = 0;
-    uint32_t consumed_x86 = 0;
-    uint32_t consumed_overloads = 0;
     if (graph->count != 0)
     {
         result = result && graph->ops != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0;
@@ -755,112 +787,336 @@ static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, uint32_
     {
         result = result && graph->argument_nodes != 0;
     }
-    for (uint32_t node = 0; result && node < graph->count; node += 1)
+    return result;
+}
+
+// One node, every node before it valid: its operator, edges, columns and turn in each sideband list, then its purity and the
+// counters. The exact path: check_graph_validate runs it on every node, check_graph_validate_vector on the blocks it leaves.
+static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, uint8_t* pure, CheckGraphValidation* state)
+{
+    const CheckOp op = graph->ops[node];
+    const TypeId requested = graph->types != 0 ? graph->types[node] : 0;
+    const uint32_t offset = graph->argument_offsets != 0 ? graph->argument_offsets[node] : 0;
+    const uint32_t count = graph->argument_counts != 0 ? graph->argument_counts[node] : 0;
+    const bool varargs = op == CHECK_OP_VARARGS;
+    const bool type_argument = varargs && graph->members != NULL && graph->members[node] == CBUILTIN_VA_ARG;
+    const uint32_t arity = varargs ? (type_argument ? count != 0 : count < 2 ? count : 2) : check_graph_arity(op, requested);
+    const uint32_t operands[] =
     {
-        const CheckOp op = graph->ops[node];
-        const TypeId requested = graph->types != 0 ? graph->types[node] : 0;
-        const uint32_t offset = graph->argument_offsets != 0 ? graph->argument_offsets[node] : 0;
-        const uint32_t count = graph->argument_counts != 0 ? graph->argument_counts[node] : 0;
-        const bool varargs = op == CHECK_OP_VARARGS;
-        const bool type_argument = varargs && graph->members != NULL && graph->members[node] == CBUILTIN_VA_ARG;
-        const uint32_t arity = varargs ? (type_argument ? count != 0 : count < 2 ? count : 2) : check_graph_arity(op, requested);
-        const uint32_t operands[] =
+        graph->operand0[node],
+        graph->operand1[node],
+        graph->operand2[node],
+    };
+    bool result = op >= CHECK_OP_VALUE && op < CHECK_OP_COUNT;
+    result = result && (graph->tag_completions == 0 || graph->source_positions[node] != BUSTER_CHECK_NONE);
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        result = result && (i < arity ? operands[i] < node : operands[i] == BUSTER_CHECK_NONE);
+    }
+    result = result && (op != CHECK_OP_VALUE || graph->leaves != 0);
+    if (result && op == CHECK_OP_VALUE)
+    {
+        result = graph->leaves[node].overload_head <= graph->overload_candidate_count;
+    }
+    result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
+    result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
+    result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)) == 0);
+    result = result && (graph->fp_environments == NULL || (graph->fp_environments[node] & ~BUSTER_CHECK_FP_ENV_ACCESS) == 0);
+    result = result && (graph->warning_suppressed == NULL ||
+                        (graph->warning_suppressed[node] & ~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
+                                                           CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) == 0);
+    if (varargs)
+    {
+        result = result && graph->argument_offsets != NULL && graph->argument_counts != NULL && graph->members != NULL &&
+                 offset == state->varargs && offset < graph->varargs_count && graph->varargs_calls[offset].node == node;
+    }
+    else
+    {
+        result = result && offset <= graph->argument_count && count <= graph->argument_count - offset && (count == 0 || check_graph_has_arguments(op));
+        result = result && (count == 0 || offset == state->arguments);
+        for (uint32_t i = 0; result && i < count; i += 1)
         {
-            graph->operand0[node],
-            graph->operand1[node],
-            graph->operand2[node],
-        };
-        result = op >= CHECK_OP_VALUE && op < CHECK_OP_COUNT;
-        result = result && (graph->tag_completions == 0 || graph->source_positions[node] != BUSTER_CHECK_NONE);
-        for (uint32_t i = 0; i < 3; i += 1)
-        {
-            result = result && (i < arity ? operands[i] < node : operands[i] == BUSTER_CHECK_NONE);
-        }
-        result = result && (op != CHECK_OP_VALUE || graph->leaves != 0);
-        if (result && op == CHECK_OP_VALUE)
-        {
-            result = graph->leaves[node].overload_head <= graph->overload_candidate_count;
-        }
-        result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
-        result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
-        result = result && (graph->contexts == 0 || (graph->contexts[node] & ~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)) == 0);
-        result = result && (graph->fp_environments == NULL || (graph->fp_environments[node] & ~BUSTER_CHECK_FP_ENV_ACCESS) == 0);
-        result = result && (graph->warning_suppressed == NULL ||
-                            (graph->warning_suppressed[node] & ~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
-                                                               CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE)) == 0);
-        if (varargs)
-        {
-            result = result && graph->argument_offsets != NULL && graph->argument_counts != NULL && graph->members != NULL &&
-                     offset == consumed_varargs && offset < graph->varargs_count && graph->varargs_calls[offset].node == node;
-        }
-        else
-        {
-            result = result && offset <= graph->argument_count && count <= graph->argument_count - offset && (count == 0 || check_graph_has_arguments(op));
-            result = result && (count == 0 || offset == consumed_arguments);
-            for (uint32_t i = 0; result && i < count; i += 1)
-            {
-                result = graph->argument_nodes[offset + i] < node;
-            }
-        }
-        if (result && consumed_builtins < graph->builtin_count && graph->builtin_calls[consumed_builtins].node <= node)
-        {
-            const CheckBuiltinCall* call = graph->builtin_calls + consumed_builtins;
-            result = call->node == node &&
-                     (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
-                      op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST);
-            const bool shuffle = op == CHECK_OP_BUILTIN_VECTOR && graph->members != NULL && graph->members[node] == CBUILTIN_SHUFFLEVECTOR;
-            result = result && (call->shuffle_index_ice != NULL ? shuffle && count >= 2 && call->shuffle_index_ice_count == count - 2 : call->shuffle_index_ice_count == 0);
-            for (uint32_t i = 0; result && i < call->shuffle_index_ice_count; i += 1)
-            {
-                result = call->shuffle_index_ice[i] <= CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU;
-            }
-            result = result && (unsigned)call->bit_cast_proof <= CHECK_BUILTIN_BIT_CAST_PROOF_ICE &&
-                     (call->bit_cast_bytes != NULL || call->bit_cast_byte_count == 0) &&
-                     (op == CHECK_OP_BUILTIN_BIT_CAST || (call->bit_cast_proof == CHECK_BUILTIN_BIT_CAST_PROOF_NONE &&
-                      call->bit_cast_bytes == NULL && call->bit_cast_byte_count == 0));
-            consumed_builtins += 1;
-        }
-        if (result && consumed_vectors < graph->vector_member_count && graph->vector_members[consumed_vectors].node <= node)
-        {
-            const CheckVectorCall* vector = graph->vector_members + consumed_vectors;
-            result = vector->node == node && op == CHECK_OP_MEMBER && vector->member.kind <= CHECK_VECTOR_MEMBER_ODD &&
-                     vector->member.count <= (1u << 30) && (vector->member.count == 0 || vector->member.lanes != NULL);
-            consumed_vectors += 1;
-        }
-        if (result && op == CHECK_OP_BUILTIN_X86)
-        {
-            result = consumed_x86 < graph->x86_count && graph->x86_calls[consumed_x86].node == node &&
-                     graph->x86_calls[consumed_x86].info != NULL && graph->types != NULL;
-            consumed_x86 += result;
-        }
-        if (result && consumed_overloads < graph->overload_count && graph->overload_calls[consumed_overloads].node <= node)
-        {
-            const CheckOverloadCall* call = graph->overload_calls + consumed_overloads;
-            result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count;
-            consumed_overloads += 1;
-        }
-        if (result)
-        {
-            pure[node] = (uint8_t)check_graph_pure(graph, node, pure);
-            *maximum_arguments = !varargs && count > *maximum_arguments ? count : *maximum_arguments;
-            *maximum_effects += op == CHECK_OP_BUILTIN_OVERFLOW;
-            consumed_arguments += varargs ? 0 : count;
-            consumed_varargs += varargs;
-            builtins[0] += op == CHECK_OP_BUILTIN_MISC;
-            builtins[1] += op == CHECK_OP_BUILTIN_FLOAT;
-            builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
-            builtins[3] += op == CHECK_OP_BUILTIN_ATOMIC;
-            builtins[4] += op == CHECK_OP_BUILTIN_VECTOR;
-            builtins[5] += op == CHECK_OP_BUILTIN_BIT_CAST;
-        }
-        else
-        {
-            *failed = node;
+            result = graph->argument_nodes[offset + i] < node;
         }
     }
-    result = result && consumed_arguments == graph->argument_count && consumed_varargs == graph->varargs_count &&
-             consumed_builtins == graph->builtin_count && consumed_vectors == graph->vector_member_count && consumed_x86 == graph->x86_count;
-    result = result && consumed_overloads == graph->overload_count;
+    if (result && state->builtin_calls < graph->builtin_count && graph->builtin_calls[state->builtin_calls].node <= node)
+    {
+        const CheckBuiltinCall* call = graph->builtin_calls + state->builtin_calls;
+        result = call->node == node &&
+                 (op == CHECK_OP_BUILTIN_FLOAT || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_ATOMIC ||
+                  op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_BIT_CAST);
+        const bool shuffle = op == CHECK_OP_BUILTIN_VECTOR && graph->members != NULL && graph->members[node] == CBUILTIN_SHUFFLEVECTOR;
+        result = result && (call->shuffle_index_ice != NULL ? shuffle && count >= 2 && call->shuffle_index_ice_count == count - 2 : call->shuffle_index_ice_count == 0);
+        for (uint32_t i = 0; result && i < call->shuffle_index_ice_count; i += 1)
+        {
+            result = call->shuffle_index_ice[i] <= CHECK_BUILTIN_VECTOR_INDEX_ICE_GNU;
+        }
+        result = result && (unsigned)call->bit_cast_proof <= CHECK_BUILTIN_BIT_CAST_PROOF_ICE &&
+                 (call->bit_cast_bytes != NULL || call->bit_cast_byte_count == 0) &&
+                 (op == CHECK_OP_BUILTIN_BIT_CAST || (call->bit_cast_proof == CHECK_BUILTIN_BIT_CAST_PROOF_NONE &&
+                  call->bit_cast_bytes == NULL && call->bit_cast_byte_count == 0));
+        state->builtin_calls += 1;
+    }
+    if (result && state->vectors < graph->vector_member_count && graph->vector_members[state->vectors].node <= node)
+    {
+        const CheckVectorCall* vector = graph->vector_members + state->vectors;
+        result = vector->node == node && op == CHECK_OP_MEMBER && vector->member.kind <= CHECK_VECTOR_MEMBER_ODD &&
+                 vector->member.count <= (1u << 30) && (vector->member.count == 0 || vector->member.lanes != NULL);
+        state->vectors += 1;
+    }
+    if (result && op == CHECK_OP_BUILTIN_X86)
+    {
+        result = state->x86 < graph->x86_count && graph->x86_calls[state->x86].node == node &&
+                 graph->x86_calls[state->x86].info != NULL && graph->types != NULL;
+        state->x86 += result;
+    }
+    if (result && state->overloads < graph->overload_count && graph->overload_calls[state->overloads].node <= node)
+    {
+        const CheckOverloadCall* call = graph->overload_calls + state->overloads;
+        result = call->node == node && op == CHECK_OP_CALL && call->head < graph->overload_candidate_count;
+        state->overloads += 1;
+    }
+    if (result)
+    {
+        pure[node] = (uint8_t)check_graph_pure(graph, node, pure);
+        state->maximum_arguments = !varargs && count > state->maximum_arguments ? count : state->maximum_arguments;
+        state->maximum_effects += op == CHECK_OP_BUILTIN_OVERFLOW;
+        state->arguments += varargs ? 0 : count;
+        state->varargs += varargs;
+        state->builtins[0] += op == CHECK_OP_BUILTIN_MISC;
+        state->builtins[1] += op == CHECK_OP_BUILTIN_FLOAT;
+        state->builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
+        state->builtins[3] += op == CHECK_OP_BUILTIN_ATOMIC;
+        state->builtins[4] += op == CHECK_OP_BUILTIN_VECTOR;
+        state->builtins[5] += op == CHECK_OP_BUILTIN_BIT_CAST;
+    }
+    return result;
+}
+
+// Every node consumed every argument slot and sideband entry.
+static bool check_graph_validate_consumed(const CheckGraph* graph, const CheckGraphValidation* state)
+{
+    return state->arguments == graph->argument_count && state->varargs == graph->varargs_count && state->builtin_calls == graph->builtin_count &&
+           state->vectors == graph->vector_member_count && state->x86 == graph->x86_count && state->overloads == graph->overload_count;
+}
+
+// The scalar twin of check_graph_validate_vector: every node in order, up to the first invalid one, which `failed` names.
+static bool check_graph_validate(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
+{
+    *state = (CheckGraphValidation){ 0 };
+    *failed = BUSTER_CHECK_NONE;
+    bool result = check_graph_validate_lists(graph);
+    for (uint32_t node = 0; result && node < graph->count; node += 1)
+    {
+        result = check_graph_validate_node(graph, node, pure, state);
+        *failed = result ? BUSTER_CHECK_NONE : node;
+    }
+    result = result && check_graph_validate_consumed(graph, state);
+    return result;
+}
+
+// check_graph_validate_vector's classes of operators, a byte each, from the exact path's rules (check_graph_classes): the
+// arity (a query's that names no type), whether it takes an argument slice, whether a region may reorder it and with the
+// requested type, whether it is sizeof or _Alignof, and whether only the exact path checks it.
+#define BUSTER_CHECK_CLASS_ARITY 0x03u
+#define BUSTER_CHECK_CLASS_ARGUMENTS 0x04u
+#define BUSTER_CHECK_CLASS_REORDERABLE 0x08u
+#define BUSTER_CHECK_CLASS_TYPED 0x10u
+#define BUSTER_CHECK_CLASS_QUERY 0x20u
+#define BUSTER_CHECK_CLASS_EXACT 0x40u
+// vpermi2b's table: an operator's low seven bits index it. Operators past CHECK_OP_COUNT fail before their class counts.
+#define BUSTER_CHECK_CLASS_OPERATORS 128u
+#define BUSTER_CHECK_VALIDATE_LANES 16u
+
+_Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the vector validator loads operators as 32-bit lanes");
+_Static_assert(CHECK_OP_COUNT <= BUSTER_CHECK_CLASS_OPERATORS, "every operator has a class byte");
+
+static void check_graph_classes(uint8_t* classes)
+{
+    for (uint32_t i = 0; i < BUSTER_CHECK_CLASS_OPERATORS; i += 1)
+    {
+        const CheckOp op = (CheckOp)i;
+        const bool query = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
+        // VARARGS reads its own list and an x86 builtin its calls' rules, in check_graph_validate_node alone.
+        const bool exact = op == CHECK_OP_VARARGS || op == CHECK_OP_BUILTIN_X86;
+        classes[i] = (uint8_t)(check_graph_arity(op, 0) | (check_graph_has_arguments(op) ? BUSTER_CHECK_CLASS_ARGUMENTS : 0) |
+                               (check_graph_reorderable(op) ? BUSTER_CHECK_CLASS_REORDERABLE : 0) | (check_graph_typed(op) ? BUSTER_CHECK_CLASS_TYPED : 0) |
+                               (query ? BUSTER_CHECK_CLASS_QUERY : 0) | (exact ? BUSTER_CHECK_CLASS_EXACT : 0));
+    }
+}
+
+// The sixteen nodes from `node`, every node before them valid: true with their purity and the counters as
+// check_graph_validate_node gives them, or false with neither, for the exact path to decide them. That path takes a block
+// with an invalid node, a VARARGS or x86 builtin or a sideband entry; the block checks each leaf's overload head, each
+// column's rule in its lanes and each argument slice's nodes before it commits anything. `classes` is check_graph_classes'
+// table in two vectors; pure[graph->count] is 1, an absent operand's purity.
+static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, uint8_t* pure, CheckGraphValidation* state, __m512i classes_low, __m512i classes_high)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
+    const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+    const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+    // A leaf's overload head, and whether a region may reorder it: first, while little else is live, since each leaf is two
+    // cache lines of its record and these are most of the block's time.
+    const __mmask16 leaves = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VALUE));
+    const bool readable = graph->leaves != 0;
+    bool heads = true;
+    uint32_t reorderable_leaves = 0;
+    for (uint32_t lanes = readable ? leaves : 0; lanes != 0; lanes &= lanes - 1)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
+        const CheckValue* leaf = graph->leaves + node + lane;
+        heads &= leaf->overload_head <= graph->overload_candidate_count;
+        reorderable_leaves |= (uint32_t)(leaf->overload_head == 0 && check_graph_builtin(leaf->type)) << lane;
+    }
+    const __m512i requested = _mm512_loadu_si512(graph->types + node);
+    const __m512i offsets = _mm512_loadu_si512(graph->argument_offsets + node);
+    const __m512i counts = _mm512_loadu_si512(graph->argument_counts + node);
+    const __m512i members = _mm512_loadu_si512(graph->members + node);
+    const __m512i operands[3] =
+    {
+        _mm512_loadu_si512(graph->operand0 + node),
+        _mm512_loadu_si512(graph->operand1 + node),
+        _mm512_loadu_si512(graph->operand2 + node),
+    };
+    const __m128i op_bytes = _mm512_cvtepi32_epi8(ops);
+    const __m512i classes = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(classes_low, _mm512_zextsi128_si512(op_bytes), classes_high)));
+    const __mmask16 query = _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_QUERY));
+    const __m512i arity = _mm512_mask_mov_epi32(_mm512_and_si512(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_ARITY)), query & _mm512_test_epi32_mask(requested, requested), zero);
+    __mmask16 valid = _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(CHECK_OP_COUNT));
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        const __mmask16 used = _mm512_cmpgt_epu32_mask(arity, _mm512_set1_epi32((int)i));
+        valid &= (used & _mm512_cmplt_epu32_mask(operands[i], nodes)) | ((__mmask16)~used & _mm512_cmpeq_epi32_mask(operands[i], none));
+    }
+    if (graph->tag_completions != 0)
+    {
+        valid &= _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(graph->source_positions + node), none);
+    }
+    valid &= readable ? (__mmask16)0xffff : (__mmask16)~leaves;
+    valid &= (__mmask16)~_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_STATEMENT_VALUE)) | _mm512_testn_epi32_mask(members, _mm512_set1_epi32((int)~BUSTER_CHECK_SIDE_EFFECT));
+    const __mmask16 bounds = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VLA_BOUND)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VLA_EXTENT));
+    valid &= (__mmask16)~bounds | _mm512_test_epi32_mask(members, members);
+    if (graph->contexts != 0)
+    {
+        const __m512i contexts = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->contexts + node)));
+        valid &= _mm512_testn_epi32_mask(contexts, _mm512_set1_epi32((int)~(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_GNU_CONSTANT)));
+    }
+    if (graph->fp_environments != NULL)
+    {
+        const __m512i environments = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->fp_environments + node)));
+        valid &= _mm512_testn_epi32_mask(environments, _mm512_set1_epi32((int)~BUSTER_CHECK_FP_ENV_ACCESS));
+    }
+    if (graph->warning_suppressed != NULL)
+    {
+        const __m512i suppressed = _mm512_cvtepu8_epi32(_mm_loadu_si128((const __m128i*)(graph->warning_suppressed + node)));
+        valid &= _mm512_testn_epi32_mask(suppressed, _mm512_set1_epi32((int)~(CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE |
+                                                                              CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE)));
+    }
+    // Argument slices within the arguments, an operator's that takes them, each starting where the block's earlier ones end:
+    // an exclusive prefix sum of the counts. While every lane holds, the sums stay within argument_count, below 2^31.
+    const __m512i total = _mm512_set1_epi32((int)graph->argument_count);
+    valid &= _mm512_cmple_epu32_mask(offsets, total) & _mm512_cmple_epu32_mask(counts, _mm512_sub_epi32(total, offsets));
+    const __mmask16 sliced = _mm512_test_epi32_mask(counts, counts);
+    valid &= (__mmask16)~sliced | _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_ARGUMENTS));
+    __m512i ends = counts;
+    ends = _mm512_add_epi32(ends, _mm512_alignr_epi32(ends, zero, 15));
+    ends = _mm512_add_epi32(ends, _mm512_alignr_epi32(ends, zero, 14));
+    ends = _mm512_add_epi32(ends, _mm512_alignr_epi32(ends, zero, 12));
+    ends = _mm512_add_epi32(ends, _mm512_alignr_epi32(ends, zero, 8));
+    const __m512i starts = _mm512_add_epi32(_mm512_sub_epi32(ends, counts), _mm512_set1_epi32((int)state->arguments));
+    valid &= (__mmask16)~sliced | _mm512_cmpeq_epi32_mask(offsets, starts);
+    const uint32_t last = node + BUSTER_CHECK_VALIDATE_LANES - 1;
+    bool result = valid == 0xffff && heads && _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_EXACT)) == 0 &&
+                  (state->builtin_calls == graph->builtin_count || graph->builtin_calls[state->builtin_calls].node > last) &&
+                  (state->vectors == graph->vector_member_count || graph->vector_members[state->vectors].node > last) &&
+                  (state->overloads == graph->overload_count || graph->overload_calls[state->overloads].node > last);
+    for (uint32_t lanes = result ? sliced : 0; lanes != 0; lanes &= lanes - 1)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
+        const uint32_t first = graph->argument_offsets[node + lane];
+        const uint32_t count = graph->argument_counts[node + lane];
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            result &= graph->argument_nodes[first + i] < node + lane;
+        }
+    }
+    if (result)
+    {
+        // check_graph_pure: a reorderable leaf, a query, or an operator a region may reorder (with a builtin or void requested
+        // type, if its result has it), and every operand present reorderable. An absent operand reads pure[count]'s 1.
+        const __mmask16 reorderable = _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_REORDERABLE));
+        const __mmask16 typed = _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_TYPED));
+        const __m512i code = _mm512_sub_epi32(_mm512_srli_epi32(requested, BUSTER_TYPE_INDEX_SHIFT), _mm512_set1_epi32(BUSTER_TYPE_CODE_BOOL));
+        const __mmask16 builtin = _mm512_cmple_epu32_mask(code, _mm512_set1_epi32(BUSTER_TYPE_CODE_LONG_DOUBLE - BUSTER_TYPE_CODE_BOOL));
+        const __mmask16 type = builtin | _mm512_cmpeq_epi32_mask(requested, _mm512_set1_epi32((int)BUSTER_TYPE_VOID));
+        const uint32_t local = (uint32_t)(query | (reorderable & ((__mmask16)~typed | type))) | reorderable_leaves;
+        _Alignas(64) uint32_t edges[3][BUSTER_CHECK_VALIDATE_LANES];
+        const __m512i absent = _mm512_set1_epi32((int)graph->count);
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            _mm512_store_si512(edges[i], _mm512_min_epu32(operands[i], absent));
+        }
+        // In node order: an operand may be an earlier lane.
+        for (uint32_t lane = 0; lane < BUSTER_CHECK_VALIDATE_LANES; lane += 1)
+        {
+            pure[node + lane] = (uint8_t)((local >> lane) & 1u & pure[edges[0][lane]] & pure[edges[1][lane]] & pure[edges[2][lane]]);
+        }
+        const uint32_t widest = _mm512_reduce_max_epu32(counts);
+        state->maximum_arguments = widest > state->maximum_arguments ? widest : state->maximum_arguments;
+        state->arguments += (uint32_t)_mm512_reduce_add_epi32(counts);
+        state->maximum_effects += (uint32_t)__builtin_popcount(_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)));
+        const CheckOp counted[6] =
+        {
+            CHECK_OP_BUILTIN_MISC,
+            CHECK_OP_BUILTIN_FLOAT,
+            CHECK_OP_BUILTIN_QUERY,
+            CHECK_OP_BUILTIN_ATOMIC,
+            CHECK_OP_BUILTIN_VECTOR,
+            CHECK_OP_BUILTIN_BIT_CAST,
+        };
+        for (uint32_t i = 0; i < 6; i += 1)
+        {
+            state->builtins[i] += (uint32_t)__builtin_popcount(_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(counted[i])));
+        }
+    }
+    return result;
+}
+
+// check_graph_validate's result, failed node and, for a valid graph, its purity and counters, sixteen nodes at a time
+// (check_graph_validate_block) where the optional columns the blocks read are present. `pure` has graph->count + 1 bytes.
+static bool check_graph_validate_vector(const CheckGraph* graph, uint8_t* pure, CheckGraphValidation* state, uint32_t* failed)
+{
+    *state = (CheckGraphValidation){ 0 };
+    *failed = BUSTER_CHECK_NONE;
+    bool result = check_graph_validate_lists(graph);
+    const uint32_t count = graph->count;
+    const bool columns = graph->types != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL && graph->members != NULL;
+    _Alignas(64) uint8_t table[BUSTER_CHECK_CLASS_OPERATORS];
+    check_graph_classes(table);
+    const __m512i classes_low = _mm512_load_si512(table);
+    const __m512i classes_high = _mm512_load_si512(table + 64);
+    if (count != 0)
+    {
+        pure[count] = 1;
+    }
+    uint32_t node = 0;
+    for (; result && columns && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    {
+        const bool block = check_graph_validate_block(graph, node, pure, state, classes_low, classes_high);
+        state->vector_blocks += block;
+        for (uint32_t lane = 0; result && !block && lane < BUSTER_CHECK_VALIDATE_LANES; lane += 1)
+        {
+            result = check_graph_validate_node(graph, node + lane, pure, state);
+            *failed = result ? BUSTER_CHECK_NONE : node + lane;
+        }
+    }
+    for (; result && node < count; node += 1)
+    {
+        result = check_graph_validate_node(graph, node, pure, state);
+        *failed = result ? BUSTER_CHECK_NONE : node;
+    }
+    result = result && check_graph_validate_consumed(graph, state);
     return result;
 }
 
@@ -945,6 +1201,34 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
     stream->warnings[node] = result->warnings;
 }
 
+// check_graph_run's marks for the vector scheduler, in its `pure` column: a node a region may reorder (check_graph_pure),
+// and a leaf check_graph_region completed before it scheduled the rest.
+#define BUSTER_CHECK_MARK_PURE 0x01u
+#define BUSTER_CHECK_MARK_DONE 0x02u
+
+// Whether the vector path completes `node` as a leaf (check_graph_leaf): a VALUE without an overload set, about 45% of
+// sqlite3.c's body nodes.
+static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
+{
+    return graph->ops[node] == CHECK_OP_VALUE && graph->leaves[node].overload_head == 0;
+}
+
+// Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
+// VALUE action reads no operand and interns no type. That is the leaf with its type as operand 0's conversion, or for an
+// invalid type, that type's diagnostic and a zero value (check_action_compute skips the operator then); its diagnostic
+// operand is the run's zero. The vector path writes it in node order, beside its neighbours' records, whose cache lines a
+// separate pass of leaves would write a second time (on sqlite3.c, a sixth of the graph's time).
+static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+{
+    const CheckValue* leaf = graph->leaves + node;
+    const bool valid = type_is_valid(types, leaf->type);
+    stream->values[node] = valid ? *leaf : (CheckValue){ 0 };
+    stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
+    stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
+    stream->warnings[node] = 0;
+    stream->statistics.vector_nodes += 1;
+}
+
 static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph, uint32_t node)
 {
     uint32_t first = 0;
@@ -964,10 +1248,11 @@ static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph,
     return first < graph->builtin_count && graph->builtin_calls[first].node == node ? graph->builtin_calls + first : NULL;
 }
 
-static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
+static void check_x86_action(TypeTable* types, const CheckX86Call* call, const CheckAction* action, CheckBuiltinX86Result* checked)
 {
     const uint32_t node = action->node;
-    const CheckX86Call* call = graph->x86_calls + stream->x86_count;
+    CheckActionResult ordinary_result;
+    CheckActionResult* result = &ordinary_result;
     CheckAction ordinary = *action;
     ordinary.op = CHECK_OP_CALL;
     ordinary.operands[0] = (CheckValue){ .type = action->type, .category = CHECK_FUNCTION };
@@ -1005,14 +1290,21 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
         .ice_arguments = call->ice_arguments,
         .node = node,
         .typed_call = *result,
-        .reachability = call->reachability,
+        .reachability = call->unselected_context ? CHECK_BUILTIN_X86_REACHABLE : call->reachability,
         // Exact constraint-scope attestation is supplied by the frozen catalogue adapter below.
         .name_in_scope = builtin_intrinsic_own_main_prototype_in_scope(call->info->name, call->info->name_length),
         .constant_evaluated_context = call->constant_evaluated_context,
         .runtime_diagnostic_suppressed = call->runtime_diagnostic_suppressed,
     };
+    check_builtin_x86(types, &input, checked, 1);
+}
+
+static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
+{
+    const uint32_t node = action->node;
+    const CheckX86Call* call = graph->x86_calls + stream->x86_count;
     CheckBuiltinX86Result checked;
-    check_builtin_x86(types, &input, &checked, 1);
+    check_x86_action(types, call, action, &checked);
     *result = checked.action;
     CheckBuiltinX86Effect* effect = stream->x86 + stream->x86_count++;
     *effect = (CheckBuiltinX86Effect){
@@ -1026,6 +1318,154 @@ static void check_graph_x86_action(TypeTable* types, const CheckGraph* graph, Ch
         .range_event_count = checked.range_event_count,
     };
     memcpy(effect->range_events, checked.range_events, sizeof(effect->range_events));
+}
+
+#define BUSTER_CHECK_ALIGNMENT_STEPS 32u
+
+// A step of an atomic object's address, from its base out: a member's or an element's byte offset (a member's also makes
+// the alignment a declaration's, as getFieldAlignmentSource does), or an explicit cast to a pointer type.
+typedef struct CheckAlignmentStep CheckAlignmentStep;
+struct CheckAlignmentStep
+{
+    uint64_t offset;
+    TypeId cast;
+    bool member;
+};
+
+// The alignment clang's code generation gives an atomic builtin's object (EmitPointerWithAlignment, CGExpr.cpp), from the
+// pointer argument's subgraph. A pointer value gets its pointee type's alignment (an aligned typedef's, which may be less);
+// a cast between pointer types its operand's, but an explicit cast its own pointee type's where the operand's came from a
+// type rather than a declaration; pointer arithmetic its pointer's at the index's offset, or at the element's size for an
+// index that isn't a constant (emitPointerArithmetic); `&` of an lvalue and an array's decay the lvalue's address's: an
+// object's its declaration's (getDeclAlign, from the witness), `*p` the pointer's, a member its base's at the member's
+// offset (a packed record's is 1), and an element its array's or its pointer's as pointer arithmetic has it. A member's or
+// an element's alignment is a declaration's (getFieldAlignmentSource). The steps are read down to the base, then applied
+// from it out. A member's offset is its whole offset from its record, where clang applies each anonymous member's on the
+// way. Returns the alignment's log2, or UINT32_MAX for a step it doesn't model, an object the witness doesn't give, or more
+// than BUSTER_CHECK_ALIGNMENT_STEPS steps.
+static uint32_t check_graph_atomic_alignment(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, const CheckBuiltinCall* witness)
+{
+    CheckAlignmentStep steps[BUSTER_CHECK_ALIGNMENT_STEPS];
+    uint32_t count = 0;
+    uint32_t result = UINT32_MAX;
+    bool lvalue = false;
+    bool declaration = false;
+    bool done = false;
+    while (!done && node < stream->count && count < BUSTER_CHECK_ALIGNMENT_STEPS)
+    {
+        const CheckOp op = (CheckOp)graph->ops[node];
+        const TypeId type = stream->values[node].type;
+        const uint8_t kind = check_action_kind(types, type);
+        const uint32_t operand = graph->operand0[node];
+        const uint32_t second = graph->operand1[node];
+        if (!lvalue && type_kind_is_array(kind))
+        {
+            lvalue = true;
+        }
+        else if (op == CHECK_OP_SELECT && operand < node)
+        {
+            node = operand;
+        }
+        else if (!lvalue && kind != BUSTER_TYPE_KIND_POINTER)
+        {
+            done = true;
+        }
+        else if (!lvalue && op == CHECK_OP_ADDRESS && operand < node)
+        {
+            node = operand;
+            lvalue = true;
+        }
+        else if (!lvalue && op == CHECK_OP_CAST && operand < node)
+        {
+            const TypeId inner = stream->values[operand].type;
+            const uint8_t inner_kind = check_action_kind(types, inner);
+            const bool object = inner_kind == BUSTER_TYPE_KIND_POINTER &&
+                                check_action_kind(types, type_element(types, type_strip_aligned(types, inner))) != BUSTER_TYPE_KIND_VOID;
+            if (object || type_kind_is_array(inner_kind))
+            {
+                steps[count++] = (CheckAlignmentStep){ .cast = type };
+                node = operand;
+            }
+            else
+            {
+                // From void *, an integer or anything else, the cast's own pointee type's.
+                result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, type)));
+                done = true;
+            }
+        }
+        else if (((lvalue && op == CHECK_OP_SUBSCRIPT) || (!lvalue && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT))) && operand < node && second < node)
+        {
+            // The pointer is a subtraction's left operand, and either of an addition's or a subscript's.
+            const uint8_t left = check_action_kind(types, stream->values[operand].type);
+            const bool reverse = op != CHECK_OP_SUBTRACT && left != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(left);
+            const uint32_t base = reverse ? second : operand;
+            const CheckValue* index = stream->values + (reverse ? operand : second);
+            const TypeId element = op == CHECK_OP_SUBSCRIPT ? type : type_element(types, type_strip_aligned(types, type));
+            const uint8_t element_kind = check_action_kind(types, element);
+            const uint64_t size = element_kind == BUSTER_TYPE_KIND_VOID || element_kind == BUSTER_TYPE_KIND_FUNCTION ? 1 : type_size(types, element);
+            int64_t number = 0;
+            uint64_t offset = size;
+            if (check_action_i64(types, index, &number))
+            {
+                offset = size * (number < 0 ? 0 - (uint64_t)number : (uint64_t)number);
+            }
+            steps[count++] = (CheckAlignmentStep){ .offset = offset };
+            node = base;
+            lvalue = type_kind_is_array(check_action_kind(types, stream->values[base].type));
+        }
+        else if (!lvalue)
+        {
+            result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, type)));
+            done = true;
+        }
+        else if (op == CHECK_OP_VALUE)
+        {
+            const bool witnessed = witness != NULL && witness->base_alignment != 0 && graph->tokens != NULL && graph->tokens[node] == witness->base_token;
+            result = witnessed ? (uint32_t)witness->base_alignment - 1 : UINT32_MAX;
+            declaration = true;
+            done = true;
+        }
+        else if (op == CHECK_OP_DEREFERENCE && operand < node)
+        {
+            node = operand;
+            lvalue = false;
+        }
+        else if ((op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && operand < node && (stream->values[node].flags & BUSTER_CHECK_BIT_FIELD) == 0)
+        {
+            TypeId record = type_strip_aligned(types, stream->values[operand].type);
+            record = op == CHECK_OP_ARROW && check_action_kind(types, record) == BUSTER_TYPE_KIND_POINTER ?
+                     type_strip_aligned(types, type_element(types, record)) : record;
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            CheckActionResult found = { 0 };
+            const uint8_t record_kind = type_kind(types, record);
+            const uint32_t member = record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION ?
+                                    check_action_member_lookup(types, record, graph->members[node], &offset, &qualifiers, &found) : 0;
+            done = member == 0 || offset % 8 != 0;
+            steps[count] = (CheckAlignmentStep){ .offset = offset / 8, .member = true };
+            count += !done;
+            node = operand;
+            lvalue = op == CHECK_OP_MEMBER;
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    for (uint32_t i = count; result != UINT32_MAX && i-- > 0;)
+    {
+        if (steps[i].cast != 0 && !declaration)
+        {
+            result = type_alignment_log2(types, type_element(types, type_strip_aligned(types, steps[i].cast)));
+        }
+        else if (steps[i].offset != 0)
+        {
+            const uint32_t low = (uint32_t)__builtin_ctzll(steps[i].offset);
+            result = low < result ? low : result;
+        }
+        declaration |= steps[i].member;
+    }
+    return result;
 }
 
 static void check_graph_special_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
@@ -1187,6 +1627,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
     }
     else if (action->op == CHECK_OP_BUILTIN_ATOMIC)
     {
+        const uint32_t walked = action->argument_count != 0 ?
+                                check_graph_atomic_alignment(types, graph, stream, graph->argument_nodes[graph->argument_offsets[node]], witness) : UINT32_MAX;
         const CheckBuiltinAtomicAction input = {
             .id = (CBuiltinId)action->member,
             .arguments = action->arguments,
@@ -1196,8 +1638,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .tag_completion_count = action->tag_completion_count,
             .source_position = action->source_position,
             .extensions = action->extensions,
-            .minimum_alignment = witness != NULL ? witness->minimum_alignment : 0,
-            .alignment_known = witness != NULL && witness->alignment_known,
+            .minimum_alignment = walked < 64 ? UINT64_C(1) << walked : 0,
+            .alignment_known = walked < 64,
         };
         CheckBuiltinAtomicResult checked;
         if (check_builtin_atomic_rmw_rule(input.id) != NULL)
@@ -1441,13 +1883,16 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
+    // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
+    // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
+    const bool overloads = graph->overload_candidate_count != 0;
     const bool overload = action.op == CHECK_OP_CALL && stream->overload_count < graph->overload_count && graph->overload_calls[stream->overload_count].node == node;
     bool contextual_call = overload || (action.op == CHECK_OP_CALL && action.operands[0].overload_head != 0);
-    for (uint32_t i = 0; action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
+    for (uint32_t i = 0; overloads && action.op == CHECK_OP_CALL && i < action.argument_count; i += 1)
     {
         contextual_call |= action.arguments[i].overload_head != 0;
     }
-    const CheckDiagnostic contextual = contextual_call ? CHECK_DIAG_NONE : check_graph_overload_operands(types, graph, stream, &action, scratch);
+    const CheckDiagnostic contextual = contextual_call || !overloads ? CHECK_DIAG_NONE : check_graph_overload_operands(types, graph, stream, &action, scratch);
     if (contextual != CHECK_DIAG_NONE)
     {
         result = (CheckActionResult){ .diagnostic = contextual };
@@ -1555,12 +2000,20 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
 }
 
 // Count/place/fill a stable level order inside one mutation-free postorder region. Dependencies before begin are
-// already complete. Relative heights keep all histogram clears together linear even for many tiny regions.
-static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t begin, uint32_t end, uint32_t batch_size, uint32_t* levels, uint32_t* counts, uint32_t* order)
+// already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them out of
+// the schedule. Relative heights keep all histogram clears together linear even for many tiny regions.
+static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end, uint32_t batch_size,
+                               uint32_t* levels, uint32_t* counts, uint32_t* order)
 {
     uint32_t maximum = 0;
     for (uint32_t node = begin; node < end; node += 1)
     {
+        // A pure leaf has no overload set (check_graph_pure).
+        if (graph->ops[node] == CHECK_OP_VALUE)
+        {
+            check_graph_leaf(types, graph, stream, node);
+            marks[node] |= BUSTER_CHECK_MARK_DONE;
+        }
         uint32_t level = 0;
         const uint32_t operands[] =
         {
@@ -1571,7 +2024,7 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
         for (uint32_t i = 0; i < 3; i += 1)
         {
             const uint32_t operand = operands[i];
-            if (operand != BUSTER_CHECK_NONE && operand >= begin)
+            if (operand != BUSTER_CHECK_NONE && operand >= begin && (marks[operand] & BUSTER_CHECK_MARK_DONE) == 0)
             {
                 const uint32_t candidate = levels[operand] + 1;
                 level = candidate > level ? candidate : level;
@@ -1581,9 +2034,12 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
         maximum = level > maximum ? level : maximum;
     }
     memset(counts, 0, (size_t)(maximum + 2) * sizeof(*counts));
+    uint32_t scheduled = 0;
     for (uint32_t node = begin; node < end; node += 1)
     {
-        counts[levels[node] + 1] += 1;
+        const uint32_t waiting = (marks[node] & BUSTER_CHECK_MARK_DONE) == 0;
+        counts[levels[node] + 1] += waiting;
+        scheduled += waiting;
     }
     for (uint32_t level = 1; level <= maximum + 1; level += 1)
     {
@@ -1593,14 +2049,17 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
     for (uint32_t node = end; node != begin;)
     {
         node -= 1;
-        const uint32_t level = levels[node];
-        counts[level + 1] -= 1;
-        order[counts[level + 1]] = node;
+        if ((marks[node] & BUSTER_CHECK_MARK_DONE) == 0)
+        {
+            const uint32_t level = levels[node];
+            counts[level + 1] -= 1;
+            order[counts[level + 1]] = node;
+        }
     }
     for (uint32_t level = 0; level <= maximum; level += 1)
     {
         const uint32_t first = counts[level + 1];
-        const uint32_t last = level == maximum ? end - begin : counts[level + 2];
+        const uint32_t last = level == maximum ? scheduled : counts[level + 2];
         for (uint32_t at = first; at < last;)
         {
             const uint32_t count = last - at < batch_size ? last - at : batch_size;
@@ -1630,7 +2089,7 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
             stream->statistics.batches += 1;
         }
     }
-    stream->statistics.levels += maximum + 1;
+    stream->statistics.levels += scheduled != 0 ? maximum + 1 : 0;
 }
 
 static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckMessage message, CheckDiagnostic diagnostic, CheckFault fault)
@@ -1678,16 +2137,39 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     return result;
 }
 
-static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
+// Whether `node` has a warning or a GNU constant where an ICE is required, which check_graph_warning_contexts must place.
+static bool check_graph_warning_needed(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
+    return stream->warnings[node] != 0 ||
+           ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
+            (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
+            check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+}
+
+static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
 {
     bool needed = false;
-    for (uint32_t node = 0; !needed && node < graph->count; node += 1)
+    uint32_t node = 0;
+    // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
+    // may need them (#530); the scalar path tests every node.
+    for (; !scalar && !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
-        const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
-        needed = stream->warnings[node] != 0 ||
-                 ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
-                  (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
-                  check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+        __mmask16 candidates = _mm512_test_epi32_mask(_mm512_loadu_si512(stream->warnings + node), _mm512_set1_epi32(-1));
+        if (graph->contexts != NULL)
+        {
+            const __m128i contexts = _mm_loadu_si128((const __m128i*)(graph->contexts + node));
+            candidates |= _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT))) &
+                          _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)BUSTER_CHECK_CONTEXT_GNU_CONSTANT));
+        }
+        for (uint32_t lanes = candidates; !needed && lanes != 0; lanes &= lanes - 1)
+        {
+            needed = check_graph_warning_needed(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+        }
+    }
+    for (; !needed && node < graph->count; node += 1)
+    {
+        needed = check_graph_warning_needed(graph, stream, node);
     }
     if (!needed)
     {
@@ -1765,43 +2247,63 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
     }
 }
 
-static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary)
+// A node's report: its action's diagnostic, or in a context, its value's fault or what the context requires of it.
+static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
-    for (uint32_t node = 0; node < graph->count; node += 1)
+    const CheckValue* value = stream->values + node;
+    const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
+    if (stream->diagnostics[node] != CHECK_DIAG_NONE)
     {
-        const CheckValue* value = stream->values + node;
-        const uint8_t context = graph->contexts != 0 ? graph->contexts[node] : 0;
+        // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
+        // would move the first error to an earlier prefix/return token instead of the offending expression.
+        if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
+        }
+    }
+    else if (context != 0 && value->type != 0)
+    {
         const uint32_t extensions = (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 ? BUSTER_CHECK_EXTENSION_GNU_CONSTANT : 0;
-        const bool folded_integer = check_action_integer_constant(value, extensions);
-        if (stream->diagnostics[node] != CHECK_DIAG_NONE)
+        if (value->fault != CHECK_FAULT_NONE)
         {
-            // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
-            // would move the first error to an earlier prefix/return token instead of the offending expression.
-            if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
-            }
+            const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
+            check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
         }
-        else if (context != 0 && value->type != 0)
+        else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !check_action_integer_constant(value, extensions))
         {
-            if (value->fault != CHECK_FAULT_NONE)
-            {
-                const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
-                check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
-            }
-            else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !folded_integer)
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
-            else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && value->integer == 0)
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_ASSERT, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
-            else if ((context & BUSTER_CHECK_CONTEXT_STATIC) != 0 && (value->constant_kind == CHECK_CONSTANT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
-            {
-                check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_INITIALIZER, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
-            }
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
         }
+        else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && value->integer == 0)
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_ASSERT, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
+        }
+        else if ((context & BUSTER_CHECK_CONTEXT_STATIC) != 0 && (value->constant_kind == CHECK_CONSTANT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0))
+        {
+            check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_INITIALIZER, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
+        }
+    }
+}
+
+static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, CheckReport* temporary, bool scalar)
+{
+    // Only a node with a diagnostic or a context reports: the vector path finds those 16 at a time and reads no other
+    // node's value (a sixth of the graph's bytes, #530); the scalar path takes every node.
+    uint32_t node = 0;
+    for (; !scalar && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    {
+        __mmask16 reported = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
+        if (graph->contexts != 0)
+        {
+            reported |= _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(graph->contexts + node)), _mm_set1_epi8(-1));
+        }
+        for (uint32_t lanes = reported; lanes != 0; lanes &= lanes - 1)
+        {
+            check_graph_report_node(graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+        }
+    }
+    for (; node < graph->count; node += 1)
+    {
+        check_graph_report_node(graph, stream, node);
     }
     // Diagnostics are cold. Four stable radix passes restore source-token order without callbacks or recursion.
     CheckReport* source = stream->reports;
@@ -1834,6 +2336,26 @@ static void check_graph_reports(const CheckGraph* graph, CheckStream* stream, Ch
 
 #include "c_check_query_runtime.c"
 
+_Static_assert(sizeof(CheckDiagnostic) == sizeof(uint32_t), "the vector scans load diagnostics as 32-bit lanes");
+
+// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the rest and
+// the scalar path one at a time.
+static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count, bool scalar)
+{
+    uint32_t found = BUSTER_CHECK_NONE;
+    uint32_t node = 0;
+    for (; !scalar && found == BUSTER_CHECK_NONE && count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
+    {
+        const __mmask16 exhausted = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
+        found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
+    }
+    for (; found == BUSTER_CHECK_NONE && node < count; node += 1)
+    {
+        found = stream->diagnostics[node] == CHECK_DIAG_RESOURCE ? node : BUSTER_CHECK_NONE;
+    }
+    return found;
+}
+
 static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
 {
     const uint64_t output_start = output->length;
@@ -1845,7 +2367,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     const uint32_t batch_size = options->batch_size == 0 ? BUSTER_CHECK_BATCH : options->batch_size;
     bool result = output != scratch && count <= graph->capacity && count <= (1u << 30) && batch_size <= BUSTER_CHECK_BATCH;
     stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
-    uint8_t* pure = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : 0;
+    // The scheduler's marks (BUSTER_CHECK_MARK_PURE and _DONE), with check_graph_validate_vector's absent operand after them.
+    uint8_t* pure = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint32_t* levels = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     uint32_t* counts = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : 0;
     uint32_t* order = result && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
@@ -1855,14 +2378,16 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         result = false;
         stream->status = CHECK_STATUS_RESOURCE;
     }
-    uint32_t maximum_arguments = 0;
-    uint32_t maximum_effects = 0;
-    uint32_t maximum_builtins[6];
+    CheckGraphValidation validation = { 0 };
     if (result)
     {
-        result = check_graph_validate(graph, pure, &maximum_arguments, &maximum_effects, maximum_builtins, &stream->failed_node);
+        result = options->scalar ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
+                                   check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
     }
+    const uint32_t maximum_arguments = validation.maximum_arguments;
+    const uint32_t maximum_effects = validation.maximum_effects;
+    const uint32_t* maximum_builtins = validation.builtins;
     CheckValue* arguments = result && maximum_arguments != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, maximum_arguments) : 0;
     if (result && count != 0)
     {
@@ -1917,10 +2442,17 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
         }
+        // In node order: the vector path's impure leaves without their actions, its other impure nodes one at a time, and each
+        // run of pure nodes as a region; the scalar path's nodes one at a time.
         uint32_t node = 0;
         while (node < count)
         {
-            if (options->scalar || pure[node] == 0)
+            if (!options->scalar && pure[node] == 0 && check_graph_is_leaf(graph, node))
+            {
+                check_graph_leaf(types, graph, stream, node);
+                node += 1;
+            }
+            else if (options->scalar || pure[node] == 0)
             {
                 check_graph_scalar_node(types, graph, stream, node, arguments, scratch, options->scalar);
                 node += 1;
@@ -1932,19 +2464,17 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 {
                     node += 1;
                 }
-                check_graph_region(types, graph, stream, begin, node, batch_size, levels, counts, order);
+                check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
             }
         }
         for (uint32_t pass = 0; result && pass < 2; pass += 1)
         {
-            for (uint32_t i = 0; result && i < count; i += 1)
+            const uint32_t exhausted = check_graph_resource_node(stream, count, options->scalar);
+            if (exhausted != BUSTER_CHECK_NONE)
             {
-                if (stream->diagnostics[i] == CHECK_DIAG_RESOURCE)
-                {
-                    result = false;
-                    stream->status = CHECK_STATUS_RESOURCE;
-                    stream->failed_node = i;
-                }
+                result = false;
+                stream->status = CHECK_STATUS_RESOURCE;
+                stream->failed_node = exhausted;
             }
             if (result && pass == 0)
             {
@@ -1960,9 +2490,9 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         {
             if (count != 0)
             {
-                check_graph_warning_contexts(types, graph, stream, pure);
+                check_graph_warning_contexts(types, graph, stream, pure, options->scalar);
             }
-            check_graph_reports(graph, stream, reports);
+            check_graph_reports(graph, stream, reports, options->scalar);
         }
     }
     if (!result)

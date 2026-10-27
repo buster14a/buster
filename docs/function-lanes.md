@@ -86,13 +86,13 @@ body's Tier 0 code or in a body's code after Tier 0.
 
 ### Memory
 
-Lane 0 is the calling thread, with the caller's arenas, so one lane's emission
-pushes what source order's did, where it did. Each other lane has three arenas
-of its own (`CheckProgramLanes.arenas`): its functions' lowered columns, its
-writer's columns with its functions' Tier 0 code and what the merge reads, and
-its functions' bytes. The caller keeps them until it is done with the
-emission's link (`check_program_lanes_release`); the next emission with them
-puts them back.
+Lane 0 is the calling thread, with the caller's arenas but for its writer's
+columns, so one lane's emission pushes what source order's did, where it did.
+Each other lane has three arenas of its own (`CheckProgramLanes.arenas`): its
+functions' lowered columns, its writer's columns with its functions' Tier 0
+code and what the merge reads, and its functions' bytes. The caller keeps them
+until it is done with the emission's link (`check_program_lanes_release`); the
+next emission with them puts them back.
 
 A lane's writer has some thirty columns, each with room for any of the
 program's bodies, far apart in its scratch arena, of which a lane touches a
@@ -101,8 +101,26 @@ a 2 MB page, and each lane's arenas are new: on the 9700X, 8 lanes' emissions
 of `sqlite3.c` took 6.7 billion kernel cycles against one lane's 0.17, and
 were slower than 4 lanes'. The lanes' scratch arenas are in base pages
 (`arena_reserve_small`), so a lane clears only what it touches: 0.58 billion.
-The functions' columns and bytes are packed, and keep huge pages past their
-first 64 KB.
+So are lane 0's writer's columns (`CheckEmitRun.columns`), in the first lane's
+scratch of `CheckProgramLanes.arenas`, or without lanes an arena of the
+emission's own: in the caller's scratch, they cleared a huge page each too.
+On one lane on the 9700X, the lowering of `sqlite3.c` added 56 MB to the peak
+RSS, and 9.8 MB with them in base pages (#531). The functions' columns and
+bytes are packed, and keep huge pages past their first 64 KB.
+
+Lane 0's arena is reserved for exactly the room its writer's columns take
+(`check_lower_writer_bytes`: the writer's pushes on an arena of no memory,
+`arena_measure`, so that the room doesn't depend on what the caller's arenas
+hold), and the first lane's scratch is kept while it has that room. The other
+lanes' arenas are 64 GB each, since their scratch also holds their functions'
+Tier 0 code, whose size isn't known before they run; a lane that can't
+reserve its arenas refuses its parts, and the calling thread runs them again.
+Lane 0 is that last resort, so where its columns' address space can't be
+reserved either (`RLIMIT_AS`, or overcommit refused), they go in the caller's
+scratch, as before #531, if it has their room: an emission then needs no
+address space past the caller's arenas. `test-check-lanes` checks both in a
+child whose address space it limits, and that an emission whose caller's
+scratch has room for all but lane 0's columns makes its object.
 
 ## The lane rule
 
