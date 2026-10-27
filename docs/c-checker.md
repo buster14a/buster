@@ -914,6 +914,45 @@ history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
 levels" has both.
 Floating results are compared field by field, never by `long double` padding.
 
+Packed-member addresses warn by default (`-Waddress-of-packed-member`, #507).
+`c_check_packed_input.c` retains sparse source witnesses even in `sizeof` and
+`typeof`: a direct chain of members must start at a declaration, contain a
+packed record or field, and have either an insufficient enclosing alignment
+or an offset incompatible with the final member's type. An explicitly aligned
+object can strengthen a direct `.` access. `#pragma pack` alone does not trigger
+this warning, nor do array decay, an address of an array element, or the complex
+bases Clang currently excludes (a call, subscript or explicit dereference).
+Anonymous members participate in both layout and the choice of packed culprit.
+The reader counts actual layout witnesses before reserving their retained
+storage. It bounds chain scratch by the largest candidate expression, and
+builds conversion context only when a witness exists. An unused packed type
+plus ordinary local addresses needs no diagnostic records or scratch.
+The first anonymous diagnostic builds a temporary tag-to-source/context map;
+later addresses reuse it, so formatting many anonymous locals stays linear in
+the source size plus the emitted names.
+
+`c_check_packed_diagnostic.c` cancels a pending warning when a source conversion
+permits the culprit's reduced alignment, including integer and incomplete-pointer
+casts. It follows conditional arms and a comma expression's right operand in
+their implicit consuming context. Generic/choose selections transparently use
+the chosen operand. A bounded source interval scan preserves pending warnings
+inside unevaluated and unchosen operands, where Clang does not perform its
+implicit-conversion analysis. An explicit cast cancels only a directly
+addressed member; its target does not flow into conditional/comma operands.
+A cast to `void` does not cancel it. Builtin lowering
+conversions are distinguished from source conversions: `__builtin_assume_aligned`
+retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
+can cancel it. The existing diagnostic pragma history controls suppression and
+promotion, and `-w` silences the diagnostic. Source records remain ordered and
+the driver consumes them sparsely without widening its dense warning columns.
+
+The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
+`llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation
+or fixtures were imported. `test-checker-driver` runs the original probes through
+both checker schedules and, with `--executable`, both production command routes;
+it compares warning decisions, complete messages and presumed line/column pairs
+with Clang, and covers guarded classifier/interval tails and allocation failure.
+
 ## Corpus comparison and semantic mutations
 
 ```sh
