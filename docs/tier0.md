@@ -39,6 +39,11 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
     for it (`Tier0Function.entry_records`; a compile without it allocates and copies nothing for it), which with branch
     sizing's offsets says where each entry's code starts: the C driver's source rows for `-g` (#395,
     `c_check_debug.c`);
+  - the frame (`Tier0Code.frame_saved`, `frame_size` and `frame_pointer`: the callee-saved registers the prologue
+    pushed, in `tier0_callee_saved`'s order, the bytes it reserved below them and whether it pushed rbp first and
+    pointed it at the push), which `unwind_tier0_frame` reads with the prologue's and epilogue's records for the C
+    driver's unwind tables (#395, [the unwind guide](unwind.md)): the prologue is the code's first records and the
+    epilogue's release, pops and ret its last;
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
@@ -48,13 +53,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
-**Waits for #133, #145 and #146:**
+**Measured on SQLite,** which compiles now: the whole compile's time and the generated code's run time and size
+against clang -O0's and tcc's, on its shell ([#136's
+measurement](https://github.com/buster14a/buster/issues/136#issuecomment-6421100260)) and on `speedtest1`, SQLite's
+own benchmark ("Measurements", below).
 
-- the corpora and `sqlite3.c`;
-- `speedtest1`;
-- the whole compile's time against tcc's.
+**Still to do:** Tier 0's own costs on `sqlite3.c`'s functions, `benchmark-backend`'s measurement on real code.
 
-Until then, generated programs (below) stand in for #142's random programs.
+Generated programs (below) stand in for #142's random programs.
 
 ## The typed stream (#133 → #136)
 
@@ -857,8 +863,9 @@ Before the programs, checks of their own:
     2^63 too), calls of C functions through their addresses and frame objects (four, of 16 to 32 bytes aligned to 8 or
     16, given values first, read by `LOCAL`, written by `STORE_LOCAL` and `SET_LOCAL` and copied out at the end), against
     the check's own stack machine over the stream. A program past the depth tables is counted, not compiled. The programs
-    compiled, run and checked must reach every kind and conversion of the class, in bitmaps of their own (`CALL`'s and
-    `JUMP_VALUE`'s bits had been two conversions' too).
+    compiled, run and checked must execute every kind and conversion of the class and both arms of a `?:`. Separate
+    bitmaps record kinds and conversions, and the interpreter marks only entries and arms it runs. Any refusal except
+    a random program's excess depth fails the check with its error and entry.
 - **int128** (`tier0_int128_test.c`), the 128-bit integers compiled by both paths into the same records, encoded by both
   encoders into the same bytes and run natively in a child, called from C through function pointers, so that the file's
   C (clang's code of `__int128`) is the oracle of their values and of the convention for them:
@@ -1174,6 +1181,39 @@ path's 11.1.
   They are also full of constant arithmetic, which #133 will fold before Tier 0 sees it.
 - **rsp-relative frame operands** take a SIB byte that clang's rbp-relative ones don't.
 
+**SQLite's speedtest1 against clang -O0 and tcc**
+([record](https://github.com/buster14a/buster-performance/tree/35da10607a8769545da88379cecc60891c153829/docs/measurements/speedtest1-136-2026-10-26)).
+The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. They are built with SQLite's own
+`test/speedtest.tcl` options four ways:
+
+- by `-c` (main at `e04462c1`), linked by cc;
+- by the direct path, both files as one unit;
+- by clang -O0, linked by cc;
+- by tcc.
+
+Each build runs with that script's options at `--size 5`, from a database on tmpfs. On the 9700X, CPU 2, every build
+gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
+instructions and instructions per cycle medians of 3 rounds under `perf stat`:
+
+| | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
+| --- | --- | --- | --- | --- |
+| Run time | 294.4 ms | 295.7 ms | 293.3 ms | 271.5 ms |
+| User-space instructions | 6,866 M | 6,865 M | 3,922 M | 4,833 M |
+| Instructions per cycle | 4.47 | 4.46 | 2.59 | 3.45 |
+| `.text` of the executable | 1,331,336 B | 1,331,216 B | 1,024,342 B | 1,295,452 B |
+| `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
+
+- **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
+  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
+- **Code size:**
+  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
+    sizes known before writing.
+- **`switch`** is a chain of compares in case order:
+  - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
+  - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
+  - jump tables (#136's item 7) will change both, and the record's scripts can measure them again.
+
 ## Follow-ups
 
 - **Deep values' refusals:** a function with values of the memory classes past the depth tables, and a call with
@@ -1231,6 +1271,7 @@ actual current producer is `tier0_generate` and the tests' manually built
 | Final records/branch columns → `size_branches` → `x86_encode` | Implemented generated-program path. Branch indices/targets stay in record coordinates until sizing; fixup markings/references retain record order. |
 | Encoded bytes/fixup ends + `LinkReference` → `link_add_code_fixups` | Implemented object/executable test path; symbol identity/addends are carried, not rediscovered from instruction bytes. |
 | Entries' first records + branch sizing's offsets → source rows | Implemented for the C driver's `-g` (#395): `Tier0Code.entry_records` are the measured positions both paths emit from, which `check_program_emit` turns into byte offsets after sizing and `c_check_debug.c` into DWARF rows. |
+| Published frame + branch sizing's offsets → unwind tables | Implemented for the C driver (#395): `unwind_tier0_frame` takes each transition's end from the frame's records, and `check_program_emit` writes the functions' FDEs with one CIE. |
 
 A logical batch is one complete function; kernels classify 64 entries and
 read u64 values eight at a time with bounded masks. Input columns need natural

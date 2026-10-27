@@ -151,11 +151,12 @@ static uint64_t snapshot_benchmark_unhashed(const char* path, const RuntimeProbe
     {
         close(descriptor);
     }
-    bool loaded = file != MAP_FAILED && snapshot_valid_header((const SnapshotHeader*)file, bytes, &runtime) &&
+    SnapshotColumn columns[SNAPSHOT_REGIONS];
+    bool loaded = file != MAP_FAILED && snapshot_valid_header((const SnapshotHeader*)file, bytes, &runtime, columns) &&
                   snapshot_same_identity(&((const SnapshotHeader*)file)->compiler, compiler);
     if (loaded)
     {
-        snapshot_view(&runtime, file, bytes);
+        snapshot_view_columns(&runtime, file, bytes, columns);
         snapshot_rebase(&runtime);
         loaded = runtime_probes_current(&runtime);
     }

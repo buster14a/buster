@@ -3,20 +3,30 @@
 //
 // Native fixed-frame unwind descriptions (#88). The producer proves an ordered subset of six pushes, an optional
 // fixed allocation, its matching release and reverse pops, and supplies their instruction-end PCs after branch sizing.
-// unwind_write consumes that trusted description; unwind_check is the separate diagnostic boundary. No instruction
-// bytes, typed nodes or source rows are inspected here. Initialize once before concurrent readers use the tables.
+// A function with a frame pointer (UnwindFunction.pointer, #395) pushes rbp and points it at the push first, then an
+// ordered subset of the other five, and its frame and anything its body allocates are below them, so its CFA is rbp's
+// until its last pop, rbp's, whatever rsp does. unwind_write consumes that trusted description; unwind_check is the
+// separate diagnostic boundary. No instruction bytes, typed nodes or source rows are inspected here. Initialize once
+// before concurrent readers use the tables.
 //
 // Each function gets its own eight-byte-aligned CIE/FDE pair: version 1, zR, code alignment 1, data alignment -8 and
 // pcrel sdata4 addresses. locations[i] names the zero initial-location field for a Link PC32 relocation with addend 0.
 // A pair begins BUSTER_UNWIND_LOCATION bytes before that field and ends at the next pair or output.size. Keep pairs
-// separate as EH_FRAME atoms for function ownership and the native indexer's bounded CIE walk. No terminator is added.
+// separate as EH_FRAME atoms for function ownership and the native indexer's bounded CIE walk. With UnwindOutput.shared
+// (#395), the batch is one CIE and the FDEs that point back to it, as a compiler's .eh_frame is and its linkers' fast
+// paths take it: the CIE first, each FDE BUSTER_UNWIND_FDE_LOCATION bytes before its field, to the next FDE or the end;
+// keep the whole batch as one EH_FRAME atom (an object's .eh_frame holds its atoms as one section, whose CIEs a linker's
+// walk would otherwise count by the function). No terminator is added.
 //
 // The exact writer independently appends the CIE and CFI. The vector path gathers eight descriptors, forms their CFA
-// ULEBs and shape indices in lanes, then expands original templates with byte permutations. Fourteen PC deltas, the
-// function range and five CFA bytes are the only holes. Neither inputs nor outputs need padding; masked tails touch
-// only their slices. Input, byte output and location output must be disjoint. Output sizes and every representability
-// limit are checked before stores. CAPACITY publishes the required size but preserves bytes/locations; other errors
-// preserve the output descriptor too. Empty batches need no byte or location storage.
+// ULEBs and shape indices in lanes, then expands original templates of FDEs with byte permutations. Fourteen PC
+// deltas, the function range, the CIE pointer and five CFA bytes are the only holes; the CIE is the same bytes for
+// every function (unwind_cie). A function with a frame pointer, the rare shape (a C function that allocates on the
+// stack as it runs), the vector path leaves to the exact writer, lane by lane. Neither inputs nor outputs need
+// padding; masked tails touch only their slices. Input, byte output and location output must be disjoint. Output
+// sizes and every representability limit are checked before stores. CAPACITY publishes the required size but
+// preserves bytes/locations; other errors preserve the output descriptor too. Empty batches need no byte or location
+// storage.
 //
 // The encodings are format facts from DWARF call-frame instructions and the AMD64 .eh_frame convention. These
 // templates and both writers are original; no external implementation is included.
@@ -24,13 +34,21 @@
 #define BUSTER_UNWIND_EVENTS 14
 #define BUSTER_UNWIND_SAVED 6
 #define BUSTER_UNWIND_CIE_BYTES 40
-#define BUSTER_UNWIND_LOCATION 48
+// An FDE's initial location field, from its start (past its length and its CIE pointer), and a pair's, from its CIE's.
+#define BUSTER_UNWIND_FDE_LOCATION 8
+#define BUSTER_UNWIND_LOCATION (BUSTER_UNWIND_CIE_BYTES + BUSTER_UNWIND_FDE_LOCATION)
 #define BUSTER_UNWIND_PAIR_MIN 64
 #define BUSTER_UNWIND_TEMPLATE_BYTES 192
 #define BUSTER_UNWIND_SHAPE_WIDTHS 6
 #define BUSTER_UNWIND_SHAPES (64 * BUSTER_UNWIND_SHAPE_WIDTHS)
 #define BUSTER_UNWIND_BATCH 8
+// A batch lane's shape when its function has a frame pointer, which the exact writer writes.
+#define BUSTER_UNWIND_SHAPE_POINTER BUSTER_UNWIND_SHAPES
 
+// A function's frame: its size, its allocation and the instruction-end PCs of its transitions, in order. Without a
+// frame pointer: each push of `saved`'s registers, the allocation, its release and each pop, the allocation's two
+// events only when frame_size isn't 0 (2n + 2 or 2n events). With one (`pointer`, saved without RBP's bit and frame_size
+// 0, which no transition moves): rbp's push, its mov from rsp, each other push, each pop and rbp's pop (2n + 3).
 typedef struct UnwindFunction UnwindFunction;
 struct UnwindFunction
 {
@@ -39,7 +57,8 @@ struct UnwindFunction
     uint32_t offsets[BUSTER_UNWIND_EVENTS];
     uint8_t saved;
     uint8_t event_count;
-    uint16_t reserved;
+    uint8_t pointer;
+    uint8_t reserved;
 };
 
 typedef enum UnwindError
@@ -59,6 +78,8 @@ struct UnwindOutput
     uint64_t size;
     uint32_t* locations;
     uint32_t location_capacity;
+    // One CIE for the batch rather than one per function (see the file's comment).
+    bool shared;
 };
 
 // Mask order is the producer's RBX, RBP, R12, R13, R14, R15. These are DWARF numbers, not encoder register numbers.
@@ -76,8 +97,11 @@ static UnwindError unwind_check(const UnwindFunction* functions, uint32_t count)
     for (uint32_t i = 0; result == UNWIND_OK && i < count; i += 1)
     {
         const UnwindFunction* function = &functions[i];
-        const uint32_t events = 2 * (uint32_t)__builtin_popcount(function->saved) + 2 * (function->frame_size != 0);
-        if (function->size == 0 || function->saved >= 64 || function->reserved != 0 || function->event_count != events)
+        const uint32_t pushes = (uint32_t)__builtin_popcount(function->saved);
+        const uint32_t events = function->pointer != 0 ? 2 * pushes + 3 : 2 * pushes + 2 * (function->frame_size != 0);
+        // With a frame pointer, rbp is its push and the allocation moves no CFA: RBP's bit (1) and frame_size are 0.
+        const bool pointer_valid = function->pointer == 0 || (function->pointer == 1 && (function->saved & 2) == 0 && function->frame_size == 0);
+        if (function->size == 0 || function->saved >= 64 || function->reserved != 0 || function->event_count != events || !pointer_valid)
         {
             result = UNWIND_ERROR_INVALID;
         }
@@ -140,6 +164,16 @@ static uint32_t unwind_uleb_size(uint32_t value)
     return size;
 }
 
+// A function's FDE's bytes as the exact writer writes them: its header and its transitions, to a multiple of 8; its
+// pair's are BUSTER_UNWIND_CIE_BYTES more. The batch writer works the same sizes out in lanes (unwind_batch).
+static uint32_t unwind_fde_bytes(const UnwindFunction* function)
+{
+    const uint32_t saved = (uint32_t)__builtin_popcount(function->saved);
+    const uint32_t cfa = 8 + 8 * saved + function->frame_size;
+    const uint32_t bytes = function->pointer != 0 ? 42 + 13 * saved : 17 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
+    return (bytes + 7) & ~7u;
+}
+
 static void unwind_advance(UnwindWriter* writer, uint32_t offset, uint32_t* previous)
 {
     unwind_integer(writer, 4, 1); // DW_CFA_advance_loc4
@@ -147,7 +181,8 @@ static void unwind_advance(UnwindWriter* writer, uint32_t offset, uint32_t* prev
     *previous = offset;
 }
 
-static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* function)
+// The CIE every FDE points back to: its pair's, or the batch's shared one.
+static void unwind_cie_scalar(UnwindWriter* writer)
 {
     const uint64_t begin = writer->size;
     unwind_integer(writer, BUSTER_UNWIND_CIE_BYTES - 4, 4);
@@ -175,16 +210,63 @@ static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* f
     {
         unwind_integer(writer, 0, 1); // DW_CFA_nop
     }
+}
+
+// A function's FDE, pointing back to the CIE at `cie`.
+static void unwind_fde_scalar(UnwindWriter* writer, const UnwindFunction* function, uint64_t cie)
+{
     const uint64_t fde = writer->size;
     unwind_integer(writer, 0, 4); // patched record length
-    unwind_integer(writer, (uint32_t)(fde + 4 - begin), 4); // backward CIE pointer, from this field
+    unwind_integer(writer, (uint32_t)(fde + 4 - cie), 4); // backward CIE pointer, from this field
     unwind_integer(writer, 0, 4); // relocated initial location
     unwind_integer(writer, function->size, 4);
     unwind_uleb(writer, 0); // FDE augmentation data length
     uint32_t cfa = 8;
     uint32_t previous = 0;
     uint32_t event = 0;
-    for (uint32_t reg = 0; reg < BUSTER_UNWIND_SAVED; reg += 1)
+    if (function->pointer != 0)
+    {
+        // rbp pushed (the CFA 16 bytes up, rbp at its top) and pointed at its push: the CFA rbp's from then on.
+        unwind_advance(writer, function->offsets[event], &previous);
+        event += 1;
+        unwind_integer(writer, 0x0e, 1); // DW_CFA_def_cfa_offset
+        unwind_uleb(writer, 16);
+        unwind_integer(writer, 0x80 | unwind_registers[1], 1); // DW_CFA_offset rbp
+        unwind_uleb(writer, 2);
+        unwind_advance(writer, function->offsets[event], &previous);
+        event += 1;
+        unwind_integer(writer, 0x0d, 1); // DW_CFA_def_cfa_register
+        unwind_uleb(writer, unwind_registers[1]);
+        // The others below it, which move no CFA; their pops restore them, then rbp's makes the CFA rsp's again.
+        uint32_t slot = 2;
+        for (uint32_t reg = 0; reg < BUSTER_UNWIND_SAVED; reg += 1)
+        {
+            if ((function->saved & (1u << reg)) != 0)
+            {
+                unwind_advance(writer, function->offsets[event], &previous);
+                event += 1;
+                slot += 1;
+                unwind_integer(writer, 0x80 | unwind_registers[reg], 1);
+                unwind_uleb(writer, slot);
+            }
+        }
+        for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
+        {
+            if ((function->saved & (1u << (reg - 1))) != 0)
+            {
+                unwind_advance(writer, function->offsets[event], &previous);
+                event += 1;
+                unwind_integer(writer, 0xc0 | unwind_registers[reg - 1], 1);
+            }
+        }
+        unwind_advance(writer, function->offsets[event], &previous);
+        event += 1;
+        unwind_integer(writer, 0x0c, 1); // DW_CFA_def_cfa rsp, 8
+        unwind_uleb(writer, 7);
+        unwind_uleb(writer, 8);
+        unwind_integer(writer, 0xc0 | unwind_registers[1], 1);
+    }
+    for (uint32_t reg = 0; function->pointer == 0 && reg < BUSTER_UNWIND_SAVED; reg += 1)
     {
         if ((function->saved & (1u << reg)) != 0)
         {
@@ -197,7 +279,7 @@ static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* f
             unwind_uleb(writer, cfa / 8);
         }
     }
-    if (function->frame_size != 0)
+    if (function->pointer == 0 && function->frame_size != 0)
     {
         unwind_advance(writer, function->offsets[event], &previous);
         event += 1;
@@ -208,7 +290,7 @@ static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* f
         unwind_integer(writer, 0x0e, 1);
         unwind_uleb(writer, cfa);
     }
-    for (uint32_t reg = BUSTER_UNWIND_SAVED; reg > 0; reg -= 1)
+    for (uint32_t reg = BUSTER_UNWIND_SAVED; function->pointer == 0 && reg > 0; reg -= 1)
     {
         if ((function->saved & (1u << (reg - 1))) != 0)
         {
@@ -231,6 +313,15 @@ static void unwind_function_scalar(UnwindWriter* writer, const UnwindFunction* f
 // ---------------------------------------------------------------------------------------------------------------------
 // Original template construction, once before the batch writers
 
+// The same CIE the scalar writer constructs field by field. Six trailing nops align its successor to eight bytes.
+static const uint8_t unwind_cie[BUSTER_UNWIND_CIE_BYTES] = {
+    36, 0, 0, 0, 0, 0, 0, 0, 1, 'z', 'R', 0, 1, 0x78, 16, 1,
+    0x1b, 0x0c, 7, 8, 0x90, 1, 0x08, 3, 0x08, 6, 0x08, 12, 0x08, 13, 0x08, 14,
+    0x08, 15, 0, 0, 0, 0, 0, 0,
+};
+
+// Each shape's FDE: its bytes, which hole (a byte of the two vectors unwind_function_vector permutes) fills each byte
+// that has one, a bit per such byte, and its size.
 static uint8_t unwind_templates[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
 static uint8_t unwind_indices[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES] __attribute__((aligned(64)));
 static uint64_t unwind_patches[BUSTER_UNWIND_SHAPES][BUSTER_UNWIND_TEMPLATE_BYTES / 64];
@@ -275,12 +366,6 @@ static void unwind_template_advance(UnwindTemplateBuilder* builder, uint32_t eve
 
 static bool unwind_initialize(void)
 {
-    // The same CIE the scalar writer constructs field by field. Six trailing nops align its successor to eight bytes.
-    static const uint8_t cie[BUSTER_UNWIND_CIE_BYTES] = {
-        36, 0, 0, 0, 0, 0, 0, 0, 1, 'z', 'R', 0, 1, 0x78, 16, 1,
-        0x1b, 0x0c, 7, 8, 0x90, 1, 0x08, 3, 0x08, 6, 0x08, 12, 0x08, 13, 0x08, 14,
-        0x08, 15, 0, 0, 0, 0, 0, 0,
-    };
     memset(unwind_templates, 0, sizeof(unwind_templates));
     memset(unwind_indices, 0, sizeof(unwind_indices));
     memset(unwind_patches, 0, sizeof(unwind_patches));
@@ -293,15 +378,12 @@ static bool unwind_initialize(void)
                 .shape = saved * BUSTER_UNWIND_SHAPE_WIDTHS + width,
                 .valid = true,
             };
-            for (uint32_t byte = 0; byte < BUSTER_UNWIND_CIE_BYTES; byte += 1)
-            {
-                unwind_template_byte(&builder, cie[byte], 128);
-            }
-            // FDE length, backward CIE pointer, relocated initial PC, range, and zero augmentation length.
+            // FDE length, backward CIE pointer (the second vector's dword 1), relocated initial PC, range (the first's
+            // dword 14), and zero augmentation length.
             for (uint32_t byte = 0; byte < 17; byte += 1)
             {
-                const uint8_t value = byte == 4 ? BUSTER_UNWIND_CIE_BYTES + 4 : 0;
-                unwind_template_byte(&builder, value, byte >= 12 && byte < 16 ? 56 + byte - 12 : 128);
+                const uint32_t source = byte >= 4 && byte < 8 ? 64 + byte : byte >= 12 && byte < 16 ? 56 + byte - 12 : 128;
+                unwind_template_byte(&builder, 0, source);
             }
             uint32_t cfa = 8;
             uint32_t event = 0;
@@ -348,8 +430,8 @@ static bool unwind_initialize(void)
             {
                 unwind_template_byte(&builder, 0, 128);
             }
-            const uint32_t length = builder.size - BUSTER_UNWIND_CIE_BYTES - 4;
-            memcpy(unwind_templates[builder.shape] + BUSTER_UNWIND_CIE_BYTES, &length, 4);
+            const uint32_t length = builder.size - 4;
+            memcpy(unwind_templates[builder.shape], &length, 4);
             unwind_sizes[builder.shape] = builder.size;
             valid = valid && builder.valid && event <= BUSTER_UNWIND_EVENTS;
         }
@@ -365,6 +447,7 @@ typedef struct UnwindBatch UnwindBatch;
 struct UnwindBatch
 {
     uint32_t shapes[BUSTER_UNWIND_BATCH];
+    // Each FDE's bytes, and all of them.
     uint32_t sizes[BUSTER_UNWIND_BATCH];
     uint64_t lebs[BUSTER_UNWIND_BATCH];
     uint32_t bytes;
@@ -391,8 +474,14 @@ static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
     }
     width = _mm512_maskz_mov_epi64(_mm512_cmpneq_epi64_mask(frame, zero), width);
     const __m512i shapes = _mm512_add_epi64(_mm512_mullo_epi64(saved, _mm512_set1_epi64(BUSTER_UNWIND_SHAPE_WIDTHS)), width);
-    const __m256i shape_indices = _mm512_cvtepi64_epi32(shapes);
-    const __m512i sizes = _mm512_mask_i32gather_epi32(zero, lanes, _mm512_castsi256_si512(shape_indices), unwind_sizes, 4);
+    // A function with a frame pointer: the exact writer's FDE, 42 + 13n bytes to a multiple of 8 (unwind_fde_bytes).
+    const __m512i flags = _mm512_and_si512(_mm512_srli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(metadata)), 16), _mm512_set1_epi64(0xff));
+    const __mmask8 pointers = _mm512_mask_cmpneq_epi64_mask(lanes, flags, zero);
+    const __m512i pointer_bytes = _mm512_and_si512(_mm512_add_epi64(_mm512_mullo_epi64(_mm512_popcnt_epi64(saved), _mm512_set1_epi64(13)), _mm512_set1_epi64(42 + 7)),
+                                                   _mm512_set1_epi64(~7ll));
+    const __m256i shape_indices = _mm256_mask_mov_epi32(_mm512_cvtepi64_epi32(shapes), pointers, _mm256_set1_epi32(BUSTER_UNWIND_SHAPE_POINTER));
+    const __m512i sizes = _mm512_mask_mov_epi32(_mm512_mask_i32gather_epi32(zero, lanes & ~pointers, _mm512_castsi256_si512(shape_indices), unwind_sizes, 4),
+                                                pointers, _mm512_castsi256_si512(_mm512_cvtepi64_epi32(pointer_bytes)));
     const __m512i byte_positions = _mm512_set1_epi64(0x0706050403020100ull);
     const __m512i widths = _mm512_mullo_epi64(width, _mm512_set1_epi64(0x0101010101010101ull));
     const __mmask64 continuation = _mm512_cmplt_epu8_mask(_mm512_add_epi8(byte_positions, _mm512_set1_epi8(1)), widths);
@@ -408,14 +497,15 @@ static UnwindBatch unwind_batch(const UnwindFunction* functions, uint32_t count)
     return batch;
 }
 
-static void unwind_function_vector(uint8_t* output, const UnwindFunction* function, uint32_t shape, uint64_t leb)
+// A function's FDE from its shape's template, its CIE `cie_pointer` bytes back from its CIE pointer's field.
+static void unwind_function_vector(uint8_t* output, const UnwindFunction* function, uint32_t shape, uint64_t leb, uint32_t cie_pointer)
 {
     const __m512i offsets = _mm512_maskz_loadu_epi32(0x3fff, function->offsets);
     const __m512i before = _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), offsets);
     __m512i holes = _mm512_sub_epi32(offsets, before);
     holes = _mm512_mask_set1_epi32(holes, 0x4000, (int32_t)function->size);
     holes = _mm512_mask_set1_epi32(holes, 0x8000, (int32_t)leb);
-    const __m512i high = _mm512_maskz_set1_epi32(1, (int32_t)(leb >> 32));
+    const __m512i high = _mm512_mask_set1_epi32(_mm512_maskz_set1_epi32(1, (int32_t)(leb >> 32)), 2, (int32_t)cie_pointer);
     const uint32_t length = unwind_sizes[shape];
     for (uint32_t at = 0; at < length; at += 64)
     {
@@ -438,7 +528,9 @@ static UnwindError unwind_write(const UnwindFunction* functions, uint32_t count,
     {
         result = UNWIND_ERROR_LIMIT;
     }
-    uint64_t required = 0;
+    // The CIEs: the shared one, or one before each FDE.
+    const bool shared = output != 0 && output->shared;
+    uint64_t required = shared ? (count != 0 ? BUSTER_UNWIND_CIE_BYTES : 0) : (uint64_t)count * BUSTER_UNWIND_CIE_BYTES;
     for (uint32_t first = 0; result == UNWIND_OK && first < count;)
     {
         const uint32_t remaining = count - first;
@@ -446,16 +538,13 @@ static UnwindError unwind_write(const UnwindFunction* functions, uint32_t count,
         if (exact)
         {
             const UnwindFunction* function = &functions[first];
-            const uint32_t saved = (uint32_t)__builtin_popcount(function->saved);
             if (function->size > INT32_MAX || function->frame_size > INT32_MAX)
             {
                 result = UNWIND_ERROR_LIMIT;
             }
             else
             {
-                const uint32_t cfa = 8 + 8 * saved + function->frame_size;
-                const uint32_t bytes = 57 + 17 * saved + (function->frame_size != 0 ? 13 + unwind_uleb_size(cfa) : 0);
-                required += (bytes + 7) & ~7u;
+                required += unwind_fde_bytes(function);
             }
         }
         else
@@ -481,23 +570,55 @@ static UnwindError unwind_write(const UnwindFunction* functions, uint32_t count,
         UnwindWriter writer = {
             .bytes = output->bytes,
         };
+        uint64_t cie = 0;
+        if (shared && count != 0)
+        {
+            if (exact)
+            {
+                unwind_cie_scalar(&writer);
+            }
+            else
+            {
+                memcpy(writer.bytes, unwind_cie, BUSTER_UNWIND_CIE_BYTES);
+                writer.size = BUSTER_UNWIND_CIE_BYTES;
+            }
+        }
         for (uint32_t first = 0; first < count;)
         {
             const uint32_t remaining = count - first;
             const uint32_t lanes = exact ? 1 : remaining < BUSTER_UNWIND_BATCH ? remaining : BUSTER_UNWIND_BATCH;
             if (exact)
             {
-                output->locations[first] = (uint32_t)(writer.size + BUSTER_UNWIND_LOCATION);
-                unwind_function_scalar(&writer, &functions[first]);
+                cie = shared ? 0 : writer.size;
+                if (!shared)
+                {
+                    unwind_cie_scalar(&writer);
+                }
+                output->locations[first] = (uint32_t)(writer.size + BUSTER_UNWIND_FDE_LOCATION);
+                unwind_fde_scalar(&writer, &functions[first], cie);
             }
             else
             {
                 const UnwindBatch batch = unwind_batch(functions + first, lanes);
                 for (uint32_t lane = 0; lane < lanes; lane += 1)
                 {
-                    output->locations[first + lane] = (uint32_t)(writer.size + BUSTER_UNWIND_LOCATION);
-                    unwind_function_vector(writer.bytes + writer.size, &functions[first + lane], batch.shapes[lane], batch.lebs[lane]);
-                    writer.size += batch.sizes[lane];
+                    cie = shared ? 0 : writer.size;
+                    if (!shared)
+                    {
+                        memcpy(writer.bytes + writer.size, unwind_cie, BUSTER_UNWIND_CIE_BYTES);
+                        writer.size += BUSTER_UNWIND_CIE_BYTES;
+                    }
+                    output->locations[first + lane] = (uint32_t)(writer.size + BUSTER_UNWIND_FDE_LOCATION);
+                    if (batch.shapes[lane] == BUSTER_UNWIND_SHAPE_POINTER)
+                    {
+                        unwind_fde_scalar(&writer, &functions[first + lane], cie);
+                    }
+                    else
+                    {
+                        unwind_function_vector(writer.bytes + writer.size, &functions[first + lane], batch.shapes[lane], batch.lebs[lane],
+                                               (uint32_t)(writer.size + 4 - cie));
+                        writer.size += batch.sizes[lane];
+                    }
                 }
             }
             first += lanes;

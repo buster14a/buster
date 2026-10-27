@@ -329,9 +329,16 @@ selected helper need another real fallback. A helper must not make unaligned
 ordinary MOV appear atomic. The semantic result retains alignment evidence
 and unsupported requirements without turning valid source into fake success.
 
-`c_check_builtin_atomic_rmw.c` checks 30 scalar GNU and legacy spellings:
-exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, legacy
-lock-test-and-set and lock-release. It retains actual source types, converted
+`c_check_builtin_atomic_rmw.c` checks 34 scalar GNU and legacy spellings:
+exchange, compare-exchange, old/new-value add/sub/AND/OR/XOR/NAND, clang's
+min/max extensions (`__atomic_fetch_min`, `__atomic_max_fetch` and the other
+two: integers and its floating types, never pointers), legacy
+lock-test-and-set and lock-release. The source checker takes every one of them
+(#126): `check_graph_builtin_op` gives them the atomic op, and the graph and
+the declaration-time reader send them to this module, with the orders' ICE
+proofs from the source's own analysis (`check_builtin_atomic_rmw_order_ice`).
+The lowering refuses them as unsupported ("atomic read-modify-write builtins")
+until the producer calls the leaves below. It retains actual source types, converted
 fixed operands, old/new/boolean/void result kind, conditional object/expected
 writes and explicit runtime format. Checking never reads or folds a source
 memory object. GNU pointer add/sub converts the delta to LP64 `ptrdiff_t`
@@ -440,7 +447,7 @@ hash-pins all four inputs before publishing output. Derived LLVM data retains
 its own attribution and license in `THIRD_PARTY_NOTICES.md`; exact package,
 input, tool and output provenance is in
 [`builtin-metadata/clang-23.1.1-inputs.json`](builtin-metadata/clang-23.1.1-inputs.json).
-The 1,506-row frozen own-main subset includes explicit `bit_cast` parser and
+The 1,534-row frozen own-main subset includes explicit `bit_cast` parser and
 `va_list` predefined-type gaps. These are not invented function declarations
 and are absent from the ordinary 3,775-record catalogue. A catalogue miss is
 not a general `__has_builtin` answer. Header/language restrictions and custom
@@ -448,7 +455,7 @@ rules remain consumer obligations.
 
 `builtin_intrinsic_own_main_lookup` exposes that frozen subset, including its
 two explicit gap rows. `builtin_intrinsic_own_main_x86_in_scope` accepts exactly
-the 1,457 recorded x86/x86-64 members. Neither a name prefix nor membership in
+the 1,483 recorded x86/x86-64 members. Neither a name prefix nor membership in
 the complete installed catalogue attests the audited operand-constraint scope.
 Membership also does not replace successful ordinary prototype checking.
 
@@ -469,8 +476,23 @@ true alternative. CPU defaults and per-function target-attribute closure
 remain producer obligations. These modules do not implement instructions or
 establish source constant-expression acceptance.
 
-`c_check_builtin_x86.c` adds the 185 audited SemaX86 constraint facts for the
-183 affected names in the frozen 1,457-name own-main target-builtin scope.
+`c_check_builtin_x86.c` adds the 208 audited SemaX86 constraint facts for the
+206 affected names in the frozen 1,483-name own-main target-builtin scope: 87
+rounding sets, 61 SAE sets, 6 gather/scatter scale sets (1, 2, 4 or 8, a hard
+error as clang's `CheckBuiltinGatherScatterScale` has it) and 54 direct ranges.
+#126 added the 26 x86 names this compiler's build calls that the first
+inventory lacked (`main.c`'s 25, `__rdtsc`, `__builtin_ia32_pause` and `xgetbv`
+among them, and the macros' `ucmp`, gather, scatter, insert, extract, align,
+shuffle, rotate and mask-shift builtins, and `executable_benchmark.c`'s
+`scattersiv16si`), with their 17 ranges and 6 scales, and
+`__builtin_unpredictable` and `__builtin_assume`. `builtin_intrinsic_own_main_prototype_in_scope` also admits
+the generic records no checker module owns whose clang checking is their
+prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
+`__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
+this checker doesn't give); they take the x86 path, which adds no rule for
+them. Neither path folds a call in a constant context, nor takes one as
+`_Generic`'s controlling expression yet (#488), and a direct range's
+violation is an event nothing reports yet (#487).
 The producer attests exact catalogue membership and successful ordinary
 prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
