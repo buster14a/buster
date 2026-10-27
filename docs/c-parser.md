@@ -673,6 +673,8 @@ isolate the parser change over the same frozen source as the kernel runs.
 
 #186's last lead and #544's alternative ("The postorder and the tree's columns"). On the 9700X (CPU 2, the shared
 lock), main `43030b89` against the branch, both built without `-g` (`BUSTER_DEBUG_INFO=0`, as the 9700X job builds).
+[The record](https://github.com/buster14a/buster-performance/tree/4341f5f3c2db41e8f4c088658c08290468e0b6b1/docs/measurements/tree-columns-186-544-2026-10-27) has the raw outputs, the scripts, the builds' and inputs' identities, and the micro-benchmark of the
+variants in "The postorder and the tree's columns", with its source.
 
 `benchmark-parser --only stages`, 21 passes, cycles a token (main's postorder passes the median of two processes,
 the derivation's of three, the branch's one):

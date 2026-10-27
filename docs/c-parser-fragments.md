@@ -385,7 +385,7 @@ At most the walk could take its operands from fragments, and that is what #539's
 
 The bound on the 9700X, CPU 2. The tree's items are from `benchmark-parser` on `sqlite3.c` (706,586 tokens), the
 walk's from `perf record` of `-c` of the frozen `sqlite3.c`, and the compile's from `perf stat`, all at main
-`43030b89`. Cycles a token:
+`43030b89` ([the record](https://github.com/buster14a/buster-performance/tree/4341f5f3c2db41e8f4c088658c08290468e0b6b1/docs/measurements/tree-columns-186-544-2026-10-27) has the outputs). Cycles a token:
 
 | The tree's work | cycles a token |
 | --- | ---: |
