@@ -872,6 +872,8 @@ static void ci_apply(CiState* state, CiPr* pr, CiCommand command, uint64_t now, 
             pr->queued_at = now;
             pr->admitted_at = 0;
             pr->completed_at = 0;
+            pr->check = 0;
+            pr->check_hash = 0;
         }
         if (override != NULL)
         {
@@ -1396,6 +1398,52 @@ static void ci_commit_status(CiPr* pr, const char* state)
     }
 }
 
+static void ci_refresh_status(CiPr* pr)
+{
+    char path[120];
+    snprintf(path, sizeof(path), "commits/%s/status?per_page=100", pr->head);
+    Http response = ci_api("GET", path, NULL);
+    size_t statuses = json_get(&response.json, 0, "statuses");
+    if (statuses >= response.json.count || json_number(&response.json, 0, "total_count") > 100)
+    {
+        ci_die("ambiguous required commit status; no publication");
+    }
+    pr->status_state[0] = 0;
+    for (size_t row = statuses + 1; row < response.json.rows[statuses].next; row = response.json.rows[row].next)
+    {
+        size_t creator = json_get(&response.json, row, "creator");
+        if (strcmp(json_field(&response.json, row, "context"), BUSTER_CI_REQUIRED) == 0 && strcmp(json_field(&response.json, creator, "login"), "github-actions[bot]") == 0)
+        {
+            ci_copy(pr->status_state, sizeof(pr->status_state), json_field(&response.json, row, "state"));
+            break;
+        }
+    }
+    json_free(&response.json);
+}
+
+static bool ci_check_needs_restart(const CiPr* pr)
+{
+    char path[180];
+    snprintf(path, sizeof(path), "repos/%s/check-runs/%" PRIu64, BUSTER_CI_REPO, pr->check);
+    Http response = ci_http("GET", path, NULL);
+    if (response.status != 200 && response.status != 404)
+    {
+        ci_die("cannot verify the current required check (HTTP %d)", response.status);
+    }
+    bool restart = response.status == 404;
+    if (!restart)
+    {
+        size_t app = json_get(&response.json, 0, "app");
+        if (json_number(&response.json, app, "id") != 15368 || strcmp(json_field(&response.json, 0, "head_sha"), pr->head) != 0 || strcmp(json_field(&response.json, 0, "name"), BUSTER_CI_REQUIRED) != 0)
+        {
+            ci_die("required check identity changed; refusing to overwrite it");
+        }
+        restart = strcmp(json_field(&response.json, 0, "status"), "completed") == 0;
+    }
+    json_free(&response.json);
+    return restart;
+}
+
 static Buffer ci_receipt(const CiPr* pr, const CiIdentity* current)
 {
     Buffer out = {0};
@@ -1434,6 +1482,13 @@ static void ci_publish(CiPr* pr, const CiIdentity* current, const CiCandidate* c
         if (!ci_same_pair(current, &latest) || current->mergeable != latest.mergeable || strcmp(current->merge, latest.merge) != 0)
         {
             ci_die("PR changed before check publication; reconciliation will retry");
+        }
+        // A controller can die after a successful outbound write but before persisting its local cache. Read the
+        // actual status before repairing it; cached "pending" must never conceal an already-published success.
+        ci_refresh_status(pr);
+        if (!new_check && strcmp(status, "pending") == 0)
+        {
+            new_check = ci_check_needs_restart(pr);
         }
     }
     if (strcmp(status, "success") != 0)

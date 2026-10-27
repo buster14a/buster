@@ -313,6 +313,13 @@ static void ci_test_controller(void)
     ci_expect(ci_fixture.state.prs[0].outcome == 1 && strcmp(ci_fixture.required_conclusion, "success") == 0, "API: native executor success plus successful guard and current identities yields the PR check");
     ci_expect(strcmp(ci_fixture.commit_status, "success") == 0, "API: both the check and authoritative same-name status pass only after current qualification");
     ci_expect(ci_fixture.dispatches == 2, "API: completed current qualification is not automatically duplicated");
+    ci_fixture.state.prs[0].status_state[0] = 0;
+    ci_copy(ci_fixture.state.prs[0].status_state, sizeof(ci_fixture.state.prs[0].status_state), "pending");
+    ci_fixture.state.prs[0].check_hash = 0;
+    ci_fixture.current.mergeable = -1;
+    ci_reconcile(false);
+    ci_expect(strcmp(ci_fixture.commit_status, "pending") == 0, "API: crash after publishing success cannot conceal that success behind a stale pending cache");
+    ci_expect(strcmp(ci_fixture.required_status, "queued") == 0 && strcmp(ci_fixture.required_conclusion, "success") != 0, "API: a completed check is restarted before returning an indeterminate revision to pending");
 
     ci_fixture_init();
     ci_fixture.dispatch_returns_id = false;
@@ -368,6 +375,21 @@ static void ci_test_controller(void)
     ci_copy(ci_fixture.run.conclusion, sizeof(ci_fixture.run.conclusion), "cancelled");
     ci_reconcile(false);
     ci_expect(ci_fixture.state.pr_count == 1 && ci_fixture.state.prs[0].manual == -1 && ci_fixture.dispatches == 2, "API: reopen starts a fresh current qualification and cannot restore a closed PR's override");
+
+    ci_fixture_init();
+    ci_fixture.current.code = false;
+    ci_fixture.background_enabled = true;
+    ci_fixture.background_ready = false;
+    ci_copy(ci_fixture.background.status, sizeof(ci_fixture.background.status), "pending");
+    ci_reconcile(false);
+    ci_expect(*ci_fixture.state.lease.nonce == 0, "API: a maintenance run pending behind its ref cannot deadlock an active admission gate by taking the lease");
+    ci_fixture.background_ready = true;
+    ci_copy(ci_fixture.background.status, sizeof(ci_fixture.background.status), "in_progress");
+    ci_reconcile(false);
+    ci_expect(ci_fixture.state.lease.run == 6000 && ci_fixture.state.lease.pr == 0, "API: ready main/daily work runs promptly when PR backlog is empty");
+    ci_fixture_clock = ci_fixture.state.lease.expires_at + 1;
+    ci_reconcile(false);
+    ci_expect(ci_fixture.cancellations == 0 && ci_fixture.state.lease.run == 6000, "API: conflict/expiry reconciliation never cancels unrelated maintenance or releases its live slot");
 }
 
 static Buffer ci_test_comment_body(const char* body, bool trusted, uint64_t id, uint64_t updated_at)

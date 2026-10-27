@@ -15,6 +15,7 @@ struct CiFixture
     CiRun background;
     bool native_enabled;
     bool background_enabled;
+    bool background_ready;
     bool legacy;
     bool dispatch_returns_id;
     bool cancel_terminal;
@@ -127,6 +128,16 @@ static Http ci_fixture_request(const char* method, const char* full_path, const 
         }
         buffer_printf(&out, "]}}}}");
     }
+    else if (strcmp(method, "GET") == 0 && strncmp(path, "commits/", 8) == 0 && strstr(path, "/status?") != NULL)
+    {
+        bool present = *ci_fixture.commit_status != 0 && strncmp(path + 8, ci_fixture.status_head, 40) == 0;
+        buffer_printf(&out, "{\"total_count\":%u,\"statuses\":[", present ? 1 : 0);
+        if (present)
+        {
+            buffer_printf(&out, "{\"context\":\"%s\",\"state\":\"%s\",\"creator\":{\"login\":\"github-actions[bot]\"}}", BUSTER_CI_REQUIRED, ci_fixture.commit_status);
+        }
+        buffer_printf(&out, "]}");
+    }
     else if (strcmp(method, "GET") == 0 && strncmp(path, "commits/", 8) == 0)
     {
         buffer_printf(&out, "{\"total_count\":%u,\"check_runs\":[", ci_fixture.exists ? 1 : 0);
@@ -143,6 +154,10 @@ static Http ci_fixture_request(const char* method, const char* full_path, const 
     else if (strcmp(method, "GET") == 0 && strcmp(path, "actions/workflows/9700x.yml") == 0)
     {
         buffer_printf(&out, "{\"id\":42,\"path\":\"%s\",\"state\":\"active\"}", BUSTER_CI_WORKFLOW);
+    }
+    else if (strcmp(method, "GET") == 0 && strncmp(path, "check-runs/", 11) == 0)
+    {
+        buffer_printf(&out, "{\"name\":\"%s\",\"head_sha\":\"%s\",\"app\":{\"id\":15368},\"status\":\"%s\"}", BUSTER_CI_REQUIRED, ci_fixture.required_head, ci_fixture.required_status);
     }
     else if (strcmp(method, "GET") == 0 && strncmp(path, "actions/workflows/9700x-control.yml/runs?", strlen("actions/workflows/9700x-control.yml/runs?")) == 0)
     {
@@ -242,7 +257,7 @@ static Http ci_fixture_request(const char* method, const char* full_path, const 
             }
             else if (run == &ci_fixture.background)
             {
-                buffer_printf(&out, "{\"total_count\":1,\"jobs\":[{\"name\":\"admission\",\"status\":\"in_progress\",\"conclusion\":null}]}");
+                buffer_printf(&out, "%s", ci_fixture.background_ready ? "{\"total_count\":1,\"jobs\":[{\"name\":\"admission\",\"status\":\"in_progress\",\"conclusion\":null}]}" : "{\"total_count\":0,\"jobs\":[]}");
             }
             else
             {
@@ -401,6 +416,7 @@ static void ci_fixture_init(void)
     ci_copy(ci_fixture.native.status, sizeof(ci_fixture.native.status), "completed");
     ci_fixture.native_enabled = true;
     ci_fixture.background.id = 6000;
+    ci_fixture.background_ready = true;
     ci_fixture.background.workflow = 42;
     ci_fixture.background.attempt = 1;
     ci_fixture.background.created_at = ci_now() - 50;
