@@ -2116,11 +2116,13 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
-- parts (rules 1 and 3): 12 inputs cut by `lane_parts_by_cost`, whose parts the
+- parts (rules 1 and 3): 13 inputs cut by `lane_parts_by_cost`, whose parts the
   lanes take with `lane_take`, then count, place and fill by part, with a late
   lane in every loop. The output must be byte-identical to the reference,
-  every part must be taken once, and every lane must get the same order,
-  costliest first.
+  every part must be taken once, and every lane must get the same order: the
+  costliest part first, then the others costliest first to within a factor of
+  two (one input's costs grow within one factor of two, so that its costliest
+  part isn't its first).
 
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the

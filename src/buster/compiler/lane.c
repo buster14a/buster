@@ -416,10 +416,11 @@ static __attribute__((unused)) Range64 range_part_by_cost(const uint64_t* cost_p
 static __attribute__((unused)) uint64_t lane_part_count(uint64_t count);
 // Cuts [0, count) by cost into lane_part_count(count) parts, as range_part_by_cost cuts, and returns how many. The
 // parts are contiguous and in canonical order: part i is [boundaries[i], boundaries[i + 1]), and boundaries gets
-// parts + 1 values. order gets the parts in the order to take them: by decreasing cost, to within a factor of two (the
-// cost's bit width), ties in index order. Every lane calls it with the same boundaries, which the lanes fill together
-// and which is read-only once it returns, and with an order of its own, which every lane fills alike. Like lane_sync,
-// it waits for every lane, so it can be the sync that starts a phase. A loop over the parts:
+// parts + 1 values. order gets the parts in the order to take them: the costliest first (the first of them on a tie),
+// then the others by decreasing cost, to within a factor of two (the cost's bit width), ties in index order. Every lane
+// calls it with the same boundaries, which the lanes fill together and which is read-only once it returns, and with an
+// order of its own, which every lane fills alike. Like lane_sync, it waits for every lane, so it can be the sync that
+// starts a phase. A loop over the parts:
 //
 //     const uint64_t parts = lane_parts_by_cost(cost_prefix, count, boundaries, order);
 //     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
@@ -670,8 +671,11 @@ static uint64_t lane_part_count(uint64_t count)
 }
 
 // The lanes find the boundaries together, a range of them each, with one binary search per boundary. Then each lane
-// orders the parts with a counting sort by bucket, which keeps index order within a bucket. A part's cost is the prefix
-// at its end less the prefix at the last part's end, so finding the buckets reads the prefix sums once per part.
+// orders the parts with a counting sort by bucket, which keeps index order within a bucket, after the costliest part,
+// which it finds in the same pass: a bucket's costs differ by up to a factor of two, and a caller may give the costliest
+// part to a lane of its choosing (c_check_deferred.c gives it to the first lane, which runs fastest). A part's cost is
+// the prefix at its end less the prefix at the last part's end, so finding the buckets reads the prefix sums once per
+// part.
 static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order)
 {
     const uint64_t parts = lane_part_count(count);
@@ -696,6 +700,8 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
     uint8_t buckets[BUSTER_LANE_MAX_PARTS];
     uint64_t next[BUSTER_LANE_COST_BUCKETS] = { 0 };
     uint64_t before = 0;
+    uint64_t costliest = 0;
+    uint64_t most = 0;
     for (uint64_t part = 0; part < parts; part += 1)
     {
         const uint64_t end = boundaries[part + 1];
@@ -704,9 +710,18 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
         const uint32_t bucket = cost == 0 ? BUSTER_LANE_COST_BUCKETS - 1 : (uint32_t)__builtin_clzll(cost);
         buckets[part] = (uint8_t)bucket;
         next[bucket] += 1;
+        costliest = cost > most ? part : costliest;
+        most = cost > most ? cost : most;
         before = after;
     }
+    // The costliest part takes the first place, and its bucket counts it no more.
     uint64_t offset = 0;
+    if (parts != 0)
+    {
+        order[0] = (uint32_t)costliest;
+        next[buckets[costliest]] -= 1;
+        offset = 1;
+    }
     for (uint32_t bucket = 0; bucket < BUSTER_LANE_COST_BUCKETS; bucket += 1)
     {
         const uint64_t in_bucket = next[bucket];
@@ -715,8 +730,10 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
     }
     for (uint64_t part = 0; part < parts; part += 1)
     {
-        order[next[buckets[part]]] = (uint32_t)part;
-        next[buckets[part]] += 1;
+        // The costliest part writes its own first place again, and leaves its bucket's next place to the others.
+        const bool first = part == costliest;
+        order[first ? 0 : next[buckets[part]]] = (uint32_t)part;
+        next[buckets[part]] += !first;
     }
     return parts;
 }
