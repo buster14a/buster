@@ -892,6 +892,31 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
+            "named nested records keep independent namespaces and layout",
+            "struct S{int x;struct T{int x;struct U{int x;} u;} t;};_Static_assert(sizeof(struct S)==12,\"layout\");\n",
+            false,
+            false
+        },
+        {
+            "anonymous names grow beyond the direct member count",
+            "struct S{union{struct{int a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r;};};int z;unsigned:0;};"
+            "_Static_assert(sizeof(struct S)==76,\"layout\");_Static_assert(__builtin_offsetof(struct S,r)==68,\"member\");\n",
+            false,
+            false
+        },
+        {
+            "anonymous duplicate after hash growth reports the later declaration",
+            "struct S{\nstruct{int a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r;};\nint a;\n};\n",
+            true,
+            false
+        },
+        {
+            "earlier direct name conflicts with a later anonymous path",
+            "struct S{\nint r;\nunion{struct{int a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r;};};\n};\n",
+            true,
+            false
+        },
+        {
             "anonymous member supports flexible successor",
             "struct S{struct{int x;}; int values[];}; _Static_assert(sizeof(struct S)==4,\"flexible\");\n",
             false,
