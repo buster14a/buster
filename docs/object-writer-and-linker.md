@@ -2989,7 +2989,7 @@ already-discovered begin-object path, replaces repeated version scans with
 range classification, and omits the unused catalog from the writer's inputs.
 Three alternating rounds on the same 9700X compare e04462c, the immediate
 baseline 8fcf19ce and implementation 3760045a
-([the follow-up record](https://github.com/buster14a/buster-performance/tree/5208f575308ce0317e5c325924114f032ab4c28d/docs/measurements/libgcc-s-no-import-489-2026-10-27)).
+([the follow-up record](https://github.com/buster14a/buster-performance/tree/7dfb7a1d1e4102800710b692916cd06c4dd8f135/docs/measurements/libgcc-s-no-import-489-2026-10-27)).
 The tiny PIE's median total is 21.4, 22.6 and 21.2 us respectively; every
 final round is at or below its paired historical total. Its cached runtime
 load is 11.0--11.4 us, against the historical 11.4--12.0 us, and the writer's
@@ -3011,6 +3011,12 @@ implementation before catalog omission. The snapshot, binding, import,
 dynamic-output, C-driver and call-graph checks pass on the physical 9700X,
 including both binding paths, stale-file retries, unwinding and split-stack
 execution.
+Unversioned strong references from needed named libraries have separate
+stale/retry coverage for both paths and runtime kinds, and the common path
+comparison checks `gcc_s_needed` too. Test-only build e65a6f3e passes the four
+affected checks; its one complete-link smoke gives 21.4 us for the tiny PIE,
+matching the historical median. The production modules are unchanged from
+3760045a; this smoke does not replace the three-round comparison.
 
 `test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
 libraries' and its exports apart from theirs, `__udivti3` a member's of
