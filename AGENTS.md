@@ -3390,7 +3390,10 @@ by the direct path and by each linker, and reports medians:
 - `link-foreign` (#86, #394), this executable's linker of other compilers'
   objects, given the same command line as a process of its own, for every
   kind: by default for its threads (the lanes its objects pay for, #594),
-  with `--lanes=8`, the most its default takes, and with `--lanes=1` for one.
+  with `--lanes=8`, the most its default takes, and with `--lanes=1` for one,
+  on every CPU as its threads run and pinned as one thread runs: a default
+  link of one lane runs where the scheduler puts it, on the 9700X up to 60%
+  slower than on CPU 2.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
