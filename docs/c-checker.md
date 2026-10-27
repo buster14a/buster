@@ -1282,6 +1282,18 @@ sharing an ambiguous key can still require quadratic compatibility work.
 checks source-time transparent unions, guarded groups, collisions, exhaustion
 and the query-count bound, and checks both source readers against Clang.
 
+On the locked 9700X (CPU 2, one lane, six repeated fresh-process samples),
+10,000 pointer associations went from 738.960 to 12.474 ms in an ordinary
+expression and from 785.990 to 58.097 ms in a declaration-time constant.
+Duplicate compatibility queries fell from 49,995,000 to zero in both readers,
+and control queries from 10,000 to one. The complete constant-expression
+compile still grows faster than linearly; this removes its quadratic
+association-compatibility work, without claiming every other operation is
+linear. SQLite's control instructions were effectively unchanged. The
+[source pins, full scaling/RSS/instruction table, exact-query logs and validation](https://github.com/buster14a/buster-performance/blob/b6424ad152a7cdc49ee9d3ca89e66ac850c90dbb/docs/measurements/generic-association-index-602-2026-10-27/README.md)
+retain both record and pointer families, scalar/vector/native equivalence and
+the experiment's limits.
+
 `test-checker` checks every scan, count and syntax bit, by both paths,
 against its own reading of columns of every length to 200 that end at a
 `PROT_NONE` page (`c_check_input_scan_test.c`).

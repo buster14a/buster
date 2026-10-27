@@ -48,7 +48,11 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
     bool ready = check_test_types_open(&storage) && scratch.base != NULL;
     TypeId records[257] = { 0 };
     TypeId pointers[257] = { 0 };
-    const TypeMember member = { .name = 1, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    const TypeMember member = {
+        .name = 1,
+        .type = BUSTER_TYPE_INT,
+        .bit_width = BUSTER_TYPE_NOT_BIT_FIELD
+    };
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(records); i += 1)
     {
         records[i] = type_tag(&storage.table, i % 2 == 0 ? BUSTER_TYPE_KIND_STRUCT : BUSTER_TYPE_KIND_UNION, i + 1);
@@ -57,7 +61,21 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
         ready &= pointers[i] != 0;
     }
     check_test_expect(test, ready, "generic nominal type family is constructed");
-    const uint32_t counts[] = { 0, 1, 7, 8, 9, 15, 16, 17, 31, 32, 33, 127, 257 };
+    const uint32_t counts[] = {
+        0,
+        1,
+        7,
+        8,
+        9,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        127,
+        257
+    };
     for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
     {
         parser.options.scalar = scalar != 0;
@@ -125,8 +143,16 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
         const TypeId record_pointer = pointers[0];
         const TypeId union_type = type_tag(&storage.table, BUSTER_TYPE_KIND_UNION, 901);
         const TypeMember union_members[] = {
-            { .name = 1, .type = record_pointer, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
-            { .name = 2, .type = pointers[1], .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+            {
+                .name = 1,
+                .type = record_pointer,
+                .bit_width = BUSTER_TYPE_NOT_BIT_FIELD
+            },
+            {
+                .name = 2,
+                .type = pointers[1],
+                .bit_width = BUSTER_TYPE_NOT_BIT_FIELD
+            },
         };
         ready = ready && type_complete_record(&storage.table, union_type, union_members, 2, (TypeRecordAttributes){ 0 }) &&
                 type_mark_transparent_union(&storage.table, union_type).status == TYPE_TRANSPARENT_UNION_APPLIED;
