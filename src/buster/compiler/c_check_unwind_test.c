@@ -7,12 +7,14 @@
 // body) that each of a computed goto's labels calls, from one with values live across the call, called with a
 // positive and a negative argument so that both arms of its last ?: run, and from one of 128-bit integers (Tier 0's
 // I128 and U128, in their frame slots), four of them live across the call, its division and remainder libgcc's calls,
-// called with shifts of 3 and of 64 so that its shifts' cmovne takes both values:
+// called with shifts of 3 and of 64 so that its shifts' cmovne takes both values, from one with an array aligned to 64
+// (a realigned frame) and from one with an array aligned to 4096 and a variable-length array (a realigned frame with a
+// base, r15, rsp moved in its body):
 //
 // - The driver's executable by each path, the same bytes: by default, and with -funwind-tables or -g after
 //   -fno-asynchronous-unwind-tables, the unwinder walks through every function to main and libc's start, which the
-//   program checks (it prints the seven depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
-//   the first of them, and the program prints 1 1 1 1 -1 1 1.
+//   program checks (it prints the nine depths and returns 0); with -fno-asynchronous-unwind-tables alone, it stops at
+//   the first of them, and the program prints 1 1 1 1 -1 1 1 1 1.
 // - Its object (-c) by each path, the same bytes: an .eh_frame of one CIE and an FDE per function the object defines,
 //   each a relocation; linked by cc through GNU ld and through lld, and by link-foreign from GCC's driver's line, into
 //   programs that walk alike. With -fno-asynchronous-unwind-tables, no .eh_frame.
@@ -26,6 +28,9 @@
 // - gdb on the -g executable, at every instruction it executes of each function from its first to its ret, stepping
 //   over calls, through as many of the function's calls as the fixture's paths need: each backtrace's frames are the
 //   function and its callers, and the steps reach every instruction of gdb's disassembly of the function.
+// - A second fixture (#523) whose SIGILL handler counts the frames from __builtin_trap()'s helper, a ud2 alone with an
+//   FDE of no transitions: by each path, the same bytes, and its object linked by cc through GNU ld, the unwinder walks
+//   from the handler through the helper to main; without unwind tables, it still traps into the handler.
 
 static const char check_unwind_test_text[] =
     "#include <execinfo.h>\n"
@@ -89,6 +94,24 @@ static const char check_unwind_test_text[] =
     "    return vla(5);\n"
     "}\n"
     "\n"
+    "int aligned(int x)\n"
+    "{\n"
+    "    _Alignas(64) int values[4] = { x, x + 1, x + 2, x + 3 };\n"
+    "    return depth() + values[3] - x - 3 + (int)((unsigned long)values & 63);\n"
+    "}\n"
+    "\n"
+    "int based(int n)\n"
+    "{\n"
+    "    _Alignas(4096) char page[16];\n"
+    "    int values[n];\n"
+    "    page[0] = (char)n;\n"
+    "    for (int i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        values[i] = i;\n"
+    "    }\n"
+    "    return depth() + values[n - 1] - (n - 1) + page[0] - n + (int)((unsigned long)page & 4095);\n"
+    "}\n"
+    "\n"
     "int main(void)\n"
     "{\n"
     "    int baseline = depth();\n"
@@ -98,9 +121,65 @@ static const char check_unwind_test_text[] =
     "    long negative = pressure(-5);\n"
     "    __int128 short_shift = wide(5, 3);\n"
     "    __int128 long_shift = wide(7, 64);\n"
-    "    printf(\"%d %d %d %ld %ld %ld %ld\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift);\n"
+    "    int realigned = aligned(7);\n"
+    "    int rebased = based(4);\n"
+    "    printf(\"%d %d %d %ld %ld %ld %ld %d %d\\n\", baseline, deep, shallow, pressed, negative, (long)short_shift, (long)long_shift, realigned, rebased);\n"
     "    return baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&\n"
-    "           short_shift == baseline + 1 && long_shift == baseline + 1 ? 0 : 1;\n"
+    "           short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1 ? 0 : 1;\n"
+    "}\n";
+
+// The terminal builtins' helper (#523): __builtin_trap's and __builtin_unreachable's calls reach a helper of a ud2
+// alone, which has an FDE of no transitions like every other function. The SIGILL handler counts its frames with
+// backtrace(): above main's own count, the handler, libc's signal trampoline, the helper (found by the ud2's address,
+// a signal frame's) and trap, so it exits with 0 only where the unwinder walked through the helper to main. signal and
+// _exit are declared rather than included, so the fixture needs no more of the C library's headers than the other.
+static const char check_unwind_test_trap_text[] =
+    "#include <execinfo.h>\n"
+    "#include <stdio.h>\n"
+    "\n"
+    "#define SIGILL 4\n"
+    "void (*signal(int number, void (*handler)(int)))(int);\n"
+    "void _exit(int status);\n"
+    "\n"
+    "static int baseline;\n"
+    "\n"
+    "int depth(void)\n"
+    "{\n"
+    "    void* frames[64];\n"
+    "    return backtrace(frames, 64);\n"
+    "}\n"
+    "\n"
+    "void caught(int number)\n"
+    "{\n"
+    "    int frames = depth();\n"
+    "    printf(\"%d %d %d\\n\", number, baseline, frames);\n"
+    "    fflush(stdout);\n"
+    "    _exit(number == SIGILL && baseline >= 3 && frames == baseline + 4 ? 0 : 1);\n"
+    "}\n"
+    "\n"
+    "int pick(int x)\n"
+    "{\n"
+    "    if (x > 0)\n"
+    "    {\n"
+    "        return x;\n"
+    "    }\n"
+    "    __builtin_unreachable();\n"
+    "}\n"
+    "\n"
+    "void trap(void)\n"
+    "{\n"
+    "    __builtin_trap();\n"
+    "}\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    baseline = depth();\n"
+    "    signal(SIGILL, caught);\n"
+    "    if (pick(1) == 1)\n"
+    "    {\n"
+    "        trap();\n"
+    "    }\n"
+    "    return 2;\n"
     "}\n";
 
 // An option set of the driver's: whether its output has unwind tables; whether the fixture's executables and objects
@@ -228,7 +307,7 @@ static bool check_unwind_test_compile(const char* compiler, const char* source, 
 }
 
 // Whether the program runs as its unwind tables (or their absence) make it: with them, it returns 0 having printed
-// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1.
+// depths that walk through main to libc's start; without them, it returns 1 having printed 1 1 1 1 -1 1 1 1 1.
 static bool check_unwind_test_run(const char* program, bool tables, Arena* arena)
 {
     char report[PATH_MAX + 8];
@@ -243,11 +322,14 @@ static bool check_unwind_test_run(const char* program, bool tables, Arena* arena
     long negative = 0;
     long short_shift = 0;
     long long_shift = 0;
-    const bool read = printed.pointer != 0 &&
-                      sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld", &baseline, &deep, &shallow, &pressed, &negative, &short_shift, &long_shift) == 7;
+    int realigned = 0;
+    int rebased = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d %ld %ld %ld %ld %d %d", &baseline, &deep, &shallow, &pressed, &negative, &short_shift,
+                                                     &long_shift, &realigned, &rebased) == 9;
     const bool walked = status == 0 && baseline >= 3 && deep == baseline + 2 && shallow == baseline + 2 && pressed == baseline + 1 && negative == -(baseline + 1) &&
-                        short_shift == baseline + 1 && long_shift == baseline + 1;
-    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1;
+                        short_shift == baseline + 1 && long_shift == baseline + 1 && realigned == baseline + 1 && rebased == baseline + 1;
+    const bool stopped = status == 1 && baseline == 1 && deep == 1 && shallow == 1 && pressed == 1 && negative == -1 && short_shift == 1 && long_shift == 1 &&
+                         realigned == 1 && rebased == 1;
     return read && (tables ? walked : stopped);
 }
 
@@ -431,6 +513,73 @@ static void check_unwind_test_policy(CheckDebugTestTally* tally, const char* sou
                             set->debug_frame ? "clang's object has as many FDEs in .debug_frame as ours in .eh_frame" : "clang's object has as many FDEs as ours", theirs);
 }
 
+// Whether the trap fixture's program runs as its unwind tables (or their absence) make it: its SIGILL handler prints
+// the signal, main's count and its own. With tables, it returns 0 having counted main's and the four frames above it;
+// without them, it returns 1 having printed 4 1 1, both walks stopped at depth: the handler ran, and nothing else
+// exited with 1.
+static bool check_unwind_test_trap_run(const char* program, bool tables, Arena* arena)
+{
+    char report[PATH_MAX + 8];
+    snprintf(report, sizeof(report), "%s.out", program);
+    char* run[] = { (char*)program, 0 };
+    const int status = object_test_run(run, report, "/dev/null");
+    const String8 printed = foreign_test_read(arena, report);
+    int number = 0;
+    int baseline = 0;
+    int frames = 0;
+    const bool read = printed.pointer != 0 && sscanf(printed.pointer, "%d %d %d", &number, &baseline, &frames) == 3;
+    const bool walked = status == 0 && baseline >= 3 && frames == baseline + 4;
+    const bool stopped = status == 1 && baseline == 1 && frames == 1;
+    return read && number == SIGILL && (tables ? walked : stopped);
+}
+
+// The trap fixture (check_unwind_test_trap_text, #523) by default: its executable by each path, the same bytes, and
+// its object linked by cc through GNU ld, each of whose handlers must count the frames through the trap's helper; and
+// its executable without unwind tables, which must still trap into the handler (check_unwind_test_trap_run).
+static void check_unwind_test_trap(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_trap.c", directory);
+    const bool written = foreign_test_write(source, check_unwind_test_trap_text, sizeof(check_unwind_test_trap_text) - 1);
+    check_debug_test_expect(tally, written, "write the trap's fixture", source);
+    const CheckUnwindTestSet* sets[] = { &check_unwind_test_sets[0], &check_unwind_test_sets[1] };
+    for (uint32_t s = 0; written && s < BUSTER_ARRAY_LENGTH(sets); s += 1)
+    {
+        const bool tables = sets[s]->tables;
+        char outputs[2][PATH_MAX + 32];
+        String8 files[2] = { 0 };
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            snprintf(outputs[path], sizeof(outputs[path]), "%s/dbg_trap.%s%s", directory, sets[s]->name, path == 0 ? "" : ".scalar");
+            const bool made = check_unwind_test_compile("/proc/self/exe", source, outputs[path], sets[s], false, path != 0);
+            check_debug_test_expect(tally, made, "the driver links the trap's fixture", outputs[path]);
+            files[path] = made ? foreign_test_read(arena, outputs[path]) : (String8){ 0 };
+        }
+        check_debug_test_expect(tally, files[0].pointer != 0 && files[1].pointer != 0 && files[0].length == files[1].length &&
+                                           memcmp(files[0].pointer, files[1].pointer, files[0].length) == 0,
+                                "the trap's executable by the vector path is --scalar's, byte for byte", outputs[0]);
+        check_debug_test_expect(tally, files[0].pointer != 0 && check_unwind_test_trap_run(outputs[0], tables, arena),
+                                tables ? "the trap's handler walks through the trap's helper to main" : "without unwind tables, the trap still reaches its handler",
+                                outputs[0]);
+        if (tables)
+        {
+            char object[PATH_MAX + 48];
+            char program[PATH_MAX + 56];
+            char errors[PATH_MAX + 64];
+            snprintf(object, sizeof(object), "%s.o", outputs[0]);
+            snprintf(program, sizeof(program), "%s.bfd", object);
+            snprintf(errors, sizeof(errors), "%s.err", program);
+            const bool made = check_unwind_test_compile("/proc/self/exe", source, object, sets[s], true, false);
+            check_debug_test_expect(tally, made, "the driver writes the trap's object", object);
+            char* arguments[] = { (char*)"cc", (char*)"-fuse-ld=bfd", (char*)"-o", program, object, 0 };
+            const bool linked = made && object_test_run(arguments, "/dev/null", errors) == 0;
+            check_debug_test_expect(tally, linked, "cc links the trap's object through GNU ld", errors);
+            check_debug_test_expect(tally, linked && check_unwind_test_trap_run(program, true, arena),
+                                    "the linked trap's handler walks through the trap's helper to main", program);
+        }
+    }
+}
+
 // The fixture's executables and objects, the options' rule, and gdb on its -g executable (see the file's comment).
 static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* directory, Arena* arena)
 {
@@ -521,6 +670,8 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
     static const char* const wide[] = { "wide", "main" };
     static const char* const vla[] = { "vla", "jump", "main" };
     static const char* const jump[] = { "jump", "main" };
+    static const char* const aligned[] = { "aligned", "main" };
+    static const char* const based[] = { "based", "main" };
     if (file.pointer != 0)
     {
         check_unwind_test_gdb(tally, debug_program, file, depth, BUSTER_ARRAY_LENGTH(depth), 1, arena);
@@ -528,5 +679,8 @@ static void check_unwind_test_driver(CheckDebugTestTally* tally, const char* dir
         check_unwind_test_gdb(tally, debug_program, file, wide, BUSTER_ARRAY_LENGTH(wide), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, vla, BUSTER_ARRAY_LENGTH(vla), 1, arena);
         check_unwind_test_gdb(tally, debug_program, file, jump, BUSTER_ARRAY_LENGTH(jump), 2, arena);
+        check_unwind_test_gdb(tally, debug_program, file, aligned, BUSTER_ARRAY_LENGTH(aligned), 1, arena);
+        check_unwind_test_gdb(tally, debug_program, file, based, BUSTER_ARRAY_LENGTH(based), 1, arena);
     }
+    check_unwind_test_trap(tally, directory, arena);
 }

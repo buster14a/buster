@@ -300,6 +300,19 @@ designs and the compilers already built this way.
   syntax, limitations, example and measurement method are in
   [docs/assembler.md](docs/assembler.md). `.S` uses the shared preprocessor's
   explicit assembly mode, including `-I`, `-D`, `-U` and source line markers.
+- `src/buster/compiler/c_check_program_asm.c` lowers GNU C's `asm` statements
+  (#147). It places each operand by its constraint and substitutes the template
+  as GCC and clang print it in AT&T syntax. `assembler.c`'s `asm_assemble_code`
+  assembles it, by the checker's path, into records, branch columns and
+  references. The statement's code calls the result, a per-unit helper; a
+  template of no instructions, a barrier's, is no code at all.
+  `test-checker` runs each shape natively against clang -O0's build on both
+  paths and checks each refusal by name (`c_check_program_asm_test.c`).
+  `test-assembler` checks `asm_assemble_code`, and with `--cross-check` compares
+  the instructions it admits for templates with GNU as.
+  [The inline assembly guide](docs/c-inline-assembly.md) has the placement, the
+  substitution, the helper's frame, the refusals and what is pending: naked
+  functions and templates that refer to symbols.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
   [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
@@ -339,7 +352,7 @@ designs and the compilers already built this way.
   alone (`run_parse_command`, in `c_parser.c`). With no file each prints its
   usage and exits with status 1. It
   includes most of the compiler and all of its tests, and `build.sh` compiles
-  it as twelve translation units: `main.c` itself, the driver's unit, and each
+  it as eleven translation units: `main.c` itself, the driver's unit, and each
   `main_unit_*.c`, which names a unit and includes `main.c`. Every unit reads
   all of `main.c`, so each has the whole file's diagnostics, but emits only its
   own commands' code: each branch of `main_command` first tests its unit, and
@@ -347,8 +360,7 @@ designs and the compilers already built this way.
   command's branch names its unit. The modules that several units' commands
   run compile in one unit alone, their home, which the others call (#270): the
   lexer in the driver's unit, the preprocessor and the parser in the front
-  end's (but for the fragments' unit, which compiles a parser of its own with
-  the fragment sink), and the linker's modules (`import.c`, `runtime.c`,
+  end's, and the linker's modules (`import.c`, `runtime.c`,
   `bind.c`, `dynamic.c`, `executable.c` and `snapshot.c`) in the dynamic PIEs'
   unit. Their entry points that other units call take the module's macro
   (`BUSTER_LEXER_ENTRY`, `BUSTER_PREPROCESSOR_ENTRY`, `BUSTER_PARSER_ENTRY`,
@@ -636,12 +648,15 @@ designs and the compilers already built this way.
   unit relocated, linked by `cc` through GNU ld and lld and by `link-foreign`,
   the same way; and the unwind tables (`c_check_unwind_test.c`): a fixture's
   `backtrace()` through a variable-length array's function, a computed goto's,
-  one with values live across its call and one of 128-bit integers, by
-  default and with each option
+  one with values live across its call, one of 128-bit integers and two in
+  realigned frames (an array aligned to 64, and one aligned to 4096 beside a
+  variable-length array, with a base), by default and with each option
   that keeps or drops the tables, by each path, as executables and as objects
   linked three ways; the options' rule against clang's objects of the fixture;
   and gdb's backtrace at every instruction of each function, whose steps must
-  reach every instruction of gdb's disassembly of it.
+  reach every instruction of gdb's disassembly of it; and a `SIGILL` handler's
+  `backtrace()` from `__builtin_trap()`'s helper, a `ud2` alone, to `main`
+  (#523: `unwind_tier0_frame` takes a frameless function's `ud2` for its ret).
   [The debug guide](docs/debug.md) ("The C driver's `-g`") has the details.
 - `src/buster/compiler/foreign_debug.c` builds `link-foreign`'s DWARF from the
   selected objects' debug sections (#395): concatenated by name in input order
@@ -661,13 +676,14 @@ designs and the compilers already built this way.
   consumer that does not repeat generic instruction validation), or reads them
   from the frame Tier 0 published, with no pass over the body
   (`unwind_tier0_frame`, #395: frame pointers' too, which the analyzer
-  refuses); `unwind.c` emits original CIE/FDE contributions with scalar/vector
+  refuses, and realigned frames', whose `and rsp` and base's `mov` it checks);
+  `unwind.c` emits original CIE/FDE contributions with scalar/vector
   twins, a pair per function or with `UnwindOutput.shared` one CIE for the
   batch. `check_program_emit` writes the C driver's unwind tables so, one
   EH_FRAME atom of them after the last function. `test-unwind --cross-check`
   checks independent frame-state oracles, protected tails, the published
-  frame against the analyzer and actual Tier 0 code, a frame pointer's among
-  it, with native GDB/perf consumers. `benchmark-unwind` charges
+  frame against the analyzer and actual Tier 0 code, a frame pointer's and
+  realigned frames' among it, with native GDB/perf consumers. `benchmark-unwind` charges
   analysis/emission to the existing Tier 0, sizing and encoding chain,
   including per-function arena cleanup, and the driver's published frame
   (`--only published`). [The unwind guide](docs/unwind.md) records the trusted
@@ -914,7 +930,12 @@ designs and the compilers already built this way.
   reached through their addresses; calls, and division and shifts at depths where
   their fixed registers are taken, are emitted entry by entry, and so are
   variable-length arrays' allocations and the stack's saved and restored
-  positions, which give their function a frame pointer. An optional per-unit
+  positions, which give their function a frame pointer. An object, or a call's
+  outgoing area, aligned past 16 bytes realigns its function's frame (rbp the
+  frame pointer, `and rsp` after the reservation, the frame's places rsp's or,
+  where rsp moves, r15's, and its incoming places rbp's: docs/tier0.md's
+  "Realigned frames"), and `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` of a class
+  may name an object, a value that must live in memory. An optional per-unit
   access column reaches the symbols a unit doesn't define through their GOT
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
@@ -938,8 +959,10 @@ designs and the compilers already built this way.
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
   twin.
   `tier0_generate.c` makes random programs as typed streams and as C,
-  `tier0_test.c` holds `test-tier0` and `tier0_benchmark.c` provides
-  `benchmark-backend`. `docs/tier0.md` has the contract, the design and the
+  `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
+  `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
+  the same measurement (`tier0_benchmark_measure.c`) on the functions `-c`
+  compiles of C files. `docs/tier0.md` has the contract, the design and the
   9700X measurements.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
@@ -1037,7 +1060,10 @@ designs and the compilers already built this way.
   places with clang's messages. It also holds the driver. `docs/c-parser.md`
   explains the design and its 9700X measurements. `c_parser_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
-  `c_parser_benchmark.c` provides `benchmark-parser`.
+  `c_parser_benchmark.c` provides `benchmark-parser`. Salter's operator
+  fragments, the alternative to the postorder that #104–#107 measured end to
+  end beside the checker's tree walk, lost and were removed: [the
+  decision](docs/c-parser-fragments.md).
 - `src/buster/compiler/profile.c` is the profiling tools: `ab` (builds of
   several trees run in turn, under the 9700X's lock), `time-runs` (whole
   processes, and builds compared over their code's placements and fresh
@@ -1143,6 +1169,7 @@ git init -q --template= build/c-testsuite
 git -C build/c-testsuite fetch -q --depth 1 https://github.com/c-testsuite/c-testsuite 5c7275656d751de0e68b2d340a95b5681858ed07
 git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler test-c-testsuite --cross-check --subset tests/c-testsuite/subset.txt build/c-testsuite
+./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
 The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
@@ -1166,7 +1193,9 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every pull request's job queues behind every other's, so keep the job short.
+- Keep each qualification short. With admission enabled, the hosted controller
+  chooses priority before a job enters the physical queue ("9700X admission"
+  below); the shared host lock still protects every measurement.
   A pull request runs a benchmark's plain run, which checks its paths against
   their scalar twins, where it changes what the benchmark measures (the
   `changes` job's `measure`): a file that the benchmark's translation unit
@@ -1186,9 +1215,11 @@ there at a time, so everything takes one lock:
   campaign (#336's binding handoff) has a module of its own, not the whole
   checker's. A step gated so also runs on the pull request that changes it.
   The same holds for the linkers' baselines and floors, mold's and wild's
-  foreign phases, and the first-party performance readers' qualification
-  (`tools/performance`, `docs/performance`, `web/perf`, their pin; a change to
-  `docs/performance` alone runs the job for it). A push
+  foreign phases, `clang -E`'s times beside the preprocessor's benchmark
+  (`--clang`, its harness `c_preprocessor_benchmark.c`) and the first-party
+  performance readers' qualification (`tools/performance`, `docs/performance`,
+  `web/perf`, their pin; a change to `docs/performance` alone runs the job for
+  it). A push
   to main runs none of them: its pull request's run measured what it changes,
   and the full set took the job past its 10 minutes. The daily and dispatched
   runs have 25 minutes.
@@ -1213,6 +1244,76 @@ there at a time, so everything takes one lock:
   benchmark's step or the tables.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## 9700X admission
+
+`tools/ci/admission.c` and `.github/workflows/9700x-control.yml` implement the
+default-branch eligibility/priority controller for #546-#548.
+[The admission guide](docs/ci-9700x-admission.md) describes the version-1
+interface, required-check attribution, recovery and the live rollout gates.
+Keep `CI_9700X_ADMISSION_ENABLED` off until the reviewed main implementation,
+ordinary qualification and restricted runner-group access have been verified.
+Verify this repository's exact default-workflow entrypoint and the existing
+single host-lock pool before setting `CI_9700X_POOL_CAPACITY=1`. For a group shared
+with legacy, use the documented root-owned Buster-only job-start source guard;
+do not narrow legacy's group-wide access, broaden access or change other jobs.
+
+When enabled, confirmed conflicting PRs are blocked and their own outstanding
+qualifications cancelled; UNKNOWN is retried and stays pending, never inferred
+to be a conflict. Behind-but-clean PRs remain eligible. The controller preserves
+the `buster-fast-9700x-` per-PR/ref concurrency groups and the shared host lock.
+It admits one job, rather than flooding the self-hosted queue. P0 critical,
+P1 high/current approval, P2 ordinary, P3 background and explicit P4 low are FIFO
+within class, with the guide's reserved aging slots and two-hour main/daily
+deadline. The default backlog threshold is three waiting eligible PRs.
+
+Maintainers with verified repository write/maintain/admin permission can post
+one standalone command in a PR conversation:
+
+```text
+/ci priority critical|high|normal|low
+/ci hold
+/ci resume
+/ci retry
+/ci status
+```
+
+The priority words above are alternatives. Append `run RUN_ID` for a current
+request-specific control, or use the controller's `workflow_dispatch` form on
+`main` with a PR/run ID. `normal`/`clear` removes an override; automatic approval
+priority can apply again. PR overrides/holds persist across commits until
+reset/resume or closure. Run overrides are bound to that request ID/SHA and expire
+on supersession/completion. Hold/promote never preempts admitted work. Retry
+qualifies only the current revision and is a no-op while its run is active.
+
+Automatic P1 requires a trusted current-head `APPROVED` review, or a comment
+consisting of `LGTM`, `APPROVED`, `SHIP IT`, `READY TO MERGE` or `/ci approve`.
+Quotes, code blocks, incidental/negated text and untrusted actors do not approve.
+Comment approval binds only a head already observed by the controller; edit or
+repost after observation, or use a commit-associated review, when ambiguous.
+Edits/deletions, dismissed reviews and new heads remove derived approval. Manual
+priority persists independently. Public fork revisions need a trusted current
+approval before any physical execution; a persistent priority alone is not one.
+
+The required context keeps its name, `Build and execute on Ryzen 7 9700X`, and
+GitHub Actions integration. In active mode the controller publishes both its
+Check Run and same-name commit status on the PR head after the exact current
+head/base/merge qualification; the native default-branch dispatch is not the PR
+result. Skips, cancellations, UNKNOWN or stale identities cannot turn the required
+status green. Documentation-only clean PRs retain success without hardware work.
+The check and controller summary expose priority, position, blocked reason,
+command result, admitted SHA/run, state and expiry. Raw real-run scheduling
+measurements belong in `buster-performance`, not here.
+
+Run `cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/admission.c -o /tmp/admission`
+and `/tmp/admission --self-test` after changing this policy, and rerun the existing
+`changes --self-test` after any workflow gate/benchmark edit. The policy/fixtures
+are original C; the privileged workflow never runs PR code or consumes a PR cache
+or artifact as authority. Guard binaries are compiled on hosted capacity and
+checked by SHA-256 from the same reviewed executor run/attempt. API/state errors
+block new admission; never clear a live lease merely because it expired.
+`tools/ci/admission-hook.sh` only wraps the original lock hook, preserves its
+backup, and applies the root-controlled source gate before lock/checkout.
 
 ## Sharing the owner's machines' cores
 
@@ -1719,13 +1820,14 @@ a reader sees a whole entry or none whatever runs at once.
 tool and writes an entry for each run; `check` runs every one and writes it,
 and where an entry with the same inputs holds another result reports it as
 stale, which fails the run; anything else, or unset, keeps nothing (local
-runs). The 9700X job's test step uses `use`, but on the daily and dispatched
-runs, which use `check` and then remove the entries no test has written for
-two days. An entry is only as right as the run that wrote it: the daily check
-finds one a pull request's run left wrong. The counts of what runs did (taken,
-run, stale, not kept) are in shared memory, which the parts a test forks after
-it sets up the cache add to, and a test prints them at its end
-(`oracle_cache_report`).
+runs). The 9700X job's test step uses `use` (a push, and a pull request's
+admitted execution, `docs/ci-9700x-admission.md`), but on the daily runs and
+the dispatches that name no pull request, which use `check` and then remove the
+entries no test has written for two days. An entry is only as right as the run
+that wrote it: the daily check finds one a pull request's run left wrong. The
+counts of what runs did (taken, run, stale, not kept) are in shared memory,
+which the parts a test forks after it sets up the cache add to, and a test
+prints them at its end (`oracle_cache_report`).
 
 A run whose directories hold other runs' files as it runs
 (`OracleRun.shared_directories`) keeps its dependencies but not their
@@ -4194,7 +4296,11 @@ still replaces them (the benchmark leaves it out of clang's command line). The
 runs answer the feature queries as clang does (`--clang-features`), so that they
 do the work `clang -E` does. The
 default 9700X job runs the smoke command above on `main.c`, pinned to one allowed
-CPU; like the others, its measurements are informational.
+CPU, with `--clang` on the daily and dispatched runs and on pull requests that
+change `c_preprocessor_benchmark.c` (the `changes` job's `preprocessor_clang`),
+and without it on every other run that measures the preprocessor: clang's times,
+about 6 s of the step's 12, measure clang rather than this compiler. Like the
+others, its measurements are informational.
 
 `./build/compiler benchmark-preprocessor --defines [--only vectorized|scalar]
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
@@ -4445,18 +4551,6 @@ file, for perf. Run it under the 9700X's lock with `taskset -c 2`;
 The default 9700X job runs it on `main.c`, pinned to one allowed CPU; like the
 others, its measurements are informational.
 
-## Fragment experiment tests
-
-The test-only expression-fragment experiment is described in
-[docs/c-parser-fragments.md](docs/c-parser-fragments.md).
-`./build/compiler test-fragment-interleave [--seed N]` compares scalar and
-AVX-512 byte routing, including exhaustive short masks and exact protected-page
-boundaries. `./build/compiler test-fragments` checks the scalar recognizer's
-experimental sink, compiled separately in `main_unit_fragments.c`; production
-parser units have no fragment sink. These checks do not establish semantic or
-SSA IR identity. The complete #107 comparison still requires the shared
-semantic consumer and its actual output.
-
 ## Scoped binding kernels
 
 `test-environments [--seed N]` checks the immutable file-scope position index,
@@ -4569,11 +4663,21 @@ the caller allows (the driver: one per CPU it may run on, or `--lanes N`).
 [--programs N] [--keep]` emits generated programs of up to 600 functions (of
 libgcc's functions in random first-use orders, computed gotos through static
 tables of labels' addresses, switches, structs by value, long doubles,
-variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, and
-on 8 with a slow lane, by both paths, with `-g`'s rows and unwind tables and
-without: each must be the one lane's object or failure; then the lane rule,
-and the driver's objects and executables by `--lanes` and by default, each one
-lane's, the executables exiting alike. `./build/compiler benchmark-check-lanes
+variadic calls) and failing programs on one lane and on 2, 3 and 8 lanes, on
+8 with a slow lane, and on 8 that can't be pinned (which `lane_run` runs, then
+counts as lanes that didn't start), by both paths, with `-g`'s rows and unwind
+tables and without: each must be the one lane's object or failure, run again
+on one lane only when its lanes didn't start. Then the serial retry's other
+causes, each emission one lane's: a lane short of room
+(`CheckProgramLanes.squeeze_body`: the lane that takes a body's part left only
+so many bytes in one of its arenas, from none up, doubling, until the part
+fits), whose sweeps must reach each reason (the lowering's, Tier 0's and the
+code's after it), and lanes that start no thread, in a child that
+`RLIMIT_NPROC` limits (not as root); then the lane rule, and the driver's
+objects and executables by `--lanes` and by default, each one lane's, the
+executables exiting alike, and with lanes that don't start, and the failing
+programs' exit statuses and diagnostics by `--lanes 8`, each `--lanes 1`'s.
+`./build/compiler benchmark-check-lanes
 [--passes N] [--lanes LIST] [--cpus LIST] [preprocessor options] file...`
 times a file's emission on each lane count (every lane forced) and by the
 rule, with the lowering's preparation, the lanes' run and the merge apart,
@@ -4815,11 +4919,13 @@ and the program runs: each side checks every argument, result, hidden pointer,
 side: a world of what its C passes (integers to 64 bits, `__int128` and
 `unsigned __int128`, enums, pointers, `float`, `double`, `long double`, their
 complex types and the
-records, arrays and aligned typedefs of them, aligned to 16 at most, with C23's
+records, arrays and aligned typedefs of them, aligned to 64 as the clang
+worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
-signatures within Tier 0's depths (13 integer arguments, long doubles and
-128-bit integers among them, and 15 floating ones); our
+signatures within Tier 0's depths (12 integer arguments, long doubles and
+128-bit integers among them, a realigned frame's rbp past them, and 15
+floating ones); our
 caller and callee per signature as C, which this executable (or `--buster
 PATH`) compiles with `--verify -c` and with `--scalar` into the same bytes,
 and the C side checks every argument and result both ways (the al and the
@@ -4894,24 +5000,27 @@ informational.
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
-[--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
-2.9 s with `--cross-check`) checks `tier0.c` on programs from
-`tier0_generate.c`, `--count` (300) of each of six shapes: one function of
+[--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
+14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
+`tier0_generate.c`, `--count` (300) of each of seven shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
 passed and returned by value (#137), from a catalog of records whose parts
 load every way (byte arrays of 1 to 17 bytes, floats and doubles mixed with
 integers both ways round, unions, a member aligned to 16, the empty struct,
-records past 16 bytes), whose programs must reach every kind of part,
-location and result the catalog makes, and functions with a frame pointer
-(variable-length arrays) that pass, take or return records; and larger past
-the depth tables (calls of 13 to 32 arguments, each evaluated over the ones
-before it, and deeper expressions, whose deep entries must be at least 1% of
-the entries). Their calls pass up to 12
+records aligned to 32 and records past 16 bytes), whose programs must reach
+every kind of part, location and result the catalog makes, and functions with
+a frame pointer (variable-length arrays) that pass, take or return records;
+larger past the depth tables (calls of 13 to 32 arguments, each evaluated over
+the ones before it, and deeper expressions, whose deep entries must be at
+least 1% of the entries); and that with objects aligned past 16 bytes (to 32,
+64 and 4096, `over_aligned`), in realigned frames, a base (r15) among them
+where variable-length arrays move rsp, many of each. Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects
-are local arrays and structs, some `_Alignas(16)`, read, written and pointed
+are local arrays and structs, some `_Alignas(16)` (or past it, in the last
+shape), read, written and pointed
 into, copied (twins' bytes, all or a prefix, in statements and before a call's
 arguments, its C sequenced), each address's remainder by its alignment a value,
 and every object's bits folded into a global at its function's end (a
@@ -4928,16 +5037,23 @@ refuse unsupported entries alike and compile up to 240 values at once alike,
 refusing more, and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
 frames of objects, values and `VA_LIST`s whose places both paths must give
-alike, aligned, inside the frame and apart; copies: their rules, and a copy of
+alike, aligned, inside the frame and apart, every other round's realigned for
+objects aligned past 16 (the prologue's `and rsp` by the most they need, which
+the frame publishes); the frame's alignment, `tier0_frame_alignment` and its
+vector twin, on random columns of every count of locals to 40 and of calls to
+12, each ending at a `PROT_NONE` page; copies: their rules, and a copy of
 each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
 pointer, run natively: a probe must see `al` 3, `r11` its own address and the
 call's arguments, after moves that are cycles and that run through `r11`, with
-values saved around the call; and deep values (`tier0_deep_test.c`): seven
+values saved around the call; and deep values (`tier0_deep_test.c`): eleven
 functions that fill the depth tables and cross their line with an entry of each
 kind (a dropped value, `?:`, a fused compare and branch, floating values,
 division by a local and by a value and shifts by a register, a frame pointer's
-14, both stacks at once), run natively against the file's model; and the
+14, both stacks at once, rsp moved past the line, a conversion past the
+floating line, a realigned frame's 14 and a realigned frame with a base's 13,
+an allocation past them that keeps rsp aligned to 4096), run natively against
+the file's model; and the
 operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
@@ -5038,6 +5154,26 @@ one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
 each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
+
+`./build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode]
+[--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
+measures the same variants on real C. Each file is checked as the driver checks
+it, and the definitions `-c` lowers are lowered and emitted, outside the time;
+their typed streams, with the symbols' access the emission gave them
+(`check_program_access`), make one corpus with the other files' functions, which
+both paths must agree on before the same medians are reported. A file the
+checker rejects, or whose checked program or emission refuses a feature by
+name, is left out with its reason; one that fails otherwise (it doesn't
+preprocess, a resource runs out, a function doesn't join the corpus) fails the
+command, and so does a run left with no function or no typed entry, or a
+timed run that failed on a function (both benchmarks: `tier0_benchmark_measure`),
+and both refuse an unknown `--only` wherever it comes on the line. Its last line
+totals the files measured, left out and failed and the measurement's outcome
+(`measurement=reported`, `failed` or `none`), as the exit status takes them.
+`test-checker` checks these outcomes (`tier0_source_benchmark_test.c`), with the
+resources' failures injected, and the corpus's add at its capacity. Run it under the 9700X's lock with
+`taskset -c 2`. The default 9700X job runs it on the frozen `sqlite3.c`, pinned
+to one allowed CPU, where a pull request changes what it measures.
 
 ## Streaming tests
 
