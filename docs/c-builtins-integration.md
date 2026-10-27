@@ -558,8 +558,11 @@ the generic records no checker module owns whose clang checking is their
 prototype alone (`builtin_intrinsic_prototype_names`: the eight rotates,
 `__builtin_unpredictable` and `__builtin_assume`, whose side-effect warning
 this checker doesn't give); they take the x86 path, which adds no rule for
-them. Neither path folds a call in a constant context, nor takes one as
-`_Generic`'s controlling expression yet (#488).
+them. `_Generic`'s controlling expression uses the captured intrinsic
+prototype on both checker paths (#488), including in declaration-time bounds
+and type queries. Ordinary argument conversions determine the exact result
+type; the control and its arguments remain unevaluated. These paths do not
+fold the intrinsic call in a constant context.
 The producer attests exact catalogue membership and successful ordinary
 prototype checking, and supplies both the generated required-ICE bitmap and
 independent source ICE witnesses. Existing ordinary-call diagnostics remain
