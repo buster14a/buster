@@ -159,7 +159,14 @@ independent dependencies each add their own integration check:
   before its walk ("Property tests").
 - #151's per-function frontend/backend must assign canonical job positions,
   literal first uses and output ranges, then compare actual compilation
-  results at every lane count.
+  results at every lane count. Done for the backend's emission
+  (`check_program_emit_lanes`, [the lanes guide](function-lanes.md)): its
+  parts are consecutive bodies in source order, the runtime's functions and
+  the label symbols each part numbers are numbered in source order after the
+  lanes, the link's atoms, symbols and fixups are added in source order, and
+  the failure reported is source order's. `test-check-lanes` compares objects,
+  `-g`'s rows, unwind tables, executables and failures at 1, 2, 3 and 8
+  lanes, with a slow lane, against one lane's.
 - #152's multi-file driver must route jobs' diagnostic groups through the
   merge, finish the earlier jobs before applying fatal cutoff, and compare
   its final objects, executable, `-E` text and diagnostic stream.

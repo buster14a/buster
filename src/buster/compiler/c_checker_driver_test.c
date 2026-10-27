@@ -98,6 +98,7 @@ static bool check_test_driver_run(const char* executable, const char* source, co
                 outcome->rejected = true;
                 outcome->line = line;
                 outcome->column = column;
+                snprintf(outcome->message, sizeof(outcome->message), "%s", strstr(at, "error: ") + 7);
             }
         }
         *warnings += strstr(at, "warning: ") != NULL;
@@ -733,10 +734,11 @@ static bool check_test_driver_temporaries(const uint8_t* bytes, uint64_t length,
 }
 
 // Jump tables in the C driver's outputs (#136's item 7): a program of two switches clang -O0 would make tables of, an
-// int's of 8 entries and a long's of 9, compiled with -c by both paths into the same bytes. The object holds no symbol
-// of the lowering's (.Lbuster_switch_N, .Lbuster_case_N), its tables' 17 entries are relocations against .text's
-// section symbol, and linked by clang it prints what the test's clang build computes, as does the direct path's
-// executable.
+// int's of 8 entries and a long's of 9, and a 128-bit division, which calls libgcc's __udivti3 from the same part of
+// the bodies (one lane's), where the tables' symbols' numbers fall among the runtime functions' provisional ones, each
+// reference rewritten once. Compiled with -c by both paths into the same bytes. The object holds no symbol of the
+// lowering's (.Lbuster_switch_N, .Lbuster_case_N), its tables' 17 entries are relocations against .text's section
+// symbol, and linked by clang it prints what the test's clang build computes, as does the direct path's executable.
 static void check_test_driver_switch_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char program[] = "#include <stdio.h>\n"
@@ -769,6 +771,10 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
                                   "    }\n"
                                   "    return result;\n"
                                   "}\n"
+                                  "static unsigned long long quotient(unsigned __int128 n, unsigned long long d)\n"
+                                  "{\n"
+                                  "    return (unsigned long long)(n / d);\n"
+                                  "}\n"
                                   "int main(void)\n"
                                   "{\n"
                                   "    unsigned sum = 0;\n"
@@ -776,6 +782,7 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
                                   "    {\n"
                                   "        sum = sum * 31 + (unsigned)dense(i);\n"
                                   "        sum = sum * 7 + (unsigned)wide(i - 2);\n"
+                                  "        sum = sum * 3 + (unsigned)quotient(((unsigned __int128)(unsigned)(i + 5) << 70) + 12345, 1000003);\n"
                                   "    }\n"
                                   "    printf(\"%u\\n\", sum);\n"
                                   "    return 0;\n"
@@ -813,6 +820,7 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     {
         sum = sum * 31 + (unsigned)check_test_switch_dense(i);
         sum = sum * 7 + (unsigned)check_test_switch_wide(i - 2);
+        sum = sum * 3 + (unsigned)(unsigned long long)((((unsigned __int128)(unsigned)(i + 5) << 70) + 12345) / 1000003u);
     }
     char expected[32];
     snprintf(expected, sizeof(expected), "%u\n", sum);
@@ -1632,6 +1640,95 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
     }
 }
 
+#include "c_check_packed_test.c"
+
+// #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
+// after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
+static void check_test_driver_loop_hints(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        bool exact_message;
+        // Existing argument/control columns stay as they were; these cases check first-error line precedence.
+        bool line_only;
+    } fixtures[] =
+    {
+        { "conflict after a body name error", "void f(int n) {\n#pragma clang loop unroll_count(4)\n#pragma clang loop unroll(full)\n    while (n--) { undeclared_x = 1; }\n}\n" },
+        { "duplicate after a body type error", "void f(int n) {\n#pragma clang loop unroll(disable)\n#pragma clang loop unroll(enable)\n    while (n--) { *n = 1; }\n}\n" },
+        { "count duplicate after a condition name error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll_count(8)\n    while (missing) {}\n}\n" },
+        { "conflict after a for update type error", "void f(int n) {\n#pragma clang loop vectorize(disable) vectorize_width(4)\n    for (; n; *n) {}\n}\n" },
+        { "do conflict after its trailing condition", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    do {} while (*n);\n}\n" },
+        { "conflict after an initializer's type error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { int x = *n; }\n}\n" },
+        { "placement after an expression name error", "void f(int n) {\n#pragma clang loop unroll(full)\n    missing = 1;\n}\n" },
+        { "placement after a block type error", "void f(int n) {\n#pragma nounroll\n    { *n = 1; }\n}\n" },
+        { "placement after an if's else type error", "void f(int n) {\n#pragma unroll\n    if (n) {} else { *n = 1; }\n}\n" },
+        { "placement after a labeled loop name error", "void f(int n) {\n#pragma clang loop unroll(full)\n    label: while (n--) { missing = 1; }\n}\n" },
+        { "conflict before a later statement error", "void f(int n) {\n#pragma clang loop unroll_count(4)\n#pragma clang loop unroll(full)\n    while (n--) {}\n    missing = 1;\n}\n", true },
+        { "placement before a later statement error", "void f(int n) {\n#pragma nounroll\n    n = 1;\n    missing = 1;\n}\n", true },
+        { "duplicate's message and column", "void f(int n) {\n#pragma clang loop unroll(disable) unroll(enable)\n    while (n--) {}\n}\n", true },
+        { "duplicate counts' message and column", "void f(int n) {\n#pragma unroll 4\n#pragma GCC unroll 8\n    while (n--) {}\n}\n", true },
+        { "unroll zero belongs to the state category", "void f(int n) {\n#pragma unroll 0\n#pragma nounroll\n    while (n--) {}\n}\n", true },
+        { "scalable width's diagnostic spelling", "void f(int n) {\n#pragma clang loop vectorize_width(4, scalable) vectorize_width(fixed)\n    while (n--) {}\n}\n", true },
+        { "ordinary unroll conflict spelling", "void f(int n) {\n#pragma unroll 4\n#pragma nounroll\n    while (n--) {}\n}\n", true },
+        { "placement overrides conflicts", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    n = 1;\n}\n", true },
+        { "an inner pragma argument precedes an outer conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {\n#pragma unroll ()\n        while (n--) {}\n    }\n}\n", true, true },
+        { "later argument before a same pragma conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4) interleave_count()\n    while (n--) { missing = 1; }\n}\n", true, true },
+        { "later argument before an earlier pragma conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n#pragma unroll ()\n    while (n--) { missing = 1; }\n}\n", true, true },
+        { "inner and outer loops complete together", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--)\n#pragma clang loop distribute(enable) distribute(disable)\n        while (n--) {}\n}\n", true },
+        { "nested placement completes before outer conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {\n#pragma nounroll\n        n = 1;\n    }\n}\n", true },
+        { "dropped hints do not hide a body error", "void f(int n) {\n#pragma clang loop unroll_count(4))\n    while (n--) { *n = 1; }\n}\n" },
+        { "an annotated statement's syntax error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { n = ; }\n}\n" },
+        { "conflict before a later statement's syntax error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n    int x = ;\n}\n", true },
+        { "placement before a later statement's syntax error", "void f(int n) {\n#pragma nounroll\n    n = 1;\n    int x = ;\n}\n", true },
+        { "synthetic closure does not complete the annotated loop", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { n = 1;\n" },
+        { "a following pragma argument comes after completed-loop Sema", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll ()\n    while (n--) {}\n}\n", true },
+        { "a following pragma handler runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
+        { "a following unclosed pragma runs in the loop's lookahead", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll (4\n    while (n--) {}\n}\n", true, true },
+        { "a trailing empty annotation is not a nested statement", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n#pragma unroll\n}\n", true },
+        { "duplicate labels precede a loop conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {\n        same:;\n        same:;\n    }\n}\n", false, true },
+        { "duplicate case values precede a loop conflict", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { switch (n) {\n        case 0: break;\n        case 0: break;\n    } }\n}\n", false, true },
+        { "duplicate defaults precede loop placement", "void f(int n) {\n#pragma unroll\n    switch (n) {\n        default: break;\n        default: break;\n    }\n}\n", false, true },
+        { "a later duplicate label follows the loop conflict", "void f(int n) {\n    same:;\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) {}\n    same:;\n}\n", true },
+        { "an undefined goto is an end-of-function obligation", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { goto missing; }\n}\n", true },
+        { "a forward label address stays typed before loop placement", "void f(int n) {\n#pragma unroll\n    { void *p = &&later; }\n    later:;\n}\n", true },
+        { "an undefined label address waits for function completion", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { void *p = &&missing; }\n}\n", true },
+        { "a body type error after a pending label address precedes the hint", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { void *p = &&missing;\n        *n = 1;\n    }\n}\n" },
+        { "nested switch errors precede a later pragma handler", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n    while (n--) { switch (n) {\n        case 0: break;\n        case 0: break;\n    } }\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
+        { "lookahead handler precedes completion of its direct switch", "void f(int n) {\n#pragma unroll\n    switch (n) {\n        case 0: break;\n        case 0: break;\n    }\n#pragma clang loop bogus(4)\n    while (n--) {}\n}\n", false, true },
+        { "pragma expansion retains the conflict's invocation", "void f(int n) {\n_Pragma(\"clang loop unroll_count(4)\")\n_Pragma(\"clang loop unroll(full)\")\n    while (n--) {}\n}\n", true },
+    };
+    const char* arguments[] = { "-std=gnu17", "-w" };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[192];
+        char object[192];
+        char description[384];
+        snprintf(source, sizeof(source), "%s/loop-%u.c", directory, i);
+        snprintf(object, sizeof(object), "%s/loop-%u.o", directory, i);
+        CheckCorpusOracle oracle = { 0 };
+        const bool ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
+        check_test_expect(test, ready && oracle.rejected, fixtures[i].name);
+        const uint32_t routes = executable != NULL ? 4 : 2;
+        for (uint32_t route = 0; ready && route < routes; route += 1)
+        {
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
+            snprintf(description, sizeof(description), "%s, route %u: first error %u:%u, clang %u:%u", fixtures[i].name, route,
+                     checked.line, checked.column, oracle.line, oracle.column);
+            check_test_expect(test, ran && checked.rejected && checked.line == oracle.line && (fixtures[i].line_only || checked.column == oracle.column), description);
+            snprintf(description, sizeof(description), "%s: first diagnostic text matches clang", fixtures[i].name);
+            check_test_expect(test, !fixtures[i].exact_message || strcmp(checked.message, oracle.message) == 0, description);
+            check_test_expect(test, access(object, F_OK) != 0, "a rejected annotated statement writes no object");
+        }
+        unlink(object);
+        unlink(source);
+    }
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     CheckTest test = { 0 };
@@ -2023,8 +2120,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);
         check_test_driver_named_ucns(&test, clang, executable, directory, lazy);
+        check_test_driver_loop_hints(&test, clang, executable, directory, lazy);
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);

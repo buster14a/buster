@@ -108,7 +108,7 @@ static void check_input_pack_number(CheckInputReader* reader, CheckInputPackPrag
         {
             const uint8_t* bytes = 0;
             const uint32_t length = pp_spelling(reader->pp, kind, end, location, buffer, &bytes);
-            literal = check_literal_number(bytes, length, reader->scratch);
+            check_literal_number(bytes, length, reader->scratch, &literal);
             reader->output->resource |= literal.resource;
         }
         reader->scratch->length = mark;

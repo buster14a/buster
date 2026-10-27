@@ -47,16 +47,17 @@ struct TestProcess
     pid_t pid;
 };
 
-// `cpus` divided among `jobs` commands, rounded up, at least 1 for any `cpus` and `jobs` past 0 (#468's review: a
-// ceiling of (cpus + jobs - 1) / jobs wraps to 0 when jobs is near UINT32_MAX).
-static uint32_t test_process_share(uint32_t cpus, uint32_t jobs)
+// The processes of `cpus` that a command the parallel runner gave `granted` CPUs runs at once: the fewer, at least 1
+// for any `cpus` and `granted` past 0.
+static uint32_t test_process_share(uint32_t cpus, uint32_t granted)
 {
-    return 1 + (cpus - 1) / jobs;
+    return cpus < granted ? cpus : granted;
 }
 
-// The processes a test may run at once (at least 1): the CPUs this process may run on, divided among the commands
-// that the parallel runner runs at once (BUSTER_PARALLEL_JOBS, which it sets for them; #468's review), rounded up, so
-// that the commands' processes together come to about one per CPU rather than one per CPU each.
+// The processes a test may run at once (at least 1): the CPUs this process may run on, or fewer when the parallel
+// runner gave its command fewer (BUSTER_PARALLEL_CPUS, which it sets to each command's CPUs; #468's review, #522), so
+// that the commands' processes together come to about one per CPU of the runner's rather than one per CPU each. A
+// value that isn't a count from 1 to UINT32_MAX counts as no limit.
 static uint32_t test_process_cpus(void)
 {
     uint64_t mask[16] = { 0 };
@@ -66,11 +67,11 @@ static uint32_t test_process_cpus(void)
     {
         count += (uint32_t)__builtin_popcountll(mask[i]);
     }
-    const char* text = getenv("BUSTER_PARALLEL_JOBS");
+    const char* text = getenv("BUSTER_PARALLEL_CPUS");
     char* end = 0;
-    const unsigned long long value = text != 0 ? strtoull(text, &end, 10) : 0;
-    const uint32_t jobs = end != 0 && end != text && *end == 0 && value != 0 && value <= UINT32_MAX ? (uint32_t)value : 1;
-    return test_process_share(count != 0 ? count : 1, jobs);
+    const unsigned long long value = text != 0 && text[0] >= '0' && text[0] <= '9' ? strtoull(text, &end, 10) : 0;
+    const uint32_t granted = end != 0 && *end == 0 && value != 0 && value <= UINT32_MAX ? (uint32_t)value : UINT32_MAX;
+    return test_process_share(count != 0 ? count : 1, granted);
 }
 
 // A file in memory for a process's output (memfd_create, closed on exec: a descriptor that dup2 gives a process's
@@ -235,28 +236,74 @@ static uint32_t test_process_test(void)
         free(output_text);
         free(errors_text);
     }
-    // The share's bounds: one CPU, as many jobs as CPUs and more, and the most jobs --jobs and BUSTER_PARALLEL_JOBS take.
+    // The share's bounds: one CPU, fewer CPUs granted than there are, as many and more, and the most CPUs --jobs and
+    // BUSTER_PARALLEL_CPUS take.
     const uint32_t shares[][3] = {
         { 1, 1, 1 },
-        { 16, 1, 16 },
-        { 16, 8, 2 },
-        { 15, 8, 2 },
-        { 16, 16, 1 },
-        { 16, 17, 1 },
-        { 16, UINT32_MAX, 1 },
-        { UINT32_MAX, 1, UINT32_MAX },
-        { UINT32_MAX, UINT32_MAX, 1 },
+        { 16, 1, 1 },
+        { 16, 8, 8 },
+        { 15, 8, 8 },
+        { 16, 16, 16 },
+        { 16, 17, 16 },
+        { 16, UINT32_MAX, 16 },
+        { UINT32_MAX, 1, 1 },
+        { UINT32_MAX, UINT32_MAX, UINT32_MAX },
     };
     for (uint32_t i = 0; i < sizeof(shares) / sizeof(shares[0]); i += 1)
     {
         const uint32_t share = test_process_share(shares[i][0], shares[i][1]);
         if (share != shares[i][2])
         {
-            printf("test processes: %u CPUs among %u jobs gave %u, not %u\n", shares[i][0], shares[i][1], share, shares[i][2]);
+            printf("test processes: %u CPUs with %u granted gave %u, not %u\n", shares[i][0], shares[i][1], share, shares[i][2]);
         }
         failures += share != shares[i][2];
     }
-    printf("test processes: %u of 13 cases fail (output, a part's output lost, the parent's lost, a failed part, 9 shares)\n", failures);
+    // BUSTER_PARALLEL_CPUS as the runner sets it, and values that aren't a count from 1 to UINT32_MAX, which leave every
+    // CPU this process may run on: test_process_cpus with it unset. The variable is put back as it was.
+    const char* saved = getenv("BUSTER_PARALLEL_CPUS");
+    char* kept = saved != 0 ? strdup(saved) : 0;
+    unsetenv("BUSTER_PARALLEL_CPUS");
+    const uint32_t all = test_process_cpus();
+    typedef struct TestProcessGrant TestProcessGrant;
+    struct TestProcessGrant
+    {
+        const char* value;
+        uint32_t expected;
+    };
+    const TestProcessGrant grants[] = {
+        { "1", 1 },
+        { "2", all < 2 ? all : 2 },
+        { "4294967295", all },
+        { "0", all },
+        { "", all },
+        { "x", all },
+        { "3x", all },
+        { " 3", all },
+        { "+3", all },
+        { "-1", all },
+        { "4294967296", all },
+        { "99999999999999999999999", all },
+    };
+    for (uint32_t i = 0; i < sizeof(grants) / sizeof(grants[0]); i += 1)
+    {
+        setenv("BUSTER_PARALLEL_CPUS", grants[i].value, 1);
+        const uint32_t share = test_process_cpus();
+        if (share != grants[i].expected)
+        {
+            printf("test processes: BUSTER_PARALLEL_CPUS=\"%s\" gave %u processes, not %u\n", grants[i].value, share, grants[i].expected);
+        }
+        failures += share != grants[i].expected;
+    }
+    if (kept != 0)
+    {
+        setenv("BUSTER_PARALLEL_CPUS", kept, 1);
+    }
+    else
+    {
+        unsetenv("BUSTER_PARALLEL_CPUS");
+    }
+    free(kept);
+    printf("test processes: %u of 25 cases fail (output, a part's output lost, the parent's lost, a failed part, 9 shares, 12 grants)\n", failures);
     return failures;
 }
 

@@ -31,8 +31,19 @@ omit the DWARF alone. `--scalar` selects the exact resolver, symbol-selection,
 conversion and writer paths. `--lanes N` runs the resolution,
 the conversion and the writer on up to N lanes, at most one per CPU the process
 may run on: lanes past those share CPUs, and each of their syncs waits for a
-lane the scheduler has set aside. `--time` reports, on standard
-error after the link, each stage's wall time (the arguments, the interpreter's
+lane the scheduler has set aside. On more than one lane the command starts its
+threads once, a team (`lane_team_start`, "The command owns the threads" in the
+linker's design), as soon as its options are valid; the three stages run on
+them in turn, the threads sleeping between them and keeping their scratch
+arenas from one to the next (`lane_team_keep_scratch`), and the release stops
+them (#501). A link whose threads can't start fails before its resolution.
+On the 9700X, against the cold group per stage before it, the team took 6.8%
+to 17.7% off links on eight lanes of `benchmark-link`'s programs of 1, 2,000
+and 102,400 workers, dynamic and static, and nothing off one lane ([the
+record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)).
+`--time` reports, on standard
+error after the link, each stage's wall time (the arguments, the team's start,
+the interpreter's
 discovery, the resolution with each of its phases on the slowest lane, the
 conversion, the optional passes, the write with each of the writer's phases on
 lane 0, and the release), as wild's `--time` and mold's `--perf` report
@@ -395,7 +406,13 @@ system's start file links and runs, and so it does through a symbolic link to
 the start file on 3 lanes, while a copy of the start file, a `_start` of its
 own that mentions `__libc_start_main` only in data (on 3 lanes too) and the
 system's start file with a `__libc_start_main` of the test's own are refused,
-saying why. Its section GC case collects a link
+saying why. Its threads (#501): a counter of `pthread_create` preloaded into
+`link-foreign` must find a thread per lane past the first, started once for
+the whole command (none on one lane), for a static executable, a PIE, and
+with GC, unwind deduplication and string merging; and a link whose threads
+can't start (a child limited by `RLIMIT_NPROC`, which doesn't bind root) must
+fail before its resolution, saying so, and leave the output as it was, while
+one on one lane links. Its section GC case collects a link
 after the merge: a
 retained section whose bounds only dead code refers to must keep its bytes,
 and a hook in a merged code section its FDE, while the dead code goes.
