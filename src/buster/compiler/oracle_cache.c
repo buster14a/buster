@@ -15,20 +15,26 @@
 // wait status, its standard output and errors, and those files' bytes. Its key is SHA-256 (FIPS 180-4) of, each part
 // after its length:
 //   - its purpose, the caller's name for its kind of run;
-//   - the tool: the first file of its name on PATH that may be run, as posix_spawnp finds it, and what stat gives of
-//     the file it resolves to (device, inode, size, modification and change times, as the runtime snapshot's probes
-//     have them); the same of the package database (pacman's, dpkg's or rpm's), which an update of any package
-//     changes, so that a new clang, its libraries or its headers make new keys; and the CPU's model and flags, which
-//     -march=native reads;
+//   - the tool: the first file of its name on PATH that may be run, as execvp finds it, and what stat gives of the file
+//     it resolves to (device, inode, size, modification and change times, as the runtime snapshot's probes have them);
+//     the same of the package database (pacman's, dpkg's or rpm's), which an update of any package changes, so that a
+//     new clang, its libraries or its headers make new keys; and the CPU's model and flags, which -march=native reads;
 //   - its arguments, its working directory, the names of the files it writes and the environment variables that change
 //     a compiler's result (oracle_environment_names) with their values, each with its roots made alike (below);
 //   - the bytes its standard input reads.
-// A compiler's run of one source (OracleRun.dependencies) runs with `-MD -MF FILE` too, which its key doesn't have, and
-// its entry holds what the run read: each file the compiler's dependency file names (its source, the headers, #embed's
-// resources and what __has_include found, which clang 23 lists) with SHA-256 of its bytes, and the names in each
-// directory under a root that its arguments name, as they were when it started, so that a file added where the run
-// looked for one and found none makes it run again. An entry is taken only if each of those files and directories is
-// as it was. A run whose dependencies can't be read (a compiler writes none when an #include fails) isn't kept.
+// The tool runs in a process group of its own, killed when it ends and past its time limit on the monotonic clock.
+//
+// A compiler's run (OracleRun.dependencies) is traced (--- Tracing ---): its entry holds every path its processes
+// looked at, those they found and those they didn't, and the names of each directory they listed, each as the run found
+// it when it first looked (oracle_probe_look, before the run could change it): a file by SHA-256 of its bytes if it is
+// in one of the run's roots and of its identity otherwise, a path that isn't there as one, a directory as one. An entry
+// is taken only if each of them is as it was, so that a header created where an #include, __has_include or #embed
+// looked for one, in any directory, makes the run run again. The files a run writes are its outputs, whatever was there
+// before, and a file it changes after it read it isn't kept. The package manager's files and the kernel's are left out (oracle_system_path): the package
+// database's identity stands for them. A compiler's run is kept only if its environment sets SOURCE_DATE_EPOCH
+// (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and clang's __TIMESTAMP__; the entries of a
+// tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files' modification times. A test that compares with
+// compilers fixes the epoch (oracle_epoch_begin).
 //
 // A test makes its files in directories of mkdtemp's under $TMPDIR (or /tmp), whose names differ from one run to the
 // next. A root is such a name in a run's strings: $TMPDIR/NAME, NAME a run of letters, digits, '.', '_' and '-' whose
@@ -49,18 +55,26 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
-#include <spawn.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 
 extern char** environ;
@@ -73,6 +87,13 @@ extern char** environ;
 #define BUSTER_ORACLE_RANDOM 6
 // The most files a run may write.
 #define BUSTER_ORACLE_FILES 8
+// The most paths a traced run may look at: past them it isn't kept.
+#define BUSTER_ORACLE_PROBES 65536
+// The most runs a process traces at once: a compiler's run past them runs untraced, and isn't kept.
+#define BUSTER_ORACLE_TRACED 64
+// The time oracle_epoch_begin fixes for a test, the preprocessor oracle's (c_preprocessor_oracle.c's
+// BUSTER_PP_ORACLE_EPOCH).
+#define BUSTER_ORACLE_EPOCH "1792454400"
 
 // snapshot.c's: the cache directory.
 static bool snapshot_directory(char* path, uint64_t capacity);
@@ -84,8 +105,9 @@ typedef enum OracleMode
     ORACLE_MODE_CHECK,
 } OracleMode;
 
-// What runs through a cache did: took an entry, ran, found their entry stale, and ran without being kept (no
-// dependencies, a file that couldn't be read, more roots than BUSTER_ORACLE_ROOTS, an entry that couldn't be written).
+// What runs through a cache did: took an entry, ran, found their entry stale, and ran without being kept (a compiler's
+// run without SOURCE_DATE_EPOCH or whose tracing missed something, a file that couldn't be read, more roots than
+// BUSTER_ORACLE_ROOTS, an entry that couldn't be written).
 typedef struct OracleCounts OracleCounts;
 struct OracleCounts
 {
@@ -296,18 +318,6 @@ static void oracle_hash_identity(OracleHash* hash, const char* path)
     oracle_hash_bytes(hash, fields, sizeof(fields));
 }
 
-// Whether `needle` is in the `length` bytes at `bytes`.
-static bool oracle_contains(const uint8_t* bytes, uint64_t length, const char* needle)
-{
-    const uint64_t size = strlen(needle);
-    bool result = false;
-    for (uint64_t at = 0; !result && size <= length && at <= length - size; at += 1)
-    {
-        result = bytes[at] == (uint8_t)needle[0] && memcmp(bytes + at, needle, size) == 0;
-    }
-    return result;
-}
-
 // The first file named `name` on PATH that may be run, into `path`, as posix_spawnp looks it up: false if there is none.
 static bool oracle_find_tool(const char* name, char* path, size_t capacity)
 {
@@ -329,12 +339,12 @@ static bool oracle_find_tool(const char* name, char* path, size_t capacity)
     return found;
 }
 
-// The tool, as a part: its path on PATH, the file it resolves to and what stat gives of it. False if it isn't on PATH.
-static bool oracle_hash_tool(OracleHash* hash, const char* name)
+// The tool, as a part: its path on PATH (into `path`), the file it resolves to and what stat gives of it. False if it
+// isn't on PATH.
+static bool oracle_hash_tool(OracleHash* hash, const char* name, char* path, size_t capacity)
 {
-    char path[BUSTER_ORACLE_PATH_BYTES];
     char resolved[BUSTER_ORACLE_PATH_BYTES];
-    const bool result = oracle_find_tool(name, path, sizeof(path)) && realpath(path, resolved) != 0;
+    const bool result = oracle_find_tool(name, path, capacity) && realpath(path, resolved) != 0;
     if (result)
     {
         oracle_hash_text(hash, name);
@@ -669,11 +679,28 @@ static void oracle_cache_disable(void)
     oracle_cache_open(&oracle_cache_state, 0, 0);
 }
 
+// SOURCE_DATE_EPOCH fixed (BUSTER_ORACLE_EPOCH) for a test that compares with compilers, where it isn't set: their
+// __DATE__, __TIME__ and __TIMESTAMP__ and the test's own preprocessor's follow it, so that they agree whenever the test
+// runs and the compilers' runs can be kept (oracle_run_key). Before the test starts threads or processes; true if it set
+// it, for oracle_epoch_end, which unsets it again.
+static bool oracle_epoch_begin(void)
+{
+    return getenv("SOURCE_DATE_EPOCH") == 0 && setenv("SOURCE_DATE_EPOCH", BUSTER_ORACLE_EPOCH, 1) == 0;
+}
+
+static void oracle_epoch_end(bool set)
+{
+    if (set)
+    {
+        unsetenv("SOURCE_DATE_EPOCH");
+    }
+}
+
 // A key's start: the format, the purpose and the cache's host part.
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
     oracle_sha256_begin(hash);
-    oracle_hash_text(hash, "buster oracle 2");
+    oracle_hash_text(hash, "buster oracle 3");
     oracle_hash_text(hash, purpose);
     oracle_hash_bytes(hash, cache->host, BUSTER_ORACLE_KEY_BYTES);
 }
@@ -815,17 +842,44 @@ static void oracle_records_release(OracleRecords* records)
 
 // --- Runs ---
 
+// A path a traced run looked at, as it found it when it first looked (oracle_probe_look): SHA-256 of what lstat and stat
+// gave, or of a directory's names; whether it is a file in one of the run's roots, whose digest has its bytes
+// (oracle_probe_digest), which the run must not change; and the file's identity (what stat gave of it: device, inode,
+// size, modification and change times).
+typedef struct OracleLook OracleLook;
+struct OracleLook
+{
+    uint8_t state[BUSTER_ORACLE_KEY_BYTES];
+    bool rooted;
+    int64_t identity[7];
+};
+
+// The paths a traced run looked at, each after its kind ('p' a path, 'l' a directory's names) with its first look, and
+// an index of them by hash (open addressing over a power of two of slots, each a place + 1, or 0 for none).
+typedef struct OracleLooks OracleLooks;
+struct OracleLooks
+{
+    char** probes;
+    OracleLook* looks;
+    uint32_t count;
+    uint32_t capacity;
+    uint32_t* slots;
+    uint32_t slot_count;
+    bool failed;
+};
+
 // A run of a tool through a cache: oracle_run_start starts it or takes its entry, oracle_run_finish finishes it, and
-// oracle_run_release frees its result.
+// oracle_run_release frees its result. A process starts and finishes its runs on one thread, which answers its traced
+// runs' calls while it waits for any of them (oracle_run_finish).
 typedef struct OracleRun OracleRun;
 struct OracleRun
 {
     // The run, which the caller sets and keeps until the run is finished: the cache (null: the process's), the purpose,
-    // the tool (as posix_spawnp takes it) and its arguments with a null after them, its environment (null: this
+    // the tool (a name PATH has, or a path) and its arguments with a null after them, its environment (null: this
     // process's), the file its standard input reads (null: /dev/null), its working directory (null: this process's),
-    // the files it writes, whether it is a compiler's run of one source whose dependencies its entry lists, whether
-    // its directories hold other runs' files as it runs (so that their names aren't what it read: its dependencies
-    // are), and the seconds it may run (0: no limit), past which it is killed and fails.
+    // the files it writes, whether it is a compiler's run, traced for every path it looks at (oracle_trace_answer) and
+    // kept only with SOURCE_DATE_EPOCH set (oracle_run_key), and the seconds it may run (0: no limit), past which it is
+    // killed with its process group and fails.
     OracleCache* cache;
     const char* purpose;
     char* const* arguments;
@@ -835,7 +889,6 @@ struct OracleRun
     const char* const* files;
     uint32_t file_count;
     bool dependencies;
-    bool shared_directories;
     uint32_t timeout;
     // Its result once finished: its wait status, its standard output and errors (malloc's, each with a NUL after it),
     // whether it came from an entry, and whether it ran past its time limit and was killed.
@@ -846,17 +899,36 @@ struct OracleRun
     uint64_t errors_length;
     bool taken;
     bool killed;
-    // The run's own state.
+    // The run's own state: its key and roots, its working directory, its tool's path, its process (the leader of its
+    // group), a pidfd of it (or -1), when it started, the socket its child reports on (oracle_child) and whether the
+    // child said its tool couldn't start, and its captures. Traced, also its filter's listener (or -1), whether no
+    // process uses the filter any more, whether the tracing missed something (a call it can't follow, a path it can't
+    // read), and the paths the run looked at, each with its first look.
     bool keyed;
     OracleKey key;
     OracleRoots roots;
     char working[BUSTER_ORACLE_PATH_BYTES];
-    OracleRecords listings;
+    char tool[BUSTER_ORACLE_PATH_BYTES];
     pid_t pid;
+    int process;
+    uint64_t started;
+    int report;
+    bool unstarted;
     int output_descriptor;
     int errors_descriptor;
-    char dependency_path[BUSTER_ORACLE_PATH_BYTES];
+    int listener;
+    bool hung;
+    bool untraced;
+    OracleLooks looks;
 };
+
+// Nanoseconds on the monotonic clock.
+static uint64_t oracle_now(void)
+{
+    struct timespec now = { 0 };
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000000000 + (uint64_t)now.tv_nsec;
+}
 
 // `path` as the run's tool sees it, from its working directory, into `resolved`: false if it doesn't fit.
 static bool oracle_run_path(const OracleRun* run, const char* path, char* resolved, size_t capacity)
@@ -865,9 +937,19 @@ static bool oracle_run_path(const OracleRun* run, const char* path, char* resolv
     return length > 0 && (size_t)length < capacity;
 }
 
-// The run's key, with its roots found in its strings: false if its cache is off, its tool isn't on PATH, its input
-// can't be read, it has more roots than BUSTER_ORACLE_ROOTS or more files than BUSTER_ORACLE_FILES, or its
-// dependencies can't be asked for (an argument of -M's family is there).
+// Whether `epoch` has SOURCE_DATE_EPOCH's form, a run of decimal digits.
+static bool oracle_epoch_valid(const char* epoch)
+{
+    return epoch != 0 && epoch[0] != 0 && strspn(epoch, "0123456789") == strlen(epoch);
+}
+
+// The run's key, with its roots found in its strings and its tool's path: false if its cache is off, its tool isn't on
+// PATH, its input can't be read, it has more roots than BUSTER_ORACLE_ROOTS or more files than BUSTER_ORACLE_FILES, or it
+// is a compiler's run (OracleRun.dependencies) that writes a dependency file of its own (an argument of -M's family),
+// which isn't one of its files, or whose environment doesn't set SOURCE_DATE_EPOCH: its __DATE__ and __TIME__ would be
+// when it ran, however its sources spell them (a token pasted from two halves among them), and clang's __TIMESTAMP__
+// too. With the epoch, which the key has, they are the epoch's; a tool whose __TIMESTAMP__ doesn't follow it has the
+// files' times in its entry (oracle_tool_epoch).
 static bool oracle_run_key(OracleRun* run)
 {
     bool result = oracle_cache_active(run->cache) && run->arguments != 0 && run->arguments[0] != 0 && run->file_count <= BUSTER_ORACLE_FILES;
@@ -879,6 +961,7 @@ static bool oracle_run_key(OracleRun* run)
                                                   : snprintf(run->working, sizeof(run->working), "%s/%s", here, run->directory);
     result = length > 0 && (size_t)length < sizeof(run->working);
     char* const* environment = run->environment != 0 ? run->environment : environ;
+    result = result && (!run->dependencies || oracle_epoch_valid(oracle_variable(environment, "SOURCE_DATE_EPOCH")));
     oracle_roots_begin(&run->roots);
     uint64_t count = 0;
     while (result && run->arguments[count] != 0)
@@ -903,7 +986,7 @@ static bool oracle_run_key(OracleRun* run)
     result = result && !run->roots.overflow;
     OracleHash hash;
     oracle_hash_begin(&hash, run->cache, run->purpose != 0 ? run->purpose : "");
-    result = result && oracle_hash_tool(&hash, run->arguments[0]);
+    result = result && oracle_hash_tool(&hash, run->arguments[0], run->tool, sizeof(run->tool));
     if (result)
     {
         const uint8_t dependencies = run->dependencies;
@@ -921,12 +1004,10 @@ static bool oracle_run_key(OracleRun* run)
         {
             oracle_hash_rooted(&hash, &run->roots, run->files[f]);
         }
-        // The input's bytes (none for /dev/null), and whether its result depends on when it runs (as a dependency's).
+        // The input's bytes (none for /dev/null).
         OracleBuffer input = { 0 };
         result = run->input == 0 || strcmp(run->input, "/dev/null") == 0 || oracle_buffer_file(&input, run->input);
         oracle_hash_bytes(&hash, input.bytes, input.length);
-        const bool dated = oracle_contains(input.bytes, input.length, "__DATE__") || oracle_contains(input.bytes, input.length, "__TIME__");
-        result = result && !(dated && oracle_variable(environment, "SOURCE_DATE_EPOCH") == 0);
         free(input.bytes);
     }
     run->key = oracle_hash_end(&hash);
@@ -999,73 +1080,21 @@ static bool oracle_listing(const char* path, uint8_t* digest)
     return result;
 }
 
-// What the directories under the run's roots that its arguments name held as it starts: for each place a root starts in
-// an argument, the path from there to the argument's end (or a ',' or ':' after the root) if it is a directory, or
-// else its directory; and the working directory if a root holds it. False if one can't be read.
-static bool oracle_run_listings(OracleRun* run)
+// A descriptor at 3 or above, as the sources of the child's dup2 calls must be where the caller has closed a standard
+// one: `descriptor`, or a duplicate of it closed on exec, with it closed. -1 stays -1.
+static int oracle_high(int descriptor)
 {
-    bool result = true;
-    uint32_t count = 0;
-    while (run->arguments[count] != 0)
+    int result = descriptor;
+    if (descriptor >= 0 && descriptor <= 2)
     {
-        count += 1;
-    }
-    for (uint32_t a = 1; result && a <= count; a += 1)
-    {
-        const char* text = a < count ? run->arguments[a] : run->working;
-        const size_t length = strlen(text);
-        for (size_t at = 0; result && at < length; at += 1)
-        {
-            const uint32_t r = oracle_root_in(run->roots.roots, run->roots.count, (const uint8_t*)text, length, at);
-            if (r < run->roots.count && (a < count || at == 0))
-            {
-                size_t end = at + run->roots.roots[r].length;
-                while (end < length && text[end] != ',' && text[end] != ':')
-                {
-                    end += 1;
-                }
-                char named[BUSTER_ORACLE_PATH_BYTES];
-                char path[BUSTER_ORACLE_PATH_BYTES];
-                result = end - at < sizeof(named);
-                if (result)
-                {
-                    memcpy(named, text + at, end - at);
-                    named[end - at] = 0;
-                    result = oracle_run_path(run, named, path, sizeof(path));
-                }
-                // Not a directory: its directory, if the root holds it (a root that is a file has none to list).
-                struct stat status;
-                bool listed = result;
-                if (result && !(stat(path, &status) == 0 && S_ISDIR(status.st_mode)))
-                {
-                    const char* slash = strrchr(path, '/');
-                    const size_t kept = slash != 0 ? (size_t)(slash - path) : 0;
-                    const size_t root_end = (named[0] == '/' ? 0 : strlen(run->working) + 1) + run->roots.roots[r].length;
-                    listed = kept >= root_end;
-                    if (listed)
-                    {
-                        path[kept] = 0;
-                    }
-                }
-                for (uint32_t l = 0; listed && l < run->listings.count; l += 1)
-                {
-                    listed = strcmp(run->listings.records[l].path, path) != 0;
-                }
-                uint8_t digest[BUSTER_ORACLE_KEY_BYTES];
-                result = result && (!listed || oracle_listing(path, digest));
-                if (result && listed)
-                {
-                    oracle_records_add(&run->listings, path, strlen(path), digest);
-                    result = !run->listings.failed;
-                }
-            }
-        }
+        result = fcntl(descriptor, F_DUPFD_CLOEXEC, 3);
+        close(descriptor);
     }
     return result;
 }
 
 // A file for a process's output: in memory (memfd_create), or an unnamed temporary file where the kernel has none;
-// closed on exec. -1 if neither can be made.
+// closed on exec, and never a standard descriptor. -1 if neither can be made.
 static int oracle_capture(void)
 {
     // MFD_CLOEXEC, which <sys/mman.h> declares only with _GNU_SOURCE.
@@ -1081,14 +1110,7 @@ static int oracle_capture(void)
             fcntl(result, F_SETFD, FD_CLOEXEC);
         }
     }
-    // Never a standard descriptor, which the child's dup2 calls would overwrite where the caller has closed one.
-    if (result >= 0 && result <= 2)
-    {
-        const int low = result;
-        result = fcntl(low, F_DUPFD_CLOEXEC, 3);
-        close(low);
-    }
-    return result;
+    return oracle_high(result);
 }
 
 // A captured output's bytes, malloc's with a NUL after them: false if they can't be read.
@@ -1120,70 +1142,802 @@ static bool oracle_read_capture(int descriptor, char** bytes, uint64_t* length)
     return result;
 }
 
-// Starts the run's tool, with -MD -MF and a file of its own if `dependencies`: false if it can't start.
-static bool oracle_run_spawn(OracleRun* run, bool dependencies)
+// Whether `path` is one of the run's roots or is in one.
+static bool oracle_run_rooted(const OracleRun* run, const char* path)
 {
-    uint32_t count = 0;
-    while (run->arguments[count] != 0)
+    bool result = false;
+    for (uint32_t r = 0; r < run->roots.count && !result; r += 1)
     {
-        count += 1;
+        const OracleRoot* root = &run->roots.roots[r];
+        result = strncmp(path, root->name, root->length) == 0 && (path[root->length] == '/' || path[root->length] == 0);
     }
-    char** argv = calloc((size_t)count + 4, sizeof(char*));
-    bool result = argv != 0;
-    if (result && dependencies)
+    return result;
+}
+
+// A probe as the run finds it now, into `look`. A path ('p'): what lstat gives (none and its errno, a symbolic link and
+// its target, a directory, a file, another kind) and, through a link, what stat gives. A file is its identity, or rooted
+// if it is in one of the run's roots (through a link, if its target is), which tests write anew for each run, so that
+// its bytes stand for it instead (oracle_probe_digest); the system's headers, the repository's sources and the frozen
+// corpora keep their identities from one run to the next until they change. A directory is only one, as other runs may
+// add their files to it. A directory's names ('l'): oracle_listing's. False if a link can't be read.
+static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLook* look)
+{
+    const char kind = probe[0];
+    const char* path = probe + 1;
+    *look = (OracleLook){ 0 };
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    oracle_hash_bytes(&hash, &kind, 1);
+    bool result = true;
+    if (kind == 'l')
     {
-        const int length = snprintf(run->dependency_path, sizeof(run->dependency_path), "%s/buster-oracle-XXXXXX", run->roots.base_length != 0 ? run->roots.base : "/tmp");
-        const int descriptor = length > 0 && (size_t)length < sizeof(run->dependency_path) ? mkstemp(run->dependency_path) : -1;
-        result = descriptor >= 0;
-        run->dependency_path[0] = result ? run->dependency_path[0] : 0;
-        if (descriptor >= 0)
+        uint8_t names[BUSTER_ORACLE_KEY_BYTES] = { 0 };
+        const uint8_t listed = oracle_listing(path, names);
+        oracle_hash_bytes(&hash, &listed, 1);
+        oracle_hash_bytes(&hash, names, sizeof(names));
+    }
+    else
+    {
+        struct stat entry;
+        const int32_t entry_error = lstat(path, &entry) == 0 ? 0 : errno;
+        const bool linked = entry_error == 0 && S_ISLNK(entry.st_mode);
+        char target[BUSTER_ORACLE_PATH_BYTES];
+        const ssize_t target_length = linked ? readlink(path, target, sizeof(target)) : 0;
+        result = target_length >= 0 && (size_t)target_length < sizeof(target);
+        struct stat status = entry;
+        const int32_t error = entry_error != 0 ? entry_error : linked && stat(path, &status) != 0 ? errno : 0;
+        const char type = error != 0 ? '-' : S_ISREG(status.st_mode) ? 'f' : S_ISDIR(status.st_mode) ? 'd' : 'o';
+        oracle_hash_bytes(&hash, &entry_error, sizeof(entry_error));
+        oracle_hash_bytes(&hash, target, target_length > 0 ? (size_t)target_length : 0);
+        oracle_hash_bytes(&hash, &error, sizeof(error));
+        oracle_hash_bytes(&hash, &type, 1);
+        char resolved[BUSTER_ORACLE_PATH_BYTES];
+        look->rooted = type == 'f' && oracle_run_rooted(run, path) && (!linked || (realpath(path, resolved) != 0 && oracle_run_rooted(run, resolved)));
+        if (type == 'f')
         {
-            close(descriptor);
+            const int64_t identity[7] = {
+                (int64_t)status.st_dev,
+                (int64_t)status.st_ino,
+                (int64_t)status.st_size,
+                (int64_t)status.st_mtim.tv_sec,
+                (int64_t)status.st_mtim.tv_nsec,
+                (int64_t)status.st_ctim.tv_sec,
+                (int64_t)status.st_ctim.tv_nsec,
+            };
+            memcpy(look->identity, identity, sizeof(identity));
+            oracle_hash_bytes(&hash, identity, look->rooted ? 0 : sizeof(identity));
+        }
+        else if (type == 'o')
+        {
+            const uint64_t other[2] = { (uint64_t)(status.st_mode & S_IFMT), (uint64_t)status.st_rdev };
+            oracle_hash_bytes(&hash, other, sizeof(other));
         }
     }
-    if (result)
+    const OracleKey key = oracle_hash_end(&hash);
+    memcpy(look->state, key.bytes, sizeof(key.bytes));
+    return result;
+}
+
+// A probe's digest from its look, into `digest`: the look's state and, for a rooted file, SHA-256 of its bytes, read
+// now, with its modification time if `times`. False if the file isn't the one the look found (the run changed it, as a
+// run that writes a file it read does) or can't be read.
+static bool oracle_probe_digest(const char* probe, const OracleLook* look, bool times, uint8_t* digest)
+{
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    oracle_hash_bytes(&hash, look->state, sizeof(look->state));
+    bool result = true;
+    if (look->rooted)
     {
-        uint32_t n = 0;
-        argv[n++] = run->arguments[0];
-        if (dependencies)
+        const int fd = open(probe + 1, O_RDONLY | O_CLOEXEC);
+        struct stat status;
+        result = fd >= 0 && fstat(fd, &status) == 0;
+        const int64_t identity[7] = {
+            result ? (int64_t)status.st_dev : 0,
+            result ? (int64_t)status.st_ino : 0,
+            result ? (int64_t)status.st_size : 0,
+            result ? (int64_t)status.st_mtim.tv_sec : 0,
+            result ? (int64_t)status.st_mtim.tv_nsec : 0,
+            result ? (int64_t)status.st_ctim.tv_sec : 0,
+            result ? (int64_t)status.st_ctim.tv_nsec : 0,
+        };
+        result = result && memcmp(identity, look->identity, sizeof(identity)) == 0;
+        oracle_hash_length(&hash, (uint64_t)identity[2]);
+        uint64_t done = 0;
+        while (result && done < (uint64_t)identity[2])
         {
-            argv[n++] = "-MD";
-            argv[n++] = "-MF";
-            argv[n++] = run->dependency_path;
+            uint8_t chunk[65536];
+            const ssize_t got = read(fd, chunk, sizeof(chunk));
+            result = got > 0 || (got < 0 && errno == EINTR);
+            oracle_hash_raw(&hash, chunk, got > 0 ? (size_t)got : 0);
+            done += got > 0 ? (uint64_t)got : 0;
         }
-        for (uint32_t a = 1; a < count; a += 1)
+        if (fd >= 0)
         {
-            argv[n++] = run->arguments[a];
+            close(fd);
         }
-        argv[n] = 0;
+        oracle_hash_bytes(&hash, look->identity + 3, times ? 2 * sizeof(int64_t) : 0);
     }
+    const OracleKey key = oracle_hash_end(&hash);
+    memcpy(digest, key.bytes, sizeof(key.bytes));
+    return result;
+}
+
+// FNV-1a of a probe, for its slot.
+static uint64_t oracle_probe_hash(const char* probe)
+{
+    uint64_t hash = 0xcbf29ce484222325ull;
+    for (const char* at = probe; *at != 0; at += 1)
+    {
+        hash = (hash ^ (uint8_t)*at) * 0x100000001b3ull;
+    }
+    return hash;
+}
+
+// Keeps the probe's first look, taken now (as its call stops, before the kernel makes it): a probe the run looked at
+// before keeps the look it had then, which is what the run's tool found of the files before the run touched them (a
+// file the run makes is one that wasn't there). Past BUSTER_ORACLE_PROBES, or a list that can't grow, it makes the run
+// untraced.
+static void oracle_looks_add(OracleRun* run, const char* probe)
+{
+    OracleLooks* looks = &run->looks;
+    if (!looks->failed && 2 * ((uint64_t)looks->count + 1) > looks->slot_count)
+    {
+        // Twice the slots, the probes placed again.
+        const uint32_t slot_count = looks->slot_count != 0 ? 2 * looks->slot_count : 256;
+        uint32_t* slots = slot_count > looks->slot_count ? calloc(slot_count, sizeof(uint32_t)) : 0;
+        looks->failed = slots == 0;
+        for (uint32_t i = 0; slots != 0 && i < looks->count; i += 1)
+        {
+            uint32_t slot = (uint32_t)oracle_probe_hash(looks->probes[i]) & (slot_count - 1);
+            while (slots[slot] != 0)
+            {
+                slot = (slot + 1) & (slot_count - 1);
+            }
+            slots[slot] = i + 1;
+        }
+        if (slots != 0)
+        {
+            free(looks->slots);
+            looks->slots = slots;
+            looks->slot_count = slot_count;
+        }
+    }
+    uint32_t slot = looks->failed ? 0 : (uint32_t)oracle_probe_hash(probe) & (looks->slot_count - 1);
+    while (!looks->failed && looks->slots[slot] != 0 && strcmp(looks->probes[looks->slots[slot] - 1], probe) != 0)
+    {
+        slot = (slot + 1) & (looks->slot_count - 1);
+    }
+    const bool added = !looks->failed && looks->slots[slot] == 0;
+    if (added && looks->count == looks->capacity)
+    {
+        const uint32_t capacity = looks->capacity != 0 ? 2 * looks->capacity : 64;
+        char** probes = realloc(looks->probes, sizeof(char*) * capacity);
+        looks->probes = probes != 0 ? probes : looks->probes;
+        OracleLook* grown = probes != 0 ? realloc(looks->looks, sizeof(OracleLook) * capacity) : 0;
+        looks->looks = grown != 0 ? grown : looks->looks;
+        looks->capacity = grown != 0 ? capacity : looks->capacity;
+        looks->failed = grown == 0;
+    }
+    char* copy = added && !looks->failed ? strdup(probe) : 0;
+    looks->failed |= added && copy == 0;
+    if (copy != 0)
+    {
+        looks->failed |= !oracle_probe_look(run, copy, &looks->looks[looks->count]);
+        looks->probes[looks->count] = copy;
+        looks->count += 1;
+        looks->slots[slot] = looks->count;
+    }
+    looks->failed |= looks->count > BUSTER_ORACLE_PROBES;
+    run->untraced |= looks->failed;
+}
+
+static void oracle_looks_release(OracleLooks* looks)
+{
+    for (uint32_t i = 0; i < looks->count; i += 1)
+    {
+        free(looks->probes[i]);
+    }
+    free(looks->probes);
+    free(looks->looks);
+    free(looks->slots);
+    *looks = (OracleLooks){ 0 };
+}
+
+// --- Tracing ---
+//
+// A compiler's run (OracleRun.dependencies) runs under a seccomp filter that stops each call of its processes that looks
+// at a path, lists a directory or opens a file, for the cache to read the path from the process (process_vm_readv, as
+// its parent may) and let the call through to the kernel (SECCOMP_USER_NOTIF_FLAG_CONTINUE). What the run looked at is
+// then every path it found or didn't find: the headers it read, and each place an #include, __has_include or #embed
+// looked for one and found none, in whatever directory, the run's own or one other runs share, and from whatever
+// header, so that a file created there later makes the run run again. A compiler doesn't list directories to find its
+// headers, but a directory a run lists is part of what it looked at by its names.
+
+#ifndef SYS_openat2
+#define SYS_openat2 437
+#endif
+#ifndef SYS_faccessat2
+#define SYS_faccessat2 439
+#endif
+#ifndef SYS_io_uring_setup
+#define SYS_io_uring_setup 425
+#endif
+#ifndef SECCOMP_USER_NOTIF_FLAG_CONTINUE
+#define SECCOMP_USER_NOTIF_FLAG_CONTINUE 1
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
+// The calls the filter stops: those that look at a path, list a directory or open a file, and those whose files the
+// tracing can't follow (io_uring's, and files opened by handle), which make the run untraced. Calls of another
+// architecture, and x32's, are stopped and do the same.
+static const uint32_t oracle_traced_calls[] = {
+    SYS_open,
+    SYS_openat,
+    SYS_openat2,
+    SYS_creat,
+    SYS_stat,
+    SYS_lstat,
+    SYS_newfstatat,
+    SYS_statx,
+    SYS_access,
+    SYS_faccessat,
+    SYS_faccessat2,
+    SYS_readlink,
+    SYS_readlinkat,
+    SYS_execve,
+    SYS_execveat,
+    SYS_chdir,
+    SYS_getdents,
+    SYS_getdents64,
+    SYS_io_uring_setup,
+    SYS_name_to_handle_at,
+    SYS_open_by_handle_at,
+};
+
+#define BUSTER_ORACLE_TRACED_CALLS (sizeof(oracle_traced_calls) / sizeof(oracle_traced_calls[0]))
+#define BUSTER_ORACLE_FILTER (BUSTER_ORACLE_TRACED_CALLS + 6)
+
+// The filter's program into `filter` (BUSTER_ORACLE_FILTER instructions): the architecture and x32's bit checked, then
+// each of oracle_traced_calls, stopped for the listener (SECCOMP_RET_USER_NOTIF), and any other call let through.
+static void oracle_trace_filter(struct sock_filter* filter, struct sock_fprog* program)
+{
+    const uint8_t calls = (uint8_t)BUSTER_ORACLE_TRACED_CALLS;
+    // Each jump counts the instructions it skips; the last instruction stops the call.
+    filter[0] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch));
+    filter[1] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 0, (uint8_t)(calls + 3));
+    filter[2] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr));
+    filter[3] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, (uint8_t)(calls + 1), 0);
+    for (uint8_t c = 0; c < calls; c += 1)
+    {
+        filter[4 + c] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, oracle_traced_calls[c], (uint8_t)(calls - c), 0);
+    }
+    filter[4 + calls] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    filter[5 + calls] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF);
+    *program = (struct sock_fprog){
+        .len = (unsigned short)BUSTER_ORACLE_FILTER,
+        .filter = filter,
+    };
+}
+
+// The runs this process traces until they finish, whose calls oracle_run_finish answers while it waits for any run; a
+// child forked from a process that traced some finds them its parent's (oracle_traced_owner) and has none.
+static OracleRun* oracle_traced[BUSTER_ORACLE_TRACED];
+static uint32_t oracle_traced_count;
+static pid_t oracle_traced_owner;
+
+static void oracle_traced_own(void)
+{
+    const pid_t self = getpid();
+    if (oracle_traced_owner != self)
+    {
+        for (uint32_t t = 0; t < oracle_traced_count; t += 1)
+        {
+            // The parent's listener, this process's copy of it, which nothing here answers.
+            close(oracle_traced[t]->listener);
+            oracle_traced[t]->listener = -1;
+        }
+        oracle_traced_count = 0;
+        oracle_traced_owner = self;
+    }
+}
+
+static void oracle_traced_remove(const OracleRun* run)
+{
+    oracle_traced_own();
+    for (uint32_t t = 0; t < oracle_traced_count; t += 1)
+    {
+        if (oracle_traced[t] == run)
+        {
+            oracle_traced_count -= 1;
+            oracle_traced[t] = oracle_traced[oracle_traced_count];
+        }
+    }
+}
+
+// The NUL-terminated string at `address` in the process `pid`, into `text` (at most `capacity` bytes with its NUL),
+// read up to a page's end at a time, so that a string before an unmapped page is read: false if it can't be read or
+// doesn't fit.
+static bool oracle_trace_string(pid_t pid, uint64_t address, char* text, size_t capacity)
+{
+    size_t done = 0;
+    bool ended = false;
+    bool result = address != 0;
+    while (result && !ended)
+    {
+        const size_t page = 4096 - (size_t)((address + done) % 4096);
+        const size_t want = page < capacity - done ? page : capacity - done;
+        struct iovec local = {
+            .iov_base = text + done,
+            .iov_len = want,
+        };
+        struct iovec remote = {
+            .iov_base = (void*)(uintptr_t)(address + done),
+            .iov_len = want,
+        };
+        const ssize_t got = want != 0 ? (ssize_t)syscall(SYS_process_vm_readv, pid, &local, 1ul, &remote, 1ul, 0ul) : -1;
+        result = got > 0;
+        ended = result && memchr(text + done, 0, (size_t)got) != 0;
+        done += result ? (size_t)got : 0;
+    }
+    return result;
+}
+
+// The path the process's descriptor names (AT_FDCWD: its working directory), into `path`: 1 if it is one, 0 if the
+// descriptor is something else (a pipe, a socket), and -1 if it can't be read.
+static int oracle_trace_descriptor(pid_t pid, int descriptor, char* path, size_t capacity)
+{
+    char link[64];
+    if (descriptor == AT_FDCWD)
+    {
+        snprintf(link, sizeof(link), "/proc/%ld/cwd", (long)pid);
+    }
+    else
+    {
+        snprintf(link, sizeof(link), "/proc/%ld/fd/%d", (long)pid, descriptor);
+    }
+    const ssize_t length = readlink(link, path, capacity - 1);
+    const int result = length <= 0 || (size_t)length >= capacity - 1 ? -1 : path[0] == '/' ? 1 : 0;
+    path[result == 1 ? length : 0] = 0;
+    return result;
+}
+
+// Whether the cache leaves `path` out of what a run looked at: the package manager's files (under /usr but /usr/local,
+// and /bin, /sbin, /lib, /lib32, /lib64 and /libx32, which merged-usr systems link into /usr), which the package
+// database's identity in every key stands for, and the kernel's (/proc, /sys, /dev). A path with ".." in it isn't
+// left out, as it may lead out of them.
+static bool oracle_system_path(const char* path)
+{
+    static const char* const systems[] = { "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/proc", "/sys", "/dev" };
+    bool system = false;
+    for (uint32_t s = 0; s < sizeof(systems) / sizeof(systems[0]); s += 1)
+    {
+        const size_t length = strlen(systems[s]);
+        system |= strncmp(path, systems[s], length) == 0 && (path[length] == 0 || path[length] == '/');
+    }
+    const bool local = strncmp(path, "/usr/local", 10) == 0 && (path[10] == 0 || path[10] == '/');
+    return system && !local && strstr(path, "/..") == 0;
+}
+
+// The kernel's sizes of a notification and its response (SECCOMP_GET_NOTIF_SIZES), which may be larger than the
+// headers' structures: oracle_trace_answer's buffers hold up to BUSTER_ORACLE_NOTIFICATION bytes.
+#define BUSTER_ORACLE_NOTIFICATION 1024
+static struct seccomp_notif_sizes oracle_trace_sizes;
+
+// Answers one call the filter stopped on the run's listener: the path it looks at (or the directory whose names it
+// lists) looked at first, if the run hasn't before (oracle_looks_add), then the call let through to the kernel. A call
+// the tracing can't follow, a path it can't read and a look it can't keep make the run untraced; a listener that fails
+// stops its answering (OracleRun.hung) and makes it untraced too.
+static void oracle_trace_answer(OracleRun* run)
+{
+    const bool sized = oracle_trace_sizes.seccomp_notif != 0 || syscall(SYS_seccomp, SECCOMP_GET_NOTIF_SIZES, 0, &oracle_trace_sizes) == 0;
+    _Alignas(16) uint8_t request_bytes[BUSTER_ORACLE_NOTIFICATION] = { 0 };
+    _Alignas(16) uint8_t response_bytes[BUSTER_ORACLE_NOTIFICATION] = { 0 };
+    const bool fits = sized && oracle_trace_sizes.seccomp_notif <= sizeof(request_bytes) && oracle_trace_sizes.seccomp_notif_resp <= sizeof(response_bytes) &&
+                      oracle_trace_sizes.seccomp_notif >= sizeof(struct seccomp_notif) && oracle_trace_sizes.seccomp_notif_resp >= sizeof(struct seccomp_notif_resp);
+    struct seccomp_notif* request = (struct seccomp_notif*)request_bytes;
+    const int received = fits ? ioctl(run->listener, SECCOMP_IOCTL_NOTIF_RECV, request) : -1;
+    // EINTR: answered on the next poll; ENOENT: the process that called it ended before it was read.
+    const bool lost = received != 0 && (!fits || (errno != EINTR && errno != ENOENT));
+    run->hung |= lost;
+    run->untraced |= lost;
+    if (received == 0)
+    {
+        const struct seccomp_data* call = &request->data;
+        const int64_t number = call->nr;
+        const pid_t pid = (pid_t)request->pid;
+        int descriptor = AT_FDCWD;
+        uint64_t address = 0;
+        uint64_t at = 0;
+        bool known = call->arch == AUDIT_ARCH_X86_64 && (number & 0x40000000) == 0;
+        bool listing = false;
+        if (number == SYS_open || number == SYS_creat || number == SYS_stat || number == SYS_lstat || number == SYS_access || number == SYS_readlink ||
+            number == SYS_execve || number == SYS_chdir)
+        {
+            address = call->args[0];
+        }
+        else if (number == SYS_openat || number == SYS_openat2 || number == SYS_newfstatat || number == SYS_statx || number == SYS_faccessat ||
+                 number == SYS_faccessat2 || number == SYS_readlinkat || number == SYS_execveat)
+        {
+            descriptor = (int)(uint32_t)call->args[0];
+            address = call->args[1];
+            at = number == SYS_newfstatat ? call->args[3] : number == SYS_statx ? call->args[2] : number == SYS_execveat ? call->args[4] : 0;
+        }
+        else if (number == SYS_getdents || number == SYS_getdents64)
+        {
+            descriptor = (int)(uint32_t)call->args[0];
+            listing = true;
+        }
+        else
+        {
+            known = false;
+        }
+        // The path: a listed directory's or, with AT_EMPTY_PATH and no path, the descriptor's own; a relative one from
+        // the descriptor's directory, or the working directory.
+        char named[BUSTER_ORACLE_PATH_BYTES] = { 0 };
+        char base[BUSTER_ORACLE_PATH_BYTES] = { 0 };
+        char path[BUSTER_ORACLE_PATH_BYTES] = { 0 };
+        bool named_read = known && (listing || oracle_trace_string(pid, address, named, sizeof(named)));
+        const bool own = listing || ((at & AT_EMPTY_PATH) != 0 && named[0] == 0);
+        const int found = named_read && (own || named[0] != '/') ? oracle_trace_descriptor(pid, descriptor, base, sizeof(base)) : 1;
+        named_read = named_read && found >= 0;
+        const int length = !named_read || found == 0 ? 0
+                           : own ? snprintf(path, sizeof(path), "%s", base)
+                           : named[0] == '/' ? snprintf(path, sizeof(path), "%s", named)
+                                             : snprintf(path, sizeof(path), "%s/%s", strcmp(base, "/") == 0 ? "" : base, named);
+        named_read = named_read && length >= 0 && (size_t)length < sizeof(path);
+        // The process may have ended, and its pid gone to another, while the path was read.
+        const bool valid = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_ID_VALID, &request->id) == 0;
+        if (valid && named_read && length > 0 && !oracle_system_path(path))
+        {
+            char probe[BUSTER_ORACLE_PATH_BYTES + 1];
+            probe[0] = listing ? 'l' : 'p';
+            memcpy(probe + 1, path, (size_t)length + 1);
+            oracle_looks_add(run, probe);
+        }
+        run->untraced |= valid && (!known || !named_read);
+        struct seccomp_notif_resp* response = (struct seccomp_notif_resp*)response_bytes;
+        response->id = request->id;
+        response->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+        const bool answered = ioctl(run->listener, SECCOMP_IOCTL_NOTIF_SEND, response) == 0 || errno == ENOENT;
+        run->hung |= !answered;
+        run->untraced |= !answered;
+    }
+}
+
+// --- Spawning ---
+
+// The child's report to its parent: the listener of its filter, as an 'L' with the descriptor, or a step that failed, as
+// an 'E' and its errno.
+static bool oracle_send_listener(int report, int listener)
+{
+    char byte = 'L';
+    struct iovec part = {
+        .iov_base = &byte,
+        .iov_len = 1,
+    };
+    _Alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))];
+    memset(control, 0, sizeof(control));
+    struct msghdr message = {
+        .msg_iov = &part,
+        .msg_iovlen = 1,
+        .msg_control = listener >= 0 ? control : 0,
+        .msg_controllen = listener >= 0 ? sizeof(control) : 0,
+    };
+    if (listener >= 0)
+    {
+        struct cmsghdr* header = CMSG_FIRSTHDR(&message);
+        header->cmsg_level = SOL_SOCKET;
+        header->cmsg_type = SCM_RIGHTS;
+        header->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(header), &listener, sizeof(int));
+    }
+    return sendmsg(report, &message, 0) == 1;
+}
+
+// The listener a traced run's child sends (oracle_send_listener), closed on exec here: -1 if its filter couldn't be
+// installed, or if the child failed first (then OracleRun.unstarted).
+static int oracle_receive_listener(OracleRun* run)
+{
+    char byte = 0;
+    struct iovec part = {
+        .iov_base = &byte,
+        .iov_len = 1,
+    };
+    _Alignas(struct cmsghdr) char control[CMSG_SPACE(sizeof(int))];
+    memset(control, 0, sizeof(control));
+    struct msghdr message = {
+        .msg_iov = &part,
+        .msg_iovlen = 1,
+        .msg_control = control,
+        .msg_controllen = sizeof(control),
+    };
+    ssize_t got = -1;
+    do
+    {
+        got = recvmsg(run->report, &message, 0);
+    }
+    while (got < 0 && errno == EINTR);
+    int listener = -1;
+    struct cmsghdr* header = got == 1 ? CMSG_FIRSTHDR(&message) : 0;
+    if (header != 0 && header->cmsg_level == SOL_SOCKET && header->cmsg_type == SCM_RIGHTS && header->cmsg_len == CMSG_LEN(sizeof(int)))
+    {
+        memcpy(&listener, CMSG_DATA(header), sizeof(int));
+        fcntl(listener, F_SETFD, FD_CLOEXEC);
+    }
+    run->unstarted |= got != 1 || byte != 'L';
+    return byte == 'L' ? listener : -1;
+}
+
+// The child's side, between fork and exec, with async-signal-safe calls alone: a process group of its own, its standard
+// input, output and errors, its working directory, with `filter` the filter and its listener sent to the parent on
+// `report`, then the tool. A step that fails sends an 'E' and its errno on `report` and ends the child with status 127.
+static void oracle_child(const OracleRun* run, int input, int report, const struct sock_fprog* filter, char* const* environment)
+{
+    setpgid(0, 0);
+    bool ready = dup2(input, 0) == 0 && dup2(run->output_descriptor, 1) == 1 && dup2(run->errors_descriptor, 2) == 2 &&
+                 (run->directory == 0 || chdir(run->directory) == 0);
+    if (ready && filter != 0)
+    {
+        const int listener = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 ? (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, filter) : -1;
+        ready = oracle_send_listener(report, listener);
+        if (listener >= 0)
+        {
+            close(listener);
+        }
+    }
+    if (ready)
+    {
+        execve(run->tool, run->arguments, environment);
+    }
+    const int error = errno;
+    char failed[1 + sizeof(int)] = { 'E' };
+    memcpy(failed + 1, &error, sizeof(error));
+    const ssize_t sent = write(report, failed, sizeof(failed));
+    _exit(sent == (ssize_t)sizeof(failed) ? 127 : 126);
+}
+
+// The self-test's switch: wait for every process as the cache does where it has no pidfd.
+static bool oracle_without_pidfd;
+
+// Starts the run's tool in a process group of its own, its standard input from its input, its output and errors into
+// captures, and, if `traced`, under the filter, its listener answered by oracle_trace_answer: if the filter can't be
+// installed, the tool runs all the same, untraced. False if it can't start: the tool isn't on PATH, its input can't be
+// opened, or a capture, the socket or the fork can't be made.
+static bool oracle_run_spawn(OracleRun* run, bool traced)
+{
+    bool result = run->tool[0] != 0 || oracle_find_tool(run->arguments[0], run->tool, sizeof(run->tool));
+    char* const* environment = run->environment != 0 ? run->environment : environ;
+    struct sock_filter filter[BUSTER_ORACLE_FILTER];
+    struct sock_fprog program;
+    oracle_trace_filter(filter, &program);
+    int sockets[2] = { -1, -1 };
+    const int input = result ? oracle_high(open(run->input != 0 ? run->input : "/dev/null", O_RDONLY | O_CLOEXEC)) : -1;
     run->output_descriptor = result ? oracle_capture() : -1;
     run->errors_descriptor = result ? oracle_capture() : -1;
-    result = result && run->output_descriptor >= 0 && run->errors_descriptor >= 0;
-    posix_spawn_file_actions_t actions;
-    const bool actions_made = result && posix_spawn_file_actions_init(&actions) == 0;
-    result = actions_made && posix_spawn_file_actions_addopen(&actions, 0, run->input != 0 ? run->input : "/dev/null", O_RDONLY, 0) == 0 &&
-             posix_spawn_file_actions_adddup2(&actions, run->output_descriptor, 1) == 0 && posix_spawn_file_actions_adddup2(&actions, run->errors_descriptor, 2) == 0 &&
-             (run->directory == 0 || posix_spawn_file_actions_addchdir_np(&actions, run->directory) == 0);
-    pid_t pid = 0;
-    result = result && posix_spawnp(&pid, run->arguments[0], &actions, 0, argv, run->environment != 0 ? run->environment : environ) == 0;
-    run->pid = result ? pid : 0;
-    if (actions_made)
+    result = result && input >= 0 && run->output_descriptor >= 0 && run->errors_descriptor >= 0 && socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0;
+    sockets[1] = oracle_high(sockets[1]);
+    result = result && sockets[1] >= 0;
+    const pid_t pid = result ? fork() : -1;
+    if (pid == 0)
     {
-        posix_spawn_file_actions_destroy(&actions);
+        oracle_child(run, input, sockets[1], traced ? &program : 0, environment);
     }
-    free(argv);
+    if (sockets[1] >= 0)
+    {
+        close(sockets[1]);
+    }
+    if (input >= 0)
+    {
+        close(input);
+    }
+    result = result && pid > 0;
+    if (result)
+    {
+        // Its group made here too, so that it is there whichever side runs first.
+        setpgid(pid, pid);
+        run->pid = pid;
+        run->started = oracle_now();
+        run->process = oracle_without_pidfd ? -1 : (int)syscall(SYS_pidfd_open, pid, 0);
+        run->report = sockets[0];
+        sockets[0] = -1;
+    }
+    if (sockets[0] >= 0)
+    {
+        close(sockets[0]);
+    }
+    if (result && traced)
+    {
+        run->listener = oracle_receive_listener(run);
+        run->untraced |= run->listener < 0;
+        oracle_traced_own();
+        if (run->listener >= 0)
+        {
+            oracle_traced[oracle_traced_count] = run;
+            oracle_traced_count += 1;
+        }
+    }
     return result;
+}
+
+// Whether the process has ended, without reaping it (waitid with WNOWAIT), for a run without a pidfd: so that its
+// group's id stays its own until the group is killed. True on an error but EINTR, which leaves nothing to wait for.
+static bool oracle_ended(pid_t pid)
+{
+    siginfo_t information;
+    memset(&information, 0, sizeof(information));
+    const int waited = waitid(P_PID, (id_t)pid, &information, WEXITED | WNOHANG | WNOWAIT);
+    return waited == 0 ? information.si_pid == pid : errno != EINTR;
+}
+
+// Waits for the run's process to end while it answers the traced runs' calls (its own and the others' this process
+// has under way, so that they go on too): a poll on its pidfd and their listeners, a millisecond at a time without a
+// pidfd, up to its time limit on the monotonic clock, past which its process group is killed; then what its group
+// left running is killed before it is reaped. The wait status into `status`; false if it couldn't be waited for, or was
+// killed for its time (OracleRun.killed).
+static bool oracle_run_wait(OracleRun* run, int* status)
+{
+    const uint64_t deadline = run->started + (uint64_t)run->timeout * 1000000000;
+    bool ended = run->pid <= 0;
+    bool killed = false;
+    while (!ended)
+    {
+        struct pollfd polled[1 + BUSTER_ORACLE_TRACED];
+        OracleRun* owners[1 + BUSTER_ORACLE_TRACED];
+        uint32_t count = 0;
+        if (run->process >= 0)
+        {
+            polled[count] = (struct pollfd){
+                .fd = run->process,
+                .events = POLLIN,
+            };
+            owners[count] = 0;
+            count += 1;
+        }
+        oracle_traced_own();
+        for (uint32_t t = 0; t < oracle_traced_count; t += 1)
+        {
+            if (oracle_traced[t]->listener >= 0 && !oracle_traced[t]->hung)
+            {
+                polled[count] = (struct pollfd){
+                    .fd = oracle_traced[t]->listener,
+                    .events = POLLIN,
+                };
+                owners[count] = oracle_traced[t];
+                count += 1;
+            }
+        }
+        const uint64_t now = oracle_now();
+        const uint64_t left = run->timeout == 0 || killed ? UINT64_MAX : deadline > now ? (deadline - now + 999999) / 1000000 : 0;
+        const uint64_t limit = run->process < 0 && left > 1 ? 1 : left;
+        const int ready = poll(polled, count, limit > INT32_MAX ? -1 : (int)limit);
+        for (uint32_t p = 0; ready > 0 && p < count; p += 1)
+        {
+            if (owners[p] != 0 && (polled[p].revents & POLLIN) != 0)
+            {
+                oracle_trace_answer(owners[p]);
+            }
+            else if (owners[p] != 0 && (polled[p].revents & (POLLHUP | POLLERR | POLLNVAL)) != 0)
+            {
+                owners[p]->hung = true;
+            }
+        }
+        ended = run->process >= 0 ? ready > 0 && (polled[0].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0 : oracle_ended(run->pid);
+        // A poll that fails but for a signal leaves the wait to oracle_ended, a millisecond at a time.
+        if (ready < 0 && errno != EINTR && run->process >= 0)
+        {
+            close(run->process);
+            run->process = -1;
+        }
+        if (!ended && run->timeout != 0 && !killed && oracle_now() >= deadline)
+        {
+            kill(-run->pid, SIGKILL);
+            kill(run->pid, SIGKILL);
+            killed = true;
+        }
+    }
+    // Whatever the tool's processes left running in its group goes with it, while its ended leader keeps the group's id.
+    if (run->pid > 0)
+    {
+        kill(-run->pid, SIGKILL);
+    }
+    pid_t waited = run->pid > 0 ? -1 : 0;
+    do
+    {
+        waited = run->pid > 0 ? waitpid(run->pid, status, 0) : 0;
+    }
+    while (waited < 0 && errno == EINTR);
+    run->killed = killed;
+    return run->pid > 0 && waited == run->pid && !killed;
+}
+
+// Whether the run's child started its tool: true if the socket it reports on closed on exec without a word, false if
+// it sent an 'E' (oracle_child), or was never there.
+static bool oracle_run_started(OracleRun* run)
+{
+    char byte = 0;
+    ssize_t got = -1;
+    do
+    {
+        got = run->report >= 0 ? read(run->report, &byte, 1) : 0;
+    }
+    while (got < 0 && errno == EINTR);
+    return run->report >= 0 && !run->unstarted && got == 0;
+}
+
+// The end of a run that ran: its tool waited for (oracle_run_wait), whether it started, its status, and its output and
+// errors read. False if any of that failed.
+static bool oracle_run_end(OracleRun* run)
+{
+    int status = 0;
+    bool result = oracle_run_wait(run, &status);
+    result = oracle_run_started(run) && result;
+    run->status = status;
+    result = oracle_read_capture(run->output_descriptor, &run->output, &run->output_length) && result;
+    result = oracle_read_capture(run->errors_descriptor, &run->errors, &run->errors_length) && result;
+    oracle_traced_remove(run);
+    return result;
+}
+
+// Closes a finished run's descriptors and frees its looks.
+static void oracle_run_close(OracleRun* run)
+{
+    const int descriptors[5] = { run->output_descriptor, run->errors_descriptor, run->process, run->report, run->listener };
+    for (uint32_t d = 0; d < 5; d += 1)
+    {
+        if (descriptors[d] >= 0)
+        {
+            close(descriptors[d]);
+        }
+    }
+    run->output_descriptor = -1;
+    run->errors_descriptor = -1;
+    run->process = -1;
+    run->report = -1;
+    run->listener = -1;
+    run->pid = 0;
+    oracle_looks_release(&run->looks);
+}
+
+// The run's own state before it starts, its result empty.
+static void oracle_run_reset(OracleRun* run)
+{
+    run->cache = run->cache != 0 ? run->cache : oracle_cache();
+    run->status = 0;
+    run->output = 0;
+    run->output_length = 0;
+    run->errors = 0;
+    run->errors_length = 0;
+    run->taken = false;
+    run->killed = false;
+    run->keyed = false;
+    run->tool[0] = 0;
+    run->pid = 0;
+    run->process = -1;
+    run->started = 0;
+    run->report = -1;
+    run->unstarted = false;
+    run->output_descriptor = -1;
+    run->errors_descriptor = -1;
+    run->listener = -1;
+    run->hung = false;
+    run->untraced = false;
+    run->looks = (OracleLooks){ 0 };
 }
 
 // --- Entries ---
 
-static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '2' };
+static const char oracle_magic[8] = { 'B', 'U', 'S', 'T', 'O', 'R', 'C', '3' };
 
-// An entry's header: the magic, the key, the wait status, its records' counts and the bytes after it. Then its roots
-// (each a u32 length and its name), its dependencies and its listings (each a u32 length, the path as the run named it
-// and SHA-256), its files (each a u64 length, UINT64_MAX for none, and its bytes), its standard output and its errors
-// (each a u64 length and its bytes).
+// An entry's flags: its files' modification times are part of what its run read (oracle_tool_epoch).
+#define BUSTER_ORACLE_TIMES 1u
+
+// An entry's header: the magic, the key, the wait status, its records' counts, its flags and the bytes after it. Then its
+// roots (each a u32 length and its name), what its run looked at (each a u32 length, the probe, its kind and the path as
+// the run named it, and SHA-256), its files (each a u64 length, UINT64_MAX for none, and its bytes), its standard output
+// and its errors (each a u64 length and its bytes).
 typedef struct OracleEntryHeader OracleEntryHeader;
 struct OracleEntryHeader
 {
@@ -1192,7 +1946,7 @@ struct OracleEntryHeader
     int32_t status;
     uint32_t roots;
     uint32_t dependencies;
-    uint32_t listings;
+    uint32_t flags;
     uint32_t files;
     uint32_t reserved;
     uint64_t body;
@@ -1204,12 +1958,11 @@ struct OracleEntry
 {
     uint8_t* bytes;
     int status;
+    uint32_t flags;
     uint32_t root_count;
     OracleRoot roots[BUSTER_ORACLE_ROOTS];
     uint32_t dependency_count;
     uint64_t dependencies;
-    uint32_t listing_count;
-    uint64_t listings;
     uint32_t file_count;
     uint64_t files;
     uint8_t* output;
@@ -1251,32 +2004,31 @@ static bool oracle_take_u64(const uint8_t* bytes, uint64_t end, uint64_t* at, ui
     return result;
 }
 
-// Steps over `count` records of an entry, each a u32 length, its bytes and, with `digests`, SHA-256: false if one
-// runs past `end`.
-static bool oracle_entry_skip(const uint8_t* bytes, uint64_t end, uint64_t* at, uint32_t count, bool digests)
+// Steps over `count` records of an entry, each a u32 length, its bytes and SHA-256: false if one runs past `end`.
+static bool oracle_entry_skip(const uint8_t* bytes, uint64_t end, uint64_t* at, uint32_t count)
 {
     bool result = true;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
         uint32_t length = 0;
-        result = oracle_take_u32(bytes, end, at, &length) && end - *at >= (uint64_t)length + (digests ? BUSTER_ORACLE_KEY_BYTES : 0);
-        *at += result ? (uint64_t)length + (digests ? BUSTER_ORACLE_KEY_BYTES : 0) : 0;
+        result = oracle_take_u32(bytes, end, at, &length) && end - *at >= (uint64_t)length + BUSTER_ORACLE_KEY_BYTES;
+        *at += result ? (uint64_t)length + BUSTER_ORACLE_KEY_BYTES : 0;
     }
     return result;
 }
 
-// The record at bytes[*at] of a section an entry's reading checked: its path into `path` (with the entry's roots
-// replaced by `roots`, as many and as long) and its SHA-256, *at past it. False if the path doesn't fit.
-static bool oracle_entry_record(const OracleEntry* entry, uint64_t* at, const OracleRoot* roots, char* path, size_t capacity, const uint8_t** digest)
+// The record at bytes[*at] of a section an entry's reading checked: its probe into `probe` (with the entry's roots
+// replaced by `roots`, as many and as long) and its SHA-256, *at past it. False if the probe doesn't fit.
+static bool oracle_entry_record(const OracleEntry* entry, uint64_t* at, const OracleRoot* roots, char* probe, size_t capacity, const uint8_t** digest)
 {
     uint32_t length = 0;
     memcpy(&length, entry->bytes + *at, sizeof(length));
     const bool result = length < capacity;
     if (result)
     {
-        memcpy(path, entry->bytes + *at + sizeof(length), length);
-        path[length] = 0;
-        oracle_roots_replace(entry->roots, roots, entry->root_count, (uint8_t*)path, length);
+        memcpy(probe, entry->bytes + *at + sizeof(length), length);
+        probe[length] = 0;
+        oracle_roots_replace(entry->roots, roots, entry->root_count, (uint8_t*)probe, length);
     }
     *digest = entry->bytes + *at + sizeof(length) + length;
     *at += sizeof(length) + (uint64_t)length + BUSTER_ORACLE_KEY_BYTES;
@@ -1303,7 +2055,8 @@ static bool oracle_entry_read(const OracleCache* cache, OracleKey key, OracleEnt
         memcpy(&header, buffer.bytes, sizeof(header));
     }
     result = result && memcmp(header.magic, oracle_magic, sizeof(oracle_magic)) == 0 && memcmp(header.key, key.bytes, sizeof(key.bytes)) == 0 &&
-             header.body == buffer.length - sizeof(header) && header.roots <= BUSTER_ORACLE_ROOTS && header.files <= BUSTER_ORACLE_FILES;
+             header.body == buffer.length - sizeof(header) && header.roots <= BUSTER_ORACLE_ROOTS && header.files <= BUSTER_ORACLE_FILES &&
+             (header.flags & ~BUSTER_ORACLE_TIMES) == 0;
     const uint64_t end = buffer.length;
     uint64_t at = sizeof(header);
     for (uint32_t r = 0; result && r < header.roots; r += 1)
@@ -1317,9 +2070,7 @@ static bool oracle_entry_read(const OracleCache* cache, OracleKey key, OracleEnt
         }
     }
     entry->dependencies = at;
-    result = result && oracle_entry_skip(buffer.bytes, end, &at, header.dependencies, true);
-    entry->listings = at;
-    result = result && oracle_entry_skip(buffer.bytes, end, &at, header.listings, true);
+    result = result && oracle_entry_skip(buffer.bytes, end, &at, header.dependencies);
     entry->files = at;
     for (uint32_t f = 0; result && f < header.files; f += 1)
     {
@@ -1338,9 +2089,9 @@ static bool oracle_entry_read(const OracleCache* cache, OracleKey key, OracleEnt
     {
         entry->bytes = buffer.bytes;
         entry->status = header.status;
+        entry->flags = header.flags;
         entry->root_count = header.roots;
         entry->dependency_count = header.dependencies;
-        entry->listing_count = header.listings;
         entry->file_count = header.files;
     }
     else
@@ -1362,115 +2113,77 @@ static bool oracle_entry_fits(const OracleEntry* entry, const OracleRun* run)
     return result;
 }
 
-// A dependency's state as the run reads it: SHA-256 of its bytes or of its identity, its device and inode, and its
-// modification time.
-typedef struct OracleState OracleState;
-struct OracleState
+// What a run looked at, `count` probes with their looks, into `digests` (BUSTER_ORACLE_KEY_BYTES each): each probe's
+// digest (oracle_probe_digest) and the place of the first of them that is the same file (a hard link, which #pragma
+// once takes once, whatever names reach it). False if one can't be read.
+typedef struct OracleSame OracleSame;
+struct OracleSame
 {
-    uint8_t bytes[BUSTER_ORACLE_KEY_BYTES];
-    uint64_t device;
-    uint64_t inode;
-    int64_t time[2];
+    int64_t device;
+    int64_t inode;
+    uint32_t place;
 };
 
-// Whether `path` is one of the run's roots or is in one.
-static bool oracle_run_rooted(const OracleRun* run, const char* path)
+static int oracle_compare_same(const void* a, const void* b)
 {
-    bool result = false;
-    for (uint32_t r = 0; r < run->roots.count && !result; r += 1)
-    {
-        const OracleRoot* root = &run->roots.roots[r];
-        result = strncmp(path, root->name, root->length) == 0 && (path[root->length] == '/' || path[root->length] == 0);
-    }
-    return result;
+    const OracleSame* x = a;
+    const OracleSame* y = b;
+    return x->device != y->device ? (x->device < y->device ? -1 : 1) : x->inode != y->inode ? (x->inode < y->inode ? -1 : 1) : x->place < y->place ? -1 : x->place > y->place;
 }
 
-// What a run reads of `count` files it names, into `digests` (BUSTER_ORACLE_KEY_BYTES each): SHA-256 of a file's bytes
-// if it is in one of the run's roots (which tests write anew for each run), and otherwise of its identity, what stat
-// gives of it (device, inode, size, modification and change times), as the runtime snapshot's probes (the system's
-// headers, the repository's sources and the frozen corpora, which keep theirs from one run to the next until they
-// change); of the place of the first of them that is the same file (by device and inode: #pragma once and include
-// guards take a file once, whatever names reach it); and if a rooted one has __TIMESTAMP__ (the modification time of
-// the file it expands in), of its modification time. False if a file can't be read, or the run's result depends on when
-// it runs: __DATE__ or __TIME__ in a rooted one, without SOURCE_DATE_EPOCH in its environment.
-static bool oracle_dependency_digests(const OracleRun* run, char* const* names, uint32_t count, uint8_t* digests)
+static bool oracle_probe_digests(char* const* probes, const OracleLook* looks, uint32_t count, bool times, uint8_t* digests)
 {
-    OracleState* states = calloc((size_t)count + 1, sizeof(OracleState));
-    bool result = states != 0;
-    bool timestamp = false;
-    bool dated = false;
+    OracleSame* files = calloc((size_t)count + 1, sizeof(OracleSame));
+    uint32_t* firsts = calloc((size_t)count + 1, sizeof(uint32_t));
+    bool result = files != 0 && firsts != 0;
     for (uint32_t i = 0; result && i < count; i += 1)
     {
-        char path[BUSTER_ORACLE_PATH_BYTES];
-        OracleBuffer bytes = { 0 };
-        struct stat status;
-        result = oracle_run_path(run, names[i], path, sizeof(path)) && stat(path, &status) == 0;
-        const bool rooted = result && oracle_run_rooted(run, path);
-        result = result && (!rooted || (S_ISREG(status.st_mode) && oracle_buffer_file(&bytes, path)));
-        if (result)
-        {
-            const int64_t identity[7] = {
-                (int64_t)status.st_dev,
-                (int64_t)status.st_ino,
-                (int64_t)status.st_size,
-                (int64_t)status.st_mtim.tv_sec,
-                (int64_t)status.st_mtim.tv_nsec,
-                (int64_t)status.st_ctim.tv_sec,
-                (int64_t)status.st_ctim.tv_nsec,
-            };
-            OracleHash hash;
-            oracle_sha256_begin(&hash);
-            oracle_hash_bytes(&hash, rooted ? "bytes" : "identity", rooted ? 5 : 8);
-            oracle_hash_bytes(&hash, rooted ? (const void*)bytes.bytes : (const void*)identity, rooted ? bytes.length : sizeof(identity));
-            const OracleKey key = oracle_hash_end(&hash);
-            memcpy(states[i].bytes, key.bytes, sizeof(key.bytes));
-            states[i].device = (uint64_t)status.st_dev;
-            states[i].inode = (uint64_t)status.st_ino;
-            states[i].time[0] = (int64_t)status.st_mtim.tv_sec;
-            states[i].time[1] = (int64_t)status.st_mtim.tv_nsec;
-            timestamp |= oracle_contains(bytes.bytes, bytes.length, "__TIMESTAMP__");
-            dated |= oracle_contains(bytes.bytes, bytes.length, "__DATE__") || oracle_contains(bytes.bytes, bytes.length, "__TIME__");
-        }
-        free(bytes.bytes);
+        result = oracle_probe_digest(probes[i], &looks[i], times, digests + (size_t)i * BUSTER_ORACLE_KEY_BYTES);
+        files[i] = (OracleSame){ .device = looks[i].identity[0], .inode = looks[i].identity[1], .place = i };
+        firsts[i] = i;
     }
-    result = result && !(dated && oracle_variable(run->environment != 0 ? run->environment : environ, "SOURCE_DATE_EPOCH") == 0);
+    if (result && count > 1)
+    {
+        qsort(files, count, sizeof(OracleSame), oracle_compare_same);
+    }
+    for (uint32_t i = 1; result && i < count; i += 1)
+    {
+        const bool same = files[i].device == files[i - 1].device && files[i].inode == files[i - 1].inode && (files[i].device | files[i].inode) != 0;
+        firsts[files[i].place] = same ? firsts[files[i - 1].place] : files[i].place;
+    }
     for (uint32_t i = 0; result && i < count; i += 1)
     {
-        uint32_t same = i;
-        for (uint32_t j = 0; j < i && same == i; j += 1)
-        {
-            same = states[j].device == states[i].device && states[j].inode == states[i].inode ? j : i;
-        }
         OracleHash hash;
         oracle_sha256_begin(&hash);
-        oracle_hash_bytes(&hash, states[i].bytes, sizeof(states[i].bytes));
-        oracle_hash_bytes(&hash, &same, sizeof(same));
-        oracle_hash_bytes(&hash, states[i].time, timestamp ? sizeof(states[i].time) : 0);
+        oracle_hash_bytes(&hash, digests + (size_t)i * BUSTER_ORACLE_KEY_BYTES, BUSTER_ORACLE_KEY_BYTES);
+        oracle_hash_bytes(&hash, &firsts[i], sizeof(firsts[i]));
         const OracleKey key = oracle_hash_end(&hash);
         memcpy(digests + (size_t)i * BUSTER_ORACLE_KEY_BYTES, key.bytes, sizeof(key.bytes));
     }
-    free(states);
+    free(files);
+    free(firsts);
     return result;
 }
 
-// Whether what the entry's run read is as the run finds it: its dependencies (as `fresh` has them, or as the files are
-// now if it is null: oracle_dependency_digests) and its listings (as the run's start found them), the entry's roots
-// replaced by the run's. The entry fits the run (oracle_entry_fits).
-static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, const OracleRecords* fresh)
+// Whether what the entry's run looked at is as the run finds it: its probes (as `fresh` has them, or as the paths are
+// now if it is null: oracle_probe_look and oracle_probe_digests), the entry's roots replaced by the run's. The entry fits the run
+// (oracle_entry_fits), and its flags are `fresh_flags` where `fresh` is given.
+static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, const OracleRecords* fresh, uint32_t fresh_flags)
 {
     const uint32_t count = entry->dependency_count;
     char** names = calloc((size_t)count + 1, sizeof(char*));
     uint8_t* stored = malloc(((size_t)count + 1) * BUSTER_ORACLE_KEY_BYTES);
     uint8_t* now = fresh == 0 ? malloc(((size_t)count + 1) * BUSTER_ORACLE_KEY_BYTES) : 0;
-    bool result = names != 0 && stored != 0 && (fresh != 0 || now != 0) && (fresh == 0 || fresh->count == count);
+    OracleLook* looks = fresh == 0 ? calloc((size_t)count + 1, sizeof(OracleLook)) : 0;
+    bool result = names != 0 && stored != 0 && (fresh != 0 || (now != 0 && looks != 0)) && (fresh == 0 || (fresh->count == count && fresh_flags == entry->flags));
     uint64_t at = entry->dependencies;
     for (uint32_t d = 0; result && d < count; d += 1)
     {
-        char named[BUSTER_ORACLE_PATH_BYTES];
+        char named[BUSTER_ORACLE_PATH_BYTES + 1];
         const uint8_t* digest = 0;
-        result = oracle_entry_record(entry, &at, run->roots.roots, named, sizeof(named), &digest);
+        result = oracle_entry_record(entry, &at, run->roots.roots, named, sizeof(named), &digest) && (named[0] == 'p' || named[0] == 'l');
         names[d] = result ? strdup(named) : 0;
-        result = result && names[d] != 0;
+        result = result && names[d] != 0 && (fresh != 0 || oracle_probe_look(run, names[d], &looks[d]));
         if (result)
         {
             memcpy(stored + (size_t)d * BUSTER_ORACLE_KEY_BYTES, digest, BUSTER_ORACLE_KEY_BYTES);
@@ -1480,16 +2193,8 @@ static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, 
     {
         result = strcmp(fresh->records[d].path, names[d]) == 0 && memcmp(fresh->records[d].digest, stored + (size_t)d * BUSTER_ORACLE_KEY_BYTES, BUSTER_ORACLE_KEY_BYTES) == 0;
     }
-    result = result && (fresh != 0 || (oracle_dependency_digests(run, names, count, now) && memcmp(now, stored, (size_t)count * BUSTER_ORACLE_KEY_BYTES) == 0));
-    result = result && run->listings.count == entry->listing_count;
-    at = entry->listings;
-    for (uint32_t l = 0; result && l < entry->listing_count; l += 1)
-    {
-        char path[BUSTER_ORACLE_PATH_BYTES];
-        const uint8_t* digest = 0;
-        result = oracle_entry_record(entry, &at, run->roots.roots, path, sizeof(path), &digest) && strcmp(run->listings.records[l].path, path) == 0 &&
-                 memcmp(run->listings.records[l].digest, digest, BUSTER_ORACLE_KEY_BYTES) == 0;
-    }
+    result = result && (fresh != 0 || (oracle_probe_digests(names, looks, count, (entry->flags & BUSTER_ORACLE_TIMES) != 0, now) &&
+                                       memcmp(now, stored, (size_t)count * BUSTER_ORACLE_KEY_BYTES) == 0));
     for (uint32_t d = 0; names != 0 && d < count; d += 1)
     {
         free(names[d]);
@@ -1497,6 +2202,7 @@ static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, 
     free(names);
     free(stored);
     free(now);
+    free(looks);
     return result;
 }
 
@@ -1555,7 +2261,7 @@ static const char* oracle_entry_differs(const OracleEntry* entry, const OracleRu
 }
 
 // Writes the run's entry, into a file of its own renamed over its name: false if it couldn't.
-static bool oracle_entry_write(const OracleRun* run, const OracleRecords* dependencies, const OracleFile* files)
+static bool oracle_entry_write(const OracleRun* run, const OracleRecords* probes, uint32_t flags, const OracleFile* files)
 {
     OracleBuffer body = { 0 };
     for (uint32_t r = 0; r < run->roots.count; r += 1)
@@ -1563,16 +2269,12 @@ static bool oracle_entry_write(const OracleRun* run, const OracleRecords* depend
         oracle_buffer_u32(&body, run->roots.roots[r].length);
         oracle_buffer_put(&body, run->roots.roots[r].name, run->roots.roots[r].length);
     }
-    const OracleRecords* sections[2] = { dependencies, &run->listings };
-    for (uint32_t s = 0; s < 2; s += 1)
+    for (uint32_t i = 0; i < probes->count; i += 1)
     {
-        for (uint32_t i = 0; i < sections[s]->count; i += 1)
-        {
-            const uint32_t length = (uint32_t)strlen(sections[s]->records[i].path);
-            oracle_buffer_u32(&body, length);
-            oracle_buffer_put(&body, sections[s]->records[i].path, length);
-            oracle_buffer_put(&body, sections[s]->records[i].digest, BUSTER_ORACLE_KEY_BYTES);
-        }
+        const uint32_t length = (uint32_t)strlen(probes->records[i].path);
+        oracle_buffer_u32(&body, length);
+        oracle_buffer_put(&body, probes->records[i].path, length);
+        oracle_buffer_put(&body, probes->records[i].digest, BUSTER_ORACLE_KEY_BYTES);
     }
     for (uint32_t f = 0; f < run->file_count; f += 1)
     {
@@ -1586,8 +2288,8 @@ static bool oracle_entry_write(const OracleRun* run, const OracleRecords* depend
     OracleEntryHeader header = {
         .status = run->status,
         .roots = run->roots.count,
-        .dependencies = dependencies->count,
-        .listings = run->listings.count,
+        .dependencies = probes->count,
+        .flags = flags,
         .files = run->file_count,
         .body = body.length,
     };
@@ -1621,79 +2323,150 @@ static bool oracle_entry_write(const OracleRun* run, const OracleRecords* depend
     return result;
 }
 
-// The files the run's dependency file names, each with its digest (oracle_dependency_digests): false if it can't be
-// read, it writes a name this reader doesn't take (an escaped space, '#' or '$': it reads none), or the digests can't
-// be made.
-static bool oracle_run_read_dependencies(const OracleRun* run, OracleRecords* records)
+// --- Keeping and taking ---
+
+// The tools whose __TIMESTAMP__ this process found to follow SOURCE_DATE_EPOCH or not, by SHA-256 of their identity
+// (oracle_hash_tool's).
+#define BUSTER_ORACLE_EPOCH_TOOLS 16
+static OracleKey oracle_epoch_tools[BUSTER_ORACLE_EPOCH_TOOLS];
+static bool oracle_epoch_follows[BUSTER_ORACLE_EPOCH_TOOLS];
+static uint32_t oracle_epoch_count;
+
+// Whether the run's tool's __TIMESTAMP__ follows SOURCE_DATE_EPOCH, as clang's does (with __DATE__ and __TIME__): GCC's
+// is the source's modification time whatever the epoch, and so is it for the runs of a tool whose isn't the epoch's,
+// whose entries then have their files' times (BUSTER_ORACLE_TIMES). Its run of `-E -P -x c -` on `__TIMESTAMP__` with the
+// epoch 0, which must print the epoch's time, outside the cache, once per tool in a process: a process that keeps
+// compilers' runs pays one more run.
+static bool oracle_tool_epoch(const OracleRun* run)
 {
-    OracleBuffer text = { 0 };
-    bool result = run->dependency_path[0] != 0 && oracle_buffer_file(&text, run->dependency_path);
-    oracle_buffer_put(&text, "", 1);
-    result = result && !text.failed;
-    const char* bytes = result ? (const char*)text.bytes : "";
-    const uint64_t length = result ? text.length - 1 : 0;
-    // The target's end: the first ':' before a blank, a line's end, a backslash or the end.
-    uint64_t at = 0;
-    while (result && at < length && !(bytes[at] == ':' && (at + 1 == length || bytes[at + 1] == ' ' || bytes[at + 1] == '\t' || bytes[at + 1] == '\n' ||
-                                                           bytes[at + 1] == '\r' || bytes[at + 1] == '\\')))
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    char found[BUSTER_ORACLE_PATH_BYTES];
+    const bool identified = oracle_hash_tool(&hash, run->arguments[0], found, sizeof(found));
+    const OracleKey tool = oracle_hash_end(&hash);
+    uint32_t place = oracle_epoch_count;
+    for (uint32_t t = 0; t < oracle_epoch_count && place == oracle_epoch_count; t += 1)
     {
-        at += 1;
+        place = memcmp(oracle_epoch_tools[t].bytes, tool.bytes, sizeof(tool.bytes)) == 0 ? t : place;
     }
-    result = result && at < length;
-    at += 1;
-    while (result && at < length)
+    bool follows = place < oracle_epoch_count && oracle_epoch_follows[place];
+    if (identified && place == oracle_epoch_count)
     {
-        const char c = bytes[at];
-        if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+        char input[BUSTER_ORACLE_PATH_BYTES];
+        const int length = snprintf(input, sizeof(input), "%s/buster-oracle-epoch-XXXXXX", run->roots.base_length != 0 ? run->roots.base : "/tmp");
+        const int descriptor = length > 0 && (size_t)length < sizeof(input) ? mkstemp(input) : -1;
+        static const char source[] = "__TIMESTAMP__\n";
+        const bool written = descriptor >= 0 && write(descriptor, source, sizeof(source) - 1) == (ssize_t)(sizeof(source) - 1);
+        if (descriptor >= 0)
         {
-            at += 1;
+            close(descriptor);
         }
-        else if (c == '\\' && at + 1 < length && (bytes[at + 1] == '\n' || (bytes[at + 1] == '\r' && at + 2 < length && bytes[at + 2] == '\n')))
+        char* arguments[] = { found, "-E", "-P", "-x", "c", "-", 0 };
+        char* environment[] = { "SOURCE_DATE_EPOCH=0", "TZ=UTC0", "LC_ALL=C", 0 };
+        OracleRun probe = {
+            .cache = run->cache,
+            .arguments = arguments,
+            .environment = environment,
+            .input = input,
+            .timeout = 60,
+        };
+        oracle_run_reset(&probe);
+        const bool spawned = written && oracle_run_spawn(&probe, false);
+        const bool ended = oracle_run_end(&probe);
+        follows = spawned && ended && WIFEXITED(probe.status) && WEXITSTATUS(probe.status) == 0 && strstr(probe.output, "Thu Jan  1 00:00:00 1970") != 0;
+        oracle_run_close(&probe);
+        free(probe.output);
+        free(probe.errors);
+        if (descriptor >= 0)
         {
-            at += bytes[at + 1] == '\n' ? 2 : 3;
+            unlink(input);
         }
-        else
+        if (oracle_epoch_count < BUSTER_ORACLE_EPOCH_TOOLS)
         {
-            const uint64_t start = at;
-            while (at < length && bytes[at] != ' ' && bytes[at] != '\t' && bytes[at] != '\n' && bytes[at] != '\r')
-            {
-                result = result && bytes[at] != '\\' && bytes[at] != '$' && bytes[at] != '#';
-                at += 1;
-            }
-            const uint8_t none[BUSTER_ORACLE_KEY_BYTES] = { 0 };
-            result = result && at - start < BUSTER_ORACLE_PATH_BYTES;
-            if (result)
-            {
-                oracle_records_add(records, bytes + start, at - start, none);
-                result = !records->failed;
-            }
+            oracle_epoch_tools[oracle_epoch_count] = tool;
+            oracle_epoch_follows[oracle_epoch_count] = follows;
+            oracle_epoch_count += 1;
         }
     }
-    free(text.bytes);
-    char** names = result ? calloc((size_t)records->count + 1, sizeof(char*)) : 0;
-    uint8_t* digests = result ? malloc(((size_t)records->count + 1) * BUSTER_ORACLE_KEY_BYTES) : 0;
-    result = result && names != 0 && digests != 0;
-    for (uint32_t i = 0; result && i < records->count; i += 1)
+    return follows;
+}
+
+// A probe's place among the run's looks, for their order by probe.
+typedef struct OraclePlace OraclePlace;
+struct OraclePlace
+{
+    const char* probe;
+    uint32_t place;
+};
+
+static int oracle_compare_places(const void* a, const void* b)
+{
+    return strcmp(((const OraclePlace*)a)->probe, ((const OraclePlace*)b)->probe);
+}
+
+// What the run looked at, as its entry lists it, into `probes`: its first looks, by probe, but at the files it writes
+// (the caller's outputs, whatever was there before), each with its digest (oracle_probe_digests). False if a file it read
+// isn't the one it found (the run changed it), or a list can't be made.
+static bool oracle_run_probes(OracleRun* run, bool times, OracleRecords* probes)
+{
+    const OracleLooks* looks = &run->looks;
+    char outputs[BUSTER_ORACLE_FILES][BUSTER_ORACLE_PATH_BYTES + 1];
+    bool result = !looks->failed;
+    for (uint32_t f = 0; result && f < run->file_count; f += 1)
     {
-        names[i] = records->records[i].path;
+        outputs[f][0] = 'p';
+        result = oracle_run_path(run, run->files[f], outputs[f] + 1, sizeof(outputs[f]) - 1);
     }
-    result = result && oracle_dependency_digests(run, names, records->count, digests);
-    for (uint32_t i = 0; result && i < records->count; i += 1)
+    OraclePlace* places = result ? calloc((size_t)looks->count + 1, sizeof(OraclePlace)) : 0;
+    char** names = result ? calloc((size_t)looks->count + 1, sizeof(char*)) : 0;
+    OracleLook* chosen = result ? calloc((size_t)looks->count + 1, sizeof(OracleLook)) : 0;
+    uint8_t* digests = result ? malloc(((size_t)looks->count + 1) * BUSTER_ORACLE_KEY_BYTES) : 0;
+    result = result && places != 0 && names != 0 && chosen != 0 && digests != 0;
+    for (uint32_t i = 0; result && i < looks->count; i += 1)
     {
-        memcpy(records->records[i].digest, digests + (size_t)i * BUSTER_ORACLE_KEY_BYTES, BUSTER_ORACLE_KEY_BYTES);
+        places[i] = (OraclePlace){ .probe = looks->probes[i], .place = i };
     }
+    if (result && looks->count > 1)
+    {
+        qsort(places, looks->count, sizeof(OraclePlace), oracle_compare_places);
+    }
+    uint32_t count = 0;
+    for (uint32_t i = 0; result && i < looks->count; i += 1)
+    {
+        bool output = false;
+        for (uint32_t f = 0; f < run->file_count; f += 1)
+        {
+            output |= strcmp(places[i].probe, outputs[f]) == 0;
+        }
+        if (!output)
+        {
+            names[count] = (char*)places[i].probe;
+            chosen[count] = looks->looks[places[i].place];
+            count += 1;
+        }
+    }
+    result = result && oracle_probe_digests(names, chosen, count, times, digests);
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        oracle_records_add(probes, names[i], strlen(names[i]), digests + (size_t)i * BUSTER_ORACLE_KEY_BYTES);
+        result = !probes->failed;
+    }
+    free(places);
     free(names);
+    free(chosen);
     free(digests);
     return result;
 }
 
-// After a run that ran: what it read and wrote, and its entry written; in check mode compared first with the entry
-// there, if what that entry's run read is what this one read. False if that entry is stale, with a line on the errors
-// naming it.
+// After a run that ran: what it looked at and wrote, and its entry written; in check mode compared first with the entry
+// there, if what that entry's run looked at is what this one did. A traced run (a compiler's) is kept only if its tracing
+// missed nothing. False if that entry is stale, with a line on the errors naming it.
 static bool oracle_run_keep(OracleRun* run)
 {
-    OracleRecords dependencies = { 0 };
-    bool keep = !run->dependencies || oracle_run_read_dependencies(run, &dependencies);
+    OracleRecords probes = { 0 };
+    bool keep = !run->dependencies || (run->listener >= 0 && !run->untraced);
+    const uint32_t flags = keep && run->dependencies && !oracle_tool_epoch(run) ? BUSTER_ORACLE_TIMES : 0;
+    keep = keep && (!run->dependencies || oracle_run_probes(run, (flags & BUSTER_ORACLE_TIMES) != 0, &probes));
     OracleFile files[BUSTER_ORACLE_FILES];
     for (uint32_t f = 0; f < run->file_count; f += 1)
     {
@@ -1708,7 +2481,7 @@ static bool oracle_run_keep(OracleRun* run)
     OracleEntry entry;
     if (keep && run->cache->mode == ORACLE_MODE_CHECK && oracle_entry_read(run->cache, run->key, &entry))
     {
-        if (oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, &dependencies))
+        if (oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, &probes, flags))
         {
             oracle_entry_root(&entry, run);
             differs = oracle_entry_differs(&entry, run, files);
@@ -1727,22 +2500,22 @@ static bool oracle_run_keep(OracleRun* run)
         fprintf(stderr, "%s%s\n", run->input != 0 ? " < " : "", run->input != 0 ? run->input : "");
         oracle_count(&run->cache->counts->stale);
     }
-    const bool written = keep && oracle_entry_write(run, &dependencies, files);
+    const bool written = keep && oracle_entry_write(run, &probes, flags, files);
     oracle_count(written ? &run->cache->counts->run : &run->cache->counts->unkept);
     for (uint32_t f = 0; f < run->file_count; f += 1)
     {
         free(files[f].bytes.bytes);
     }
-    oracle_records_release(&dependencies);
+    oracle_records_release(&probes);
     return differs == 0;
 }
 
-// In use mode, before a run: its entry's result, if the entry is there, fits the run and what its run read is as it
-// is now, with the files it writes written (true: the tool doesn't run).
+// In use mode, before a run: its entry's result, if the entry is there, fits the run and what its run looked at is as
+// it is now, with the files it writes written (true: the tool doesn't run).
 static bool oracle_run_take(OracleRun* run)
 {
     OracleEntry entry;
-    bool result = oracle_entry_read(run->cache, run->key, &entry) && oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, 0);
+    bool result = oracle_entry_read(run->cache, run->key, &entry) && oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, 0, 0);
     if (result)
     {
         oracle_entry_root(&entry, run);
@@ -1799,93 +2572,44 @@ static bool oracle_run_take(OracleRun* run)
     return result;
 }
 
-// Starts a run: in use mode takes its entry if it can (OracleRun.taken), and otherwise starts its tool. False if the
-// tool can't start; oracle_run_finish then finishes it all the same.
+// Starts a run: in use mode takes its entry if it can (OracleRun.taken), and otherwise starts its tool, traced if it is
+// a compiler's run the cache may keep and this process traces fewer than BUSTER_ORACLE_TRACED runs (else it isn't
+// kept). False if the tool can't start; oracle_run_finish then finishes it all the same.
 static bool oracle_run_start(OracleRun* run)
 {
-    run->cache = run->cache != 0 ? run->cache : oracle_cache();
-    run->status = 0;
-    run->output = 0;
-    run->output_length = 0;
-    run->errors = 0;
-    run->errors_length = 0;
-    run->taken = false;
-    run->killed = false;
-    run->pid = 0;
-    run->output_descriptor = -1;
-    run->errors_descriptor = -1;
-    run->dependency_path[0] = 0;
-    run->listings = (OracleRecords){ 0 };
+    oracle_run_reset(run);
     run->keyed = oracle_run_key(run);
-    run->keyed = run->keyed && (!run->dependencies || run->shared_directories || oracle_run_listings(run));
     run->taken = run->keyed && run->cache->mode == ORACLE_MODE_USE && oracle_run_take(run);
+    oracle_traced_own();
+    const bool room = oracle_traced_count < BUSTER_ORACLE_TRACED;
     if (run->taken)
     {
         oracle_count(&run->cache->counts->taken);
     }
-    else if (oracle_cache_active(run->cache) && !run->keyed)
+    else if (oracle_cache_active(run->cache) && (!run->keyed || (run->dependencies && !room)))
     {
         oracle_count(&run->cache->counts->unkept);
+        run->keyed = false;
     }
     return run->taken || oracle_run_spawn(run, run->keyed && run->dependencies);
 }
 
-// Finishes a run: waits for its tool, reads what it wrote, and keeps its entry. False if the tool didn't run or can't
-// be waited for, its output can't be read, or (in check mode) its entry is stale; the result is the tool's.
+// Finishes a run: waits for its tool (oracle_run_wait), reads what it wrote, and keeps its entry. False if the tool
+// didn't start or can't be waited for, was killed for its time, its output can't be read, or (in check mode) its entry
+// is stale; the result is the tool's.
 static bool oracle_run_finish(OracleRun* run)
 {
     bool result = run->taken;
     if (!run->taken)
     {
-        // With a time limit, the wait a millisecond at a time, and past the limit the tool killed and waited for.
-        int status = 0;
-        pid_t waited = 0;
-        bool killed = false;
-        uint64_t waits = 0;
-        const struct timespec pause = { .tv_sec = 0, .tv_nsec = 1000000 };
-        while (run->pid > 0 && waited != run->pid && !(waited < 0 && errno != EINTR))
-        {
-            const bool expired = run->timeout != 0 && waits >= 1000ull * run->timeout;
-            if (expired && !killed)
-            {
-                kill(run->pid, SIGKILL);
-                killed = true;
-            }
-            waited = waitpid(run->pid, &status, run->timeout != 0 && !expired ? WNOHANG : 0);
-            if (waited == 0)
-            {
-                nanosleep(&pause, 0);
-                waits += 1;
-            }
-        }
-        result = run->pid > 0 && waited == run->pid && !killed;
-        run->killed = killed;
-        run->status = status;
-        result = oracle_read_capture(run->output_descriptor, &run->output, &run->output_length) && result;
-        result = oracle_read_capture(run->errors_descriptor, &run->errors, &run->errors_length) && result;
+        result = oracle_run_end(run);
         if (run->keyed && !result)
         {
             oracle_count(&run->cache->counts->unkept);
         }
         result = result && (!run->keyed || oracle_run_keep(run));
     }
-    if (run->output_descriptor >= 0)
-    {
-        close(run->output_descriptor);
-    }
-    if (run->errors_descriptor >= 0)
-    {
-        close(run->errors_descriptor);
-    }
-    if (run->dependency_path[0] != 0)
-    {
-        unlink(run->dependency_path);
-    }
-    run->output_descriptor = -1;
-    run->errors_descriptor = -1;
-    run->dependency_path[0] = 0;
-    run->pid = 0;
-    oracle_records_release(&run->listings);
+    oracle_run_close(run);
     return result;
 }
 

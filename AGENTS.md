@@ -1078,11 +1078,12 @@ designs and the compilers already built this way.
   in the list's order. `parallel_test.c` holds its tests (`main.c` includes
   both; `./build/compiler test-parallel` runs them); "The parallel runner"
   below describes both.
-- `src/buster/compiler/oracle_cache.c` keeps the results of the clang runs
-  that tests compare with between runs, with what each read, in the cache
-  directory (#542):
-  `BUSTER_ORACLE_CACHE=use` takes a kept result rather than run clang again,
-  and `check` runs every one and fails on a kept result that differs.
+- `src/buster/compiler/oracle_cache.c` keeps the results of the clang and gcc
+  runs that tests compare with between runs in the cache directory (#542),
+  each with every path its processes looked at, which a seccomp listener
+  traces: `BUSTER_ORACLE_CACHE=use` takes a kept result rather than run the
+  tool again, and `check` runs every one and fails on a kept result that
+  differs.
   `oracle_cache_test.c` holds its tests (`./build/compiler test-oracle-cache`);
   "The oracle cache" below describes both.
 - `build/` is disposable output. Do not commit generated binaries or captures.
@@ -1785,25 +1786,49 @@ SHA-256 of:
   (`oracle_environment_names`) with their values, each with its roots made
   alike (below); and the bytes of its standard input.
 
-A compiler's run of one source (`OracleRun.dependencies`) also has `-MD -MF
-FILE`, which its key doesn't, and its entry lists what it read: each file its
-dependency file names (its source, the headers, `#embed`'s resources and what
-`__has_include` found, which clang 23 lists) with SHA-256 of its bytes if it is
-in one of the run's roots (below), which tests write anew for each run, and
-otherwise of its identity (what `stat` gives of it, as the runtime snapshot's
-probes: the system's headers, the repository's sources and the frozen corpora
-keep theirs from one run to the next until they change), of which of them is
-the same file (a hard link, which `#pragma once` takes once), and of their
-modification times where a rooted one has `__TIMESTAMP__`; and the names in
-each directory under a root that its arguments name, as the run found them, so
-that a file added where it looked for one and found none runs it again. An
-entry is taken only if all of these are as they were. A run isn't kept whose
-dependency file can't be read (a compiler writes none when an `#include`
-fails), that has `-M` options of its own, whose rooted files or input have
-`__DATE__` or `__TIME__` without `SOURCE_DATE_EPOCH`, or that has more than 8
-roots. On the first run with an empty cache, hashing what each run read added
-16 s to test-preprocessor's cases, mostly system headers' bytes, which their
-identities now stand for.
+A compiler's run (`OracleRun.dependencies`) is traced: it runs under a seccomp
+filter that stops each call of its processes that looks at a path (`open`,
+`stat`, `access`, `readlink`, `execve` and their kin) or lists a directory,
+whose listener the cache answers (`oracle_trace_answer`): it reads the path
+from the process (`process_vm_readv`), looks at it first if the run hasn't
+before (`oracle_probe_look`), and lets the call through
+(`SECCOMP_USER_NOTIF_FLAG_CONTINUE`). The entry lists every path the run looked
+at, each as it was when the run first looked, before the run could change it:
+a file by SHA-256 of its bytes if it is in one of the run's roots (below),
+which tests write anew for each run, and otherwise by its identity (what
+`stat` gives of it, as the runtime snapshot's probes: the system's headers,
+the repository's sources and the frozen corpora keep theirs from one run to
+the next until they change); a path that isn't there, and why; a symbolic
+link and its target; a directory as one; a directory's names where the run
+listed them; and which of them is the same file (a hard link, which `#pragma
+once` takes once). So every place an `#include`, `__has_include` or `#embed`
+looked for a header and found none counts, in any directory (one that other
+runs' files go into, or a nested header's), and so does a missing `#include`,
+whose run is kept. A file the run makes was one that wasn't there; a file it
+changes after it read it isn't kept; the files it writes are its outputs. The
+package manager's files (under `/usr` but `/usr/local`, and `/bin`, `/sbin`
+and `/lib*`) and the kernel's (`/proc`, `/sys`, `/dev`) are left out, the
+package database's identity standing for them (`oracle_system_path`). A
+process answers its traced runs' calls while it waits for any of them, so that
+runs under way at once all go on; a call the tracing can't follow (io_uring's,
+files opened by handle, another architecture's) makes its run unkept. On this
+container, the filter's stops took a `clang -E` of `<stdio.h>` from 34 ms to
+47 ms, which only a run that isn't taken pays.
+
+A compiler's run is kept only if its environment sets `SOURCE_DATE_EPOCH`
+(`oracle_run_key`): without it, its `__DATE__` and `__TIME__` would be when
+it ran, however its sources spell them (pasted from two halves, say, in a
+header in no root, or on its standard input). With it, which the key has,
+they are the epoch's, and so is clang's `__TIMESTAMP__`; a tool whose
+`__TIMESTAMP__` doesn't follow the epoch (GCC's is the file's modification
+time), as one run of `-E -P -x c -` on it shows once per tool in a process
+(`oracle_tool_epoch`), has its rooted files' modification times in its
+entries. The tests that compare with compilers through the cache fix the
+epoch where it isn't set (`oracle_epoch_begin`: test-preprocessor,
+test-parser, test-checker, test-checker-asm, test-checker-driver, test-tier0,
+test-calling-convention, test-c-testsuite; test-checker-corpus fixes its
+own), for the compilers and their own preprocessor alike. A run with `-M`
+options of its own, or more than 8 roots, isn't kept.
 
 The roots: a test makes its files in directories of `mkdtemp`'s under
 `$TMPDIR` (or `/tmp`), whose names differ from one run to the next. A root is
@@ -1812,7 +1837,7 @@ the 6 before its last `.`) letters and digits, as `mkdtemp`'s random ones are.
 A key has a placeholder for each root's 6 characters, by the root's place
 among the run's; an entry holds the roots it was made with, which a run that
 takes it replaces with its own, as long, in the result (an object's bytes as
-much as a text's) and in the names of what it read.
+much as a text's) and in the names of what it looked at.
 
 An entry is written into a file of its own and renamed over its name, so that
 a reader sees a whole entry or none whatever runs at once.
@@ -1829,12 +1854,12 @@ counts of what runs did (taken, run, stale, not kept) are in shared memory,
 which the parts a test forks after it sets up the cache add to, and a test
 prints them at its end (`oracle_cache_report`).
 
-A run whose directories hold other runs' files as it runs
-(`OracleRun.shared_directories`) keeps its dependencies but not their
-directories' names. A run may have a time limit (`OracleRun.timeout`), past
-which it is killed (`OracleRun.killed`), fails and isn't kept. A test of a
-harness whose processes must run turns the process's cache off
-(`oracle_cache_disable`).
+The tool runs in a process group of its own: what it leaves running there is
+killed when it ends, and the whole group at its time limit
+(`OracleRun.timeout`), on the monotonic clock, waited for on a pidfd (a
+millisecond at a time without one); a run killed so fails
+(`OracleRun.killed`) and isn't kept. A test of a harness whose processes must
+run turns the process's cache off (`oracle_cache_disable`).
 
 Its users:
 
@@ -1848,7 +1873,8 @@ Its users:
   at once as its batches have, each file's result the one a batch gives it;
 - test-checker-corpus's clang (`check_corpus_clang_phase`, its first error,
   and `check_corpus_clang_object`, `-O0 -c`'s objects), which test-checker-asm
-  and test-checker-driver use too;
+  and test-checker-driver use too, and its semantic mutants' preprocessed
+  text (`-x cpp-output`);
 - test-tier0's cross-check's compiles of each program's C and of its harness,
   each then linked with Tier 0's object (`tier0_test_compile`);
 - test-calling-convention's cross-check's compiles of the C side, each then
@@ -1856,10 +1882,12 @@ Its users:
 - test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
   in `--self-test`, which turns the cache off.
 
-`./build/compiler test-oracle-cache` (about 1.5 s, a second of it the time
-limit's run) checks it with sh and clang
-as the tools, in a directory of its own under `$TMPDIR` (or `/tmp`) and two of
-one template beside it:
+Each of these tests prints a line of what its runs did (`oracle_cache_report`).
+
+`./build/compiler test-oracle-cache` (about 4.5 s, 3 s of it the process
+groups' waits) checks it with sh and clang as the tools, in a directory of its
+own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
+`SOURCE_DATE_EPOCH` fixed where it isn't set:
 
 - SHA-256 against FIPS 180-4's examples, and every length to 300 bytes whole
   and in random pieces;
@@ -1874,24 +1902,36 @@ one template beside it:
   nothing against one not set, the purpose, the tool's path and its file's
   times), and `HOME` not; a tool not on `PATH`; a file the run didn't write,
   removed when its entry is taken;
-- dependencies: a compile taken in its directory and in the other, and run
-  again after a header changes, a file is added beside it, or `#embed`'s
-  resource or what `__has_include` found changes; errors naming absolute
-  paths, taken with the other directory's; a missing `#include` and `-M`
-  options, not kept;
-- what a run reads besides bytes: a dependency in no root, checked by its
-  identity (rewritten, even with its own bytes, it is another file); a hard
-  link replaced by a copy of its bytes,
-  `__TIMESTAMP__`'s files' times, and `__DATE__` without `SOURCE_DATE_EPOCH`
-  (not kept) and with it (kept); shared directories, where a file added beside
-  the source leaves the entry taken and a changed dependency doesn't; a run
-  past its time limit, killed and not kept;
+- dependencies (traced `clang -fsyntax-only`): a compile taken in its
+  directory and in the other, run again after a header changes, and taken
+  after a file it doesn't look for is added beside it; run again after
+  `#embed`'s resource or what `__has_include` found changes; `__has_include`'s
+  header created where it looked, in a directory other files go into; a nested
+  header created in its includer's directory, before the one `-I` found;
+  preprocessed text's `#include`; errors naming absolute paths, taken with the
+  other directory's; a missing `#include` kept, and run again once its header
+  is there; `-M` options, not kept;
+- identities: a hard link replaced by a copy of its bytes; clang's
+  `__TIMESTAMP__`, the epoch's, its file's times changed and its entry taken;
+  `__DATE__`, and `__TIME__` pasted from two halves in a header in no root and
+  in a source on standard input, none kept without `SOURCE_DATE_EPOCH` and each
+  with it, giving the epoch's date and time; a header in no root checked by its
+  identity (rewritten, even with its own bytes, it is another file);
+- tracing (traced sh): a file a child process read and a path a test found
+  absent, each run again when it changes; a file the run makes and reads back,
+  taken while it isn't there and run again when it is; a file the run changes
+  after it read it, not kept; two runs at once, each waiting on a file the
+  other writes, finished in the other order; clang's `__TIMESTAMP__` following
+  the epoch and sh's not, whose run of `stat` has its file's time in its entry;
+- process groups: what a run leaves running when it ends, and what a run
+  killed at its time limit started, killed (the markers they would write later
+  aren't there); the limit on the monotonic clock, with a pidfd and without;
 - check mode: an entry made stale fails its run and is written again (the test
   prints that it makes one on purpose), and one whose run read other bytes
   isn't stale;
 - damaged entries: another magic, key, body length, root or dependency count,
-  cut short, cut inside its header or a byte longer, each run again and
-  written whole;
+  a flag it doesn't know, cut short, cut inside its header or a byte longer,
+  each run again and written whole;
 - the modes: off, a name that is no mode and no directory keep nothing and
   make no directory;
 - 8 processes running the same 4 runs 16 times each, whose counts add up in

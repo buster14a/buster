@@ -342,9 +342,9 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
     snprintf(oracle, sizeof(oracle), "%s/object-clang.o", directory);
     snprintf(log, sizeof(log), "%s/object-clang.txt", directory);
     char* const compile[] = { (char*)suite->clang, "-O0", "-c", "-w", (char*)source, "-o", oracle, 0 };
-    // Through the oracle cache (oracle_cache.c, #542): the test's directory holds this compiler's files too, so its
-    // names aren't what clang read (the source and the headers are). Its output and errors go to the log, as
-    // c_testsuite_run writes them.
+    // Through the oracle cache (oracle_cache.c, #542): traced, its entry has the paths clang looked at, whatever this
+    // compiler writes beside them in the test's directory. Its output and errors go to the log, as c_testsuite_run
+    // writes them.
     const char* files[] = { oracle };
     OracleRun run = {
         .purpose = "c-testsuite: clang -O0 -c",
@@ -353,7 +353,6 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
         .files = files,
         .file_count = 1,
         .dependencies = true,
-        .shared_directories = true,
         .timeout = suite->compile_timeout,
     };
     const bool ran = oracle_run(&run);
@@ -982,6 +981,9 @@ static int c_testsuite_self_test(CTestsuite* suite)
 
 static int run_c_testsuite_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     static CTestsuite suite;
     const char* subset = 0;
     const char* root = 0;
@@ -1080,5 +1082,6 @@ static int run_c_testsuite_tests(int argc, char** argv)
             fprintf(stderr, "test-c-testsuite: can't run the tests\n");
         }
     }
+    oracle_epoch_end(epoch);
     return result;
 }

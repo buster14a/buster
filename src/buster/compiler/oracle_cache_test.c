@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-oracle-cache: the oracle cache's checks (oracle_cache.c), in a directory of their own under $TMPDIR (or /tmp)
-// and two more of one template beside it, with sh and clang as the tools:
+// and two more of one template beside it, with sh and clang as the tools and SOURCE_DATE_EPOCH fixed where it isn't set:
 //   - SHA-256: FIPS 180-4's examples (the empty message, "abc", the 448-bit message, a million a's), and every length
 //     from 0 to 300 bytes hashed whole and in random pieces, which must agree;
 //   - roots: a directory's, an option's and a file's (its random characters before its suffix), names that aren't
@@ -13,16 +13,25 @@
 //     bytes, an argument's byte, where the arguments split, a variable's value, one set to nothing against one that
 //     isn't set, the purpose, the tool's path and its file's times) making a new one, and HOME not; a tool not on
 //     PATH; a file the run didn't write removed when it is taken;
-//   - dependencies (clang -fsyntax-only): taken in the same and the other directory, again after a header changes,
-//     a file is added to the directory, #embed's resource or what __has_include found changes; errors naming
-//     absolute paths, taken with the other directory's; a missing #include and -M options, not kept;
-//   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; __TIMESTAMP__'s files'
-//     times; __DATE__ without SOURCE_DATE_EPOCH, not kept, and with it, kept; shared directories, a file added beside
-//     the source taken and a dependency changed not; a run past its time limit, killed and not kept;
+//   - dependencies (traced clang -fsyntax-only): taken in the same and the other directory, again after a header
+//     changes, and taken after a file it doesn't look for is added beside it; again after #embed's resource or what
+//     __has_include found changes; __has_include's header created where it looked, in a directory other files go
+//     into; a nested header created in its includer's directory, before the one -I found; preprocessed text's
+//     #include; errors naming absolute paths, taken with the other directory's; a missing #include kept, and run
+//     again once its header is there; -M options, not kept;
+//   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; clang's __TIMESTAMP__,
+//     SOURCE_DATE_EPOCH's, its files' times changed and its entry taken; __DATE__, and __TIME__ pasted from two halves
+//     in a header in no root and on standard input, none kept without SOURCE_DATE_EPOCH and each with it; a header in
+//     no root checked by its identity;
+//   - tracing (traced sh): a file a child process read and a path a test found absent, each run again when it
+//     changes; two runs at once, finished in the other order; clang's __TIMESTAMP__ following SOURCE_DATE_EPOCH and
+//     sh's not, whose run of `stat` has its file's time in its entry;
+//   - process groups: what a run leaves running when it ends and when it is killed at its time limit, killed (markers
+//     they would write later aren't); the limit on the monotonic clock, with a pidfd and without one;
 //   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
 //     whose run read other bytes isn't stale;
-//   - damaged entries: a changed magic, key, body length, root or dependency count, one cut short, cut inside its
-//     header or one byte longer, run again and written whole;
+//   - damaged entries: a changed magic, key, body length, root or dependency count, an unknown flag, one cut short, cut
+//     inside its header or one byte longer, run again and written whole;
 //   - modes: off, a mode that names none, and no directory keep nothing;
 //   - writers at once: 8 processes running the same 4 runs 16 times each, whose counts add up in the parent's and
 //     whose entries are whole after, with no file left beside them;
@@ -439,8 +448,8 @@ static void oracle_test_runs(OracleTest* test)
 
 // --- Dependencies ---
 
-// A run of clang -fsyntax-only with `arguments` after it, in `directory` (null: this process's), its dependencies
-// listed: whether it ran, whether it took its entry, and its status and errors.
+// A traced run of clang -fsyntax-only with `arguments` after it, in `directory` (null: this process's): whether it ran,
+// whether it took its entry, and its status and errors.
 static bool oracle_test_clang(OracleCache* cache, const char* directory, char* const* arguments, bool* taken, int* status, char* errors, size_t capacity)
 {
     char* argv[16] = { "clang", "-fsyntax-only", "-fno-color-diagnostics" };
@@ -460,6 +469,21 @@ static bool oracle_test_clang(OracleCache* cache, const char* directory, char* c
     return result;
 }
 
+// `directory`/`name`, made if it isn't there.
+static bool oracle_test_directory(const char* directory, const char* name)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    return mkdir(path, 0700) == 0 || errno == EEXIST;
+}
+
+static void oracle_test_unlink(const char* directory, const char* name)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    unlink(path);
+}
+
 static void oracle_test_dependencies(OracleTest* test)
 {
     OracleCache cache;
@@ -467,10 +491,17 @@ static void oracle_test_dependencies(OracleTest* test)
     bool ready = true;
     for (uint32_t d = 0; d < 2; d += 1)
     {
-        ready &= oracle_test_write_text(test->runs[d], "main.c", "#include \"h.h\"\nint x = X;\n") && oracle_test_write_text(test->runs[d], "h.h", "#define X 1\n");
-        ready &= oracle_test_write_text(test->runs[d], "bad.c", "int y = ;\n");
-        ready &= oracle_test_write_text(test->runs[d], "data.bin", "abc");
-        ready &= oracle_test_write_text(test->runs[d], "embed.c", "#if __has_include(\"h.h\")\n#endif\nconst char d[] = {\n#embed \"data.bin\"\n};\n");
+        const char* directory = test->runs[d];
+        ready &= oracle_test_write_text(directory, "main.c", "#include \"h.h\"\nint x = X;\n") && oracle_test_write_text(directory, "h.h", "#define X 1\n");
+        ready &= oracle_test_write_text(directory, "bad.c", "int y = ;\n");
+        ready &= oracle_test_write_text(directory, "data.bin", "abc");
+        ready &= oracle_test_write_text(directory, "embed.c", "#if __has_include(\"h.h\")\n#endif\nconst char d[] = {\n#embed \"data.bin\"\n};\n");
+        ready &= oracle_test_write_text(directory, "pre.c", "# 1 \"pre.c\"\n#include \"decl.h\"\nint p = sizeof(from_header);\n");
+        ready &= oracle_test_write_text(directory, "decl.h", "int from_header;\n");
+        ready &= oracle_test_write_text(directory, "has.c", "#if __has_include(\"optional.h\")\nint has;\n#endif\n");
+        ready &= oracle_test_directory(directory, "sub") && oracle_test_directory(directory, "other");
+        ready &= oracle_test_write_text(directory, "nest.c", "#include \"sub/inner.h\"\nint n = sizeof(deep);\n");
+        ready &= oracle_test_write_text(directory, "sub/inner.h", "#include \"deep.h\"\n") && oracle_test_write_text(directory, "other/deep.h", "int deep;\n");
     }
     char errors[16384];
     bool taken = false;
@@ -484,12 +515,11 @@ static void oracle_test_dependencies(OracleTest* test)
     const bool changed = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
     const bool again = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && taken;
     oracle_test_expect(test, changed && again, "dependencies: a header that changes");
+    // A file beside the source that the run doesn't look for leaves its entry taken.
     oracle_test_write_text(test->runs[1], "new.h", "\n");
-    const bool added = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
-    oracle_test_expect(test, added, "dependencies: a file added to the directory");
-    char added_path[BUSTER_ORACLE_PATH_BYTES + 16];
-    snprintf(added_path, sizeof(added_path), "%s/new.h", test->runs[1]);
-    unlink(added_path);
+    const bool beside = oracle_test_clang(&cache, test->runs[1], main_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_unlink(test->runs[1], "new.h");
+    oracle_test_expect(test, beside, "dependencies: a file added beside the source that it doesn't look for, taken");
     char* embed_source[] = { "-std=c23", "embed.c", 0 };
     const bool embedded = oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0 &&
                           oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && taken;
@@ -498,6 +528,33 @@ static void oracle_test_dependencies(OracleTest* test)
     oracle_test_write_text(test->runs[0], "h.h", "#define X 3\n");
     const bool probed = oracle_test_clang(&cache, test->runs[0], embed_source, &taken, &status, errors, sizeof(errors)) && !taken;
     oracle_test_expect(test, embedded && resource && probed, "dependencies: #embed's resource and what __has_include found");
+    // __has_include's header, which isn't there, created where it looked for it, in a directory that other files go
+    // into meanwhile, as other runs' files go into a directory they share.
+    char* has_source[] = { "has.c", 0 };
+    const bool has_kept = oracle_test_clang(&cache, test->runs[0], has_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    oracle_test_write_text(test->runs[0], "sibling.c", "int sibling;\n");
+    const bool has_beside = oracle_test_clang(&cache, test->runs[0], has_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_write_text(test->runs[0], "optional.h", "\n");
+    const bool has_created = oracle_test_clang(&cache, test->runs[0], has_source, &taken, &status, errors, sizeof(errors)) && !taken;
+    const bool has_again = oracle_test_clang(&cache, test->runs[0], has_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_expect(test, has_kept && has_beside && has_created && has_again,
+                       "dependencies: __has_include's header created where it looked, in a directory other files go into");
+    // A header a header includes, found through -Iother, created in the including header's directory, where a quoted
+    // #include looks first.
+    char* nest_source[] = { "-Iother", "nest.c", 0 };
+    const bool nest_kept = oracle_test_clang(&cache, test->runs[0], nest_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    const bool nest_taken = oracle_test_clang(&cache, test->runs[0], nest_source, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_write_text(test->runs[0], "sub/deep.h", "int shadow;\n");
+    const bool nest_created = oracle_test_clang(&cache, test->runs[0], nest_source, &taken, &status, errors, sizeof(errors)) && !taken && status != 0;
+    oracle_test_expect(test, nest_kept && nest_taken && nest_created, "dependencies: a nested header created in its includer's directory, before the one found");
+    // Preprocessed text, whose #include still reads a header (clang's driver writes no dependency file for it).
+    char* pre_source[] = { "-x", "cpp-output", "pre.c", 0 };
+    const bool pre_first = ready && oracle_test_clang(&cache, test->runs[0], pre_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0 &&
+                           strstr(errors, "unused") == 0;
+    const bool pre_same = oracle_test_clang(&cache, test->runs[0], pre_source, &taken, &status, errors, sizeof(errors)) && taken && status == 0;
+    oracle_test_write_text(test->runs[0], "decl.h", "char from_header;\n");
+    const bool pre_changed = oracle_test_clang(&cache, test->runs[0], pre_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    oracle_test_expect(test, pre_first && pre_same && pre_changed, "dependencies: preprocessed text's, with the headers its directives include");
     // Errors naming absolute paths, taken with the other directory's.
     char bad[2][BUSTER_ORACLE_PATH_BYTES + 16];
     for (uint32_t d = 0; d < 2; d += 1)
@@ -512,23 +569,30 @@ static void oracle_test_dependencies(OracleTest* test)
                  strstr(errors, bad[d]) != 0 && strstr(errors, bad[1 - d]) == 0;
     }
     oracle_test_expect(test, named, "dependencies: errors naming the run's paths, taken with the other directory's");
-    // A missing #include writes no dependencies, and -M options can't be added to: neither is kept.
+    // A missing #include is kept, its header looked for where it isn't, and run again once the header is there.
     oracle_test_write_text(test->runs[0], "missing.c", "#include \"missing.h\"\n");
     char* missing_source[] = { "missing.c", 0 };
+    const bool missing_kept = oracle_test_clang(&cache, test->runs[0], missing_source, &taken, &status, errors, sizeof(errors)) && !taken && status != 0;
+    const bool missing_taken = oracle_test_clang(&cache, test->runs[0], missing_source, &taken, &status, errors, sizeof(errors)) && taken && status != 0;
+    oracle_test_write_text(test->runs[0], "missing.h", "\n");
+    const bool missing_found = oracle_test_clang(&cache, test->runs[0], missing_source, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
+    oracle_test_expect(test, missing_kept && missing_taken && missing_found, "dependencies: a missing #include kept, and run again once its header is there");
+    // -M options write a dependency file the run doesn't name: not kept.
     char* asked[] = { "-MD", "main.c", 0 };
     const uint64_t unkept = cache.counts->unkept;
     bool not_kept = true;
     for (uint32_t i = 0; i < 2; i += 1)
     {
-        not_kept &= oracle_test_clang(&cache, test->runs[0], missing_source, &taken, &status, errors, sizeof(errors)) && !taken && status != 0;
         not_kept &= oracle_test_clang(&cache, test->runs[0], asked, &taken, &status, errors, sizeof(errors)) && !taken && status == 0;
     }
-    oracle_test_expect(test, not_kept && cache.counts->unkept == unkept + 4, "dependencies: a missing #include and -M options, not kept");
+    oracle_test_unlink(test->runs[0], "main.d");
+    oracle_test_expect(test, not_kept && cache.counts->unkept == unkept + 2, "dependencies: -M options, not kept");
     oracle_cache_close(&cache);
 }
 
 // What a run reads of its files besides their bytes: which of them are one file (a hard link, which #pragma once takes
-// once), their times where __TIMESTAMP__ reads them, and whether __DATE__ and __TIME__ make it depend on when it runs.
+// once), its time macros, which only SOURCE_DATE_EPOCH makes keepable, however its sources spell them, and the files'
+// identities outside its roots.
 static void oracle_test_identities(OracleTest* test)
 {
     OracleCache cache;
@@ -544,7 +608,8 @@ static void oracle_test_identities(OracleTest* test)
     bool ready = oracle_test_write_text(directory, "a.h", "#pragma once\nint a;\n") && link(a, b) == 0 &&
                  oracle_test_write_text(directory, "links.c", "#include \"a.h\"\n#include \"b.h\"\n") &&
                  oracle_test_write_text(directory, "stamped.c", "const char* stamp = __TIMESTAMP__;\n") &&
-                 oracle_test_write_text(directory, "dated.c", "const char* date = __DATE__;\n");
+                 oracle_test_write_text(directory, "dated.c", "const char* date = __DATE__;\n") &&
+                 oracle_test_write_text(directory, "timed.txt", "#define CAT(a, b) a ## b\nconst char* t = CAT(__TI, ME__);\n");
     char errors[4096];
     bool taken = false;
     int status = 0;
@@ -555,27 +620,57 @@ static void oracle_test_identities(OracleTest* test)
     const bool copied = unlink(b) == 0 && oracle_test_write_text(directory, "b.h", "#pragma once\nint a;\n") &&
                         oracle_test_clang(&cache, directory, links, &taken, &status, errors, sizeof(errors)) && !taken;
     oracle_test_expect(test, linked && copied, "identities: a hard link and a copy of the same bytes are other dependencies");
+    // clang's __TIMESTAMP__ follows SOURCE_DATE_EPOCH, so that its files' times aren't what its run read.
     const struct timespec first[2] = { { .tv_sec = 946684800 }, { .tv_sec = 946684800 } };
     const struct timespec second[2] = { { .tv_sec = 978307200 }, { .tv_sec = 978307200 } };
     char* stamp[] = { "stamped.c", 0 };
     const bool timed = utimensat(AT_FDCWD, stamped, first, 0) == 0 && oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && !taken &&
                        oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && taken && utimensat(AT_FDCWD, stamped, second, 0) == 0 &&
-                       oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && !taken;
-    oracle_test_expect(test, timed, "identities: __TIMESTAMP__ makes its files' times part of what the run read");
+                       oracle_test_clang(&cache, directory, stamp, &taken, &status, errors, sizeof(errors)) && taken;
+    oracle_test_expect(test, timed, "identities: clang's __TIMESTAMP__ is SOURCE_DATE_EPOCH's, its files' times not part of the run");
+    // __DATE__, and __TIME__ pasted from two halves in a header in no root and in a source on standard input: without
+    // SOURCE_DATE_EPOCH none is kept, and with it each is, and gives the epoch's time.
+    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
+    char fixed[BUSTER_ORACLE_PATH_BYTES];
+    char option[BUSTER_ORACLE_PATH_BYTES + 8];
+    char input[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(fixed, sizeof(fixed), "%s/buster_oracle_identity_%ld_x", temporary, (long)getpid());
+    snprintf(option, sizeof(option), "-I%s", fixed);
+    snprintf(input, sizeof(input), "%s/timed.txt", directory);
+    ready = (mkdir(fixed, 0700) == 0 || errno == EEXIST) && oracle_test_write_text(fixed, "fixed.h", "int fixed;\n") &&
+            oracle_test_write_text(fixed, "pasted.h", "#define CAT(a, b) a ## b\nconst char* t = CAT(__TI, ME__);\n") &&
+            oracle_test_write_text(directory, "fixed.c", "#include \"fixed.h\"\n") && oracle_test_write_text(directory, "pasted.c", "#include \"pasted.h\"\n");
+    char* date[] = { "clang", "-E", "-P", "dated.c", 0 };
+    char* pasted[] = { "clang", "-E", "-P", option, "pasted.c", 0 };
+    char* piped[] = { "clang", "-E", "-P", "-x", "c", "-", 0 };
+    char* const* sources[3] = { date, pasted, piped };
+    const char* const inputs[3] = { 0, 0, input };
     const char* saved = getenv("SOURCE_DATE_EPOCH");
     char* kept = saved != 0 ? strdup(saved) : 0;
-    unsetenv("SOURCE_DATE_EPOCH");
-    char* date[] = { "dated.c", 0 };
-    const uint64_t unkept = cache.counts->unkept;
-    bool dated = true;
-    for (uint32_t i = 0; i < 2; i += 1)
+    bool dated = ready;
+    for (uint32_t epoch = 0; epoch < 2; epoch += 1)
     {
-        dated &= oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && !taken;
+        if (epoch == 0)
+        {
+            unsetenv("SOURCE_DATE_EPOCH");
+        }
+        else
+        {
+            setenv("SOURCE_DATE_EPOCH", "0", 1);
+        }
+        for (uint32_t s = 0; s < 3; s += 1)
+        {
+            const uint64_t unkept = cache.counts->unkept;
+            for (uint32_t i = 0; i < 2; i += 1)
+            {
+                OracleRun run = { .cache = &cache, .purpose = "oracle test: dated", .arguments = sources[s], .input = inputs[s], .directory = directory, .dependencies = true };
+                dated &= oracle_run(&run) && run.status == 0 && run.taken == (epoch == 1 && i == 1);
+                dated &= epoch == 0 || (s == 0 ? strstr(run.output, "Jan  1 1970") != 0 : strstr(run.output, "00:00:00") != 0);
+                oracle_run_release(&run);
+            }
+            dated &= epoch == 1 || cache.counts->unkept == unkept + 2;
+        }
     }
-    dated &= cache.counts->unkept == unkept + 2;
-    setenv("SOURCE_DATE_EPOCH", "0", 1);
-    dated &= oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && !taken &&
-             oracle_test_clang(&cache, directory, date, &taken, &status, errors, sizeof(errors)) && taken;
     if (kept != 0)
     {
         setenv("SOURCE_DATE_EPOCH", kept, 1);
@@ -585,57 +680,144 @@ static void oracle_test_identities(OracleTest* test)
         unsetenv("SOURCE_DATE_EPOCH");
     }
     free(kept);
-    oracle_test_expect(test, dated, "identities: __DATE__ without SOURCE_DATE_EPOCH isn't kept, and with it is");
-    // A run whose directories hold other runs' files as it runs keeps its dependencies but not their names.
-    char* argv[] = { "clang", "-fsyntax-only", "-fno-color-diagnostics", "links.c", 0 };
-    OracleRun run = { .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
-    bool shared = oracle_run(&run) && !run.taken;
-    oracle_run_release(&run);
-    shared &= oracle_test_write_text(directory, "beside.c", "\n");
-    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
-    shared &= oracle_run(&run) && run.taken;
-    oracle_run_release(&run);
-    shared &= oracle_test_write_text(directory, "b.h", "#pragma once\nint b;\n");
-    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: shared", .arguments = argv, .directory = directory, .dependencies = true, .shared_directories = true };
-    shared &= oracle_run(&run) && !run.taken;
-    oracle_run_release(&run);
-    oracle_test_expect(test, shared, "identities: shared directories, their names left out and the dependencies kept");
+    oracle_test_expect(test, dated, "identities: __DATE__ and __TIME__ pasted, in no root and on standard input, kept with SOURCE_DATE_EPOCH alone");
     // A dependency in no root (a directory whose name isn't mkdtemp's) is checked by its identity: rewritten, even with
     // its own bytes, it is another file.
-    const char* temporary = getenv("TMPDIR") != 0 && getenv("TMPDIR")[0] != 0 ? getenv("TMPDIR") : "/tmp";
-    char fixed[BUSTER_ORACLE_PATH_BYTES];
-    char option[BUSTER_ORACLE_PATH_BYTES + 8];
-    char header[BUSTER_ORACLE_PATH_BYTES + 16];
-    snprintf(fixed, sizeof(fixed), "%s/buster_oracle_identity_%ld_x", temporary, (long)getpid());
-    snprintf(option, sizeof(option), "-I%s", fixed);
-    snprintf(header, sizeof(header), "%s/fixed.h", fixed);
     char* identified[] = { "clang", "-fsyntax-only", "-fno-color-diagnostics", option, "fixed.c", 0 };
-    bool identity = (mkdir(fixed, 0700) == 0 || errno == EEXIST) && oracle_test_write_text(fixed, "fixed.h", "int fixed;\n") &&
-                    oracle_test_write_text(directory, "fixed.c", "#include \"fixed.h\"\n");
+    bool identity = ready;
     for (uint32_t i = 0; i < 5; i += 1)
     {
         // Kept, taken, rewritten with other bytes (run), with the same bytes (run), and taken.
         const bool rewrite = i == 2 || i == 3;
         identity &= !rewrite || oracle_test_write_text(fixed, "fixed.h", "int fixed2;\n");
-        run = (OracleRun){ .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
         identity &= oracle_run(&run) && run.status == 0 && run.taken == (i == 1 || i == 4);
         oracle_run_release(&run);
     }
-    unlink(header);
+    oracle_test_unlink(fixed, "fixed.h");
+    oracle_test_unlink(fixed, "pasted.h");
     rmdir(fixed);
     oracle_test_expect(test, identity, "identities: a dependency in no root, checked by its identity, a rewrite another file");
-    // A run past its time limit is killed, fails, and isn't kept.
-    char* slow[] = { "sleep", "20", 0 };
-    const uint64_t before = cache.counts->unkept;
-    struct timespec start;
-    struct timespec end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    run = (OracleRun){ .cache = &cache, .purpose = "oracle test: slow", .arguments = slow, .timeout = 1 };
-    const bool failed = !oracle_run(&run) && run.killed;
+    oracle_cache_close(&cache);
+}
+
+// --- Tracing ---
+
+// A traced run of `sh -c SCRIPT sh DIRECTORY`, through `cache`: whether it ran, took its entry, and printed `output`.
+static bool oracle_test_traced(OracleCache* cache, const char* script, const char* directory, bool taken, const char* output)
+{
+    char* arguments[] = { "sh", "-c", (char*)script, "sh", (char*)directory, 0 };
+    OracleRun run = { .cache = cache, .purpose = "oracle test: traced sh", .arguments = arguments, .dependencies = true };
+    const bool result = oracle_run(&run) && run.taken == taken && run.output != 0 && strcmp(run.output, output) == 0;
     oracle_run_release(&run);
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    const double seconds = (double)(end.tv_sec - start.tv_sec) + (double)(end.tv_nsec - start.tv_nsec) / 1e9;
-    oracle_test_expect(test, failed && seconds < 10 && cache.counts->unkept == before + 1, "runs: a run past its time limit, killed and not kept");
+    return result;
+}
+
+// What a traced run looked at, with sh as the tool: a file its child process (cat) read and a path its test found
+// absent, each of which runs it again when it changes; two runs at once, finished in the other order, each answered
+// while the other is waited for; and the tools' __TIMESTAMP__: clang's follows SOURCE_DATE_EPOCH and sh's (which has
+// none) doesn't, so that a sh run that prints a file's time has its files' times in its entry.
+static void oracle_test_tracing(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "tracing");
+    const char* directory = test->runs[0];
+    oracle_test_unlink(directory, "maybe");
+    static const char script[] = "cat \"$1/read.txt\"; if test -e \"$1/maybe\"; then echo maybe; fi";
+    bool looked = oracle_test_write_text(directory, "read.txt", "one\n");
+    looked &= oracle_test_traced(&cache, script, directory, false, "one\n") && oracle_test_traced(&cache, script, directory, true, "one\n");
+    looked &= oracle_test_write_text(directory, "read.txt", "two\n") && oracle_test_traced(&cache, script, directory, false, "two\n");
+    looked &= oracle_test_write_text(directory, "maybe", "") && oracle_test_traced(&cache, script, directory, false, "two\nmaybe\n");
+    looked &= oracle_test_traced(&cache, script, directory, true, "two\nmaybe\n");
+    oracle_test_expect(test, looked, "tracing: what a child process read and what a test found absent, each run again when it changes");
+    // A file the run makes and reads back is one that wasn't there: taken while it isn't, and run again when it is. A
+    // file the run changes after it read it isn't kept.
+    oracle_test_unlink(directory, "scratch");
+    static const char scratch[] = "echo made > \"$1/scratch\"; cat \"$1/scratch\"";
+    bool made = oracle_test_traced(&cache, scratch, directory, false, "made\n");
+    oracle_test_unlink(directory, "scratch");
+    made &= oracle_test_traced(&cache, scratch, directory, true, "made\n") && oracle_test_write_text(directory, "scratch", "there\n");
+    made &= oracle_test_traced(&cache, scratch, directory, false, "made\n");
+    static const char append[] = "cat \"$1/log\"; echo more >> \"$1/log\"";
+    const uint64_t unkept = cache.counts->unkept;
+    made &= oracle_test_write_text(directory, "log", "first\n") && oracle_test_traced(&cache, append, directory, false, "first\n");
+    made &= oracle_test_write_text(directory, "log", "first\n") && oracle_test_traced(&cache, append, directory, false, "first\n");
+    oracle_test_expect(test, made && cache.counts->unkept == unkept + 2, "tracing: a file the run makes, absent before it, and one it changes after it read it, not kept");
+    // Two runs at once, each waiting on a file the other writes, finished in the other order (and killed at a time
+    // limit, should one wait for the other's answers).
+    oracle_test_unlink(directory, "first");
+    oracle_test_unlink(directory, "second");
+    char* first_arguments[] = { "sh", "-c", "touch \"$1/first\"; while ! test -e \"$1/second\"; do sleep 0.01; done; echo first", "sh", (char*)directory, 0 };
+    char* second_arguments[] = { "sh", "-c", "while ! test -e \"$1/first\"; do sleep 0.01; done; touch \"$1/second\"; echo second", "sh", (char*)directory, 0 };
+    OracleRun first = { .cache = &cache, .purpose = "oracle test: first", .arguments = first_arguments, .dependencies = true, .timeout = 20 };
+    OracleRun second = { .cache = &cache, .purpose = "oracle test: second", .arguments = second_arguments, .dependencies = true, .timeout = 20 };
+    const bool started = oracle_run_start(&first) && oracle_run_start(&second);
+    const bool finished = oracle_run_finish(&second) && oracle_run_finish(&first);
+    oracle_test_expect(test, started && finished && strcmp(first.output, "first\n") == 0 && strcmp(second.output, "second\n") == 0,
+                       "tracing: two runs at once, each answered while the other is waited for");
+    oracle_run_release(&first);
+    oracle_run_release(&second);
+    // The tools' __TIMESTAMP__, and a sh run whose entry has its files' times.
+    char* clang_arguments[] = { "clang", 0 };
+    char* shell_arguments[] = { "sh", 0 };
+    OracleRun clang_run = { .cache = &cache, .arguments = clang_arguments };
+    OracleRun shell_run = { .cache = &cache, .arguments = shell_arguments };
+    oracle_roots_begin(&clang_run.roots);
+    oracle_roots_begin(&shell_run.roots);
+    const bool clocks = oracle_tool_epoch(&clang_run) && !oracle_tool_epoch(&shell_run);
+    char stamped[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(stamped, sizeof(stamped), "%s/time.txt", directory);
+    const struct timespec earlier[2] = { { .tv_sec = 946684800 }, { .tv_sec = 946684800 } };
+    const struct timespec later[2] = { { .tv_sec = 978307200 }, { .tv_sec = 978307200 } };
+    static const char stat_script[] = "stat -c %Y \"$1/time.txt\"";
+    const bool times = oracle_test_write_text(directory, "time.txt", "same\n") && utimensat(AT_FDCWD, stamped, earlier, 0) == 0 &&
+                       oracle_test_traced(&cache, stat_script, directory, false, "946684800\n") && oracle_test_traced(&cache, stat_script, directory, true, "946684800\n") &&
+                       utimensat(AT_FDCWD, stamped, later, 0) == 0 && oracle_test_traced(&cache, stat_script, directory, false, "978307200\n");
+    oracle_test_expect(test, clocks && times, "tracing: clang's __TIMESTAMP__ follows SOURCE_DATE_EPOCH, sh's doesn't, and its entries have its files' times");
+    oracle_cache_close(&cache);
+}
+
+// --- Process groups ---
+
+// A run's process group: what a run that ends leaves running in it is killed, and so is what a run killed at its time
+// limit started; the limit is on the monotonic clock, with a pidfd to wait on and without one.
+static void oracle_test_groups(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "groups");
+    char ended_marker[BUSTER_ORACLE_PATH_BYTES + 16];
+    char killed_marker[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(ended_marker, sizeof(ended_marker), "%s/ended", test->runs[0]);
+    snprintf(killed_marker, sizeof(killed_marker), "%s/killed", test->runs[0]);
+    unlink(ended_marker);
+    unlink(killed_marker);
+    // A run that ends at once, leaving a process that would write its marker a second later.
+    char* leaves[] = { "sh", "-c", "(sleep 1; echo late > \"$1\") & exit 0", "sh", ended_marker, 0 };
+    OracleRun run = { .cache = &cache, .purpose = "oracle test: a group left running", .arguments = leaves };
+    const bool ended = oracle_run(&run) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0;
+    oracle_run_release(&run);
+    // Runs past their time limit, whose processes would write their marker 1.5 s after they started.
+    bool limited = true;
+    for (uint32_t pidfd = 0; pidfd < 2; pidfd += 1)
+    {
+        oracle_without_pidfd = pidfd == 1;
+        char* slow[] = { "sh", "-c", "(sleep 1.5; echo late > \"$1\") & sleep 20", "sh", killed_marker, 0 };
+        const uint64_t unkept = cache.counts->unkept;
+        const uint64_t start = oracle_now();
+        run = (OracleRun){ .cache = &cache, .purpose = "oracle test: a group past its time", .arguments = slow, .timeout = 1 };
+        const bool killed = !oracle_run(&run) && run.killed;
+        const uint64_t elapsed = oracle_now() - start;
+        oracle_run_release(&run);
+        limited &= killed && elapsed >= 1000000000ull && elapsed < 3000000000ull && cache.counts->unkept == unkept + 1;
+    }
+    oracle_without_pidfd = false;
+    // Past both markers' times, from the last run's start.
+    const struct timespec pause = { .tv_sec = 0, .tv_nsec = 800000000 };
+    nanosleep(&pause, 0);
+    struct stat status;
+    oracle_test_expect(test, limited, "process groups: runs past their time limit killed on the monotonic clock, with a pidfd and without");
+    oracle_test_expect(test, ended && lstat(ended_marker, &status) != 0 && lstat(killed_marker, &status) != 0,
+                       "process groups: what a run leaves running in its group killed, when it ends and at its time limit");
     oracle_cache_close(&cache);
 }
 
@@ -730,6 +912,7 @@ static void oracle_test_damaged(OracleTest* test)
         { "a changed body length", (int64_t)offsetof(OracleEntryHeader, body), 7, -1, false },
         { "too many roots", (int64_t)offsetof(OracleEntryHeader, roots), BUSTER_ORACLE_ROOTS + 1, -1, false },
         { "a dependency count past its records", (int64_t)offsetof(OracleEntryHeader, dependencies), 3, -1, false },
+        { "a flag it doesn't know", (int64_t)offsetof(OracleEntryHeader, flags), 2, -1, false },
         { "cut short", -1, 0, -2, false },
         { "cut inside its header", -1, 0, 10, false },
         { "a byte longer", -1, 0, -1, true },
@@ -909,6 +1092,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
     const bool runs = made && mkdtemp(test.runs[0]) != 0 && mkdtemp(test.runs[1]) != 0;
     char clang[BUSTER_ORACLE_PATH_BYTES];
     const bool tools = oracle_find_tool("sh", clang, sizeof(clang)) && oracle_find_tool("clang", clang, sizeof(clang));
+    // The compilers' runs are kept with SOURCE_DATE_EPOCH alone.
+    const bool epoch = oracle_epoch_begin();
     if (runs && tools)
     {
         oracle_test_sha(&test);
@@ -916,6 +1101,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_runs(&test);
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
+        oracle_test_tracing(&test);
+        oracle_test_groups(&test);
         oracle_test_check(&test);
         oracle_test_damaged(&test);
         oracle_test_modes(&test);
@@ -927,13 +1114,17 @@ static int run_oracle_cache_tests(int argc, char** argv)
     {
         fprintf(stderr, "usage: test-oracle-cache (with sh and clang on PATH, and $TMPDIR or /tmp writable)\n");
     }
-    static const char* const directories[] = { "runs/oracle", "dependencies/oracle", "identities/oracle", "check/oracle", "damaged/oracle", "writers/oracle", "process/one/two/buster/oracle", "" };
+    oracle_epoch_end(epoch);
+    static const char* const directories[] = { "runs/oracle",    "dependencies/oracle", "identities/oracle", "tracing/oracle", "groups/oracle", "check/oracle",
+                                               "damaged/oracle", "writers/oracle",      "process/one/two/buster/oracle", "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);
     }
     for (uint32_t r = 0; runs && r < 2; r += 1)
     {
+        oracle_test_remove(test.runs[r], "sub");
+        oracle_test_remove(test.runs[r], "other");
         oracle_test_remove(test.runs[r], "");
     }
     return runs && tools && test.failures == 0 ? 0 : 1;

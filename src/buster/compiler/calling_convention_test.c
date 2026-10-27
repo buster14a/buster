@@ -6128,7 +6128,8 @@ struct AbiTestCrossRun
 // `arguments`, a compile of the C side's one source into `object`, through the oracle cache (oracle_cache.c, #542),
 // its standard output and errors into `output_path` and `error_path` as type_test_run writes them, for up to
 // BUSTER_TYPE_TEST_RUN_SECONDS: its exit status, or -1 if it didn't run, ran too long, or its output couldn't be
-// written. The cross-check's runs share their directory, so its names aren't what a compile read (its dependencies are).
+// written. The cross-check's runs share their directory: a traced compile's entry has the paths it looked at in it, not
+// the other runs' files.
 static int abi_test_compile(char* const* arguments, const char* object, const char* output_path, const char* error_path)
 {
     const char* files[] = { object };
@@ -6138,7 +6139,6 @@ static int abi_test_compile(char* const* arguments, const char* object, const ch
         .files = files,
         .file_count = 1,
         .dependencies = true,
-        .shared_directories = true,
         .timeout = BUSTER_TYPE_TEST_RUN_SECONDS,
     };
     const bool ran = oracle_run(&run);
@@ -7195,6 +7195,9 @@ static bool abi_test_cross_descriptors(void)
 
 static int run_calling_convention_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint64_t seed = 1;
     uint64_t count = BUSTER_ABI_TEST_DEFAULT_COUNT;
     uint64_t signatures = BUSTER_ABI_TEST_DEFAULT_SIGNATURES;
@@ -7269,5 +7272,6 @@ static int run_calling_convention_tests(int argc, char** argv)
         oracle_cache_report(oracle, "test-calling-convention");
         result = passed ? 0 : 1;
     }
+    oracle_epoch_end(epoch);
     return result;
 }

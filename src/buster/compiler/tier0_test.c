@@ -5176,6 +5176,9 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 
 static int run_tier0_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint64_t seed = 1;
     uint32_t count = 300;
     uint32_t cross_count = 60;
@@ -5475,5 +5478,6 @@ static int run_tier0_tests(int argc, char** argv)
         printf("test-tier0: %" PRIu64 " checks, %" PRIu64 " failed\n", total.checks, total.failures);
         result = total.failures == 0 ? 0 : 1;
     }
+    oracle_epoch_end(epoch);
     return result;
 }

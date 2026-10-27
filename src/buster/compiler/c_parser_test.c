@@ -3309,6 +3309,9 @@ static uint32_t parse_test_driver(const char* directory)
 // -E's options for the files; --reports sets how many differences the checks print (200).
 static int run_parser_tests(int argument_count, char** arguments)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint32_t failures = 0;
     const char* clang = 0;
     uint64_t mutations = 0;
@@ -3437,6 +3440,8 @@ static int run_parser_tests(int argument_count, char** arguments)
     }
     else
     {
+        // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
+        OracleCache* oracle = oracle_cache();
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_k6_tables();
         failures += parse_test_check_handoff(options.language, seed);
@@ -3486,11 +3491,14 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             rmdir(directory);
         }
+        oracle_cache_report(oracle, "test-parser");
     }
     printf("test-parser: %s\n", failures == 0 ? "passed" : "FAILED");
     arena_release(&arena);
     free(rest);
     free(clang_arguments);
     free(inputs);
-    return failures == 0 ? 0 : 1;
+    const int returned = failures == 0 ? 0 : 1;
+    oracle_epoch_end(epoch);
+    return returned;
 }

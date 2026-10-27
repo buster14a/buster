@@ -1734,6 +1734,9 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 
 static int run_checker_driver_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     CheckTest test = { 0 };
     const char* clang = "clang";
     const char* executable = NULL;
@@ -1759,6 +1762,8 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     check_test_expect(&test, options, "driver test options are recognized");
+    // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     check_test_driver_diagnostic_capacity(&test);
     const CheckDriverFixture fixtures[] =
     {
@@ -2142,6 +2147,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         rmdir(directory);
     }
+    oracle_cache_report(oracle, "test-checker-driver");
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
-    return test.failures != 0;
+    const int returned = test.failures != 0;
+    oracle_epoch_end(epoch);
+    return returned;
 }
