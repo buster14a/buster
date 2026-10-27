@@ -169,35 +169,47 @@ module), so that tools and the comparisons below read them alike.
 ## Straight-line expression templates (#624)
 
 `c_check_program_batch.c` handles ordinary checked expressions before the task
-loop expands them. Each lane's writer keeps four 64-node windows. Byte permutes
-and bounded gathers classify 16 checked records at a time: operators, type
-classes and facts, constant proofs and categories. A bounded postorder scan joins
-their subtrees and operand conversions into two-slot entry templates. A node's first
-slot is its operation, constant or local/global read; its second is its consuming
-edge's conversion. Empty wrappers have no first slot.
+loop expands them. Each lane's writer keeps four 16-node windows. Byte permutes
+and bounded gathers classify operators, type classes and facts together. The
+cache holds only these immutable templates. It reads no semantic payload or
+local map speculatively: the popped expression supplies those facts when it is
+actually reached.
 
-The scan proves that a subtree is contiguous, its operands are in the scalar
-loop's evaluation order, and each internal node has one consuming edge. It
-computes entry counts and the task stack room the scalar path would need before
-publishing anything. Expansion compresses up to 32 templates into the kind,
-class and value columns, advancing the output by their counts. A single leaf
-writes its entry directly. Every input load is bounded by the graph's count;
-there is no graph-sized allocation or recursive traversal.
+A leaf expands its constant or local/global read template. A unary operation
+or a binary operation can join its immediately
+preceding leaf operands when their consuming edges need no conversion. Their
+occupied entry slots form a small mask, whose prefix popcounts give the output
+positions; compress stores expand the slots into the kind, class and value
+columns. An empty cast or selection wrapper has no final slot. The join proves
+the same evaluation order, entry room and a conservative bound on the original
+task stack before publishing a bulk write. Every input load is bounded by the
+graph's count. There is no graph-sized allocation or recursive traversal.
 
-Only a popped expression can publish a template interval. Constant proofs skip
-the same operands as the scalar loop; gaps, shared or reordered operands and
-window boundaries defer to it. Calls, builtins, bit-fields, pointer arithmetic,
-short-circuit and conditional expressions, memory classes and bool normalization
-retain their existing rules. Their ordinary operands can still take templates.
-Floating constants and automatic compound literals also retain the task loop.
-Functions that track their evaluation stack, and source-row emission for `-g`,
-keep the task loop, whose stack and source-token effects need more than these
-templates describe. `--scalar` selects that original loop for every expression.
+An ordinary operation with other operands expands its cached native entry and
+keeps the original operand helpers, including their conversions and resource
+failures. Thus a call or member access inside an arithmetic expression need not
+force that arithmetic operation through the general dispatcher. Shared or
+reordered operands and window edges also keep those operand tasks. Constant
+proofs skip the same children as the scalar loop. Calls, builtins, bit-fields,
+pointer arithmetic, short-circuit and conditional expressions, memory classes,
+floating constants, address-taking and automatic compound initialization retain
+their existing rules. Functions that track their evaluation stack, and source-row
+emission for `-g`, retain the task loop. `--scalar` selects that original loop
+for every expression.
 
-Window preparation may inspect a neighboring body's immutable checked facts,
-but never its mutable local map: another lane can own that map. Each body
-invalidates its windows after assigning its own locals. Coverage is accumulated
-in each part and merged in source order, without shared counters.
+Window preparation may inspect a neighboring body's immutable checked types,
+but reads no mutable local map: another lane can own it. Each body invalidates
+its windows before assigning its locals. Coverage is accumulated in each part
+and merged in source order, without shared counters.
+
+The pending task stack uses two words per task instead of a padded 32-byte C
+record. The control word holds the full node identity, kind and flags, and an
+instruction's class. Instructions, address addends, byte copies and complex
+operations retain all 64 payload bits. Other tasks keep their full TypeId and
+32-bit local identity in the payload word. The dispatch reads those words
+directly; only a consumer which needs a complete task decodes the original C
+record. The scalar expansion uses the same storage and original task rules;
+the codec has an independent field-for-field boundary test.
 
 With `--time-stages`, `-c` and the executable driver also print
 `lowering-nodes`: evaluated expression occurrences, those handled by templates,

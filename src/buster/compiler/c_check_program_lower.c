@@ -168,6 +168,44 @@ struct CheckLowerTask
     bool discard;
 };
 
+// The pending stack keeps two words instead of a padded 32-byte C record. Instructions, addresses,
+// copies and complex operations use the full value word; their type is absent or an instruction class.
+// Other tasks have a full TypeId and a 32-bit value (a local identity). The original task is decoded at pop.
+typedef struct CheckLowerTaskPacked CheckLowerTaskPacked;
+struct CheckLowerTaskPacked
+{
+    uint64_t control;
+    uint64_t payload;
+};
+
+_Static_assert(sizeof(CheckLowerTaskPacked) == 16, "a pending lowering task takes two words");
+_Static_assert(CHECK_LOWER_COMPLEX_TRUTH <= UINT8_MAX && sizeof(TypeId) == sizeof(uint32_t), "pending task tags and type identities fit their fields");
+
+static inline __attribute__((always_inline)) CheckLowerTaskPacked check_lower_task_pack(CheckLowerTask task)
+{
+    const bool full = task.kind == CHECK_LOWER_INSTRUCTION || task.kind == CHECK_LOWER_ADDRESS || task.kind == CHECK_LOWER_COPY || task.kind == CHECK_LOWER_COMPLEX;
+    return (CheckLowerTaskPacked){
+        .control = task.node | (uint64_t)task.kind << 32 | (uint64_t)task.address << 40 | (uint64_t)task.initialized << 41 | (uint64_t)task.discard << 42 |
+                   (task.kind == CHECK_LOWER_INSTRUCTION ? (uint64_t)task.type << 48 : 0),
+        .payload = full ? task.value : task.type | task.value << 32,
+    };
+}
+
+static inline __attribute__((always_inline)) CheckLowerTask check_lower_task_unpack(CheckLowerTaskPacked packed)
+{
+    const CheckLowerTaskKind kind = (CheckLowerTaskKind)((packed.control >> 32) & UINT8_MAX);
+    const bool full = kind == CHECK_LOWER_INSTRUCTION || kind == CHECK_LOWER_ADDRESS || kind == CHECK_LOWER_COPY || kind == CHECK_LOWER_COMPLEX;
+    return (CheckLowerTask){
+        .kind = kind,
+        .node = (uint32_t)packed.control,
+        .type = kind == CHECK_LOWER_INSTRUCTION ? (uint16_t)(packed.control >> 48) : full ? 0 : (uint32_t)packed.payload,
+        .value = full ? packed.payload : packed.payload >> 32,
+        .address = ((packed.control >> 40) & 1) != 0,
+        .initialized = ((packed.control >> 41) & 1) != 0,
+        .discard = ((packed.control >> 42) & 1) != 0,
+    };
+}
+
 typedef struct CheckLowerAbi CheckLowerAbi;
 struct CheckLowerAbi
 {
@@ -200,33 +238,21 @@ struct CheckLowerCaseRange
     uint32_t label;
 };
 
-// A bounded window of postorder nodes. Each node has a native entry and, when it is an operand of another
-// template, its edge's conversion. A subtree owns a contiguous interval, with one parent per internal node;
-// shared operands, gaps, reordered operands and windows' edges fall back to the task loop. Nothing here is
-// a reachability decision: only a popped expression may publish its interval.
-#define BUSTER_CHECK_LOWER_BATCH 64u
-#define BUSTER_CHECK_LOWER_BATCH_NONE UINT8_MAX
+// Immutable operator/type templates in a bounded window. Payloads belong to reached expressions alone;
+// classification never follows an operand, reads a local map or makes a reachability decision.
+#define BUSTER_CHECK_LOWER_BATCH 16u
 #define BUSTER_CHECK_LOWER_WINDOWS 4u
 
-_Static_assert((BUSTER_CHECK_LOWER_BATCH & (BUSTER_CHECK_LOWER_BATCH - 1)) == 0 && BUSTER_CHECK_LOWER_BATCH < UINT8_MAX,
-               "a window is a power of two with byte-sized node identities");
+_Static_assert(BUSTER_CHECK_LOWER_BATCH == 16, "the classification window is one vector of 32-bit node indices");
 _Static_assert((BUSTER_CHECK_LOWER_WINDOWS & (BUSTER_CHECK_LOWER_WINDOWS - 1)) == 0, "the window cache has a power-of-two slot count");
 
 typedef struct CheckLowerBatch CheckLowerBatch;
 struct CheckLowerBatch
 {
-    uint64_t values[BUSTER_CHECK_LOWER_BATCH];
     uint16_t kinds[BUSTER_CHECK_LOWER_BATCH];
     uint16_t classes[BUSTER_CHECK_LOWER_BATCH];
-    uint16_t entries[BUSTER_CHECK_LOWER_BATCH];
-    uint16_t tasks[BUSTER_CHECK_LOWER_BATCH];
-    uint8_t starts[BUSTER_CHECK_LOWER_BATCH];
-    uint8_t parents[BUSTER_CHECK_LOWER_BATCH];
-    uint8_t last_nodes[BUSTER_CHECK_LOWER_BATCH];
-    uint8_t arities[BUSTER_CHECK_LOWER_BATCH];
     TypeId types[BUSTER_CHECK_LOWER_BATCH];
     uint32_t metadata[BUSTER_CHECK_LOWER_BATCH];
-    TypeId targets[2][BUSTER_CHECK_LOWER_BATCH];
     uint64_t valid;
     uint32_t first;
 };
@@ -237,7 +263,7 @@ struct CheckLowerWriter
     const CheckProgram* program;
     CheckProgramLowered* output;
     CheckLowerAbi* abi;
-    CheckLowerTask* tasks;
+    CheckLowerTaskPacked* tasks;
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
@@ -974,7 +1000,7 @@ static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
     {
-        writer->tasks[writer->depth++] = task;
+        writer->tasks[writer->depth++] = check_lower_task_pack(task);
     }
     else
     {
@@ -3981,99 +4007,103 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
 {
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
-        const CheckLowerTask task = writer->tasks[--writer->depth];
+        const CheckLowerTaskPacked packed = writer->tasks[--writer->depth];
+        const CheckLowerTaskKind kind = (CheckLowerTaskKind)((packed.control >> 32) & UINT8_MAX);
+        const uint32_t node = (uint32_t)packed.control;
+        const TypeId type = kind == CHECK_LOWER_INSTRUCTION ? (uint16_t)(packed.control >> 48) : (uint32_t)packed.payload;
+        const uint64_t value = packed.payload;
         if (sources)
         {
-            check_lower_task_source(writer, task);
+            check_lower_task_source(writer, check_lower_task_unpack(packed));
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
-        if (task.kind == CHECK_LOWER_INSTRUCTION)
+        if (kind == CHECK_LOWER_INSTRUCTION)
         {
-            check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
+            check_lower_emit(writer, (uint8_t)node, (uint8_t)type, value);
         }
-        else if (task.kind == CHECK_LOWER_CONVERSION)
+        else if (kind == CHECK_LOWER_CONVERSION)
         {
-            check_lower_conversion(writer, task.node, task.type);
+            check_lower_conversion(writer, node, type);
         }
-        else if (task.kind == CHECK_LOWER_LABEL)
+        else if (kind == CHECK_LOWER_LABEL)
         {
-            check_lower_place(writer, task.node);
+            check_lower_place(writer, node);
         }
-        else if (task.kind == CHECK_LOWER_CONTROL)
+        else if (kind == CHECK_LOWER_CONTROL)
         {
-            check_lower_control(writer, task.node);
+            check_lower_control(writer, node);
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN)
+        else if (kind == CHECK_LOWER_BUILTIN)
         {
-            check_lower_builtin_emit(writer, task);
+            check_lower_builtin_emit(writer, check_lower_task_unpack(packed));
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN_MISC)
+        else if (kind == CHECK_LOWER_BUILTIN_MISC)
         {
-            check_lower_miscellaneous_emit(writer, task);
+            check_lower_miscellaneous_emit(writer, check_lower_task_unpack(packed));
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
+        else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
-            check_lower_floating_emit(writer, task);
+            check_lower_floating_emit(writer, check_lower_task_unpack(packed));
         }
-        else if (task.kind == CHECK_LOWER_CONSTANT)
+        else if (kind == CHECK_LOWER_CONSTANT)
         {
-            check_lower_constant(writer, writer->program->stream->values + task.node);
+            check_lower_constant(writer, writer->program->stream->values + node);
         }
-        else if (task.kind == CHECK_LOWER_ADDRESS)
+        else if (kind == CHECK_LOWER_ADDRESS)
         {
-            check_lower_address(writer, task.node, (int64_t)task.value);
+            check_lower_address(writer, node, (int64_t)value);
         }
-        else if (task.kind == CHECK_LOWER_QUERY)
+        else if (kind == CHECK_LOWER_QUERY)
         {
-            check_lower_constant(writer, &writer->program->stream->queries[task.node].runtime_value);
+            check_lower_constant(writer, &writer->program->stream->queries[node].runtime_value);
         }
-        else if (task.kind == CHECK_LOWER_TERMINATE)
+        else if (kind == CHECK_LOWER_TERMINATE)
         {
             check_lower_terminate(writer);
         }
-        else if (task.kind == CHECK_LOWER_COPY)
+        else if (kind == CHECK_LOWER_COPY)
         {
-            check_lower_copy(writer, task.value, task.address);
+            check_lower_copy(writer, value, ((packed.control >> 40) & 1) != 0);
         }
-        else if (task.kind == CHECK_LOWER_FILL)
+        else if (kind == CHECK_LOWER_FILL)
         {
-            check_lower_fill(writer, writer->program->initializers->plans[task.node].parts + task.type, (uint32_t)task.value);
+            check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32));
         }
-        else if (task.kind == CHECK_LOWER_CLEAR)
+        else if (kind == CHECK_LOWER_CLEAR)
         {
-            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = task.type };
-            check_lower_fill(writer, &clear, (uint32_t)task.value);
+            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = type };
+            check_lower_fill(writer, &clear, (uint32_t)(value >> 32));
         }
-        else if (task.kind == CHECK_LOWER_BIT_READ)
+        else if (kind == CHECK_LOWER_BIT_READ)
         {
-            check_lower_bit_read(writer, task.type);
+            check_lower_bit_read(writer, type);
         }
-        else if (task.kind == CHECK_LOWER_BIT_STORE)
+        else if (kind == CHECK_LOWER_BIT_STORE)
         {
-            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+            check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((packed.control >> 42) & 1) != 0);
         }
-        else if (task.kind == CHECK_LOWER_VARARGS)
+        else if (kind == CHECK_LOWER_VARARGS)
         {
-            check_lower_varargs_emit(writer, task);
+            check_lower_varargs_emit(writer, check_lower_task_unpack(packed));
         }
-        else if (task.kind == CHECK_LOWER_SIZE)
+        else if (kind == CHECK_LOWER_SIZE)
         {
-            check_lower_vla_size(writer, task.type, BUSTER_TYPED_CLASS_I64);
+            check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_I64);
         }
-        else if (task.kind >= CHECK_LOWER_COMPLEX)
+        else if (kind >= CHECK_LOWER_COMPLEX)
         {
             // The complex values' tasks, the kinds' last, behind one compare: few functions have them.
-            check_lower_complex_task(writer, task);
+            check_lower_complex_task(writer, check_lower_task_unpack(packed));
         }
         else
         {
-            const bool batched = !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && !task.address && !task.discard &&
-                                 check_lower_batch_expression(writer, task.node);
+            const bool batched = !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
+                                 check_lower_batch_expression(writer, node);
             if (!batched)
             {
                 writer->expression_nodes += 1;
-                check_lower_expand(writer, task);
+                check_lower_expand(writer, check_lower_task_unpack(packed));
             }
         }
     }
@@ -5406,7 +5436,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .provisional_tables = shared->provisional_tables,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
-    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
+    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, capacity);
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);

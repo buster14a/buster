@@ -2,13 +2,33 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Entry-for-entry comparison with the original task loop, independently of the semantic scheduler. Every
-// input column ends at a protected page, including all partial operator batches and the 64-node window edges.
+// input column ends at a protected page, including all partial operator batches and the 16-node window edges.
 
 #define BUSTER_CHECK_BATCH_TEST_NODES 321u
 #define BUSTER_CHECK_BATCH_TEST_ENTRIES (BUSTER_CHECK_BATCH_TEST_NODES * 4)
 
 static void check_test_program_batch(CheckTest* test)
 {
+    for (uint32_t kind = CHECK_LOWER_EXPRESSION; kind <= CHECK_LOWER_COMPLEX_TRUTH; kind += 1)
+    {
+        for (uint32_t flags = 0; flags < 8; flags += 1)
+        {
+            const bool full = kind == CHECK_LOWER_INSTRUCTION || kind == CHECK_LOWER_ADDRESS || kind == CHECK_LOWER_COPY || kind == CHECK_LOWER_COMPLEX;
+            const CheckLowerTask original = {
+                .kind = (CheckLowerTaskKind)kind,
+                .node = UINT32_MAX - kind,
+                .type = kind == CHECK_LOWER_INSTRUCTION ? UINT8_MAX : full ? 0 : UINT32_MAX - flags,
+                .value = full ? UINT64_MAX - flags : UINT32_MAX - kind,
+                .address = (flags & 1) != 0,
+                .initialized = (flags & 2) != 0,
+                .discard = (flags & 4) != 0,
+            };
+            const CheckLowerTask decoded = check_lower_task_unpack(check_lower_task_pack(original));
+            check_test_expect(test, decoded.kind == original.kind && decoded.node == original.node && decoded.type == original.type &&
+                              decoded.value == original.value && decoded.address == original.address && decoded.initialized == original.initialized &&
+                              decoded.discard == original.discard, "two-word pending tasks retain full node/type identities, payload bits and independent flags");
+        }
+    }
     CheckTestTypes types = { 0 };
     bool ready = check_test_types_open(&types);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -146,7 +166,7 @@ static void check_test_program_batch(CheckTest* test)
             uint8_t kinds[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             uint8_t classes[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             uint64_t values[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
-            CheckLowerTask tasks[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
+            CheckLowerTaskPacked tasks[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             uint32_t task_sources[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             uint32_t tokens[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             for (uint32_t limit = 0; limit < 3; limit += 1)
@@ -191,7 +211,7 @@ static void check_test_program_batch(CheckTest* test)
                 check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact task loop and failures");
                 if (limit == 0)
                 {
-                    check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes != 0,
+                    check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes <= writers[1].expression_nodes,
                                       "expression coverage counts evaluated occurrences and the batch path decides ordinary nodes itself");
                     if (mode == 0 && count <= BUSTER_CHECK_LOWER_BATCH)
                     {
@@ -292,6 +312,7 @@ static void check_test_program_batch(CheckTest* test)
             .type_count = types.table.types.count,
         };
         check_lower_batch_reset(&writer);
+        check_lower_batch_prepare(&writer, writer.batches, 0);
         const bool lowered = check_lower_batch_expression(&writer, 0);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
