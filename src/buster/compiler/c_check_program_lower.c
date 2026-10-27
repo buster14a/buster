@@ -2254,19 +2254,44 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 writer->argument_sizes[writer->argument_count] = 0;
                 writer->argument_classes[writer->argument_count++] = check_lower_class(writer, type);
             }
+            // A floating value crosses an atomic helper's integer registers as its bits, through a frame temporary, as the
+            // math helpers' do: the helpers move bits, so a numeric conversion would change the value.
+            const uint8_t result_class = check_lower_class(writer, stream->values[node].type);
             if (helper->terminates)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
+            }
+            else if (helper->result_type == BUSTER_TYPE_ULONG && (result_class == BUSTER_TYPED_CLASS_F32 || result_class == BUSTER_TYPED_CLASS_F64))
+            {
+                const uint32_t result = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, result_class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, result);
             }
             else
             {
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
             check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, helper->result_type), call);
-            for (uint32_t a = count; a-- > 0;)
+            for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
                 const TypeId checked = stream->argument_conversions[first + a].type;
-                check_lower_convert(writer, checked, helper->parameter_types[a]);
+                const uint8_t class = check_lower_class(writer, checked);
+                if (helper->parameter_types[a] == BUSTER_TYPE_ULONG && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64))
+                {
+                    const uint32_t local = check_lower_addressed_temporary(writer, class);
+                    if (class == BUSTER_TYPED_CLASS_F32)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    }
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else
+                {
+                    check_lower_convert(writer, checked, helper->parameter_types[a]);
+                }
                 check_lower_operand(writer, node, a + 3, false, checked);
             }
         }
@@ -5147,7 +5172,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     valid &= label_room == 0 || lowered->label_symbols != 0;
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
-    valid = valid && abi_initialize(&shared->table, scratch, types, 16);
+    // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
+    valid = valid && abi_initialize_types(&shared->table, scratch, types, 16, types->types.count);
     if (valid)
     {
         if (scalar)
@@ -5180,23 +5206,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
     shared->local_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     shared->local_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
     shared->naked = valid && input->asm_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     valid = valid && (input->asm_count == 0 || shared->naked != 0);
-    if (shared->naked != 0)
-    {
-        memset(shared->naked, 0, (uint64_t)count + 1);
-        for (uint32_t token = 0; token < count; token += 1)
-        {
-            const CheckInputAttributes* attributes = input->declarations[token] == token && input->objects[token] <= count ? input->attributes[token] : 0;
-            for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-            {
-                shared->naked[input->objects[token]] |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
-            }
-        }
-    }
     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
-    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 &&
+    valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->local_first != 0 && shared->local_next != 0 && declaring != 0 &&
             (program->body_count == 0 || lowered->functions != 0) && (!sources || program->body_count == 0 || lowered->entry_tokens != 0);
     if (!valid && lowered->status == CHECK_PROGRAM_OK)
     {
@@ -5220,8 +5236,14 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             }
         }
         memset(shared->local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-        for (uint32_t token = count; token-- > 0;)
+        if (shared->naked != 0)
         {
+            memset(shared->naked, 0, (uint64_t)count + 1);
+        }
+        // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
+        for (uint32_t d = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, scalar); d-- > 0;)
+        {
+            const uint32_t token = declaring[d];
             if (input->initializer_nodes[token] < nodes)
             {
                 shared->initializer_declarations[input->initializer_nodes[token]] = token;
@@ -5231,6 +5253,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             {
                 shared->local_next[token] = shared->local_first[body];
                 shared->local_first[body] = token;
+            }
+            const CheckInputAttributes* attributes =
+                shared->naked != 0 && input->declarations[token] == token && input->objects[token] <= count ? input->attributes[token] : 0;
+            for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+            {
+                shared->naked[input->objects[token]] |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
             }
         }
         // The runtime functions the unit declares, for every writer: each one's symbol is the first declaration's of its

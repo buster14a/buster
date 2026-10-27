@@ -26,6 +26,7 @@ struct CiFixture
     const char* executor_conclusion;
     const char* guard_conclusion;
     const char* run_path;
+    const char* snapshot_base;
     char* worker_event;
     unsigned dispatches;
     unsigned cancellations;
@@ -79,7 +80,7 @@ static void ci_fixture_run_json(Buffer* out, const CiRun* run)
         json_quote(out, qualified.data);
         free(qualified.data);
     }
-    buffer_printf(out, ",\"created_at\":");
+    buffer_printf(out, ",\"head_repository\":{\"id\":%u},\"created_at\":", ci_fixture.current.fork && strcmp(run->event, "pull_request") == 0 ? 123 : 1421805693);
     ci_fixture_date(out, run->created_at);
     buffer_add(out, ",", 1);
     ci_json_string(out, "head_sha", run->head);
@@ -119,6 +120,13 @@ static CiRun* ci_fixture_run(uint64_t id)
     return result;
 }
 
+static void ci_fixture_pr_json(Buffer* out)
+{
+    const CiIdentity* current = &ci_fixture.current;
+    const char* snapshot = ci_fixture.snapshot_base != NULL ? ci_fixture.snapshot_base : current->base;
+    buffer_printf(out, "{\"number\":546,\"state\":\"%s\",\"headRefOid\":\"%s\",\"baseRefOid\":\"%s\",\"headRef\":{\"target\":{\"oid\":\"%s\"}},\"baseRef\":{\"target\":{\"oid\":\"%s\"}},\"headRepository\":{\"databaseId\":%u},\"potentialMergeCommit\":{\"oid\":\"%s\"},\"mergeable\":\"%s\"}", current->open ? "OPEN" : "CLOSED", current->head, snapshot, current->head, current->base, current->fork ? 123 : 1421805693, current->merge, current->mergeable == 1 ? "MERGEABLE" : current->mergeable == 0 ? "CONFLICTING" : "UNKNOWN");
+}
+
 static Http ci_fixture_request(const char* method, const char* full_path, const char* body)
 {
     ++ci_fixture.http_calls;
@@ -133,23 +141,31 @@ static Http ci_fixture_request(const char* method, const char* full_path, const 
     int status = 200;
     if (graphql && strcmp(method, "POST") == 0)
     {
-        buffer_printf(&out, "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[");
-        if (ci_fixture.current.open)
+        Json request = json_parse(body);
+        bool single = strstr(json_field(&request, 0, "query"), "pullRequest(number:") != NULL;
+        json_free(&request);
+        if (single)
         {
-            const CiIdentity* current = &ci_fixture.current;
-            buffer_printf(&out, "{\"number\":546,\"state\":\"OPEN\",\"headRefOid\":\"%s\",\"baseRefOid\":\"%s\",\"headRepository\":{\"databaseId\":%u},\"potentialMergeCommit\":{\"oid\":\"%s\"},\"mergeable\":\"%s\"}", current->head, current->base, current->fork ? 123 : 1421805693, current->merge, current->mergeable == 1 ? "MERGEABLE" : current->mergeable == 0 ? "CONFLICTING" : "UNKNOWN");
+            buffer_printf(&out, "{\"data\":{\"repository\":{\"pullRequest\":");
+            ci_fixture_pr_json(&out);
+            buffer_printf(&out, "}}}");
         }
-        buffer_printf(&out, "]}}}}");
+        else
+        {
+            buffer_printf(&out, "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[");
+            if (ci_fixture.current.open) ci_fixture_pr_json(&out);
+            buffer_printf(&out, "]}}}}");
+        }
     }
-    else if (strcmp(method, "GET") == 0 && strncmp(path, "commits/", 8) == 0 && strstr(path, "/status?") != NULL)
+    else if (strcmp(method, "GET") == 0 && strncmp(path, "commits/", 8) == 0 && strstr(path, "/statuses?") != NULL)
     {
         bool present = *ci_fixture.commit_status != 0 && strncmp(path + 8, ci_fixture.status_head, 40) == 0;
-        buffer_printf(&out, "{\"total_count\":%u,\"statuses\":[", present ? 1 : 0);
+        buffer_printf(&out, "[");
         if (present)
         {
-            buffer_printf(&out, "{\"context\":\"%s\",\"state\":\"%s\",\"creator\":{\"login\":\"github-actions[bot]\"}}", BUSTER_CI_REQUIRED, ci_fixture.commit_status);
+            buffer_printf(&out, "{\"context\":\"%s\",\"state\":\"%s\",\"creator\":{\"login\":\"github-actions[bot]\",\"id\":41898282}}", BUSTER_CI_REQUIRED, ci_fixture.commit_status);
         }
-        buffer_printf(&out, "]}");
+        buffer_printf(&out, "]");
     }
     else if (strcmp(method, "GET") == 0 && strncmp(path, "commits/", 8) == 0)
     {

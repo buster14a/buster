@@ -166,8 +166,8 @@ static void interpreter_test_conversions(InterpreterTestTally* tally, Arena* scr
         .values = values,
         .count = 3,
     };
-    // Every class but long double (F80) and the 128-bit integers (I128, U128), which the interpreter refuses: a conversion
-    // to one and from one is invalid.
+    // Every class but long double (F80), the 128-bit integers (I128, U128) and vectors (VECTOR), which the interpreter
+    // refuses: a conversion to one and from one is invalid.
     for (uint32_t from = BUSTER_TYPED_CLASS_I8; from < BUSTER_TYPED_CLASSES; from += 1)
     {
         classes[0] = (uint8_t)from;

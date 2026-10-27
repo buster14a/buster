@@ -68,8 +68,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// after JUMP_INDIRECT must be lowered (or refused, as JUMP_INDIRECT is) here before tier0_validate accepts it.
-_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_JUMP_INDIRECT + 1, "ir_lower.c lowers or refuses every typed kind");
+// after X86 must be lowered (or refused, as JUMP_INDIRECT and X86 are) here before tier0_validate accepts it.
+_Static_assert(BUSTER_TYPED_KINDS == BUSTER_TYPED_X86 + 1, "ir_lower.c lowers or refuses every typed kind");
 
 static bool ir_typed_control(uint8_t kind)
 {
@@ -629,17 +629,18 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_JUMP_INDIRECT)
+        else if (kind == BUSTER_TYPED_JUMP_INDIRECT || kind == BUSTER_TYPED_X86)
         {
-            // An indirect jump to a label (#133), which this adapter doesn't lower yet and the plan and the emitter
-            // would take for a binary operation.
+            // An indirect jump to a label (#133) and a machine operation (#136), which this adapter doesn't lower yet and
+            // the plan and the emitter would take for a binary operation.
             check.error = IR_ERROR_OPCODE;
             check.instruction = i;
         }
-        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80 || input->classes[i] == BUSTER_TYPED_CLASS_I128 || input->classes[i] == BUSTER_TYPED_CLASS_U128)
+        else if (input->classes[i] == BUSTER_TYPED_CLASS_F80 || input->classes[i] == BUSTER_TYPED_CLASS_I128 || input->classes[i] == BUSTER_TYPED_CLASS_U128 ||
+                 input->classes[i] == BUSTER_TYPED_CLASS_VECTOR)
         {
-            // Typed long double and the 128-bit integers (#136) aren't lowered by this adapter. Tier0 keeps their values
-            // in frame slots of its own; every such value has an entry of its class, including a conversion's operand.
+            // Typed long double, the 128-bit integers and vectors (#136) aren't lowered by this adapter. Tier0 keeps their
+            // values in frame slots of its own; every such value has an entry of its class, including a conversion's operand.
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
