@@ -2757,6 +2757,7 @@ static bool import_test_discovery(void)
     const bool begun = runtime_begin(&runtime);
     const bool found = tree && begun && runtime_find_gcc(&runtime, bases, BUSTER_ARRAY_LENGTH(bases));
     import_test_expect(&tally, found && import_equal(runtime.gcc_directory, older), "the highest version with crtbeginS.o", 0);
+    import_test_expect(&tally, found && import_equal(runtime.object_paths[RUNTIME_OBJECT_BEGIN], older_crt), "the chosen begin object's path retained", 0);
     bool probed = false;
     for (uint32_t p = 0; found && p < runtime.probe_count; p += 1)
     {
@@ -2770,6 +2771,7 @@ static bool import_test_discovery(void)
     const bool fresh_begun = runtime_begin(&fresh);
     const bool fresh_found = installed && fresh_begun && runtime_find_gcc(&fresh, bases, BUSTER_ARRAY_LENGTH(bases));
     import_test_expect(&tally, fresh_found && import_equal(fresh.gcc_directory, newer) && runtime_probes_current(&fresh), "a fresh search picks it", 0);
+    import_test_expect(&tally, fresh_found && import_equal(fresh.object_paths[RUNTIME_OBJECT_BEGIN], newer_crt), "the newer begin object's path retained", 0);
     import_test_expect(&tally, fresh_found && unlink(newer_crt) == 0 && !runtime_probes_current(&fresh), "its crtbeginS.o removed again shows", 0);
     runtime_release(&runtime);
     runtime_release(&fresh);
@@ -2907,6 +2909,21 @@ static void import_test_linker_names(ImportTestTally* tally, const Runtime* runt
     import_test_expect(tally, linker_found == linker_count && linker_marked == linker_found, "the names the kind's linker defines, the linker's, and no other", linker_found);
 }
 
+// GCC discovery already records crtbeginS.o. Every kind's actual begin object must have exactly one ordinary probe:
+// that retained one, or the independently searched crtbeginT.o for -static.
+static void import_test_begin_probe(ImportTestTally* tally, const Runtime* runtime)
+{
+    const String8 path = runtime->object_paths[RUNTIME_OBJECT_BEGIN];
+    uint32_t count = 0;
+    for (uint32_t p = 0; path.length != 0 && p < runtime->probe_count; p += 1)
+    {
+        const RuntimeProbe* probe = &runtime->probes[p];
+        const bool same = probe->path.length == path.length && memcmp(probe->path.pointer, path.pointer, path.length) == 0;
+        count += same && probe->found && !probe->directory && !probe->deferred ? 1 : 0;
+    }
+    import_test_expect(tally, path.length != 0 && count == 1, "the begin object has one ordinary probe", count);
+}
+
 static bool import_test_runtime(bool cross_check, Arena* arena)
 {
     ImportTestTally tally = {
@@ -2923,6 +2940,7 @@ static bool import_test_runtime(bool cross_check, Arena* arena)
     }
     else
     {
+        import_test_begin_probe(&tally, &runtime);
         printf("  GCC: %.*s; libc: %.*s (%.*s, %u exports, %u versions, %u references); libgcc.a and libc_nonshared.a: %u members; %u probes\n",
                (int)runtime.gcc_directory.length, runtime.gcc_directory.pointer, (int)runtime.libc_path.length, runtime.libc_path.pointer, (int)runtime.libc.soname.length,
                runtime.libc.soname.pointer, runtime.libc.exports.count, runtime.libc.version_count, runtime.libc.references.count, runtime.member_count, runtime.probe_count);
@@ -3281,6 +3299,7 @@ static bool import_test_static_runtime(RuntimeKind kind, bool cross_check, Arena
     {
         const Link* link = &runtime.link;
         const uint32_t piece_count = RUNTIME_OBJECTS + runtime.member_count;
+        import_test_begin_probe(&tally, &runtime);
         printf("  GCC: %.*s; %u archives, %u members: %u atoms, %u symbols, %u fixups, %u priorities; %u global names, %u references, %u groups of %u signatures; %u probes\n",
                (int)runtime.gcc_directory.length, runtime.gcc_directory.pointer, runtime.archive_count, runtime.member_count, link->atoms.count - 1, link->symbols.count - 1,
                link->fixups.count - 1, link->priorities.count - 1, runtime.global_names.count, runtime.reference_begin[piece_count], runtime.group_begin[piece_count],
@@ -4019,6 +4038,7 @@ static bool import_test_shared_runtime(Arena* arena)
     import_test_expect(&tally, error == RUNTIME_ERROR_NONE, "runtime_import_shared", (uint64_t)error);
     if (error == RUNTIME_ERROR_NONE)
     {
+        import_test_begin_probe(&tally, &runtime);
         const RuntimePiece* start = &runtime.pieces[RUNTIME_OBJECT_START];
         const bool empty = runtime.object_paths[RUNTIME_OBJECT_START].length == 0 && start->begin.atoms == start->end.atoms &&
                            start->begin.symbols == start->end.symbols && start->begin.fixups == start->end.fixups && runtime.abi_note.length == 0;

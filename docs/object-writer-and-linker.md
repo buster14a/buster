@@ -2895,6 +2895,13 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   callers discard the snapshot and re-import before retrying. Links that
   use none of these facts, including weak-only unwinder references, do not
   check the deferred paths. Imported runtimes already read the files.
+  GCC discovery also retains the chosen `crtbeginS.o` path directly in
+  `Runtime.object_paths[RUNTIME_OBJECT_BEGIN]`. Dynamic PIEs, shared libraries
+  and static PIEs reuse it instead of probing that same file again. Its one
+  ordinary probe still detects changes and removals. A static executable
+  independently searches for `crtbeginT.o`. `test-import` checks both the
+  retained path through a GCC-version change and exactly one ordinary probe
+  of each kind's begin object.
 - **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
   -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
   which exports most of the members' names too (`__udivti3`), so binding

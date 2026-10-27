@@ -736,7 +736,8 @@ static bool runtime_version_greater(const char* a, const char* b)
 // Finds GCC's installation under `bases`: for the first base and triple whose directory exists, the highest version
 // that has crtbeginS.o. Each version's crtbeginS.o is probed, found or not, so that the probes show one installed into a
 // version's existing directory, and in the order of the versions' names, highest first, so that they don't depend on
-// the order readdir gives them in.
+// the order readdir gives them in. The chosen file's path becomes the begin object's path: every kind but -static
+// uses that very crtbeginS.o, so runtime_search must not probe it a second time and charge every snapshot load for it.
 static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_t base_count)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
@@ -795,6 +796,10 @@ static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_
                 {
                     snprintf(best, sizeof(best), "%s/%s", path, name);
                     snprintf(best_triple, sizeof(best_triple), "%s", path);
+                    if (runtime->kind != RUNTIME_KIND_STATIC)
+                    {
+                        runtime->object_paths[RUNTIME_OBJECT_BEGIN] = runtime_copy_path(runtime, crt);
+                    }
                     found = true;
                 }
             }
@@ -962,7 +967,11 @@ static RuntimeError runtime_search(Runtime* runtime)
     {
         const bool gcc = i == RUNTIME_OBJECT_BEGIN || i == RUNTIME_OBJECT_END;
         const char* name = runtime_object_names[runtime->kind][i];
-        runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
+        const bool selected_begin = i == RUNTIME_OBJECT_BEGIN && runtime->kind != RUNTIME_KIND_STATIC;
+        if (!selected_begin)
+        {
+            runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
+        }
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
     // A dynamic PIE's and a shared library's: libgcc.a, the first archive, libgcc_s.so.1 if the system has it, then
