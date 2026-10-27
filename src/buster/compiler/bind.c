@@ -191,6 +191,9 @@ struct Bind
 {
     const Runtime* runtime;
     BindPath path;
+    // Published by bind_end after as-needed pruning, so the writer needn't receive an unused library's catalog.
+    // Fits the padding after path; the other members' offsets and Bind's size stay the same.
+    bool gcc_s_needed;
     // Where the runtime's atoms' bytes are copied.
     Arena* bytes;
     // The link's unit for the runtime's unit 0: the runtime's units follow it in their order.
@@ -1152,7 +1155,7 @@ static void bind_keep_imports(Bind* bind, const Link* link)
 // ones among them. An import is the library's by its version, whose index follows libc.so.6's and the other's
 // (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens,
 // shared by both paths.
-static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
+static bool bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
 {
     LinkSymbols* symbols = &link->symbols;
     // runtime_move_versions gives each library a disjoint range; gaps cannot contain another library's version.
@@ -1184,6 +1187,7 @@ static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* lib
         kept += dropped ? 0 : 1;
     }
     bind->import_count = kept;
+    return needed;
 }
 
 // The link's definitions of names that libc.so.6, the loader or libgcc_s.so.1 defines too, or libc.so.6 refers to, with
@@ -2154,7 +2158,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         bind_check_deferred(bind);
     }
     bind_keep_as_needed(bind, link, &bind->runtime->loader, (bind->runtime_needed & BUSTER_BIND_NEEDS_LOADER) != 0);
-    bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
+    bind->gcc_s_needed = bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
     if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
     {
         bind_shared_exports(bind, link);

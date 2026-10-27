@@ -2952,6 +2952,14 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   selects (`ExecutableLibrary.required` false), so that only a link with an
   import of its names gets its `DT_NEEDED` entry and its versions'
   `.gnu.version_r` entries.
+  After as-needed pruning, `bind_end` publishes `Bind.gcc_s_needed` in the
+  structure's existing padding. `dynamic_inputs` includes the GCC library
+  and reserves and copies its version catalog only when that flag is set,
+  preserving the same named-library and runtime order. This keeps an unused
+  catalog out of the writer's version scans as well. `test-dynamic` derives
+  the need independently from strong bound imports and forced dependencies,
+  checks that unused library and version entries are absent, and still
+  loads and runs the unwinder and split-stack outputs.
 - **Split-stack code in a dynamic PIE.** `morestack.o` binds now, and makes
   `generic-morestack.o` join, whose thread-locals it reaches by general- and
   local-dynamic accesses, which the writer relaxes in a dynamic PIE since
