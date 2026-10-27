@@ -1143,6 +1143,12 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         "int tested(int n){int* a=(int[65]){[0 ... 64]=7};a[0]=n;return a[0]==n&&a[64]==7?n:123456;}",
         "automatic-compound-literal-image", clang, false, 1, 320);
     check_test_program_source_limits(test,
+        "int tested(int n){return sizeof((int[65]){[0 ... 64]=7})==260?n:123456;}",
+        "automatic-unevaluated-compound-no-image", clang, false, 0, 320);
+    check_test_program_source_limits(test,
+        "int tested(int n){return _Generic((int[65]){[0 ... 64]=7},int*:n,default:123456);}",
+        "automatic-generic-control-no-image", clang, false, 0, 320);
+    check_test_program_source_limits(test,
         "int tested(int n){int k=n;int a[40]={k++,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,k++};"
         "return a[0]==n&&a[39]==n+1&&k==n+2?n:123456;}", "automatic-runtime-list", clang, false, 0, 0);
     check_test_program_source_limits(test,

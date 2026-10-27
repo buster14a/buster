@@ -82,7 +82,8 @@ static bool check_lower_init_selected(const CheckProgram* program, uint32_t plan
     const CheckInput* input = program->input;
     const uint32_t declaration = program->initializers->declaration_tokens[plan];
     bool wanted = selected[plan] != 0;
-    if (!wanted && declaration < input->token_count && input->compound_objects[declaration] && !input->static_objects[declaration])
+    if (!wanted && declaration < input->token_count && input->compound_objects[declaration] && !input->static_objects[declaration] &&
+        program->compound_initializers != NULL && program->compound_initializers[plan] != 0)
     {
         const uint32_t opening = input->declaration_bodies[declaration];
         uint32_t first = 0;
