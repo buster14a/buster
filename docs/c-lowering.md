@@ -372,9 +372,12 @@ selection counts and numbers its needed objects 64 at a time
 (`check_program_needed_count`, `check_program_needed_number`); each has an exact
 scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
 ABI table has rows for its type table's types alone (`abi_initialize_types`):
-the lowering makes no type. Whether a unit makes a name rides the existing pass
-over the symbols, and of the names a unit gives, only asm labels with a `.` go
-in the made names' table, since every made name has one and no identifier does.
+the lowering makes no type, and classifies only the types it has rows for. The
+emission builds the declaring tokens before each place that reads them (its
+`defined` pass before the bodies compile on lanes, its attributes' passes
+after) and gives them back after it, never holding them through Tier 0. Of the
+names a unit gives, only asm labels with a `.` go in the made names' table,
+since every made name has one and no identifier does.
 Every c-testsuite object, by both paths, is byte for byte what main wrote before.
 
 On that host, c-testsuite's 220 programs, each file's least run minimum over 6
