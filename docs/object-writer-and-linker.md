@@ -3029,13 +3029,19 @@ thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
 status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
 bytes, and without RELR; every access's bytes in the file must be the
 relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
-are compared with lld's links with `--cross-check`, and both run.
-`dynamic_test_tls_refusals` writes what a PIE refuses, by every lane count
-and the exact twins, without an output: the fixture without `__tls_get_addr`
-named (`EXECUTABLE_ERROR_RELOCATION` at its first access to `errno`) and a
-call of `__tls_get_addr` that no access makes (`EXECUTABLE_ERROR_UNSUPPORTED`,
-naming it); a local-dynamic access to `errno` binds, and `link_check` refuses
-it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
+are compared with lld's links with `--cross-check`, and both run. A call of
+`__tls_get_addr` that no access makes (one whose fixup doesn't follow a
+`TLSGD` or `TLSLD` fixup, `executable_relaxed_call`'s rule) is an ordinary
+call of the loader's function, through its stub or its GOT slot, as it was
+before the relaxation and as GNU ld and lld link it (#511's review): a
+fixture calls it both ways with the executable's own module and offset,
+beside an access whose call the relaxation consumes (status 120). Only a
+static executable, where nothing defines it, still refuses such a call
+(`EXECUTABLE_ERROR_UNSUPPORTED`). `dynamic_test_tls_refusals` writes what a
+PIE refuses, by every lane count and the exact twins, without an output: the
+fixture without `__tls_get_addr` named (`EXECUTABLE_ERROR_RELOCATION` at its
+first access to `errno`); a local-dynamic access to `errno` binds, and
+`link_check` refuses it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
 call of `__splitstack_getcontext` by both paths into the same bytes, which
 name `libgcc_s.so.1` and run.
 

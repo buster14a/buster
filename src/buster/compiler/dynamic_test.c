@@ -45,9 +45,10 @@
 //     writer relaxes, each needing libgcc_s.so.1 before libc.so.6, written and run.
 //   - General- and local-dynamic TLS (#515, dynamic_test_tls_program): assembly with each sequence, through the PLT and
 //     the GOT, to its own thread-locals (relaxed to local-exec) and to libc.so.6's errno (to initial-exec through its
-//     GOT slot), written, checked and run; and what a PIE refuses of them (dynamic_test_tls_refusals): the accesses
-//     without __tls_get_addr named and a call of __tls_get_addr of its own, and a local-dynamic access to an import,
-//     which link_check refuses.
+//     GOT slot), written, checked and run, and the same of calls of __tls_get_addr that no access makes (#511's
+//     review), through its stub and its slot, beside an access whose call the relaxation consumes; and what a PIE
+//     refuses of them (dynamic_test_tls_refusals): the accesses without __tls_get_addr named, and a local-dynamic access
+//     to an import, which link_check refuses.
 // Then shared libraries against runtime_import_shared, generated and compiled ones (an "unwinder" one among them,
 // which needs libgcc_s.so.1), and the split-stack library.
 // The exit status is 1 if the arguments are invalid or a check fails.
@@ -4266,6 +4267,41 @@ static const char dynamic_test_tls_source[] = "    .section .tdata,\"awT\",@prog
                                               "    .size main, .-main\n"
                                               "    .section .note.GNU-stack,\"\",@progbits\n";
 
+// Calls of __tls_get_addr that no access makes (#511's review), through the PLT and the GOT, with the executable's own
+// module (1, the main program's in glibc's numbering) at offset 0 of its TLS block, where `value` is: imports' calls,
+// through the stub and the slot, beside a general-dynamic access whose call the relaxation consumes. 40 + 40 + 40.
+#define BUSTER_DYNAMIC_TEST_TLS_DIRECT_STATUS 120
+
+static const char dynamic_test_tls_direct_source[] = "    .section .tdata,\"awT\",@progbits\n"
+                                                     "    .align 4\n"
+                                                     "value:\n"
+                                                     "    .long 40\n"
+                                                     "    .data\n"
+                                                     "    .align 8\n"
+                                                     "index:\n"
+                                                     "    .quad 1\n"
+                                                     "    .quad 0\n"
+                                                     "    .text\n"
+                                                     "    .globl main\n"
+                                                     "    .type main, @function\n"
+                                                     "main:\n"
+                                                     "    pushq %rbx\n"
+                                                     "    leaq index(%rip), %rdi\n"
+                                                     "    call __tls_get_addr@PLT\n"
+                                                     "    movl (%rax), %ebx\n"
+                                                     "    leaq index(%rip), %rdi\n"
+                                                     "    call *__tls_get_addr@GOTPCREL(%rip)\n"
+                                                     "    addl (%rax), %ebx\n"
+                                                     "    data16 leaq value@tlsgd(%rip), %rdi\n"
+                                                     "    .value 0x6666\n"
+                                                     "    rex64 call __tls_get_addr@PLT\n"
+                                                     "    addl (%rax), %ebx\n"
+                                                     "    movl %ebx, %eax\n"
+                                                     "    popq %rbx\n"
+                                                     "    ret\n"
+                                                     "    .size main, .-main\n"
+                                                     "    .section .note.GNU-stack,\"\",@progbits\n";
+
 // Assembles `source` with cc as `name`.s in the test's directory, imports the object as the program and binds it
 // against `runtime` (the object's bytes on `arena`, the files removed but with --keep), expecting link_check to give
 // `expected`: whether it bound and link_check passed it, with *imported whether `bound` holds a link to end.
@@ -4300,18 +4336,29 @@ static bool dynamic_test_assemble(DynamicTestTally* tally, const ExecutableTestD
     return result;
 }
 
-static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
+// A TLS fixture: its source, its accesses and those of them to an import, and its exit status.
+typedef struct DynamicTestTlsProgram DynamicTestTlsProgram;
+struct DynamicTestTlsProgram
+{
+    const char* check;
+    const char* name;
+    const char* source;
+    uint64_t accesses;
+    uint64_t imports;
+    int status;
+};
+
+static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, const Runtime* runtime, const DynamicTestTlsProgram* program, bool cross_check)
 {
     DynamicTestTally tally = {
-        .check = "general- and local-dynamic TLS",
+        .check = program->check,
     };
-    static const char name[] = "tls-accesses";
+    const char* name = program->name;
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     Scratch scratch = scratch_begin(0);
     BindTestLink bound;
     bool imported = false;
-    const bool bound_ok = dynamic_test_assemble(&tally, directory, runtime, name, dynamic_test_tls_source, LINK_ERROR_NONE, &bound, &imported, scratch.arena);
-    // Six general-dynamic accesses and two local-dynamic ones, two of them to errno, an import.
+    const bool bound_ok = dynamic_test_assemble(&tally, directory, runtime, name, program->source, LINK_ERROR_NONE, &bound, &imported, scratch.arena);
     uint64_t imports = 0;
     for (FixupId fixup = 1; bound_ok && fixup < bound.link.fixups.count; fixup += 1)
     {
@@ -4319,7 +4366,7 @@ static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, c
         imports += gd && dynamic_test_is_dynamic(&bound.link, bound.link.fixups.target[fixup], false) ? 1 : 0;
     }
     const uint64_t accesses = bound_ok ? dynamic_test_tls_accesses(&bound.link) : 0;
-    dynamic_test_expect(&tally, !bound_ok || (accesses == 6 && imports == 2), "its accesses, two of them to an import", accesses * 10 + imports);
+    dynamic_test_expect(&tally, !bound_ok || (accesses == program->accesses && imports == program->imports), "its accesses, and those to an import", accesses * 10 + imports);
     const String8 path = executable_test_path(directory, name, path_bytes);
     ExecutableResult result = { 0 };
     String8 file = { 0 };
@@ -4336,11 +4383,11 @@ static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, c
     uint64_t length = 0;
     int status = -1;
     const bool ran = written && executable_test_run(path.pointer, output, &length, &status);
-    const bool exited = ran && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_DYNAMIC_TEST_TLS_STATUS && length == 0;
+    const bool exited = ran && WIFEXITED(status) && WEXITSTATUS(status) == program->status && length == 0;
     dynamic_test_expect(&tally, exited, "it runs with its status", ran && WIFEXITED(status) ? (uint64_t)WEXITSTATUS(status) : 1000);
     if (written)
     {
-        dynamic_test_variants(&tally, &bound.link, &bound.bind, runtime, path, file, (const uint8_t*)"", 0, BUSTER_DYNAMIC_TEST_TLS_STATUS, 0, 0);
+        dynamic_test_variants(&tally, &bound.link, &bound.bind, runtime, path, file, (const uint8_t*)"", 0, program->status, 0, 0);
     }
     printf("  %s: %llu accesses, %llu of them to an import, %llu GOT slots: %s\n", name, (unsigned long long)accesses, (unsigned long long)imports,
            (unsigned long long)result.got_slots, exited ? "ran" : "failed");
@@ -4363,9 +4410,7 @@ static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, c
 //     relax: EXECUTABLE_ERROR_RELOCATION at the first such fixup, from the relocations' check, before the patch;
 //   - a local-dynamic access to errno and its DTPOFF32, whose module isn't the image, which the link can't hold:
 //     link_check refuses its fixups to a shared library's symbol (LINK_ERROR_BINDING), before any write, as lld refuses
-//     R_X86_64_TLSLD to a symbol it doesn't define;
-//   - a call of __tls_get_addr that no access makes, which the relaxation can't take: EXECUTABLE_ERROR_UNSUPPORTED,
-//     naming __tls_get_addr.
+//     R_X86_64_TLSLD to a symbol it doesn't define.
 static const char dynamic_test_tls_ld_import_source[] = "    .text\n"
                                                         "    .globl main\n"
                                                         "    .type main, @function\n"
@@ -4378,19 +4423,6 @@ static const char dynamic_test_tls_ld_import_source[] = "    .text\n"
                                                         "    ret\n"
                                                         "    .size main, .-main\n"
                                                         "    .section .note.GNU-stack,\"\",@progbits\n";
-
-static const char dynamic_test_tls_stray_source[] = "    .text\n"
-                                                    "    .globl main\n"
-                                                    "    .type main, @function\n"
-                                                    "main:\n"
-                                                    "    pushq %rbx\n"
-                                                    "    xorl %edi, %edi\n"
-                                                    "    call __tls_get_addr@PLT\n"
-                                                    "    xorl %eax, %eax\n"
-                                                    "    popq %rbx\n"
-                                                    "    ret\n"
-                                                    "    .size main, .-main\n"
-                                                    "    .section .note.GNU-stack,\"\",@progbits\n";
 
 // The first general- or local-dynamic access or DTPOFF32 of a link that reaches a dynamic symbol, or 0.
 static FixupId dynamic_test_first_imported_tls(const Link* link)
@@ -4420,7 +4452,6 @@ static bool dynamic_test_tls_refusals(const ExecutableTestDirectory* directory, 
     } cases[] = {
         { "tls-without-tls-get-addr", dynamic_test_tls_source, true, LINK_ERROR_NONE, EXECUTABLE_ERROR_RELOCATION },
         { "tls-local-dynamic-import", dynamic_test_tls_ld_import_source, false, LINK_ERROR_BINDING, EXECUTABLE_ERROR_NONE },
-        { "tls-stray-call", dynamic_test_tls_stray_source, false, LINK_ERROR_NONE, EXECUTABLE_ERROR_UNSUPPORTED },
     };
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
@@ -4556,7 +4587,15 @@ static int run_dynamic_tests(int argc, char** argv)
         passed = dynamic_test_libraries(&directory, &runtime) && passed;
         passed = dynamic_test_smalls(&directory, &runtime) && passed;
         passed = dynamic_test_libgcc_s(&directory, &runtime, cross_check) && passed;
-        passed = dynamic_test_tls_program(&directory, &runtime, cross_check) && passed;
+        static const DynamicTestTlsProgram tls_programs[] = {
+            // Six general-dynamic accesses and two local-dynamic ones, two of them to errno, an import.
+            { "general- and local-dynamic TLS", "tls-accesses", dynamic_test_tls_source, 6, 2, BUSTER_DYNAMIC_TEST_TLS_STATUS },
+            { "calls of __tls_get_addr that no access makes", "tls-direct-calls", dynamic_test_tls_direct_source, 1, 0, BUSTER_DYNAMIC_TEST_TLS_DIRECT_STATUS },
+        };
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(tls_programs); t += 1)
+        {
+            passed = dynamic_test_tls_program(&directory, &runtime, &tls_programs[t], cross_check) && passed;
+        }
         passed = dynamic_test_tls_refusals(&directory, &runtime) && passed;
         Runtime shared_runtime;
         const RuntimeError shared_imported = runtime_import_shared(&shared_runtime);

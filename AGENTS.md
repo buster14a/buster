@@ -2812,10 +2812,12 @@ alone and run alike. The checks:
   through the PLT and the GOT, to its own thread-locals and to `libc.so.6`'s
   `errno` (status 53): every access's bytes in the file the relaxation's
   (local-exec, or initial-exec through the import's GOT slot), each written
-  from binding's bytes (the relaxation can't be repeated), and run; and
-  refused, by every lane count and the exact twins, without an output: that
-  assembly written without `__tls_get_addr` named (at its first access to
-  `errno`) and a call of `__tls_get_addr` that no access makes; and a
+  from binding's bytes (the relaxation can't be repeated), and run; calls of
+  `__tls_get_addr` that no access makes, through its stub and its GOT slot
+  with the executable's own module, beside an access whose call the
+  relaxation consumes, written and run (status 120); and refused, by every
+  lane count and the exact twins, without an output: that assembly written
+  without `__tls_get_addr` named (at its first access to `errno`); and a
   local-dynamic access to `errno`, which `link_check` refuses
   (`LINK_ERROR_BINDING`);
 - exports: sixteen functions whose names `libc.so.6` defines too, which
