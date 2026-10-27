@@ -1577,7 +1577,11 @@ struct CheckMemberFrame
     uint64_t offset;
 };
 
-static uint32_t check_action_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers, CheckActionResult* result)
+// The member of a record that a name finds, through its anonymous members, with its bit offset and the qualifiers it
+// inherits. Every member access runs it, inlined into check_action_member; the atomic alignment walk calls its copy
+// (check_action_member_lookup), so that a second caller doesn't take it out of check_action_member's code.
+static inline __attribute__((always_inline)) uint32_t check_action_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset,
+                                                                                uint32_t* qualifiers, CheckActionResult* result)
 {
     Scratch scratch = scratch_begin(NULL);
     const uint32_t count = table->types.count;
@@ -1641,6 +1645,12 @@ static uint32_t check_action_find_member(const TypeTable* table, TypeId record, 
     }
     scratch_end(scratch);
     return member;
+}
+
+static __attribute__((noinline)) uint32_t check_action_member_lookup(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers,
+                                                                      CheckActionResult* result)
+{
+    return check_action_find_member(table, record, name, offset, qualifiers, result);
 }
 
 static void check_action_member(TypeTable* table, const CheckAction* action, CheckActionResult* result)

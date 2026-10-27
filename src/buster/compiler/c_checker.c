@@ -1153,7 +1153,7 @@ static uint32_t check_graph_atomic_alignment(const TypeTable* types, const Check
             CheckActionResult found = { 0 };
             const uint8_t record_kind = type_kind(types, record);
             const uint32_t member = record_kind == BUSTER_TYPE_KIND_STRUCT || record_kind == BUSTER_TYPE_KIND_UNION ?
-                                    check_action_find_member(types, record, graph->members[node], &offset, &qualifiers, &found) : 0;
+                                    check_action_member_lookup(types, record, graph->members[node], &offset, &qualifiers, &found) : 0;
             done = member == 0 || offset % 8 != 0;
             steps[count] = (CheckAlignmentStep){ .offset = offset / 8, .member = true };
             count += !done;
