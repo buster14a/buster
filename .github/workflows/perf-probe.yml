@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5]
+        slot: [1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     defaults:
@@ -63,4 +63,4 @@ jobs:
 
       - name: Probe
         if: steps.cpu.outputs.capable == 'true'
-        run: bash .github/perf-probe/probe7.sh
+        run: bash .github/perf-probe/probe8.sh
