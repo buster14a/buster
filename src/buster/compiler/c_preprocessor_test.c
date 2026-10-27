@@ -1275,6 +1275,26 @@ static const PPTestCase pp_test_cases[] = {
     { "an expansion of a template with ## past 16 tokens",
       "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
       0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
+    // Arguments whose names of macros are all direct objects (pp_direct_argument), expanded in place before the template
+    // or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
+    // ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
+    { "arguments of direct objects, expanded in place",
+      "#define F(a) (a + 1)\n#define G(a, b) [a | b | a]\n#define X 2\n#define T unsigned long\n#define E\n#define N F(1)\nF(X) F(T X) G(X, T) G(T, 3) F(X X) F(E) F(N) G(X, N) G(N, X)\n",
+      0, "c17", "(2 + 1) (unsigned long 2 + 1) [2 | unsigned long | 2] [unsigned long | 3 | unsigned long] (2 2 + 1) ( + 1) ((1 + 1) + 1) [2 | (1 + 1) | 2] [(1 + 1) | 2 | (1 + 1)]\n", false },
+    // A direct object that starts a line in an argument (BUSTER_PP_START_OF_LINE in a file's text, BUSTER_PP_LINE_SPACE
+    // in an expansion's), and that ends one, from a file's text and from an expansion, with clang's line markers.
+    { "arguments of direct objects on new lines",
+      "#define F(a) <a>\n#define X x\n#define W(a) F(a) [F(a)]\nF(\nX) F(X\n) W(\nX) F(\n  X X)\nW(\n  X)\n",
+      0, "c17", "<x> <x> <x> [<x>] <x x>\n<x> [<x>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<x> <x> <x> [<x>] <x x>\n\n\n\n\n<x> [<x>]\n" },
+    // A disabled macro's name beside a direct object in an argument: painted as the main loop paints it, so that it doesn't
+    // expand when the expansion is rescanned before '('.
+    { "arguments of direct objects beside a disabled macro's name",
+      "#define F(x) x\n#define Y y\n#define G(x) F(G Y)(x)\n#define H(x) F(x H Y)\nG(1) H(2) F(Y G) F(Y)(3)\n",
+      0, "c17", "G y(1) 2 H y y G y(3)\n", false },
+    // An argument expanded in place used twice, beside one used as it is, from a file's text and from an expansion.
+    { "arguments of direct objects used twice",
+      "#define D(a, b) a b a b\n#define X x\n#define P(a) [a]\n#define W(a, b) D(a, b) P(a)\nD(X, z) D(z, X) W(X, X) W( X ,z)\n",
+      0, "c17", "x z x z z x z x x x x x [x] x z x z [x]\n", false },
     // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
     // name takes the main loop's path).
     { "poisoned names a template pastes",
@@ -4623,6 +4643,55 @@ static bool pp_test_raw_recovery_failures(void)
     return result;
 }
 
+// #595's review: an argument expanded in place (pp_expand_direct_argument) that runs out of room, as the history records
+// it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
+// starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
+// pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing
+// taken away, gives F's whole expansion.
+static bool pp_test_direct_argument_failures(void)
+{
+    enum
+    {
+        PP_TEST_DIRECT_TOKENS = 1100,
+    };
+    static char source[PP_TEST_DIRECT_TOKENS * 2 + 64];
+    uint32_t length = (uint32_t)snprintf(source, sizeof(source), "#define F(a) [a]\n#define X");
+    for (uint32_t t = 0; t < PP_TEST_DIRECT_TOKENS; t += 1)
+    {
+        length += (uint32_t)snprintf(source + length, sizeof(source) - length, " x");
+    }
+    length += (uint32_t)snprintf(source + length, sizeof(source) - length, "\nF(X)\n");
+    bool result = true;
+    for (uint32_t fault = 0; fault < 3; fault += 1)
+    {
+        static InternTable table;
+        static Preprocessor pp;
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+        const uint32_t capacity = initialized ? pp.arguments.capacity : 0;
+        pp.fail_origin_growth = initialized && fault == 0;
+        pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
+        const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
+        const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
+                                                       : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
+        if (!passed)
+        {
+            printf("direct argument failure %u: ran %u, fatal %u, errors %u, output %u\n", fault, ran, initialized && pp.fatal, initialized ? pp.errors : 0,
+                   initialized ? pp.output.count : 0);
+        }
+        result = result && passed;
+        pp.arguments.capacity = capacity;
+        pp.fail_origin_growth = false;
+        if (initialized)
+        {
+            pp_release(&pp);
+        }
+        intern_release(&table);
+    }
+    printf("direct argument failures: %s (origins' growth, the arguments' room, control)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
 // #361: a part of the prelude that can't be made (its arena push or virtual file, out of memory or past the files table)
 // is fatal, and the run fails without running the parts after it. Each fault is injected after pp_initialize: the arena's
 // capacity cut below a part's push (a -D or -include of a megabyte makes the part's push the one that fails), or the
@@ -7291,6 +7360,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_named_ucn_scaling(directory);
         passed_all &= pp_test_named_ucn_boundaries(directory);
         passed_all &= pp_test_prelude_failures();
+        passed_all &= pp_test_direct_argument_failures();
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {

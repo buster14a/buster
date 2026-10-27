@@ -49,7 +49,8 @@ static bool pp_history_origin_grow(Preprocessor* pp, PPTokens* tokens, uint32_t 
     if (!result)
     {
         const uint64_t bytes = ((uint64_t)tokens->capacity + BUSTER_PP_TOKEN_SLACK) * sizeof(uint32_t);
-        tokens->origin_arena = arena_reserve(bytes);
+        tokens->origin_arena = pp->fail_origin_growth ? (Arena){ 0 } : arena_reserve(bytes);
+        pp->fail_origin_growth = false;
         uint32_t* grown = arena_push(&tokens->origin_arena, bytes, 64);
         if (grown != 0)
         {
