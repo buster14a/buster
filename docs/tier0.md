@@ -53,11 +53,12 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
   ([the c-testsuite guide](c-testsuite.md)).
 
+**Measured** ("Measurements", below): `speedtest1`, SQLite's own benchmark, with the generated code's run time and
+size against clang -O0's and tcc's, and the whole compile's time against tcc's.
+
 **Waits for #133, #145 and #146:**
 
-- the corpora and `sqlite3.c`;
-- `speedtest1`;
-- the whole compile's time against tcc's.
+- the corpora and `sqlite3.c`.
 
 Until then, generated programs (below) stand in for #142's random programs.
 
@@ -1190,8 +1191,9 @@ The inputs are SQLite 3.53.2's `test/speedtest1.c` and the frozen `sqlite3.c`. T
 - by clang -O0, linked by cc;
 - by tcc.
 
-Each build runs with that script's options at `--size 5`, from a database on tmpfs. On the 9700X, CPU 2, medians of
-11 rounds in a rotating order, every build gives the same verification hash:
+Each build runs with that script's options at `--size 5`, from a database on tmpfs. On the 9700X, CPU 2, every build
+gives the same verification hash. The run and compile times are medians of 11 rounds in a rotating order, and the
+instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
 | | Tier 0, `-c` | Tier 0, direct path | clang -O0 | tcc |
 | --- | --- | --- | --- | --- |
@@ -1202,11 +1204,11 @@ Each build runs with that script's options at `--size 5`, from a database on tmp
 | `sqlite3.c` compiled | 194.8 ms | | 571.9 ms | 42.2 ms |
 
 - **Run time:** clang -O0's, 0.4% slower, within the rounds' spread. Tier 0's code retires 1.75 times clang's
-  instructions in 1.5% more cycles. tcc's takes 7.4% less time.
+  instructions in 1.5% more cycles. tcc's takes 7.4% less time than clang's, and 7.8% less than Tier 0's `-c` build's.
 - **Code size:**
-  - `.text` is 1.30 times clang's;
-  - `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE sizes known
-    before writing.
+  - `.text` is 1.30 times clang's, in `sqlite3.o` and in the executable;
+  - `sqlite3.o`'s `.eh_frame` is 2.46 times clang's: `unwind.c` advances with `DW_CFA_advance_loc4` throughout, for FDE
+    sizes known before writing.
 - **`switch`** is a chain of compares in case order:
   - `sqlite3VdbeExec`'s dispatch on the opcode is 184 compare-and-branch pairs, where clang's is a jump table;
   - it and the parser's `yy_reduce` account for about a third of the extra instructions (the record's profiles);
