@@ -247,7 +247,7 @@ static bool check_input_pack_placements(CheckInputReader* reader, CheckInputPack
         }
         for (uint32_t order = count; order-- > 0;)
         {
-            const uint32_t token = parser->postorder[order];
+            const uint32_t token = reader->postorder[order];
             const uint32_t parent = parser->tree.parents[token];
             const uint8_t role = parser->tree.roles[token];
             bool declaration = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER ||
