@@ -4646,8 +4646,8 @@ informational.
 ## Tier 0 tests
 
 `./build/compiler test-tier0 [--seed N] [--count N] [--cross-check
-[--cross-count N] [--clang PATH] [--keep]]` (about 0.8 s on the 9700X, and
-2.9 s with `--cross-check`) checks `tier0.c` on programs from
+[--cross-count N] [--clang PATH] [--keep]]` (about 1.6 s on the 9700X, and
+14.6 s with `--cross-check`, on CPUs 0 to 7 as its job runs it) checks `tier0.c` on programs from
 `tier0_generate.c`, `--count` (300) of each of seven shapes: one function of
 integers; integers and calls; everything (floating values, pointers,
 address-taken locals, objects); larger; larger with structs and unions
