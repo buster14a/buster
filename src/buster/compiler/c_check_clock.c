@@ -58,8 +58,8 @@ typedef enum CheckStage
     CHECK_STAGE_ENCODE,
     // On one lane, every function's frame for its unwind table; and the tables written.
     CHECK_STAGE_UNWIND,
-    // Every function's atom, symbol, labels and fixups added to the link, the helpers' code, and on one lane each
-    // function's labels' offsets.
+    // Every function's atom, symbol, labels and fixups added to the link, the helpers' code, the switches' jump
+    // tables, and on one lane each function's labels' offsets.
     CHECK_STAGE_CODE_ATOMS,
     // -g: on one lane each function's source rows; and the DWARF (check_debug_build).
     CHECK_STAGE_DEBUG,
