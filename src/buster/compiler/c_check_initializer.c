@@ -1496,8 +1496,10 @@ static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint
                     const bool decoded = check_vector_member_decode(intern_bytes(walker->identifiers, name), intern_length(walker->identifiers, name),
                                                                     lanes, sizeof(lanes), &swizzle);
                     const uint32_t vector_lanes = check_vector_count(walker->types, base);
+                    // .lo, .hi, .even and .odd take half the lanes, rounded up as check_vector_member has it: a three-lane
+                    // vector's are two lanes, a vector (#555's seventh review).
                     const uint32_t width = !decoded ? 0 : swizzle.kind == CHECK_VECTOR_MEMBER_LANES ? swizzle.count :
-                                           swizzle.kind == CHECK_VECTOR_MEMBER_INVALID ? 0 : vector_lanes / 2;
+                                           swizzle.kind == CHECK_VECTOR_MEMBER_INVALID ? 0 : (vector_lanes + 1) / 2;
                     result = width == 0 ? 0 : width == 1 ? check_vector_element(walker->types, base) : base;
                 }
                 else if (members[step] != BUSTER_CHECK_NONE)
