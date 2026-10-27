@@ -1096,24 +1096,31 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         result->reason = "binding against the C runtime failed";
         valid = false;
     }
-    // Every reference of a provisional symbol takes the final one (check_lower_finish numbered them), each reference once:
-    // a runtime function's, which only a part that called one has, and a jump table's, which only a unit with tables has.
-    // The final symbols' numbers fall among the provisional ones' (a table's among the runtime functions'), so a
-    // reference rewritten by one rule mustn't be read by the other.
+    // Every reference of a runtime function's provisional symbol takes the function's (check_lower_finish numbered them):
+    // only a part that called one has them.
     for (uint32_t p = 0; valid && p < run.part_count; p += 1)
     {
-        const bool provisional = run.parts[p].lower.runtime_count != 0 || result->lowered.table_count != 0;
-        for (uint32_t b = run.parts[p].lower.first; provisional && b < run.parts[p].lower.end; b += 1)
+        for (uint32_t b = run.parts[p].lower.first; run.parts[p].lower.runtime_count != 0 && b < run.parts[p].lower.end; b += 1)
         {
             const Tier0Code* code = run.codes + b;
             for (uint32_t i = 0; i < code->reference_count; i += 1)
             {
-                const SymbolId target = code->references[i].target;
-                const uint64_t runtime = (uint64_t)target - shared.provisional_runtimes;
-                const uint64_t table = (uint64_t)target - shared.provisional_tables;
-                code->references[i].target = runtime < CHECK_LOWER_RUNTIMES ? result->lowered.runtime_symbols[runtime] :
-                                             table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : target;
+                const uint64_t provisional = (uint64_t)code->references[i].target - shared.provisional_runtimes;
+                code->references[i].target = provisional < CHECK_LOWER_RUNTIMES ? result->lowered.runtime_symbols[provisional] : code->references[i].target;
             }
+        }
+    }
+    // Then every reference of a jump table's provisional symbol takes the table's, in the functions that have tables
+    // (CheckLowerTable.function, in their order). In this order each reference is rewritten once: a runtime function's
+    // symbol is below the tables' provisional ones, while a table's final symbol is among the runtime functions'.
+    for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
+    {
+        const uint32_t b = result->lowered.tables[t].function;
+        const Tier0Code* code = run.codes + b;
+        for (uint32_t i = 0; (t == 0 || result->lowered.tables[t - 1].function != b) && i < code->reference_count; i += 1)
+        {
+            const uint64_t table = (uint64_t)code->references[i].target - shared.provisional_tables;
+            code->references[i].target = table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : code->references[i].target;
         }
     }
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which

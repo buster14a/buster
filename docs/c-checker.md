@@ -841,10 +841,11 @@ What the lowering covers past scalars (#145's programs):
   own, after the runtime functions', which `check_lower_finish` numbers once
   they are all known: while the bodies compile, a table's address is a
   provisional symbol after the runtime functions' (`provisional_tables`, which
-  the access column has), whose references the emission's merge replaces in the
-  pass that replaces the runtime functions', each reference once: a table's
-  final symbol falls among the runtime functions' provisional numbers, so a
-  second pass would take it for one of theirs. An empty GNU range
+  the access column has), whose references the emission's merge replaces after
+  the runtime functions', in the functions that have tables: a table's final
+  symbol falls among the runtime functions' provisional numbers, while theirs
+  are below the tables' provisional ones, so that each reference is rewritten
+  once. An empty GNU range
   (`case 5 ... 3`) counts for nothing, as clang's Sema drops it. In `-c`'s
   object the tables' and the labels' symbols are temporaries
   (`ObjectOptions.temporary_symbols`), as an
