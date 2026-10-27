@@ -1392,8 +1392,17 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+#include "c_check_program_batch_test.c"
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_batch(test);
+    check_test_program_source(test,
+        "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
+        "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
+        "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
+        "v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}",
+        "batch-ordinary-and-ordered-fallback", clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);

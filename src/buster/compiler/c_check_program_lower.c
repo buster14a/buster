@@ -95,6 +95,9 @@ struct CheckProgramLowered
     const char* reason;
     uint64_t entries;
     uint64_t output_bytes;
+    // Evaluated expression occurrences, and those expanded by the straight-line templates (#624).
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
     // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
@@ -194,6 +197,27 @@ struct CheckLowerCaseRange
     uint64_t lower;
     uint64_t upper;
     uint32_t label;
+};
+
+// A bounded window of postorder nodes. Each node has a native entry and, when it is an operand of another
+// template, its edge's conversion. A subtree owns a contiguous interval, with one parent per internal node;
+// shared operands, gaps, reordered operands and windows' edges fall back to the task loop. Nothing here is
+// a reachability decision: only a popped expression may publish its interval.
+#define BUSTER_CHECK_LOWER_BATCH 64u
+#define BUSTER_CHECK_LOWER_BATCH_NONE UINT8_MAX
+
+typedef struct CheckLowerBatch CheckLowerBatch;
+struct CheckLowerBatch
+{
+    uint64_t values[BUSTER_CHECK_LOWER_BATCH];
+    uint16_t kinds[BUSTER_CHECK_LOWER_BATCH];
+    uint16_t classes[BUSTER_CHECK_LOWER_BATCH];
+    uint16_t entries[BUSTER_CHECK_LOWER_BATCH];
+    uint16_t tasks[BUSTER_CHECK_LOWER_BATCH];
+    uint8_t starts[BUSTER_CHECK_LOWER_BATCH];
+    uint8_t parents[BUSTER_CHECK_LOWER_BATCH];
+    uint8_t last_nodes[BUSTER_CHECK_LOWER_BATCH];
+    uint32_t first;
 };
 
 typedef struct CheckLowerWriter CheckLowerWriter;
@@ -318,6 +342,9 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
+    CheckLowerBatch batch;
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
     // The function's labels whose addresses the program takes (CHECK_CONTROL_LABEL with a symbol): each one's control
     // entry, then its entry (Tier0Function.label_entries), and the room for them, one per control entry.
     uint32_t* label_entries;
@@ -3918,6 +3945,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
 }
 
+#include "c_check_program_batch.c"
+
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
 // it last changed).
@@ -4026,7 +4055,13 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else
         {
-            check_lower_expand(writer, task);
+            const bool batched = !sources && !writer->scalar && !writer->track && !task.address && !task.discard &&
+                                 check_lower_batch_expression(writer, task.node);
+            if (!batched)
+            {
+                writer->expression_nodes += 1;
+                check_lower_expand(writer, task);
+            }
         }
     }
 }
@@ -5038,6 +5073,8 @@ struct CheckLowerPart
     const char* reason;
     uint32_t final_token;
     uint64_t entries;
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
@@ -5454,6 +5491,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->runtime_count = 0;
     part->stage = CHECK_LOWER_STAGE_NONE;
     part->entries = 0;
+    writer->expression_nodes = 0;
+    writer->batch_nodes = 0;
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
@@ -5470,6 +5509,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
+        writer->batch.first = BUSTER_CHECK_NONE;
         if (sources)
         {
             writer->filled = 0;
@@ -5934,6 +5974,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->label_symbol_count = status->label_symbol_count;
     writer->label_symbol_used += status->label_symbol_count;
     part->runtime_count = writer->runtime_count;
+    part->expression_nodes = writer->expression_nodes;
+    part->batch_nodes = writer->batch_nodes;
     memcpy(part->runtimes, writer->runtimes, CHECK_LOWER_RUNTIMES);
 }
 
@@ -6000,6 +6042,8 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             written += parts[p].label_symbol_count;
         }
         lowered->entries += parts[p].entries;
+        lowered->expression_nodes += parts[p].expression_nodes;
+        lowered->batch_nodes += parts[p].batch_nodes;
         for (uint32_t i = 0; i < parts[p].runtime_count; i += 1)
         {
             const uint32_t runtime = parts[p].runtimes[i];

@@ -166,6 +166,46 @@ a block-scope static, `.compoundliteral` for a file-scope compound literal, and
 source, an identifier or an asm label, as LLVM makes a name unique in its
 module), so that tools and the comparisons below read them alike.
 
+## Straight-line expression templates (#624)
+
+`c_check_program_batch.c` handles ordinary checked expressions before the task
+loop expands them. Each lane's writer keeps one 64-node window. Byte permutes
+classify 16 operators at a time; a bounded postorder scan combines their checked
+types and operand conversions into two-slot entry templates. A node's first
+slot is its operation, constant or local/global read; its second is its consuming
+edge's conversion. Empty wrappers have no first slot.
+
+The scan proves that a subtree is contiguous, its operands are in the scalar
+loop's evaluation order, and each internal node has one consuming edge. It
+computes entry counts and the task stack room the scalar path would need before
+publishing anything. Expansion compresses up to 32 templates into the kind,
+class and value columns, advancing the output by their counts. A single leaf
+writes its entry directly. Every input load is bounded by the graph's count;
+there is no graph-sized allocation or recursive traversal.
+
+Only a popped expression can publish a template interval. Constant proofs skip
+the same operands as the scalar loop; gaps, shared or reordered operands and
+window boundaries defer to it. Calls, builtins, bit-fields, pointer arithmetic,
+short-circuit and conditional expressions, memory classes and bool normalization
+retain their existing rules. Their ordinary operands can still take templates.
+Functions that track their evaluation stack, and source-row emission for `-g`,
+keep the task loop, whose stack and source-token effects need more than these
+templates describe. `--scalar` selects that original loop for every expression.
+
+Window preparation may inspect a neighboring body's immutable checked facts,
+but never its mutable local map: another lane can own that map. Each body
+invalidates its window after assigning its own locals. Coverage is accumulated
+in each part and merged in source order, without shared counters.
+
+With `--time-stages`, `-c` and the executable driver also print
+`lowering-nodes`: evaluated expression occurrences, those handled by templates,
+and their percentage. The denominator includes repeated graph uses and excludes
+unevaluated operands and unselected definitions. `test-checker` compares every
+typed column with the task loop, including guarded partial batches, window
+edges, promoted operands, folded subtrees, shared/reordered uses, task and entry
+capacity failures and a guarded neighboring body's local map. Its source
+fixtures also compare native results and effects with Clang.
+
 ## Against clang -O0's objects
 
 clang emits no unreferenced static or inline function, even at `-O0`, nor an

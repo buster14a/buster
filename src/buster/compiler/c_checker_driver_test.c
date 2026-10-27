@@ -1823,6 +1823,12 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                                 stages[CHECK_STAGE_LANES] == 0,
                       "--time-stages -c reports every stage once, adding up to its total, its functions on one lane");
     check_test_expect(test, timed_status == 0 && check_test_driver_same_files(plain, timed), "--time-stages -c writes the object -c writes");
+    uint64_t expression_nodes = 0;
+    uint64_t batch_nodes = 0;
+    const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
+    const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
+    check_test_expect(test, counted && expression_nodes >= batch_nodes && batch_nodes != 0,
+                      "--time-stages reports the templates' nonzero share of evaluated expression occurrences");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));
