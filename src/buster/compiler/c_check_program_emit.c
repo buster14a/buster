@@ -195,7 +195,8 @@ struct CheckProgramLaneArenas
 
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
 // with the emission's link and lowering: the atoms' bytes and the functions' columns of the lanes past the first are in
-// their arenas here (check_program_lanes_release), which the next emission with it reuses.
+// their arenas here (check_program_lanes_release), which the next emission with it reuses, as it reuses the first's
+// scratch for lane 0's writer's columns (CheckEmitRun.columns).
 typedef struct CheckProgramLanes CheckProgramLanes;
 struct CheckProgramLanes
 {
@@ -291,6 +292,8 @@ struct CheckEmitLane
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // The arena of its writer's columns (check_lower_writer_begin): its scratch, but lane 0's (CheckEmitRun.columns).
+    Arena* columns;
     bool prepared;
     bool ready;
 };
@@ -316,6 +319,10 @@ struct CheckEmitRun
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // Lane 0's writer's columns, in base pages, as the other lanes' scratch is: each column has room for any of the
+    // program's bodies, of which a body touches a little at the column's start, and in the caller's scratch, whose pages
+    // past its first 64 KB are huge, each column's first touch cleared a huge page of its own (#531).
+    Arena* columns;
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
@@ -378,7 +385,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     }
     if (valid)
     {
-        const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+        // The branch columns alone, which sizing reads and writes by: Tier 0's records are valid by construction, which
+        // x86_validate checks above only with `verify` (#532).
+        const BranchSizingCheck shape = run->scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
+                                                      branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                run->scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
@@ -460,8 +470,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
-// Lane `index`'s arenas, for its first part: the caller's for lane 0, and for another lane its own, reserved the first
-// time and otherwise put back (the emission before this one's are done with). Returns false if one can't be reserved.
+// Lane `index`'s arenas, for its first part: the caller's for lane 0, but its writer's columns' (CheckEmitRun.columns),
+// and for another lane its own, reserved the first time and otherwise put back (the emission before this one's are done
+// with), its scratch its writer's columns'. Returns false if one can't be reserved.
 static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     bool valid = true;
@@ -470,6 +481,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = run->output;
         lane->scratch = run->scratch;
         lane->bytes = run->bytes;
+        lane->columns = run->columns;
     }
     else
     {
@@ -491,6 +503,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = &arenas->output;
         lane->scratch = &arenas->scratch;
         lane->bytes = &arenas->bytes;
+        lane->columns = &arenas->scratch;
     }
     return valid;
 }
@@ -499,7 +512,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
 static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     return check_program_emit_lane_arenas(run, lane, index) &&
-           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
 }
 
 // A part's failure before it lowered anything: its lane had no room for its writer.
@@ -520,22 +533,24 @@ static void check_program_emit_part_refused(CheckEmitPart* part)
 
 // The part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body): each of the
 // lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its writer, if this
-// is its first part, and works on the part; then its room comes back. Out of line, so that the lanes' loop carries none
-// of it.
+// is its first part, and works on the part; then its room comes back. Lane 0's writer's columns, an arena of their own,
+// are squeezed with its scratch. Out of line, so that the lanes' loop carries none of it.
 static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index)
 {
     CheckProgramLanes* lanes = run->lanes;
     const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
-    Arena* each[3] = { lane->output, lane->scratch, lane->bytes };
-    uint64_t capacities[3] = { 0, 0, 0 };
-    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    Arena* each[4] = { lane->output, lane->scratch, lane->bytes, lane->columns };
+    const uint32_t names[4] = { BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH, BUSTER_CHECK_EMIT_SQUEEZE_BYTES, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH };
+    const uint32_t count = arenas && lane->columns != lane->scratch ? 4 : 3;
+    uint64_t capacities[4] = { 0, 0, 0, 0 };
+    for (uint32_t i = 0; arenas && i < count; i += 1)
     {
         capacities[i] = each[i]->capacity;
-        const bool named = (lanes->squeeze_arenas & (UINT32_C(1) << i)) != 0;
+        const bool named = (lanes->squeeze_arenas & names[i]) != 0;
         each[i]->capacity = named && lanes->squeeze_room < capacities[i] - each[i]->length ? each[i]->length + lanes->squeeze_room : capacities[i];
     }
     lane->ready = lane->prepared ? lane->ready :
-                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
     lane->prepared = true;
     if (lane->ready)
     {
@@ -545,7 +560,7 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     {
         check_program_emit_part_refused(part);
     }
-    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    for (uint32_t i = 0; arenas && i < count; i += 1)
     {
         each[i]->capacity = capacities[i];
     }
@@ -689,7 +704,10 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
 }
 
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
-// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND. With
+// #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND; without
+// it, only their branch columns are checked (branch_sizing_validate_branches), which sizing needs inside each
+// function, since Tier 0's records are valid by construction and x86_validate of all of them made branch sizing take
+// 14 times the encoder's time on sqlite3.c (#532). With
 // `rows`, each source body's raw source rows too (c_check_debug.c), from `output`. With `lanes`, on up to lanes->lanes
 // lanes (above): one, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest
 // body's, but with lanes->every_lane as many as there are parts for; without, on the calling thread alone.
@@ -737,6 +755,13 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         check_program_object_access(program, access, defined);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
+    // Lane 0's writer's columns (CheckEmitRun.columns): the lanes' first arenas' scratch, as the other lanes' scratch in
+    // base pages, reserved the first time and otherwise put back; or without lanes, an arena of this emission's own.
+    Arena own_columns = { 0 };
+    Arena* columns = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
+    *columns = valid && columns->base == 0 ? arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36) : *columns;
+    arena_pop_to(columns, 0);
+    valid = valid && columns->base != 0;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
     const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
     CheckEmitRun run = {
@@ -755,6 +780,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         .output = output,
         .scratch = scratch,
         .bytes = bytes,
+        .columns = columns,
     };
     run.codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Code, count) : 0;
     run.bodies = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitBody, count) : 0;
@@ -822,6 +848,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
+            arena_pop_to(columns, 0);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
             check_program_emit_alone(&run);
         }
@@ -1285,7 +1312,8 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+                const BranchSizingCheck shape = scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
+                                                         branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
                 const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
                                        scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
@@ -1414,6 +1442,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, temporary);
+    arena_release(&own_columns);
     if (timing)
     {
         lanes->merge_ns = check_program_lanes_now() - lanes_end;
