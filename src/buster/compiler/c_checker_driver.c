@@ -1122,7 +1122,8 @@ static int run_check_command(int count, char** arguments, bool executable)
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
-        const ParseOptions parser_options = { .scalar = scalar };
+        // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528).
+        const ParseOptions parser_options = { .scalar = scalar, .scratch = &scratch };
         bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
         if (!ready || scratch.base == 0 || output_arena.base == 0)
         {
@@ -1193,7 +1194,11 @@ static int run_check_command(int count, char** arguments, bool executable)
             TypeTable types = { 0 };
             if (ready)
             {
-                type_arena = arena_reserve(type_capacity_bytes(capacity));
+                // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
+                // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
+                // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+                const uint64_t type_bytes = type_capacity_bytes(capacity);
+                type_arena = arena_reserve_small(type_bytes, type_bytes);
                 index_arena = arena_reserve(type_index_capacity_bytes(capacity));
                 ready = capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
                 if (!ready)

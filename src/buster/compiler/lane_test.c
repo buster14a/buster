@@ -441,6 +441,28 @@ static bool lane_test_arenas(void)
     const uint64_t* words = BUSTER_ARENA_PUSH_ARRAY(&small, uint64_t, (small_capacity - 16) / 8);
     lane_test_expect(&tally, words == (const uint64_t*)(small.base + 16) && small.length == 16 + (small_capacity - 16) / 8 * 8, "an array that fits was refused");
 
+    // A measuring arena takes, push for push, what an arena reserved at a page boundary takes, from a base past the user's
+    // addresses, and refuses what the capacity doesn't hold.
+    Arena measure = arena_measure();
+    Arena reserved = arena_reserve_small(8ull << 20, 8ull << 20);
+    bool alike = reserved.base != 0 && ((uintptr_t)reserved.base & (BUSTER_ARENA_PAGE_BYTES - 1)) == 0;
+    uint64_t random = 0x9e3779b97f4a7c15ull;
+    for (uint32_t i = 0; alike && i < 1000; i += 1)
+    {
+        random = random * 6364136223846793005ull + 1442695040888963407ull;
+        const uint64_t size = (random >> 33) % 3000;
+        const uint64_t alignment = 1ull << ((random >> 20) % 13);
+        const uint8_t* counted = arena_push(&measure, size, alignment);
+        const uint8_t* held = arena_push(&reserved, size, alignment);
+        // As integers: a measuring arena's addresses are in no object, so subtracting them as pointers is undefined.
+        alike = counted != 0 && held != 0 && measure.length == reserved.length &&
+                (uintptr_t)counted - (uintptr_t)measure.base == (uintptr_t)held - (uintptr_t)reserved.base;
+    }
+    lane_test_expect(&tally, alike, "a measuring arena's pushes take other room than a reserved arena's");
+    lane_test_expect(&tally, (uintptr_t)measure.base >= BUSTER_ARENA_MAX_CAPACITY && arena_push(&measure, BUSTER_ARENA_MAX_CAPACITY, 1) == 0,
+                     "a measuring arena's base is a user's address, or it takes more than its capacity");
+    arena_release(&reserved);
+
     // pop_to frees what was pushed since, and the next push gets the same memory.
     arena_pop_to(&small, 10);
     const uint8_t* again = arena_push(&small, 100, 1);
