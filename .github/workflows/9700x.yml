@@ -51,7 +51,7 @@ jobs:
   # functions it calls, as its entry names them. The plain runs took about 105 s of a pull request's 230, most of them
   # measuring code the pull request doesn't change; a change to build.sh runs every one.
   # On a push to main, whose pull request's run measured what it changes, every output but `code` is `false`: the full
-  # set took the job past its 10 minutes on every push, which then failed, having kept the 9700X from every pull
+  # set used to exceed the 10-minute budget on every push, failing while keeping the 9700X from every pull
   # request's job meanwhile. A push runs every plain benchmark (`measure` is `all`), so that main has each one's numbers
   # at every commit. The daily and dispatched runs, which skip this job, have the full set.
   # The selector is tools/ci/changes.c: the modules' sources (`changes_modules`), the plain benchmarks'
@@ -128,7 +128,7 @@ jobs:
       group: buster-9700x-service-dispatch
       labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
     # The full set of measurements takes about 13 minutes; every other run, about 4 to 7.
-    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 10 }}
+    timeout-minutes: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 25 || 20 }}
     defaults:
       run:
         shell: bash

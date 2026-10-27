@@ -1106,6 +1106,95 @@ static void check_init_finish_copy(CheckInitWalker* walker, const CheckInitCopy*
     }
 }
 
+// The type of the expression from `begin` to `end` that an inferring walk (check_initializer_infer_array, before the
+// expressions are checked) reads from the tree, at the expression's root, the one token whose parent is outside it: an
+// identifier's declared type, a compound literal's (at its opening parenthesis), the third operand's of a ?:, a
+// parenthesized expression's, and a call's result where it calls a function by its name. 0 for another expression,
+// which the caller leaves to the last typed token in it. A compound literal's own tokens (a member's value) don't count:
+// `(struct L){ .target = n }` is a struct L, not n's type. One pass over the expression gives each of its nodes its first
+// and last children and its opening bracket, and the walk follows them down from the root, so that it reads each token
+// once however deeply the expression nests (#480's review: a rescan of the range at each level was quadratic).
+static TypeId check_init_root_type(CheckInitWalker* walker, uint32_t begin, uint32_t end)
+{
+    const Parser* parser = walker->parser;
+    const TypeId* types = walker->expression_types;
+    TypeId result = 0;
+    const bool valid = types != 0 && begin < end && end <= parser->tokens.count;
+    const uint32_t count = valid ? end - begin : 0;
+    const uint64_t mark = walker->scratch->length;
+    uint32_t* links = valid ? arena_push_array(walker->scratch, (uint64_t)count * 3, sizeof(uint32_t), 4) : 0;
+    uint32_t* first = links;
+    uint32_t* last = links != 0 ? links + count : 0;
+    uint32_t* opener = links != 0 ? links + 2 * (uint64_t)count : 0;
+    uint32_t root = BUSTER_CHECK_NONE;
+    uint32_t roots = 0;
+    if (valid && links == 0)
+    {
+        check_init_fail(walker, CHECK_INIT_RESOURCE, begin);
+    }
+    else if (links != 0)
+    {
+        memset(links, 0xff, (uint64_t)count * 3 * sizeof(uint32_t));
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            const uint32_t parent = parser->tree.parents[token];
+            const uint8_t role = parser->tree.roles[token];
+            if (parent < begin || parent >= end)
+            {
+                root = token;
+                roots += 1;
+            }
+            else
+            {
+                const uint32_t slot = parent - begin;
+                first[slot] = first[slot] == BUSTER_CHECK_NONE ? token : first[slot];
+                last[slot] = token;
+                opener[slot] = role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_OPEN_COMPOUND ? token : opener[slot];
+            }
+        }
+    }
+    bool descending = roots == 1;
+    while (descending)
+    {
+        const uint8_t role = parser->tree.roles[root];
+        const uint32_t slot = root - begin;
+        const uint32_t open = opener[slot];
+        descending = false;
+        if (role == PARSE_ROLE_OPERAND && parser->tokens.kinds[root] == PARSE_KIND_IDENTIFIER)
+        {
+            result = types[root];
+        }
+        else if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY && first[slot] != BUSTER_CHECK_NONE)
+        {
+            // Its `(`, whose `)` is the body's first child.
+            const uint32_t literal = opener[first[slot] - begin];
+            result = literal != BUSTER_CHECK_NONE && parser->tree.roles[literal] == PARSE_ROLE_OPEN_COMPOUND ? types[literal] : 0;
+        }
+        else if (role == PARSE_ROLE_CLOSE_TERNARY && last[slot] != BUSTER_CHECK_NONE && last[slot] > root)
+        {
+            // The third operand's root, the last child.
+            root = last[slot];
+            descending = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_GROUP && open != BUSTER_CHECK_NONE && parser->tree.roles[open] == PARSE_ROLE_OPEN_GROUP &&
+                 last[slot] != BUSTER_CHECK_NONE && last[slot] > open)
+        {
+            root = last[slot];
+            descending = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_CALL && open != BUSTER_CHECK_NONE && parser->tree.roles[open] == PARSE_ROLE_OPEN_CALL &&
+                 first[slot] + 1 == open && parser->tree.roles[first[slot]] == PARSE_ROLE_OPERAND && parser->tokens.kinds[first[slot]] == PARSE_KIND_IDENTIFIER)
+        {
+            const uint32_t name = first[slot];
+            TypeId callee = types[name] != 0 ? type_strip_aligned(walker->types, types[name]) : 0;
+            callee = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(walker->types, type_element(walker->types, callee)) : callee;
+            result = callee != 0 && type_kind(walker->types, callee) == BUSTER_TYPE_KIND_FUNCTION ? type_return(walker->types, callee) : 0;
+        }
+    }
+    arena_pop_to(walker->scratch, mark);
+    return result;
+}
+
 static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
@@ -1119,7 +1208,9 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
     if (!whole && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
     {
         TypeId source = node != BUSTER_CHECK_NONE ? walker->stream->values[node].type : 0;
-        if (walker->infer && walker->expression_types != 0)
+        const TypeId root = walker->infer ? check_init_root_type(walker, begin, end) : 0;
+        source = root != 0 ? root : source;
+        if (walker->infer && walker->expression_types != 0 && root == 0)
         {
             for (uint32_t token = begin; token < end; token += 1)
             {

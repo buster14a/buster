@@ -806,8 +806,10 @@ designs and the compilers already built this way.
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
   #87), into the exact path's link; the command runs at most a lane per CPU it
-  may run on, and `--time` reports the lanes and the resolution's, the
-  conversion's and the writer's phases.
+  may run on, on one team of threads it starts once its options are valid
+  and its resolution, conversion and write share (#501), and `--time` reports
+  the lanes, the team's start and the resolution's, the conversion's and the
+  writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`
@@ -1975,8 +1977,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - a lane that makes itself a group of one and rejoins, and the scratch arenas;
 - command-owned teams: stable worker identities across repeated operations
   and changing active counts, exact participation, shared-write visibility,
-  per-operation worker scratch cleanup, caller context restoration, one-lane
-  operation, invalid/nested dispatch and startup failure cleanup;
+  per-operation worker scratch cleanup (or with `lane_team_keep_scratch` the
+  same arenas, emptied, from one operation to the next, and unmapped when the
+  team stops), caller context restoration, one-lane operation, invalid/nested
+  dispatch and startup failure cleanup;
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
@@ -4540,6 +4544,11 @@ its compiled runs) checks
   arrays of large records among the types, which wait in the levels for the
   types their alignment reads), which a world without `_Atomic`s of types of
   no size checks, its levels ordered by the waits alone;
+- GCC's bit-fields, whatever `--seed` says: the rule on fixed fields, then
+  GCC's worlds (the record runs' and the compiled run's) from the fixed seeds
+  1 to 16, which must hold no bit-field aligned below its type's, where GCC and
+  clang lay one out apart, and clang's worlds from the same seeds, which must
+  hold some;
 - assignment: random calls over a world's types, named and variadic, by both
   paths, which must give the same locations and totals, also with the columns
   ending at a `PROT_NONE` page; and calls of 65,542 `long`s and of 32,767 and

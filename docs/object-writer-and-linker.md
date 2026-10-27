@@ -4449,12 +4449,22 @@ calling its entry or starting replacement threads. `lane_alone` does not
 permit nesting. The entry's shared writes are visible when `lane_run` returns;
 each worker releases its scratch arenas after the operation, while the
 calling thread keeps its scratch and gets its prior lane context, counter and
-CPU affinity back. Dispatch/completion synchronization is separate from the
-barriers inside an operation.
+CPU affinity back. A command whose operations follow one another can have its
+workers keep their arenas instead (`lane_team_keep_scratch`), emptied after
+each operation and released when the team stops: `link-foreign` does (#501),
+where it measured 2.5% off its small links on eight lanes and 0.7% off a
+102,400-worker one (each link's 14 reservations and unmappings fewer, and 28
+to 47 page faults), for up to 1.9 MB more peak resident memory ([the
+record](https://github.com/buster14a/buster-performance/tree/21cbae65445094687ccbef371942deed2cd6a651/docs/measurements/link-foreign-team-501-2026-10-26)). The benchmarks'
+teams release them, so that each operation pays for its scratch as a command
+does. Dispatch/completion synchronization is separate from the barriers inside
+an operation.
 
-`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link` and the
-output modes of `benchmark-executable` own teams. Each handler starts and
-stops its team in the translation unit that runs the operations: the
+`benchmark-files`, `test-files`, `benchmark-foreign`, `benchmark-link`, the
+output modes of `benchmark-executable` and `link-foreign` own teams:
+`link-foreign`'s resolution, conversion and write share one (#501). Each
+handler starts and stops its team in the translation unit that runs the
+operations: the
 benchmarks' units have thread-local contexts of their own, beside the one
 that `main.c`'s units share (`lane.c`). The ordinary
 preprocess/parse command still runs on one lane; the broader frontend work is

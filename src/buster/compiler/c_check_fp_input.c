@@ -4,9 +4,12 @@
 // Retain source-ordered floating environment and complex range settings. A setting at the beginning of a
 // compound statement ends with that compound; file settings persist. The optional graph column carries runtime
 // floating policy. Complex range is a permission to relax evaluation, so retaining full-range actions is valid.
+// FP_CONTRACT is one too, to contract a * b + c into one fused operation, which nothing here does: its records keep
+// its state (environment, 1 for ON) and change no column.
 
 #define CHECK_FP_PRAGMA_FENV_ACCESS 0
 #define CHECK_FP_PRAGMA_CX_LIMITED_RANGE 1
+#define CHECK_FP_PRAGMA_FP_CONTRACT 2
 #define CHECK_FP_PRAGMA_UNKNOWN_STATE 0x01
 #define CHECK_FP_PRAGMA_EXTRA_TOKENS 0x02
 #define CHECK_FP_PRAGMA_INVALID_PLACEMENT 0x04
@@ -45,7 +48,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
     {
         const uint32_t source = parser->tokens.pragma_sources[pragma];
         count += check_input_fp_name(reader, source + 2, "STDC") &&
-                 (check_input_fp_name(reader, source + 3, "FENV_ACCESS") || check_input_fp_name(reader, source + 3, "CX_LIMITED_RANGE"));
+                 (check_input_fp_name(reader, source + 3, "FENV_ACCESS") || check_input_fp_name(reader, source + 3, "CX_LIMITED_RANGE") ||
+                  check_input_fp_name(reader, source + 3, "FP_CONTRACT"));
     }
     typedef struct CheckFpScope CheckFpScope;
     struct CheckFpScope
@@ -82,7 +86,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
             {
                 const uint32_t source = parser->tokens.pragma_sources[pragma];
                 const bool complex = check_input_fp_name(reader, source + 3, "CX_LIMITED_RANGE");
-                if (check_input_fp_name(reader, source + 2, "STDC") && (complex || check_input_fp_name(reader, source + 3, "FENV_ACCESS")))
+                const bool contract = check_input_fp_name(reader, source + 3, "FP_CONTRACT");
+                if (check_input_fp_name(reader, source + 2, "STDC") && (complex || contract || check_input_fp_name(reader, source + 3, "FENV_ACCESS")))
                 {
                     uint32_t end = source;
                     const bool directive = parse_pragma_at(&reader->pp->output, source, &end);
@@ -97,7 +102,7 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                     {
                         complex_range = on;
                     }
-                    else if (accepted && recognized)
+                    else if (accepted && recognized && !contract)
                     {
                         environment = on ? BUSTER_CHECK_FP_ENV_ACCESS : 0;
                     }
@@ -109,8 +114,8 @@ static bool check_input_fp_pragmas(CheckInputReader* reader, uint8_t* handled)
                         .token = token,
                         .scope = depth != 0 ? scopes[depth - 1].opening : BUSTER_CHECK_NONE,
                         .scope_end = depth != 0 ? scopes[depth - 1].closing + 1 : parser->tokens.count,
-                        .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : CHECK_FP_PRAGMA_FENV_ACCESS,
-                        .environment = complex ? complex_range : environment,
+                        .kind = complex ? CHECK_FP_PRAGMA_CX_LIMITED_RANGE : contract ? CHECK_FP_PRAGMA_FP_CONTRACT : CHECK_FP_PRAGMA_FENV_ACCESS,
+                        .environment = complex ? complex_range : contract ? (uint8_t)on : environment,
                         .warnings = !recognized ? CHECK_FP_PRAGMA_UNKNOWN_STATE : end != source + 5 ? CHECK_FP_PRAGMA_EXTRA_TOKENS : 0,
                         .valid = accepted,
                     };
