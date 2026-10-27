@@ -22,10 +22,15 @@
 //   - identities: a hard link replaced by a copy of its bytes, which #pragma once takes again; clang's __TIMESTAMP__,
 //     SOURCE_DATE_EPOCH's, its files' times changed and its entry taken; __DATE__, and __TIME__ pasted from two halves
 //     in a header in no root and on standard input, none kept without SOURCE_DATE_EPOCH and each with it; a header in
-//     no root checked by its identity;
+//     no root checked by its bytes: written anew with the same bytes taken, with other bytes, and rewritten in place
+//     with other bytes of the same size, run again; its extended attribute, and a missing path's directory's, each run
+//     again (where the file system has user attributes);
 //   - tracing (traced sh): a file a child process read and a path a test found absent, each run again when it
 //     changes; two runs at once, finished in the other order; clang's __TIMESTAMP__ following SOURCE_DATE_EPOCH and
-//     sh's not, whose run of `stat` has its file's time in its entry;
+//     sh's not, whose run of `stat` has its file's time in its entry; a file given the epoch's time
+//     (oracle_epoch_file), written anew with its bytes, taken once given it again;
+//   - variants (traced sh): a file with other bytes for each run of one key, each state's entry taken in turn; past
+//     BUSTER_ORACLE_VARIANTS states, the key's oldest entry removed and the others taken;
 //   - permissions (traced sh): a directory's mode, which `test -x` reads, and a script's in a root made 0644 from
 //     0755, each run again when they change; and as root, a file's owner;
 //   - the kernel's paths: the path rule's answers for 42 paths, followed to their ends and not (a root under /usr among
@@ -41,7 +46,7 @@
 //     they would write later aren't); the limit on the monotonic clock, with a pidfd and without one; a run kept
 //     without a limit, killed at a limit given later;
 //   - check mode: an entry made stale (by a file its key doesn't have) fails the run and is written again; an entry
-//     whose run read other bytes isn't stale;
+//     whose run read other bytes isn't stale; of a key's two entries, the one the run would have taken is checked;
 //   - damaged entries: a changed magic, key, body length, root or dependency count, an unknown flag, one cut short, cut
 //     inside its header or one byte longer, run again and written whole;
 //   - modes: off, a mode that names none, and no directory keep nothing;
@@ -256,6 +261,15 @@ static bool oracle_test_write_text(const char* directory, const char* name, cons
     return oracle_test_write(path, text, strlen(text));
 }
 
+// oracle_test_write_text, the file then given SOURCE_DATE_EPOCH's time (oracle_epoch_file), as a test gives the files
+// of a tool whose entries have their files' times (sh's): written anew with the same bytes, it is as it was.
+static bool oracle_test_write_epoch(const char* directory, const char* name, const char* text)
+{
+    char path[BUSTER_ORACLE_PATH_BYTES];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    return oracle_test_write(path, text, strlen(text)) && oracle_epoch_file(path);
+}
+
 // A file's bytes, malloc's with a NUL after them (null if it can't be read), and their length.
 static char* oracle_test_read(const char* path, uint64_t* length)
 {
@@ -278,7 +292,20 @@ static void oracle_test_open(OracleTest* test, OracleCache* cache, const char* m
     oracle_cache_open(cache, mode, base);
 }
 
-// The files in a cache's directory, and of them those that aren't entries' names (64 hex digits).
+// Whether `name` is a digest's, 64 hex digits, as the cache names its keys' directories and their entries.
+static bool oracle_test_hex_name(const char* name)
+{
+    bool result = strlen(name) == 2 * BUSTER_ORACLE_KEY_BYTES;
+    for (uint32_t i = 0; result && i < 2 * BUSTER_ORACLE_KEY_BYTES; i += 1)
+    {
+        const char c = name[i];
+        result = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    }
+    return result;
+}
+
+// The entries in a cache's directory, the files in its keys' directories, and of what it and they hold, what isn't a
+// key's directory or an entry named as a digest (a file an entry's writing left beside the entries).
 static void oracle_test_count(const OracleCache* cache, uint32_t* files, uint32_t* others)
 {
     *files = 0;
@@ -287,14 +314,20 @@ static void oracle_test_count(const OracleCache* cache, uint32_t* files, uint32_
     for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
     {
         const bool own = strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0;
-        bool hex = strlen(entry->d_name) == 2 * BUSTER_ORACLE_KEY_BYTES;
-        for (uint32_t i = 0; hex && i < 2 * BUSTER_ORACLE_KEY_BYTES; i += 1)
+        char path[BUSTER_ORACLE_PATH_BYTES + 80];
+        snprintf(path, sizeof(path), "%s/%s", cache->directory, entry->d_name);
+        DIR* key = !own && oracle_test_hex_name(entry->d_name) ? opendir(path) : 0;
+        *others += !own && key == 0;
+        for (struct dirent* inner = key != 0 ? readdir(key) : 0; inner != 0; inner = readdir(key))
         {
-            const char c = entry->d_name[i];
-            hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            const bool dots = strcmp(inner->d_name, ".") == 0 || strcmp(inner->d_name, "..") == 0;
+            *files += !dots;
+            *others += !dots && !oracle_test_hex_name(inner->d_name);
         }
-        *files += !own;
-        *others += !own && !hex;
+        if (key != 0)
+        {
+            closedir(key);
+        }
     }
     if (directory != 0)
     {
@@ -507,6 +540,25 @@ static void oracle_test_unlink(const char* directory, const char* name)
 
 // Removes the files of `base`/`relative` (or `base` itself) and then each directory of `relative`, deepest first (the
 // tests' own trees, whose directories hold files alone).
+// Removes the files in the directory `path`.
+static void oracle_test_empty(const char* path)
+{
+    DIR* directory = opendir(path);
+    for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
+    {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        {
+            unlinkat(dirfd(directory), entry->d_name, 0);
+        }
+    }
+    if (directory != 0)
+    {
+        closedir(directory);
+    }
+}
+
+// Removes `relative` under `base`, its files, and the directories in it with their files (a cache's keys, each a
+// directory of entries), then each directory of `relative` that is left empty.
 static void oracle_test_remove(const char* base, const char* relative)
 {
     char path[BUSTER_ORACLE_PATH_BYTES];
@@ -514,11 +566,12 @@ static void oracle_test_remove(const char* base, const char* relative)
     DIR* directory = opendir(path);
     for (struct dirent* entry = directory != 0 ? readdir(directory) : 0; entry != 0; entry = readdir(directory))
     {
-        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0)
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0 && unlinkat(dirfd(directory), entry->d_name, 0) != 0)
         {
-            char file[BUSTER_ORACLE_PATH_BYTES + 256];
-            snprintf(file, sizeof(file), "%s/%s", path, entry->d_name);
-            unlink(file);
+            char inner[BUSTER_ORACLE_PATH_BYTES + 256];
+            snprintf(inner, sizeof(inner), "%s/%s", path, entry->d_name);
+            oracle_test_empty(inner);
+            rmdir(inner);
         }
     }
     if (directory != 0)
@@ -641,9 +694,11 @@ static void oracle_test_dependencies(OracleTest* test)
     oracle_cache_close(&cache);
 }
 
+static bool oracle_test_traced(OracleCache* cache, const char* script, const char* directory, bool taken, const char* output);
+
 // What a run reads of its files besides their bytes: which of them are one file (a hard link, which #pragma once takes
-// once), its time macros, which only SOURCE_DATE_EPOCH makes keepable, however its sources spell them, and the files'
-// identities outside its roots.
+// once), its time macros, which only SOURCE_DATE_EPOCH makes keepable, however its sources spell them, the bytes of the
+// files outside its roots, which a rewrite with the same bytes keeps, and their extended attributes.
 static void oracle_test_identities(OracleTest* test)
 {
     OracleCache cache;
@@ -732,23 +787,68 @@ static void oracle_test_identities(OracleTest* test)
     }
     free(kept);
     oracle_test_expect(test, dated, "identities: __DATE__ and __TIME__ pasted, in no root and on standard input, kept with SOURCE_DATE_EPOCH alone");
-    // A dependency in no root (a directory whose name isn't mkdtemp's) is checked by its identity: rewritten, even with
-    // its own bytes, it is another file.
+    // A dependency in no root (a directory whose name isn't mkdtemp's) is checked by its bytes, as a fetched corpus's
+    // files are, which a fetch writes anew: written anew with the bytes it had, it is the same file.
     char* identified[] = { "clang", "-fsyntax-only", "-fno-color-diagnostics", option, "fixed.c", 0 };
     bool identity = ready;
     for (uint32_t i = 0; i < 5; i += 1)
     {
-        // Kept, taken, rewritten with other bytes (run), with the same bytes (run), and taken.
-        const bool rewrite = i == 2 || i == 3;
-        identity &= !rewrite || oracle_test_write_text(fixed, "fixed.h", "int fixed2;\n");
+        // Kept, taken, written with other bytes (run), with those bytes again (taken), and with the first (taken).
+        const char* written = i == 2 || i == 3 ? "int fixed2;\n" : "int fixed;\n";
+        identity &= i < 2 || oracle_test_write_text(fixed, "fixed.h", written);
         OracleRun run = { .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
-        identity &= oracle_run(&run) && run.status == 0 && run.taken == (i == 1 || i == 4);
+        identity &= oracle_run(&run) && run.status == 0 && run.taken == (i != 0 && i != 2);
         oracle_run_release(&run);
+    }
+    oracle_test_expect(test, identity, "identities: a dependency in no root, by its bytes: written anew with the same bytes taken, with others run");
+    // Rewritten in place with other bytes of the same size, the same file (its inode) with another identity (its time
+    // set apart, whatever the clock's grain): run again.
+    char rewritten_path[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(rewritten_path, sizeof(rewritten_path), "%s/fixed.h", fixed);
+    const struct timespec apart[2] = {
+        { .tv_sec = 1000000000 },
+        { .tv_sec = 1000000000 },
+    };
+    bool rewritten = oracle_test_write_text(fixed, "fixed.h", "int fixeD;\n") && utimensat(AT_FDCWD, rewritten_path, apart, 0) == 0;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
+        rewritten &= oracle_run(&run) && run.status == 0 && run.taken == (i == 1);
+        oracle_run_release(&run);
+    }
+    oracle_test_expect(test, rewritten, "identities: a dependency in no root rewritten in place with other bytes, run again");
+    // Its extended attributes, which access and open read (an ACL is one), and those of the directory of a path that
+    // isn't there, which no call looks at itself (traced sh): each changed, the run runs again. A file system without
+    // user attributes (ENOTSUP, or EPERM) leaves the check out.
+    char header[BUSTER_ORACLE_PATH_BYTES + 16];
+    char attributed_directory[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(header, sizeof(header), "%s/fixed.h", fixed);
+    snprintf(attributed_directory, sizeof(attributed_directory), "%s/attributed", directory);
+    const bool attributes = setxattr(header, "user.oracle", "1", 1, 0) == 0;
+    if (attributes)
+    {
+        bool attributed = true;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            OracleRun run = { .cache = &cache, .purpose = "oracle test: identity", .arguments = identified, .directory = directory, .dependencies = true };
+            attributed &= oracle_run(&run) && run.status == 0 && run.taken == (i == 1);
+            oracle_run_release(&run);
+        }
+        removexattr(header, "user.oracle");
+        static const char looked[] = "if test -e \"$1/attributed/x\"; then echo there; else echo absent; fi";
+        attributed &= (mkdir(attributed_directory, 0700) == 0 || errno == EEXIST) && oracle_test_traced(&cache, looked, directory, false, "absent\n") &&
+                      oracle_test_traced(&cache, looked, directory, true, "absent\n") && setxattr(attributed_directory, "user.oracle", "1", 1, 0) == 0 &&
+                      oracle_test_traced(&cache, looked, directory, false, "absent\n") && oracle_test_traced(&cache, looked, directory, true, "absent\n");
+        rmdir(attributed_directory);
+        oracle_test_expect(test, attributed, "identities: a dependency's extended attribute, and a missing path's directory's, each run again");
+    }
+    else
+    {
+        printf("oracle cache: no user extended attributes in %s (%s), so they aren't checked\n", fixed, strerror(errno));
     }
     oracle_test_unlink(fixed, "fixed.h");
     oracle_test_unlink(fixed, "pasted.h");
     rmdir(fixed);
-    oracle_test_expect(test, identity, "identities: a dependency in no root, checked by its identity, a rewrite another file");
     oracle_cache_close(&cache);
 }
 
@@ -825,6 +925,92 @@ static void oracle_test_tracing(OracleTest* test)
                        oracle_test_traced(&cache, stat_script, directory, false, "946684800\n") && oracle_test_traced(&cache, stat_script, directory, true, "946684800\n") &&
                        utimensat(AT_FDCWD, stamped, later, 0) == 0 && oracle_test_traced(&cache, stat_script, directory, false, "978307200\n");
     oracle_test_expect(test, clocks && times, "tracing: clang's __TIMESTAMP__ follows SOURCE_DATE_EPOCH, sh's doesn't, and its entries have its files' times");
+    // A file given the epoch's time (oracle_epoch_file), as a test gives the sources of such a tool: written anew with
+    // the same bytes, it runs again, and given the epoch's time again, it takes its entry.
+    const char* epoch = getenv("SOURCE_DATE_EPOCH");
+    static const char cat_script[] = "cat \"$1/time.txt\"";
+    struct stat settled;
+    bool epoched = epoch != 0 && oracle_test_write_text(directory, "time.txt", "same\n") && oracle_epoch_file(stamped) && stat(stamped, &settled) == 0 &&
+                   (long long)settled.st_mtim.tv_sec == strtoll(epoch, 0, 10) && oracle_test_traced(&cache, cat_script, directory, false, "same\n");
+    epoched &= oracle_test_write_text(directory, "time.txt", "same\n") && oracle_test_traced(&cache, cat_script, directory, false, "same\n");
+    epoched &= oracle_epoch_file(stamped) && oracle_test_traced(&cache, cat_script, directory, true, "same\n");
+    oracle_test_expect(test, epoched, "tracing: a file given SOURCE_DATE_EPOCH's time, written anew with its bytes, taken once given it again");
+    oracle_cache_close(&cache);
+}
+
+// --- Variants ---
+
+// The entries in a key's `directory` (its files named as digests): how many there are, and with `age`, the one that
+// hasn't been given an age yet (its time is past a billion seconds, as now is) given `age` seconds, so that the entries
+// are as old as their places in the order the test wrote them. False if `age` finds no such entry, or more than one.
+static bool oracle_test_ages(const char* directory, int64_t age, uint32_t* count)
+{
+    DIR* listing = opendir(directory);
+    uint32_t aged = 0;
+    *count = 0;
+    for (struct dirent* name = listing != 0 ? readdir(listing) : 0; name != 0; name = readdir(listing))
+    {
+        struct stat status;
+        if (oracle_digest_named(name->d_name) && fstatat(dirfd(listing), name->d_name, &status, 0) == 0)
+        {
+            *count += 1;
+            const struct timespec times[2] = {
+                { .tv_sec = age },
+                { .tv_sec = age },
+            };
+            const bool unaged = status.st_mtim.tv_sec > 1000000000;
+            aged += age != 0 && unaged && utimensat(dirfd(listing), name->d_name, times, 0) == 0;
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return listing != 0 && (age == 0 || aged == 1);
+}
+
+// One key's entries, an entry for each state its runs found (traced sh reading a file a test writes anew with other
+// bytes for each run, with the same arguments): each state's entry taken in turn; and past BUSTER_ORACLE_VARIANTS
+// states, each entry older than the next, the oldest removed and the others taken.
+static void oracle_test_variants(OracleTest* test)
+{
+    OracleCache cache;
+    oracle_test_open(test, &cache, "use", "variants");
+    const char* directory = test->runs[0];
+    static const char script[] = "cat \"$1/variant.txt\"";
+    bool turns = true;
+    for (uint32_t i = 0; i < 6; i += 1)
+    {
+        // a and b, each run, then a, b, a and b, each taken.
+        const char* text = i % 2 == 0 ? "a\n" : "b\n";
+        turns &= oracle_test_write_epoch(directory, "variant.txt", text) && oracle_test_traced(&cache, script, directory, i >= 2, text);
+    }
+    oracle_test_expect(test, turns, "variants: a file with other bytes for each run, each state's entry taken in turn");
+    char* arguments[] = { "sh", "-c", "cat \"$1/trim.txt\"", "sh", (char*)directory, 0 };
+    char key_directory[BUSTER_ORACLE_PATH_BYTES + 80];
+    bool trimmed = true;
+    uint32_t count = 0;
+    for (uint32_t i = 0; trimmed && i <= BUSTER_ORACLE_VARIANTS; i += 1)
+    {
+        char text[32];
+        snprintf(text, sizeof(text), "%u\n", i);
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: variants", .arguments = arguments, .dependencies = true };
+        trimmed = oracle_test_write_epoch(directory, "trim.txt", text) && oracle_run(&run) && !run.taken && strcmp(run.output, text) == 0;
+        oracle_key_directory(&cache, run.key, key_directory, sizeof(key_directory));
+        oracle_run_release(&run);
+        trimmed = trimmed && oracle_test_ages(key_directory, 100000 + i, &count) && count == (i < BUSTER_ORACLE_VARIANTS ? i + 1 : BUSTER_ORACLE_VARIANTS);
+    }
+    // The newest and the second oldest taken, then the oldest, removed, run.
+    const uint32_t places[3] = { BUSTER_ORACLE_VARIANTS, 1, 0 };
+    for (uint32_t t = 0; trimmed && t < 3; t += 1)
+    {
+        char text[32];
+        snprintf(text, sizeof(text), "%u\n", places[t]);
+        OracleRun run = { .cache = &cache, .purpose = "oracle test: variants", .arguments = arguments, .dependencies = true };
+        trimmed = oracle_test_write_epoch(directory, "trim.txt", text) && oracle_run(&run) && run.taken == (t != 2) && strcmp(run.output, text) == 0;
+        oracle_run_release(&run);
+    }
+    oracle_test_expect(test, trimmed, "variants: past BUSTER_ORACLE_VARIANTS, the key's oldest entry removed and the others taken");
     oracle_cache_close(&cache);
 }
 
@@ -855,6 +1041,20 @@ static void oracle_test_permissions(OracleTest* test)
     }
     chmod(searched, 0700);
     oracle_test_expect(test, searches, "permissions: a directory whose mode changes, run again");
+    // A path that isn't there, in a directory no call looks at itself, whose mode changes (an mkdir of the path reads
+    // it): the directory's mode is part of the path's state, so the run runs again, whatever root's answers are.
+    static const char beneath[] = "if test -e \"$1/locked/x\"; then echo there; else echo absent; fi";
+    char locked[BUSTER_ORACLE_PATH_BYTES + 16];
+    snprintf(locked, sizeof(locked), "%s/locked", directory);
+    bool locks = oracle_test_directory(directory, "locked");
+    for (uint32_t i = 0; locks && i < 4; i += 1)
+    {
+        // 0700 (run, taken), then 0500 (run, taken).
+        locks &= chmod(locked, i < 2 ? 0700 : 0500) == 0 && oracle_test_traced(&cache, beneath, directory, i == 1 || i == 3, "absent\n");
+    }
+    chmod(locked, 0700);
+    rmdir(locked);
+    oracle_test_expect(test, locks, "permissions: a missing path's directory whose mode changes, run again");
     static const char execute[] = "\"$1/script.sh\"; echo $?";
     bool executes = oracle_test_write_text(directory, "script.sh", "#!/bin/sh\necho ran\n");
     for (uint32_t i = 0; executes && i < 4; i += 1)
@@ -1287,6 +1487,49 @@ static void oracle_test_check(OracleTest* test)
     oracle_test_write_text(test->runs[0], "h.h", "#define X 5\n");
     const bool current = oracle_test_clang(&check, test->runs[0], main_source, &taken, &status, errors, sizeof(errors)) && !taken;
     oracle_test_expect(test, kept && current && check.counts->stale == 1, "check: an entry whose run read other bytes isn't stale");
+    // A key with two entries (traced sh, its file with other bytes): the entry checked is the one the run would have
+    // taken. Each state's run is current with its own entry; then a variable the key doesn't have changes the result
+    // of the run whose file has the first bytes, whose entry is stale.
+    char* extra[] = { "sh", "-c", "cat \"$1/variant\"; printf '%s' \"$ORACLE_TEST_EXTRA\"", "sh", test->runs[0], 0 };
+    unsetenv("ORACLE_TEST_EXTRA");
+    bool both = true;
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        // Each state's entry made in use mode, then each state's run checked.
+        OracleRun made = { .cache = i < 2 ? &use : &check, .purpose = "oracle test: check variants", .arguments = extra, .dependencies = true };
+        both &= oracle_test_write_epoch(test->runs[0], "variant", i % 2 == 0 ? "a\n" : "b\n") && oracle_run(&made) && !made.taken;
+        oracle_run_release(&made);
+    }
+    both &= check.counts->stale == 1;
+    printf("oracle cache: another entry made stale on purpose, which the next line reports:\n");
+    fflush(stdout);
+    setenv("ORACLE_TEST_EXTRA", "!", 1);
+    OracleRun first = { .cache = &check, .purpose = "oracle test: check variants", .arguments = extra, .dependencies = true };
+    const bool first_stale = oracle_test_write_epoch(test->runs[0], "variant", "a\n") && !oracle_run(&first) && first.output != 0 && strcmp(first.output, "a\n!") == 0;
+    oracle_run_release(&first);
+    unsetenv("ORACLE_TEST_EXTRA");
+    oracle_test_expect(test, both && first_stale && check.counts->stale == 2, "check: of a key's two entries, the one the run would have taken is checked");
+    // A stale entry that the run's own wouldn't replace, as a temporary file it names apart each time makes that one
+    // another variant: removed, so that the key's only entry, which the next run takes, is the run's own.
+    char* apart_arguments[] = { "sh", "-c", "t=$(mktemp \"$1/apart.XXXXXX\") && rm \"$t\"; cat \"$1/variant\"; printf '%s' \"$ORACLE_TEST_EXTRA\"", "sh", test->runs[0], 0 };
+    OracleRun apart = { .cache = &use, .purpose = "oracle test: check apart", .arguments = apart_arguments, .dependencies = true };
+    bool removed = oracle_test_write_epoch(test->runs[0], "variant", "a\n") && oracle_run(&apart) && !apart.taken && strcmp(apart.output, "a\n") == 0;
+    oracle_run_release(&apart);
+    printf("oracle cache: a third entry made stale on purpose, which the next line reports:\n");
+    fflush(stdout);
+    setenv("ORACLE_TEST_EXTRA", "!", 1);
+    apart = (OracleRun){ .cache = &check, .purpose = "oracle test: check apart", .arguments = apart_arguments, .dependencies = true };
+    removed &= !oracle_run(&apart) && apart.output != 0 && strcmp(apart.output, "a\n!") == 0;
+    oracle_run_release(&apart);
+    unsetenv("ORACLE_TEST_EXTRA");
+    char key_directory[BUSTER_ORACLE_PATH_BYTES + 80];
+    oracle_key_directory(&use, apart.key, key_directory, sizeof(key_directory));
+    uint32_t entries = 0;
+    removed &= oracle_test_ages(key_directory, 0, &entries) && entries == 1;
+    apart = (OracleRun){ .cache = &use, .purpose = "oracle test: check apart", .arguments = apart_arguments, .dependencies = true };
+    removed &= oracle_run(&apart) && apart.taken && strcmp(apart.output, "a\n!") == 0;
+    oracle_run_release(&apart);
+    oracle_test_expect(test, removed && check.counts->stale == 3, "check: a stale entry that another variant's entry wouldn't replace, removed");
     oracle_cache_close(&use);
     oracle_cache_close(&check);
 }
@@ -1322,8 +1565,10 @@ static void oracle_test_damaged(OracleTest* test)
     char* arguments[] = { "sh", "-c", "printf 'out %s\\n' \"$1\" >&2; printf 'x'", "sh", test->runs[0], 0 };
     OracleRun run;
     const bool made = oracle_test_go(&run, &cache, "oracle test: damage", arguments, 0, 0) && !run.taken;
-    char path[BUSTER_ORACLE_PATH_BYTES + 80];
-    oracle_entry_path(&cache, run.key, path, sizeof(path));
+    // The run isn't traced: its entry's variant is that of no probes.
+    char path[BUSTER_ORACLE_PATH_BYTES + 160];
+    const OracleRecords none = { 0 };
+    oracle_entry_path(&cache, run.key, oracle_entry_variant(&run, &none, 0), path, sizeof(path));
     oracle_run_release(&run);
     uint32_t key_word = 0;
     memcpy(&key_word, run.key.bytes + 4, sizeof(key_word));
@@ -1502,6 +1747,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_dependencies(&test);
         oracle_test_identities(&test);
         oracle_test_tracing(&test);
+        oracle_test_variants(&test);
         oracle_test_permissions(&test);
         oracle_test_path_rules(&test);
         oracle_test_kernel(&test);
@@ -1521,9 +1767,9 @@ static int run_oracle_cache_tests(int argc, char** argv)
     }
     oracle_epoch_end(epoch);
     static const char* const directories[] = { "runs/oracle",        "dependencies/oracle", "identities/oracle", "tracing/oracle",
-                                               "permissions/oracle", "kernel/oracle",       "changes/oracle",    "unfollowed/oracle",
-                                               "groups/oracle",      "check/oracle",        "damaged/oracle",    "writers/oracle",
-                                               "process/one/two/buster/oracle",             "" };
+                                               "variants/oracle",    "permissions/oracle",  "kernel/oracle",     "changes/oracle",
+                                               "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
+                                               "writers/oracle",     "process/one/two/buster/oracle",            "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);

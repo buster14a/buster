@@ -1726,9 +1726,9 @@ runs. A test runs a tool through it as an `OracleRun` (`oracle_run_start` and
 `oracle_run_finish`, or `oracle_run`): the tool, its arguments, environment,
 standard input and working directory, and the files it writes. Its result,
 its wait status, standard output and errors and those files' bytes, is kept
-as an entry in `oracle/` under the cache directory (the runtime snapshot's:
-`$XDG_CACHE_HOME/buster` or `$HOME/.cache/buster`), named by its key, which is
-SHA-256 of:
+as an entry in its key's directory in `oracle/` under the cache directory (the
+runtime snapshot's: `$XDG_CACHE_HOME/buster` or `$HOME/.cache/buster`). The
+key is SHA-256 of:
 
 - the kind of run, as its caller names it;
 - the tool: its path on `PATH` and what `stat` gives of the file it resolves
@@ -1752,17 +1752,19 @@ each first if the run hasn't before (`oracle_probe_look`), and lets the call
 through (`SECCOMP_USER_NOTIF_FLAG_CONTINUE`). The entry lists every path the
 run looked at, each as it was when the run first looked, before the run could
 change it:
-a file by SHA-256 of its bytes if it is in one of the run's roots (below),
-which tests write anew for each run, and otherwise by its identity (what
-`stat` gives of it, as the runtime snapshot's probes: the system's headers,
-the repository's sources and the frozen corpora keep theirs from one run to
-the next until they change); a path that isn't there, and why; a symbolic
-link and its target; a directory as one; another kind (a device node, a FIFO)
-by its kind and device number; each with the permissions of what it leads to
-(its mode's bits, owner and group, which `access` and `execve` read) and the
-kind and permissions of the directory it is in (an `mkdir` in a directory that
-isn't there yet fails, and once it is succeeds, for a path that isn't there
-either way); a directory's names where the run listed them, or needed them to
+a file by SHA-256 of its bytes (`oracle_file_digest`: a file in one of the
+run's roots (below), which tests write anew for each run, read each time, and
+any other once per process for each identity, what `stat` gives of it, which a
+write changes; so a corpus fetched anew, or a header a checkout rewrote with
+the bytes it had, is the same file); a path that isn't there, and why; a
+symbolic link and its target; a directory as one; another kind (a device
+node, a FIFO) by its kind and device number; each with the permissions of what
+it leads to (its mode's bits, owner and group, which `access` and `execve`
+read) and its extended attributes (`oracle_hash_attributes`: ACLs, security
+labels and capabilities among them), and the kind, permissions and extended
+attributes of the directory it is in (an `mkdir` in a directory that isn't
+there yet fails, and once it is succeeds, for a path that isn't there either
+way); a directory's names where the run listed them, or needed them to
 be none (`rmdir`'s, and `rename`'s target's); and which of them is the same
 file (a hard link, which `#pragma once` takes once). So every place an
 `#include`, `__has_include` or `#embed` looked for a header and found none
@@ -1788,9 +1790,8 @@ unkept (`oracle_unfollowed_calls`): one that reaches files it can't name
 (io_uring's, files opened by handle), that changes how its process resolves
 paths (`chroot`, `pivot_root`, the mount calls, `unshare`, `setns`, and
 `openat2` with resolution flags, whose `RESOLVE_IN_ROOT` reads an absolute
-name from its descriptor's directory), that reads or changes what a path's
-state doesn't hold (extended attributes, the mounts' listings), and another
-architecture's. On this
+name from its descriptor's directory), that reads or changes extended
+attributes, that lists the mounts, and another architecture's. On this
 container, the filter's stops took a `clang -E` of `<stdio.h>` from 34 ms to
 47 ms, which only a run that isn't taken pays.
 
@@ -1801,8 +1802,10 @@ header in no root, or on its standard input). With it, which the key has,
 they are the epoch's, and so is clang's `__TIMESTAMP__`; a tool whose
 `__TIMESTAMP__` doesn't follow the epoch (GCC's is the file's modification
 time), as one run of `-E -P -x c -` on it shows once per tool in a process
-(`oracle_tool_epoch`), has its rooted files' modification times in its
-entries. The tests that compare with compilers through the cache fix the
+(`oracle_tool_epoch`), has its files' modification times in its entries, and
+a test gives the files it writes for such a tool the epoch's time
+(`oracle_epoch_file`: test-calling-convention's C sides, which GCC compiles
+too). The tests that compare with compilers through the cache fix the
 epoch where it isn't set (`oracle_epoch_begin`: test-preprocessor,
 test-parser, test-checker, test-checker-asm, test-checker-driver, test-tier0,
 test-calling-convention, test-c-testsuite; test-checker-corpus fixes its
@@ -1818,19 +1821,27 @@ among the run's; an entry holds the roots it was made with, which a run that
 takes it replaces with its own, as long, in the result (an object's bytes as
 much as a text's) and in the names of what it looked at.
 
-An entry is written into a file of its own and renamed over its name, so that
-a reader sees a whole entry or none whatever runs at once.
-`BUSTER_ORACLE_CACHE` picks the mode: `use` takes an entry rather than run the
-tool and writes an entry for each run; `check` runs every one and writes it,
-and where an entry with the same inputs holds another result reports it as
-stale, which fails the run; anything else, or unset, keeps nothing (local
-runs). The 9700X job's test step uses `use` on a push and a pull request's
-run, and `check` on the daily and dispatched runs, which then remove the
-entries no test has written for two days. An entry is only as right as the run
-that wrote it: the daily check finds one a pull request's run left wrong. The
-counts of what runs did (taken, run, stale, not kept) are in shared memory,
-which the parts a test forks after it sets up the cache add to, and a test
-prints them at its end (`oracle_cache_report`).
+A key keeps up to 32 entries (`BUSTER_ORACLE_VARIANTS`), one for each state
+of what its runs looked at, each named by its variant: SHA-256 of what its run
+looked at, its roots made alike (`oracle_entry_variant`). A test that writes
+one file anew with other bytes for each of its runs, with the same arguments
+(the preprocessor's header sets' `headers.c`, Tier 0's groups'
+`program_N.c`), has one key for them all. A run takes the first of its key's
+entries whose inputs are as it finds them (`oracle_entry_find`), and writing
+one past 32 removes the key's oldest (`oracle_key_trim`). An entry is written
+into a file of its own and renamed over its name, so that a reader sees a
+whole entry or none whatever runs at once. `BUSTER_ORACLE_CACHE` picks the
+mode: `use` takes an entry rather than run the tool and writes an entry for
+each run; `check` runs every one and writes it, and where the entry it would
+have taken, found before it runs, holds another result reports it as stale,
+which fails the run; anything else, or unset, keeps nothing (local runs). The
+9700X job's test step uses `use` on a push and a pull request's run, and
+`check` on the daily and dispatched runs, which then remove the entries no
+test has written for two days, and the keys left without one. An entry is only
+as right as the run that wrote it: the daily check finds one a pull request's
+run left wrong. The counts of what runs did (taken, run, stale, not kept) are
+in shared memory, which the parts a test forks after it sets up the cache add
+to, and a test prints them at its end (`oracle_cache_report`).
 
 The tool runs in a process group of its own: what it leaves running there is
 killed when it ends, and the whole group at its time limit
@@ -1856,7 +1867,8 @@ Its users:
 - test-tier0's cross-check's compiles of each program's C and of its harness,
   each then linked with Tier 0's object (`tier0_test_compile`);
 - test-calling-convention's cross-check's compiles of the C side, each then
-  linked with ours (`abi_test_compile`, its runs sharing their directory);
+  linked with ours (`abi_test_compile`, its runs sharing their directory, its
+  sources given the epoch's time for GCC's runs);
 - test-c-testsuite's `clang -O0 -c` of each test (`c_testsuite_symbols`), but
   in `--self-test`, which turns the cache off.
 
@@ -1894,13 +1906,21 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   `__DATE__`, and `__TIME__` pasted from two halves in a header in no root and
   in a source on standard input, none kept without `SOURCE_DATE_EPOCH` and each
   with it, giving the epoch's date and time; a header in no root checked by its
-  identity (rewritten, even with its own bytes, it is another file);
+  bytes: written anew with the same bytes, taken, and with other bytes, and in
+  place with other bytes of the same size, run again; its extended attribute,
+  and a missing path's directory's, each run again (where the file system has
+  user attributes);
 - tracing (traced sh): a file a child process read and a path a test found
   absent, each run again when it changes; a file the run makes and reads back,
   taken while it isn't there and run again when it is; a file the run changes
   after it read it, not kept; two runs at once, each waiting on a file the
   other writes, finished in the other order; clang's `__TIMESTAMP__` following
   the epoch and sh's not, whose run of `stat` has its file's time in its entry;
+  a file given the epoch's time (`oracle_epoch_file`), written anew with its
+  bytes, taken once given it again;
+- variants (traced sh): a file with other bytes for each run of one key, each
+  state's entry taken in turn; past 32 states, the key's oldest entry removed
+  and the others taken;
 - permissions (traced sh): a directory's mode, which `test -x` reads, and a
   script's in a root made 0644 from 0755 with the same bytes, each run again
   when they change; and as root, a file given another owner;
@@ -1922,8 +1942,9 @@ own under `$TMPDIR` (or `/tmp`) and two of one template beside it, with
   aren't there); the limit on the monotonic clock, with a pidfd and without; a
   run kept without a limit, killed at a limit given later;
 - check mode: an entry made stale fails its run and is written again (the test
-  prints that it makes one on purpose), and one whose run read other bytes
-  isn't stale;
+  prints that it makes one on purpose), one whose run read other bytes isn't
+  stale, and of a key's two entries, the one the run would have taken is
+  checked;
 - damaged entries: another magic, key, body length, root or dependency count,
   a flag it doesn't know, cut short, cut inside its header or a byte longer,
   each run again and written whole;

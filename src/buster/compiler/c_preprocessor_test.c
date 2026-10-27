@@ -6079,7 +6079,7 @@ static bool pp_test_clang_command(const char* directory)
     bool markers;
     char ours[PATH_MAX];
     char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-command-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-command", directory);
     bool linked = false;
     int clang_count = 0;
     bool result = pp_test_write_file(path, source) && pp_parse_options(count + 1, passed, &options, &arena, &input, &written_to, &markers);
@@ -6477,7 +6477,7 @@ static uint32_t pp_test_files(int passed_count, char** passed, int file_count, c
     char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
     char ours[PATH_MAX];
     char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-search", directory);
     bool linked = false;
     int clang_count = 0;
     bool ready = with_input != 0 && file_count != 0;
@@ -6582,7 +6582,7 @@ static bool pp_test_headers(const char* directory)
     char empty[4096];
     char links[4096];
     snprintf(empty, sizeof(empty), "%s/headers-empty.c", directory);
-    snprintf(links, sizeof(links), "%s/clang-headers-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-headers", directory);
     result = result && pp_test_write_file(empty, "");
     const bool linked = result && pp_clang_fallback_links(ours, links);
     if (result && !linked)

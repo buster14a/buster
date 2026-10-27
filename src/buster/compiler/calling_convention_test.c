@@ -6356,7 +6356,9 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             snprintf(program, sizeof(program), "%s/%s_%u", directory, run.file, vector_bytes);
             snprintf(output, sizeof(output), "%s/%s_%u.out", directory, run.file, vector_bytes);
             snprintf(errors, sizeof(errors), "%s/%s_%u.err", directory, run.file, vector_bytes);
-            result = result && text.valid && type_test_write_file(source, &text);
+            // With SOURCE_DATE_EPOCH's time, which GCC's __TIMESTAMP__ doesn't follow, so that the oracle cache's entry of
+            // its compile, which has the file's time, is taken by the next run's (oracle_epoch_file).
+            result = result && text.valid && type_test_write_file(source, &text) && oracle_epoch_file(source);
             abi_test_expect(tally, result, "cross-check", "the C file can't be written");
             bool written = false;
             if (result && compiled)

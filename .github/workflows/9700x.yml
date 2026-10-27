@@ -263,7 +263,7 @@ jobs:
         # kept between runs in the runner's cache directory (BUSTER_ORACLE_CACHE, oracle_cache.c, #542), which a push
         # and a pull request's run take them from: the daily and dispatched runs take none, run every one and check each
         # entry it would have read against what the tool gives now, a stale entry failing the run, and then remove the
-        # entries that no test has written for two days.
+        # entries that no test has written for two days, and the keys' directories left without one.
         env:
           BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
         run: |
@@ -632,6 +632,7 @@ jobs:
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
+              find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
       - name: Benchmark the C lexer on the repository sources

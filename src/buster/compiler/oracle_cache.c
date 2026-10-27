@@ -2,12 +2,13 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The oracle cache (#542): the results of the clang and gcc runs that the tests compare with, kept between runs in the
-// cache directory (snapshot_directory's: $XDG_CACHE_HOME/buster, or $HOME/.cache/buster) under oracle/, an entry a file
-// named by its key. BUSTER_ORACLE_CACHE picks the mode:
-//   - `use`: a run whose entry is there, with its inputs as the entry has them, takes the entry's result rather than
-//     run the tool, and a run that runs writes its entry;
-//   - `check`: every run runs, and where its entry is there with the same inputs, the entry must hold the run's result:
-//     one that differs is stale, which fails the run (the 9700X's daily run). Every result is written;
+// cache directory (snapshot_directory's: $XDG_CACHE_HOME/buster, or $HOME/.cache/buster) under oracle/, in a directory
+// per key with an entry, a file, for each state of what the key's runs looked at (below). BUSTER_ORACLE_CACHE picks the
+// mode:
+//   - `use`: a run with an entry whose inputs are as the run finds them takes the entry's result rather than run the
+//     tool, and a run that runs writes its entry;
+//   - `check`: every run runs, and the entry it would have taken, found before it runs, must hold its result: one that
+//     differs is stale, which fails the run (the 9700X's daily run). Every result is written;
 //   - anything else, or unset: every run runs and nothing is kept (local runs).
 //
 // A test runs a tool through the cache as an OracleRun (oracle_run_start and oracle_run_finish, or oracle_run): the
@@ -27,18 +28,21 @@
 // A compiler's run (OracleRun.dependencies) is traced (--- Tracing ---): its entry holds every path its processes
 // looked at, made, removed or renamed, those they found and those they didn't, and the names of each directory they
 // listed or needed empty, each as the run found it when it first looked (oracle_probe_look, before the run could change
-// it): a file by SHA-256 of its bytes if it is in one of the run's roots and of its identity otherwise, a path that
-// isn't there as one, a directory as one, each with its permissions and its directory's kind and permissions. An entry
+// it): a file by SHA-256 of its bytes (oracle_file_digest), a path that isn't there as one, a directory as one, each
+// with its permissions and extended attributes and its directory's kind, permissions and extended attributes. An entry
 // is taken only if each of them is as it was, so that a header created where an #include, __has_include or #embed
-// looked for one, in any directory, makes the run run again. The files a run writes are its outputs, whatever was there
-// before, and a file it changes after it read it isn't kept; nor is a run that does what the tracing can't follow
-// (openat2's resolution flags, chroot, the mount calls, extended attributes: oracle_unfollowed_calls). The package
-// manager's files and the kernel's are left out (oracle_path_rule): the package database's identity stands for the
-// first, and a run that follows a process's links into the file system (/proc/self/cwd, /dev/fd/3) isn't kept; /dev's
-// other paths are kept, /dev/shm's files among them. A compiler's run is kept only if its environment sets
-// SOURCE_DATE_EPOCH (oracle_run_key), which the key has and its __DATE__ and __TIME__ follow, and clang's
-// __TIMESTAMP__; the entries of a tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their files' modification
-// times. A test that compares with compilers fixes the epoch (oracle_epoch_begin).
+// looked for one, in any directory, makes the run run again. A key keeps up to BUSTER_ORACLE_VARIANTS entries, one for
+// each state its runs found (a test that writes a file anew for each of its runs, with other bytes and the same
+// arguments, has one key for them all), and a run takes the first that is as it finds it. The files a run writes are
+// its outputs, whatever was there before, and a file it changes after it read it isn't kept; nor is a run that does
+// what the tracing can't follow (openat2's resolution flags, chroot, the mount calls, extended attributes:
+// oracle_unfollowed_calls). The package manager's files and the kernel's are left out (oracle_path_rule): the package
+// database's identity stands for the first, and a run that follows a process's links into the file system
+// (/proc/self/cwd, /dev/fd/3) isn't kept; /dev's other paths are kept, /dev/shm's files among them. A compiler's run is
+// kept only if its environment sets SOURCE_DATE_EPOCH (oracle_run_key), which the key has and its __DATE__ and __TIME__
+// follow, and clang's __TIMESTAMP__; the entries of a tool whose __TIMESTAMP__ doesn't (oracle_tool_epoch) have their
+// files' modification times. A test that compares with compilers fixes the epoch (oracle_epoch_begin), and gives the
+// files it writes for such a tool the epoch's time (oracle_epoch_file).
 //
 // A test makes its files in directories of mkdtemp's under $TMPDIR (or /tmp), whose names differ from one run to the
 // next. A root is such a name in a run's strings: $TMPDIR/NAME, NAME a run of letters, digits, '.', '_' and '-' whose
@@ -48,9 +52,11 @@
 // files it lists, by the run's root of the same place, which is as long. So a result that names the run's files names
 // the files of the run that takes it, byte for byte, in an object as in text.
 //
-// An entry is written into a file of its own beside the entries and renamed over its name, so that a reader sees a
-// whole entry or none, whatever tests write at once. The counts of what runs did are in shared memory, so that a
-// test's parts in the child processes it forks after the cache is set up add to them.
+// An entry is named by its variant, SHA-256 of what its run looked at with its roots made alike (oracle_entry_variant),
+// and written into a file of its own beside its key's entries, then renamed over its name, so that a reader sees a
+// whole entry or none, whatever tests write at once; past BUSTER_ORACLE_VARIANTS, the key's oldest go. The counts of
+// what runs did are in shared memory, so that a test's parts in the child processes it forks after the cache is set up
+// add to them.
 //
 // Test tooling outside the compile path: it hashes the files a run read and has no vector path.
 #ifndef BUSTER_ORACLE_CACHE_INCLUDED
@@ -80,6 +86,7 @@
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 
 extern char** environ;
 
@@ -95,6 +102,11 @@ extern char** environ;
 #define BUSTER_ORACLE_PROBES 65536
 // The most runs a process traces at once: a compiler's run past them runs untraced, and isn't kept.
 #define BUSTER_ORACLE_TRACED 64
+// The most entries a key keeps, each for another state of what its runs looked at: writing one past them removes the
+// key's oldest.
+#define BUSTER_ORACLE_VARIANTS 32
+// The files outside the runs' roots whose bytes' digests a process keeps (oracle_file_digest), a power of two.
+#define BUSTER_ORACLE_MEMO 8192
 // The time oracle_epoch_begin fixes for a test, the preprocessor oracle's (c_preprocessor_oracle.c's
 // BUSTER_PP_ORACLE_EPOCH).
 #define BUSTER_ORACLE_EPOCH "1792454400"
@@ -700,11 +712,27 @@ static void oracle_epoch_end(bool set)
     }
 }
 
+// Gives a file a test wrote SOURCE_DATE_EPOCH's time, where the epoch is set: for the sources of a tool whose
+// __TIMESTAMP__ is its file's modification time whatever the epoch (GCC's, oracle_tool_epoch), whose entries have their
+// files' times, so that a run of a file written anew with the same bytes takes its entry, and the tool's __TIMESTAMP__
+// is the epoch's too. False if the epoch is set and the file can't be given its time.
+static bool oracle_epoch_file(const char* path)
+{
+    const char* epoch = getenv("SOURCE_DATE_EPOCH");
+    const bool set = epoch != 0 && epoch[0] != 0 && strspn(epoch, "0123456789") == strlen(epoch);
+    const time_t seconds = set ? (time_t)strtoll(epoch, 0, 10) : 0;
+    const struct timespec times[2] = {
+        { .tv_sec = seconds },
+        { .tv_sec = seconds },
+    };
+    return !set || utimensat(AT_FDCWD, path, times, 0) == 0;
+}
+
 // A key's start: the format, the purpose and the cache's host part.
 static void oracle_hash_begin(OracleHash* hash, const OracleCache* cache, const char* purpose)
 {
     oracle_sha256_begin(hash);
-    oracle_hash_text(hash, "buster oracle 5");
+    oracle_hash_text(hash, "buster oracle 6");
     oracle_hash_text(hash, purpose);
     oracle_hash_bytes(hash, cache->host, BUSTER_ORACLE_KEY_BYTES);
 }
@@ -847,13 +875,14 @@ static void oracle_records_release(OracleRecords* records)
 // --- Runs ---
 
 // A path a traced run looked at, as it found it when it first looked (oracle_probe_look): SHA-256 of what lstat and stat
-// gave, or of a directory's names; whether it is a file in one of the run's roots, whose digest has its bytes
-// (oracle_probe_digest), which the run must not change; and the file's identity (what stat gave of it: device, inode,
-// size, modification and change times).
+// gave, or of a directory's names; whether it is a file, whose digest has its bytes (oracle_probe_digest), which the run
+// must not change, and whether that file is in one of the run's roots, whose bytes are read for every digest; and the
+// file's identity (what stat gave of it: device, inode, size, modification and change times).
 typedef struct OracleLook OracleLook;
 struct OracleLook
 {
     uint8_t state[BUSTER_ORACLE_KEY_BYTES];
+    bool file;
     bool rooted;
     int64_t identity[7];
 };
@@ -907,7 +936,8 @@ struct OracleRun
     // group), a pidfd of it (or -1), when it started, the socket its child reports on (oracle_child) and whether the
     // child said its tool couldn't start, and its captures. Traced, also its filter's listener (or -1), whether no
     // process uses the filter any more, whether the tracing missed something (a call it can't follow, a path it can't
-    // read), and the paths the run looked at, each with its first look.
+    // read), and the paths the run looked at, each with its first look. In check mode, whether it found the entry it
+    // would have taken (oracle_entry_find, before it ran), and that entry's variant.
     bool keyed;
     OracleKey key;
     OracleRoots roots;
@@ -924,6 +954,8 @@ struct OracleRun
     bool hung;
     bool untraced;
     OracleLooks looks;
+    bool checking;
+    OracleKey checked;
 };
 
 // Nanoseconds on the monotonic clock.
@@ -1162,14 +1194,34 @@ static bool oracle_run_rooted(const OracleRun* run, const char* path)
     return result;
 }
 
+// The extended attributes of what `path` leads to, into `hash`: the error listing them gave (none, or ENOTSUP for a file
+// system without them), then each name the file system lists, in its order, with its value or the error reading it
+// gave. An access ACL is one (system.posix_acl_access), which access, execve and open read beside the mode's bits; a
+// directory's default ACL another, which the files made in it take; a security label and a file's capabilities others.
+static void oracle_hash_attributes(OracleHash* hash, const char* path)
+{
+    static char names[65536];
+    static uint8_t value[65536];
+    const ssize_t length = listxattr(path, names, sizeof(names));
+    const int32_t error = length < 0 ? errno : 0;
+    oracle_hash_bytes(hash, &error, sizeof(error));
+    for (ssize_t at = 0; at < length; at += (ssize_t)strlen(names + at) + 1)
+    {
+        const ssize_t got = getxattr(path, names + at, value, sizeof(value));
+        const int32_t got_error = got < 0 ? errno : 0;
+        oracle_hash_text(hash, names + at);
+        oracle_hash_bytes(hash, &got_error, sizeof(got_error));
+        oracle_hash_bytes(hash, value, got > 0 ? (size_t)got : 0);
+    }
+}
+
 // A probe as the run finds it now, into `look`. A path ('p'): what lstat gives (none and its errno, a symbolic link and
 // its target, a directory, a file, another kind) and, through a link, what stat gives, with the permissions of what it
-// leads to (its mode's bits, its owner and group). A file is its identity, or rooted if it is in one of the run's roots
-// (through a link, if its target is), which tests write anew for each run, so that its bytes stand for it instead
-// (oracle_probe_digest); the system's headers, the repository's sources and the frozen corpora keep their identities
-// from one run to the next until they change. A directory is only one, with its permissions, as other runs may add
-// their files to it; another kind (a device node, a FIFO) is its kind and device number. A directory's names ('l'):
-// oracle_listing's. False if a link can't be read.
+// leads to (its mode's bits, its owner and group) and its extended attributes (oracle_hash_attributes). A file is its
+// bytes (oracle_probe_digest), whose identity the look keeps; rooted if it is in one of the run's roots (through a link,
+// if its target is), which tests write anew for each run. A directory is only one, with its permissions, as other runs
+// may add their files to it; another kind (a device node, a FIFO) is its kind and device number. A directory's names
+// ('l'): oracle_listing's. False if a link can't be read.
 static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLook* look)
 {
     const char kind = probe[0];
@@ -1203,17 +1255,21 @@ static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLoo
         oracle_hash_bytes(&hash, &type, 1);
         char resolved[BUSTER_ORACLE_PATH_BYTES];
         look->rooted = type == 'f' && oracle_run_rooted(run, path) && (!linked || (realpath(path, resolved) != 0 && oracle_run_rooted(run, resolved)));
-        // What access, execve and a directory's search read of whatever the path leads to: its mode's permission bits
-        // and its owner and group, which a rooted file's bytes and a directory's kind don't show.
+        // What access, execve and a directory's search read of whatever the path leads to: its mode's permission bits,
+        // its owner and group and its ACLs, which a file's bytes and a directory's kind don't show.
         const uint64_t permissions[3] = {
             (uint64_t)(status.st_mode & 07777),
             (uint64_t)status.st_uid,
             (uint64_t)status.st_gid,
         };
         oracle_hash_bytes(&hash, permissions, type != '-' ? sizeof(permissions) : 0);
-        // The directory the path is in, through links: its kind and permissions, which making, removing and renaming
-        // the path read (a path that isn't there is one whose directory may or may not be), and not its times or names,
-        // which other runs' files change.
+        if (type != '-')
+        {
+            oracle_hash_attributes(&hash, path);
+        }
+        // The directory the path is in, through links: its kind, permissions and extended attributes, which making,
+        // removing and renaming the path read (a path that isn't there is one whose directory may or may not be), and
+        // not its times or names, which other runs' files change.
         char directory[BUSTER_ORACLE_PATH_BYTES];
         const char* slash = strrchr(path, '/');
         const size_t parent = slash == 0 ? 0 : slash == path ? 1 : (size_t)(slash - path);
@@ -1228,6 +1284,10 @@ static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLoo
             container_error == 0 ? (uint64_t)container.st_gid : 0,
         };
         oracle_hash_bytes(&hash, contained, sizeof(contained));
+        if (container_error == 0)
+        {
+            oracle_hash_attributes(&hash, directory);
+        }
         if (type == 'f')
         {
             const int64_t identity[7] = {
@@ -1240,7 +1300,7 @@ static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLoo
                 (int64_t)status.st_ctim.tv_nsec,
             };
             memcpy(look->identity, identity, sizeof(identity));
-            oracle_hash_bytes(&hash, identity, look->rooted ? 0 : sizeof(identity));
+            look->file = true;
         }
         else if (type == 'o')
         {
@@ -1253,16 +1313,78 @@ static bool oracle_probe_look(const OracleRun* run, const char* probe, OracleLoo
     return result;
 }
 
-// A probe's digest from its look, into `digest`: the look's state and, for a rooted file, SHA-256 of its bytes, read
-// now, with its modification time if `times`. False if the file isn't the one the look found (the run changed it, as a
-// run that writes a file it read does) or can't be read.
+// A file outside the runs' roots whose bytes this process hashed (oracle_file_digest), by its identity.
+typedef struct OracleMemo OracleMemo;
+struct OracleMemo
+{
+    int64_t identity[7];
+    uint8_t digest[BUSTER_ORACLE_KEY_BYTES];
+    bool used;
+};
+
+// BUSTER_ORACLE_MEMO slots, each the last file hashed to it, made on first use.
+static OracleMemo* oracle_memos;
+
+// SHA-256 of the identity[2] bytes of the file open on `fd`, whose identity (oracle_probe_look's) is `identity`, into
+// `digest`. A file in one of a run's roots (`rooted`) is read every time: a test rewrites its files in place from one
+// run to the next, and the kernel's coarse clock can give a rewrite of the same size the same times. Another file's
+// digest is the one this process made the last time it read the file, if its identity is the same: a write changes the
+// size, or the modification and change times, and the files outside the roots (the repository's sources, the frozen
+// corpora, a fetched corpus) aren't written while a test runs, which writes its own into its roots. False if the file
+// can't be read.
+static bool oracle_file_digest(int fd, const int64_t* identity, bool rooted, uint8_t* digest)
+{
+    if (!rooted && oracle_memos == 0)
+    {
+        oracle_memos = calloc(BUSTER_ORACLE_MEMO, sizeof(OracleMemo));
+    }
+    uint64_t slot = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < 7; i += 1)
+    {
+        slot = (slot ^ (uint64_t)identity[i]) * 0x100000001b3ull;
+    }
+    OracleMemo* memo = !rooted && oracle_memos != 0 ? &oracle_memos[slot & (BUSTER_ORACLE_MEMO - 1)] : 0;
+    const bool known = memo != 0 && memo->used && memcmp(memo->identity, identity, sizeof(memo->identity)) == 0;
+    bool result = true;
+    if (known)
+    {
+        memcpy(digest, memo->digest, BUSTER_ORACLE_KEY_BYTES);
+    }
+    else
+    {
+        OracleHash hash;
+        oracle_sha256_begin(&hash);
+        uint64_t done = 0;
+        while (result && done < (uint64_t)identity[2])
+        {
+            uint8_t chunk[65536];
+            const ssize_t got = read(fd, chunk, sizeof(chunk));
+            result = got > 0 || (got < 0 && errno == EINTR);
+            oracle_hash_raw(&hash, chunk, got > 0 ? (size_t)got : 0);
+            done += got > 0 ? (uint64_t)got : 0;
+        }
+        const OracleKey key = oracle_hash_end(&hash);
+        memcpy(digest, key.bytes, sizeof(key.bytes));
+        if (result && memo != 0)
+        {
+            memcpy(memo->identity, identity, sizeof(memo->identity));
+            memcpy(memo->digest, key.bytes, sizeof(key.bytes));
+            memo->used = true;
+        }
+    }
+    return result;
+}
+
+// A probe's digest from its look, into `digest`: the look's state and, for a file, its size and SHA-256 of its bytes
+// (oracle_file_digest), with its modification time if `times`. False if the file isn't the one the look found (the run
+// changed it, as a run that writes a file it read does) or can't be read.
 static bool oracle_probe_digest(const char* probe, const OracleLook* look, bool times, uint8_t* digest)
 {
     OracleHash hash;
     oracle_sha256_begin(&hash);
     oracle_hash_bytes(&hash, look->state, sizeof(look->state));
     bool result = true;
-    if (look->rooted)
+    if (look->file)
     {
         const int fd = open(probe + 1, O_RDONLY | O_CLOEXEC);
         struct stat status;
@@ -1277,20 +1399,14 @@ static bool oracle_probe_digest(const char* probe, const OracleLook* look, bool 
             result ? (int64_t)status.st_ctim.tv_nsec : 0,
         };
         result = result && memcmp(identity, look->identity, sizeof(identity)) == 0;
-        oracle_hash_length(&hash, (uint64_t)identity[2]);
-        uint64_t done = 0;
-        while (result && done < (uint64_t)identity[2])
-        {
-            uint8_t chunk[65536];
-            const ssize_t got = read(fd, chunk, sizeof(chunk));
-            result = got > 0 || (got < 0 && errno == EINTR);
-            oracle_hash_raw(&hash, chunk, got > 0 ? (size_t)got : 0);
-            done += got > 0 ? (uint64_t)got : 0;
-        }
+        uint8_t bytes[BUSTER_ORACLE_KEY_BYTES] = { 0 };
+        result = result && oracle_file_digest(fd, identity, look->rooted, bytes);
         if (fd >= 0)
         {
             close(fd);
         }
+        oracle_hash_length(&hash, (uint64_t)identity[2]);
+        oracle_hash_bytes(&hash, bytes, sizeof(bytes));
         oracle_hash_bytes(&hash, look->identity + 3, times ? 2 * sizeof(int64_t) : 0);
     }
     const OracleKey key = oracle_hash_end(&hash);
@@ -1531,8 +1647,9 @@ static const OracleCall oracle_calls[] = {
 
 // The calls the filter stops that make their run unkept, as the tracing can't follow them: those that reach files it
 // can't name (io_uring's, files opened by handle), that change how their process resolves paths (chroot, pivot_root,
-// the mount calls, unshare and setns), and that read or change what a path's state doesn't hold (extended attributes,
-// statfs, the mounts' listings). Calls of another architecture, and x32's, are stopped and do the same.
+// the mount calls, unshare and setns), that read or change extended attributes (a path's state has them as the run
+// first found them, not as it reads them), and that list the mounts. Calls of another architecture, and x32's, are
+// stopped and do the same.
 static const uint32_t oracle_unfollowed_calls[] = {
     SYS_io_uring_setup,
     SYS_name_to_handle_at,
@@ -2229,6 +2346,8 @@ static void oracle_run_reset(OracleRun* run)
     run->hung = false;
     run->untraced = false;
     run->looks = (OracleLooks){ 0 };
+    run->checking = false;
+    run->checked = (OracleKey){ 0 };
 }
 
 // --- Entries ---
@@ -2275,14 +2394,51 @@ struct OracleEntry
     uint64_t errors_length;
 };
 
-static void oracle_entry_path(const OracleCache* cache, OracleKey key, char* path, size_t capacity)
+// A digest's name, its bytes in hexadecimal, into `name` (2 * BUSTER_ORACLE_KEY_BYTES + 1 bytes).
+static void oracle_digest_name(OracleKey digest, char* name)
 {
-    char name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
     for (uint32_t i = 0; i < BUSTER_ORACLE_KEY_BYTES; i += 1)
     {
-        snprintf(name + 2 * i, 3, "%02x", key.bytes[i]);
+        snprintf(name + 2 * i, 3, "%02x", digest.bytes[i]);
     }
+}
+
+// Whether `name` is a digest's (oracle_digest_name), as an entry's file is named, rather than a file that an entry's
+// writing makes beside it.
+static bool oracle_digest_named(const char* name)
+{
+    return strlen(name) == 2 * BUSTER_ORACLE_KEY_BYTES && strspn(name, "0123456789abcdef") == 2 * BUSTER_ORACLE_KEY_BYTES;
+}
+
+// The digest whose name `name` is (oracle_digest_named's).
+static OracleKey oracle_digest_parse(const char* name)
+{
+    OracleKey result = { 0 };
+    for (uint32_t i = 0; i < 2 * BUSTER_ORACLE_KEY_BYTES; i += 1)
+    {
+        const char c = name[i];
+        const uint8_t nibble = (uint8_t)(c <= '9' ? c - '0' : c - 'a' + 10);
+        result.bytes[i / 2] |= (uint8_t)(i % 2 == 0 ? nibble << 4 : nibble);
+    }
+    return result;
+}
+
+// The directory of a key's entries.
+static void oracle_key_directory(const OracleCache* cache, OracleKey key, char* path, size_t capacity)
+{
+    char name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
+    oracle_digest_name(key, name);
     snprintf(path, capacity, "%s/%s", cache->directory, name);
+}
+
+// The file of a key's entry of `variant` (oracle_entry_variant).
+static void oracle_entry_path(const OracleCache* cache, OracleKey key, OracleKey variant, char* path, size_t capacity)
+{
+    char key_name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
+    char variant_name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
+    oracle_digest_name(key, key_name);
+    oracle_digest_name(variant, variant_name);
+    snprintf(path, capacity, "%s/%s/%s", cache->directory, key_name, variant_name);
 }
 
 // A u32 or u64 at bytes[*at] if it is within `end`, *at past it.
@@ -2345,11 +2501,9 @@ static void oracle_entry_release(OracleEntry* entry)
     entry->bytes = 0;
 }
 
-// The entry of `key`, if it is there and whole: false if not.
-static bool oracle_entry_read(const OracleCache* cache, OracleKey key, OracleEntry* entry)
+// The entry of `key` in the file `path`, if it is there and whole: false if not.
+static bool oracle_entry_read(const char* path, OracleKey key, OracleEntry* entry)
 {
-    char path[BUSTER_ORACLE_PATH_BYTES + 80];
-    oracle_entry_path(cache, key, path, sizeof(path));
     *entry = (OracleEntry){ 0 };
     OracleBuffer buffer = { 0 };
     bool result = oracle_buffer_file(&buffer, path) && buffer.length >= sizeof(OracleEntryHeader);
@@ -2469,17 +2623,17 @@ static bool oracle_probe_digests(char* const* probes, const OracleLook* looks, u
     return result;
 }
 
-// Whether what the entry's run looked at is as the run finds it: its probes (as `fresh` has them, or as the paths are
-// now if it is null: oracle_probe_look and oracle_probe_digests), the entry's roots replaced by the run's. The entry fits the run
-// (oracle_entry_fits), and its flags are `fresh_flags` where `fresh` is given.
-static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, const OracleRecords* fresh, uint32_t fresh_flags)
+// Whether what the entry's run looked at is as the run finds it now: each of its probes, the entry's roots replaced by
+// the run's, looked at (oracle_probe_look) and its digest made (oracle_probe_digests) as when it was kept. The entry
+// fits the run (oracle_entry_fits).
+static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run)
 {
     const uint32_t count = entry->dependency_count;
     char** names = calloc((size_t)count + 1, sizeof(char*));
     uint8_t* stored = malloc(((size_t)count + 1) * BUSTER_ORACLE_KEY_BYTES);
-    uint8_t* now = fresh == 0 ? malloc(((size_t)count + 1) * BUSTER_ORACLE_KEY_BYTES) : 0;
-    OracleLook* looks = fresh == 0 ? calloc((size_t)count + 1, sizeof(OracleLook)) : 0;
-    bool result = names != 0 && stored != 0 && (fresh != 0 || (now != 0 && looks != 0)) && (fresh == 0 || (fresh->count == count && fresh_flags == entry->flags));
+    uint8_t* now = malloc(((size_t)count + 1) * BUSTER_ORACLE_KEY_BYTES);
+    OracleLook* looks = calloc((size_t)count + 1, sizeof(OracleLook));
+    bool result = names != 0 && stored != 0 && now != 0 && looks != 0;
     uint64_t at = entry->dependencies;
     for (uint32_t d = 0; result && d < count; d += 1)
     {
@@ -2487,18 +2641,14 @@ static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, 
         const uint8_t* digest = 0;
         result = oracle_entry_record(entry, &at, run->roots.roots, named, sizeof(named), &digest) && (named[0] == 'p' || named[0] == 'l');
         names[d] = result ? strdup(named) : 0;
-        result = result && names[d] != 0 && (fresh != 0 || oracle_probe_look(run, names[d], &looks[d]));
+        result = result && names[d] != 0 && oracle_probe_look(run, names[d], &looks[d]);
         if (result)
         {
             memcpy(stored + (size_t)d * BUSTER_ORACLE_KEY_BYTES, digest, BUSTER_ORACLE_KEY_BYTES);
         }
     }
-    for (uint32_t d = 0; result && fresh != 0 && d < count; d += 1)
-    {
-        result = strcmp(fresh->records[d].path, names[d]) == 0 && memcmp(fresh->records[d].digest, stored + (size_t)d * BUSTER_ORACLE_KEY_BYTES, BUSTER_ORACLE_KEY_BYTES) == 0;
-    }
-    result = result && (fresh != 0 || (oracle_probe_digests(names, looks, count, (entry->flags & BUSTER_ORACLE_TIMES) != 0, now) &&
-                                       memcmp(now, stored, (size_t)count * BUSTER_ORACLE_KEY_BYTES) == 0));
+    result = result && oracle_probe_digests(names, looks, count, (entry->flags & BUSTER_ORACLE_TIMES) != 0, now) &&
+             memcmp(now, stored, (size_t)count * BUSTER_ORACLE_KEY_BYTES) == 0;
     for (uint32_t d = 0; names != 0 && d < count; d += 1)
     {
         free(names[d]);
@@ -2508,6 +2658,107 @@ static bool oracle_entry_inputs(const OracleEntry* entry, const OracleRun* run, 
     free(now);
     free(looks);
     return result;
+}
+
+// An entry's variant, the name of its file among its key's entries: SHA-256 of its flags and of what its run looked at,
+// each probe with the run's roots made alike (as in its key) and its digest. A run that finds what another found writes
+// over that one's entry, and one that finds something else writes one of its own.
+static OracleKey oracle_entry_variant(const OracleRun* run, const OracleRecords* probes, uint32_t flags)
+{
+    OracleHash hash;
+    oracle_sha256_begin(&hash);
+    oracle_hash_text(&hash, "buster oracle variant 1");
+    oracle_hash_bytes(&hash, &flags, sizeof(flags));
+    for (uint32_t i = 0; i < probes->count; i += 1)
+    {
+        oracle_hash_rooted(&hash, &run->roots, probes->records[i].path);
+        oracle_hash_bytes(&hash, probes->records[i].digest, BUSTER_ORACLE_KEY_BYTES);
+    }
+    return oracle_hash_end(&hash);
+}
+
+// The entry the run would take: the first of its key's entries, in the order its directory lists them, that fits the
+// run and whose run looked at what this one finds now (oracle_entry_inputs), into `entry`, with its variant in
+// `*variant`. False if none does, with nothing in `entry` to release.
+static bool oracle_entry_find(const OracleRun* run, OracleEntry* entry, OracleKey* variant)
+{
+    char directory[BUSTER_ORACLE_PATH_BYTES + 80];
+    oracle_key_directory(run->cache, run->key, directory, sizeof(directory));
+    DIR* listing = opendir(directory);
+    bool result = false;
+    *entry = (OracleEntry){ 0 };
+    for (struct dirent* name = listing != 0 ? readdir(listing) : 0; name != 0 && !result; name = readdir(listing))
+    {
+        char path[BUSTER_ORACLE_PATH_BYTES + 160];
+        const bool named = oracle_digest_named(name->d_name) && (size_t)snprintf(path, sizeof(path), "%s/%s", directory, name->d_name) < sizeof(path);
+        result = named && oracle_entry_read(path, run->key, entry) && oracle_entry_fits(entry, run) && oracle_entry_inputs(entry, run);
+        if (result)
+        {
+            *variant = oracle_digest_parse(name->d_name);
+        }
+        else
+        {
+            oracle_entry_release(entry);
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return result;
+}
+
+// A key's entry and when it was written, for oracle_key_trim.
+typedef struct OracleAge OracleAge;
+struct OracleAge
+{
+    int64_t seconds;
+    int64_t nanoseconds;
+    char name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
+};
+
+static int oracle_compare_ages(const void* a, const void* b)
+{
+    const OracleAge* x = a;
+    const OracleAge* y = b;
+    return x->seconds != y->seconds           ? (x->seconds < y->seconds ? -1 : 1)
+           : x->nanoseconds != y->nanoseconds ? (x->nanoseconds < y->nanoseconds ? -1 : 1)
+                                              : strcmp(x->name, y->name);
+}
+
+// Removes the oldest of the entries in a key's `directory` past BUSTER_ORACLE_VARIANTS, by modification time, but the
+// one named `kept`, just written.
+static void oracle_key_trim(const char* directory, const char* kept)
+{
+    OracleAge ages[2 * BUSTER_ORACLE_VARIANTS];
+    uint32_t count = 0;
+    uint32_t entries = 0;
+    DIR* listing = opendir(directory);
+    for (struct dirent* name = listing != 0 ? readdir(listing) : 0; name != 0; name = readdir(listing))
+    {
+        struct stat status;
+        const bool entry = oracle_digest_named(name->d_name) && fstatat(dirfd(listing), name->d_name, &status, AT_SYMLINK_NOFOLLOW) == 0;
+        entries += entry;
+        if (entry && strcmp(name->d_name, kept) != 0 && count < 2 * BUSTER_ORACLE_VARIANTS)
+        {
+            ages[count] = (OracleAge){ .seconds = (int64_t)status.st_mtim.tv_sec, .nanoseconds = (int64_t)status.st_mtim.tv_nsec };
+            memcpy(ages[count].name, name->d_name, sizeof(ages[count].name));
+            count += 1;
+        }
+    }
+    if (count > 1)
+    {
+        qsort(ages, count, sizeof(OracleAge), oracle_compare_ages);
+    }
+    const uint32_t past = entries > BUSTER_ORACLE_VARIANTS ? entries - BUSTER_ORACLE_VARIANTS : 0;
+    for (uint32_t i = 0; listing != 0 && i < past && i < count; i += 1)
+    {
+        unlinkat(dirfd(listing), ages[i].name, 0);
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
 }
 
 // A file a run wrote: whether it was there after the run, and its bytes.
@@ -2564,8 +2815,9 @@ static const char* oracle_entry_differs(const OracleEntry* entry, const OracleRu
     return result;
 }
 
-// Writes the run's entry, into a file of its own renamed over its name: false if it couldn't.
-static bool oracle_entry_write(const OracleRun* run, const OracleRecords* probes, uint32_t flags, const OracleFile* files)
+// Writes the run's entry of `variant` (oracle_entry_variant) among its key's, into a file of its own renamed over its
+// name, then trims the key's (oracle_key_trim): false if it couldn't.
+static bool oracle_entry_write(const OracleRun* run, const OracleRecords* probes, uint32_t flags, const OracleFile* files, OracleKey variant)
 {
     OracleBuffer body = { 0 };
     for (uint32_t r = 0; r < run->roots.count; r += 1)
@@ -2599,13 +2851,16 @@ static bool oracle_entry_write(const OracleRun* run, const OracleRecords* probes
     };
     memcpy(header.magic, oracle_magic, sizeof(oracle_magic));
     memcpy(header.key, run->key.bytes, sizeof(run->key.bytes));
-    char path[BUSTER_ORACLE_PATH_BYTES + 80];
-    char temporary[BUSTER_ORACLE_PATH_BYTES + 160];
-    oracle_entry_path(run->cache, run->key, path, sizeof(path));
+    char directory[BUSTER_ORACLE_PATH_BYTES + 80];
+    char path[BUSTER_ORACLE_PATH_BYTES + 160];
+    char temporary[BUSTER_ORACLE_PATH_BYTES + 240];
+    oracle_key_directory(run->cache, run->key, directory, sizeof(directory));
+    oracle_entry_path(run->cache, run->key, variant, path, sizeof(path));
     static uint64_t written;
     written += 1;
     snprintf(temporary, sizeof(temporary), "%s.%ld.%llu.new", path, (long)getpid(), (unsigned long long)written);
-    const int fd = body.failed ? -1 : open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    const bool made = mkdir(directory, 0700) == 0 || errno == EEXIST;
+    const int fd = body.failed || !made ? -1 : open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     bool result = fd >= 0 && write(fd, &header, sizeof(header)) == (ssize_t)sizeof(header);
     uint64_t done = 0;
     while (result && done < body.length)
@@ -2622,6 +2877,12 @@ static bool oracle_entry_write(const OracleRun* run, const OracleRecords* probes
     if (!result && fd >= 0)
     {
         unlink(temporary);
+    }
+    if (result)
+    {
+        char name[2 * BUSTER_ORACLE_KEY_BYTES + 1];
+        oracle_digest_name(variant, name);
+        oracle_key_trim(directory, name);
     }
     free(body.bytes);
     return result;
@@ -2762,9 +3023,9 @@ static bool oracle_run_probes(OracleRun* run, bool times, OracleRecords* probes)
     return result;
 }
 
-// After a run that ran: what it looked at and wrote, and its entry written; in check mode compared first with the entry
-// there, if what that entry's run looked at is what this one did. A traced run (a compiler's) is kept only if its tracing
-// missed nothing. False if that entry is stale, with a line on the errors naming it.
+// After a run that ran: what it looked at and wrote, and its entry written (its variant's, oracle_entry_variant); in
+// check mode compared first with the entry it would have taken (OracleRun.checked). A traced run (a compiler's) is kept
+// only if its tracing missed nothing. False if that entry is stale, with a line on the errors naming it.
 static bool oracle_run_keep(OracleRun* run)
 {
     OracleRecords probes = { 0 };
@@ -2783,9 +3044,11 @@ static bool oracle_run_keep(OracleRun* run)
     }
     const char* differs = 0;
     OracleEntry entry;
-    if (keep && run->cache->mode == ORACLE_MODE_CHECK && oracle_entry_read(run->cache, run->key, &entry))
+    char checked[BUSTER_ORACLE_PATH_BYTES + 160];
+    oracle_entry_path(run->cache, run->key, run->checked, checked, sizeof(checked));
+    if (keep && run->checking && oracle_entry_read(checked, run->key, &entry))
     {
-        if (oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, &probes, flags))
+        if (oracle_entry_fits(&entry, run))
         {
             oracle_entry_root(&entry, run);
             differs = oracle_entry_differs(&entry, run, files);
@@ -2794,17 +3057,18 @@ static bool oracle_run_keep(OracleRun* run)
     }
     if (differs != 0)
     {
-        char name[BUSTER_ORACLE_PATH_BYTES + 80];
-        oracle_entry_path(run->cache, run->key, name, sizeof(name));
-        fprintf(stderr, "oracle cache: the entry %s (%s) is stale: %s differs from the run's:", name, run->purpose != 0 ? run->purpose : "", differs);
+        fprintf(stderr, "oracle cache: the entry %s (%s) is stale: %s differs from the run's:", checked, run->purpose != 0 ? run->purpose : "", differs);
         for (uint32_t a = 0; run->arguments[a] != 0; a += 1)
         {
             fprintf(stderr, " %s", run->arguments[a]);
         }
         fprintf(stderr, "%s%s\n", run->input != 0 ? " < " : "", run->input != 0 ? run->input : "");
         oracle_count(&run->cache->counts->stale);
+        // Removed: the run's own entry, written next, may be another variant, which wouldn't replace it (a temporary
+        // file named apart each time it runs, as clang's outputs are written, is among what it looked at).
+        unlink(checked);
     }
-    const bool written = keep && oracle_entry_write(run, &probes, flags, files);
+    const bool written = keep && oracle_entry_write(run, &probes, flags, files, oracle_entry_variant(run, &probes, flags));
     oracle_count(written ? &run->cache->counts->run : &run->cache->counts->unkept);
     for (uint32_t f = 0; f < run->file_count; f += 1)
     {
@@ -2814,12 +3078,14 @@ static bool oracle_run_keep(OracleRun* run)
     return differs == 0;
 }
 
-// In use mode, before a run: its entry's result, if the entry is there, fits the run and what its run looked at is as
-// it is now, with the files it writes written (true: the tool doesn't run).
+// In use mode, before a run: the result of the entry it would take (oracle_entry_find), if one of its key's entries
+// fits the run and what that entry's run looked at is as it is now, with the files it writes written (true: the tool
+// doesn't run).
 static bool oracle_run_take(OracleRun* run)
 {
     OracleEntry entry;
-    bool result = oracle_entry_read(run->cache, run->key, &entry) && oracle_entry_fits(&entry, run) && oracle_entry_inputs(&entry, run, 0, 0);
+    OracleKey variant;
+    bool result = oracle_entry_find(run, &entry, &variant);
     if (result)
     {
         oracle_entry_root(&entry, run);
@@ -2876,14 +3142,21 @@ static bool oracle_run_take(OracleRun* run)
     return result;
 }
 
-// Starts a run: in use mode takes its entry if it can (OracleRun.taken), and otherwise starts its tool, traced if it is
-// a compiler's run the cache may keep and this process traces fewer than BUSTER_ORACLE_TRACED runs (else it isn't
-// kept). False if the tool can't start; oracle_run_finish then finishes it all the same.
+// Starts a run: in use mode takes its entry if it can (OracleRun.taken), in check mode finds the entry it would have
+// taken (OracleRun.checked), and otherwise starts its tool, traced if it is a compiler's run the cache may keep and
+// this process traces fewer than BUSTER_ORACLE_TRACED runs (else it isn't kept). False if the tool can't start;
+// oracle_run_finish then finishes it all the same.
 static bool oracle_run_start(OracleRun* run)
 {
     oracle_run_reset(run);
     run->keyed = oracle_run_key(run);
     run->taken = run->keyed && run->cache->mode == ORACLE_MODE_USE && oracle_run_take(run);
+    if (run->keyed && run->cache->mode == ORACLE_MODE_CHECK)
+    {
+        OracleEntry entry;
+        run->checking = oracle_entry_find(run, &entry, &run->checked);
+        oracle_entry_release(&entry);
+    }
     oracle_traced_own();
     const bool room = oracle_traced_count < BUSTER_ORACLE_TRACED;
     if (run->taken)
