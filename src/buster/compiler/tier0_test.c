@@ -731,6 +731,8 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
+static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
+
 static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functions, Arena* arena, Tier0TestCode* code, uint64_t seed)
 {
     bool result = true;
@@ -743,6 +745,17 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         const Tier0Check check = tier0_validate(function);
         result = tier0_test_expect(tally, check.error == TIER0_OK, "streams", "seed %" PRIu64 " function %u: entry %u breaks a rule: %s", seed, f, check.node,
                                    check.rule != 0 ? check.rule : "");
+        // The validation's twins (#569): the scalar validator's verdict alike; the vector path taking the function itself;
+        // and, for every fourth program, copies changed in one place, which it may take only where the scalar validator
+        // does (tier0_validate_test.c).
+        const Tier0Check twin = tier0_validate_scalar(function);
+        result = result && tier0_test_expect(tally, twin.error == check.error && twin.node == check.node && twin.rule == check.rule, "validation",
+                                             "seed %" PRIu64 " function %u: the scalar validator says %d at %u", seed, f, twin.error, twin.node);
+        uint64_t taken[2] = { 0, 0 };
+        if (result)
+        {
+            tier0_test_scan_program(tally, function, arena, seed * 64 + f, seed % 4 == 0 ? 4 : 0, taken);
+        }
         // The entries' first records asked for (Tier0Function.entry_records); and a compile without them, which must
         // make the same code and none of them.
         Tier0Function wanted = *function;
@@ -5145,6 +5158,7 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_vector_test.c"
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
+#include "buster/compiler/tier0_validate_test.c"
 
 static int run_tier0_tests(int argc, char** argv)
 {
@@ -5263,6 +5277,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_labels(&tally);
                 tier0_test_report("labels", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_validation(&tally);
+                tier0_test_report("validation", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
