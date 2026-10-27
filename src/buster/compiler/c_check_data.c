@@ -18,8 +18,8 @@
 // bytes and scratch are distinct, disjoint caller-owned arenas. Their newly allocated suffixes must not overlap
 // inputs or Link tables; live input prefixes in either stable-address arena are permitted.
 // The byte arena owns published atom bytes and must outlive Link consumers. Scratch holds encoded writes, sorted
-// bit-range boundaries and final relocations, materialized nonzero object bytes,
-// final relocations and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
+// bit-range boundaries and final relocations, materialized nonzero object bytes
+// and a symbol bitset; its length is always restored. All type, constant, symbol, duplicate, binding and
 // capacity checks precede publication. A failed call leaves Link (including its error), symbols and byte length
 // unchanged. Empty batches accept null input arrays. Records may be partitioned into batches only when local
 // forward-reference definitions remain in the same batch or were published earlier.
@@ -507,6 +507,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                                              const SymbolId* object_symbols, uint32_t object_count, const Link* link,
                                              Arena* scratch, CheckDataPlan* plan)
 {
+    const uint64_t scratch_start = scratch->length;
     *plan = (CheckDataPlan){ 0 };
     CheckDataStatus status = CHECK_DATA_OK;
     if (!type_is_valid(types, object->type) || !type_is_complete(types, object->type))
@@ -818,6 +819,13 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         if (object->string_pool)
         {
             plan->class = type_size(types, type_element(types, base)) == 1 ? BUSTER_LINK_CLASS_STRINGS : BUSTER_LINK_CLASS_RODATA;
+        }
+        if (initializer != 0 && !initialized)
+        {
+            // Zero plans publish only size/class metadata (or a direct RODATA fill). Their encoded writes and
+            // discarded-reference state have no consumer; release them before planning the next object.
+            plan->fixups = 0;
+            arena_pop_to(scratch, scratch_start);
         }
     }
     return status;

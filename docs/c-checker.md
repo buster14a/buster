@@ -616,7 +616,8 @@ overwrites can remove earlier nonzero bytes, a backwards last-writer walk over
 sorted bit-range boundaries determines the final state; each interval is visited
 once, with scratch proportional to checked writes rather than declared storage.
 Only a surviving nonzero byte or relocation requires an object-sized scratch
-buffer. Const zero objects keep RODATA and are filled directly during publication;
+buffer. Zero plans release their unused per-write caches before the next object
+is planned. Const zero objects keep RODATA and are filled directly during publication;
 negative floating zero is classified by its encoded bytes. The byte-range scan
 has bounded AVX-512 loads and an exact scalar twin, including partial-byte tails.
 Initializer plans retain the exact selected overload candidate and object.

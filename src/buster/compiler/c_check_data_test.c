@@ -1480,6 +1480,58 @@ static void check_data_test_symbolic_zero(CheckTest* test, TypeTable* types)
     }
 }
 
+static void check_data_test_zero_batch(CheckTest* test, TypeTable* types)
+{
+    enum { COUNT = 1024 };
+    const uint64_t size = UINT64_C(1) << 30;
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, size);
+    CheckInitPart parts[2] = {
+        {
+            .kind = CHECK_INIT_CLEAR,
+            .type = array,
+            .byte_count = size,
+        },
+        {
+            .kind = CHECK_INIT_VALUE,
+            .type = BUSTER_TYPE_UCHAR,
+            .value = check_test_integer(BUSTER_TYPE_UCHAR, 0),
+        },
+    };
+    const CheckInitializer initializer = {
+        .type = array,
+        .parts = parts,
+        .count = BUSTER_ARRAY_LENGTH(parts),
+    };
+    CheckDataObject objects[COUNT] = { 0 };
+    SymbolId map[COUNT + 1] = { 0 };
+    CheckDataTestLink fixture = { 0 };
+    bool ready = check_data_test_open(&fixture, COUNT + 2);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "zero_%u", i);
+        map[i + 1] = check_data_test_symbol(&fixture.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[i + 1] != 0;
+        objects[i] = (CheckDataObject){
+            .type = array,
+            .object = i + 1,
+            .initializer = BUSTER_CHECK_NONE,
+            .initializer_plan = &initializer,
+        };
+    }
+    check_test_expect(test, ready, "zero batch fixture symbols and names");
+    if (ready)
+    {
+        CheckDataResult result = { 0 };
+        const bool emitted = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                             &fixture.bytes, &fixture.scratch, &result);
+        check_test_expect(test, emitted && result.atom_count == COUNT && result.byte_count == 0 &&
+                               fixture.bytes.length == 0 && fixture.scratch.length == 0 && link_check(&fixture.link) == LINK_ERROR_NONE,
+                          "1024 one-GiB BSS objects release unused write caches inside a 64-KiB scratch batch");
+    }
+    check_data_test_close(&fixture);
+}
+
 static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
 {
     enum { SIZE = 96, COUNT = 33 };
@@ -1566,6 +1618,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_partitions(test, types);
     check_data_test_zero_bits(test);
     check_data_test_symbolic_zero(test, types);
+    check_data_test_zero_batch(test, types);
     check_data_test_overwrite_oracle(test, types);
 }
 

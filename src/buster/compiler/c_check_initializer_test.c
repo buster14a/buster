@@ -1608,15 +1608,52 @@ static __attribute__((noinline)) void check_test_initializers(CheckTest* test, c
         "int zero_target;union ZU{int *p;long n;} reloc_zero={.p=&zero_target,.n=0};\n"
         "double negative_zero_array[2]={-0.0,0.0};\n";
     static const CheckInitExpected zero_expected[] = {
-        { .name = "explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
-        { .name = "final_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
-        { .name = "overwrite_zero", .size = 64, .class = BUSTER_LINK_CLASS_BSS },
-        { .name = "tls_explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_TBSS },
-        { .name = "tls_overwrite_zero", .size = 64, .class = BUSTER_LINK_CLASS_TBSS },
-        { .name = "const_explicit_zero", .size = 64, .class = BUSTER_LINK_CLASS_RODATA },
-        { .name = "bit_zero", .size = 4, .class = BUSTER_LINK_CLASS_BSS },
-        { .name = "reloc_zero", .size = 8, .class = BUSTER_LINK_CLASS_BSS },
-        { .name = "negative_zero_array", .bytes = { [7] = 0x80 }, .size = 16, .class = BUSTER_LINK_CLASS_DATA },
+        {
+            .name = "explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "final_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "overwrite_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "tls_explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_TBSS,
+        },
+        {
+            .name = "tls_overwrite_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_TBSS,
+        },
+        {
+            .name = "const_explicit_zero",
+            .size = 64,
+            .class = BUSTER_LINK_CLASS_RODATA,
+        },
+        {
+            .name = "bit_zero",
+            .size = 4,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "reloc_zero",
+            .size = 8,
+            .class = BUSTER_LINK_CLASS_BSS,
+        },
+        {
+            .name = "negative_zero_array",
+            .bytes = { [7] = 0x80 },
+            .size = 16,
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
     };
     check_init_test_source(test, zero_source, zero_expected, BUSTER_ARRAY_LENGTH(zero_expected), true, true, clang);
     static const char automatic[] = "int f(int x){struct S{int a,b;};struct S s={x,x+1};int a[2]={x,3};return s.a+a[0];}";
