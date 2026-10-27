@@ -1812,9 +1812,8 @@ a reader sees a whole entry or none whatever runs at once.
 tool and writes an entry for each run; `check` runs every one and writes it,
 and where an entry with the same inputs holds another result reports it as
 stale, which fails the run; anything else, or unset, keeps nothing (local
-runs). The 9700X job's test step uses `use` (a push, and a pull request's
-admitted execution, `docs/ci-9700x-admission.md`), but on the daily runs and
-the dispatches that name no pull request, which use `check` and then remove the
+runs). The 9700X job's test step uses `use` on a push and a pull request's
+run, and `check` on the daily and dispatched runs, which then remove the
 entries no test has written for two days. An entry is only as right as the run
 that wrote it: the daily check finds one a pull request's run left wrong. The
 counts of what runs did (taken, run, stale, not kept) are in shared memory,

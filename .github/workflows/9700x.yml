@@ -261,11 +261,11 @@ jobs:
         # the longest first. Each heading's report gives its CPU time beside its time, which over it shows the CPUs the
         # command kept busy. Each command has 180 s from its start. The clang and gcc runs the tests compare with are
         # kept between runs in the runner's cache directory (BUSTER_ORACLE_CACHE, oracle_cache.c, #542), which a push
-        # and a pull request's admitted execution take them from: the daily runs and the dispatches that name no pull
-        # request take none, run every one and check each entry it would have read against what the tool gives now, a
-        # stale entry failing the run, and then remove the entries that no test has written for two days.
+        # and a pull request's run take them from: the daily and dispatched runs take none, run every one and check each
+        # entry it would have read against what the tool gives now, a stale entry failing the run, and then remove the
+        # entries that no test has written for two days.
         env:
-          BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !inputs.target_pr)) && 'check' || 'use' }}
+          BUSTER_ORACLE_CACHE: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'check' || 'use' }}
         run: |
           taskset -c 0-7 ./build/compiler parallel --github --timeout 180 <<'TESTS'
           == Test the foreign inputs [8 CPUs]
