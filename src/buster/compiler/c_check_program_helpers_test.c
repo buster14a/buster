@@ -17,6 +17,17 @@ struct CheckProgramHelperExpected
     uint8_t bytes[32];
 };
 
+// A read/modify/write's effect at a load's node: its builtin, the operands it says it evaluates, its rmw bit, and what the
+// planner must make of it.
+typedef struct CheckProgramHelperRmwCase CheckProgramHelperRmwCase;
+struct CheckProgramHelperRmwCase
+{
+    CBuiltinId id;
+    uint32_t operands;
+    bool rmw;
+    CheckProgramStatus status;
+};
+
 static void check_test_program_math_helpers(CheckTest* test)
 {
     static const CBuiltinId ids[] = {
@@ -512,12 +523,28 @@ static void check_test_program_helpers(CheckTest* test)
                 }
             }
         }
+        // Only a well-formed effect, its rule's fixed arguments evaluated and its rmw bit as its operation has it, is
+        // unsupported (until the producer calls its leaf); any other is invalid.
+        static const CheckProgramHelperRmwCase rmw_cases[] = {
+            { CBUILTIN_ATOMIC_FETCH_ADD, 7, true, CHECK_PROGRAM_UNSUPPORTED },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 0, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 3, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_FETCH_ADD, 7, false, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 3, true, CHECK_PROGRAM_UNSUPPORTED },
+            { CBUILTIN_SYNC_FETCH_AND_ADD, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 63, true, CHECK_PROGRAM_UNSUPPORTED },
+            { CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, 7, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 1, false, CHECK_PROGRAM_UNSUPPORTED },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 1, true, CHECK_PROGRAM_INVALID },
+            { CBUILTIN_SYNC_LOCK_RELEASE, 3, false, CHECK_PROGRAM_INVALID },
+        };
         const uint64_t full = output.length;
         arena_pop_to(&output, 64);
-        for (uint32_t test_case = 0; test_case < 11; test_case += 1)
+        for (uint32_t test_case = 0; test_case < 11 + BUSTER_ARRAY_LENGTH(rmw_cases); test_case += 1)
         {
             CheckProgram changed = program;
             CheckBuiltinAtomicEffect saved = atomics[1];
+            const uint32_t saved_member = members[1];
             const CheckBuiltinFloatEffect saved_float = floating[0];
             Arena bounded = output;
             CheckProgramStatus status = CHECK_PROGRAM_UNSUPPORTED;
@@ -568,10 +595,19 @@ static void check_test_program_helpers(CheckTest* test)
                 floating[0].reads_fp_environment = false;
                 status = CHECK_PROGRAM_INVALID;
             }
-            else
+            else if (test_case == 10)
             {
                 floating[0].compiler_barrier = false;
                 status = CHECK_PROGRAM_INVALID;
+            }
+            else
+            {
+                const CheckProgramHelperRmwCase* rmw = rmw_cases + (test_case - 11);
+                members[1] = rmw->id;
+                atomics[1].runtime_builtin = rmw->id;
+                atomics[1].evaluated_operands = rmw->operands;
+                atomics[1].rmw = rmw->rmw;
+                status = rmw->status;
             }
             CheckProgramHelpers rejected = { 0 };
             const bool accepted = check_program_helpers(&rejected, &changed, &bounded, &scratch);
@@ -583,7 +619,10 @@ static void check_test_program_helpers(CheckTest* test)
             check_test_expect(test, !accepted && rejected.status == status && rejected.items == 0 && rejected.uses == 0 &&
                                    rejected.count == 0 && rejected.use_count == 0 && untouched,
                               "unsupported metadata and partial helper allocation fail without publishing output or touching live prefixes");
+            check_test_expect(test, (rejected.reason != NULL) == (test_case >= 11 && status == CHECK_PROGRAM_UNSUPPORTED),
+                              "only a well-formed read/modify/write's refusal names what it lacks");
             atomics[1] = saved;
+            members[1] = saved_member;
             floating[0] = saved_float;
             active[0] = 1;
         }

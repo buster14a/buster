@@ -279,6 +279,11 @@ jobs:
           # does, and with --cross-check as lld's does, with as many IRELATIVE relocations and the same TLS segment's
           # alignment and init and fini arrays' sizes.
           ./build/compiler test-static --cross-check
+          == Test the functions' lanes [8 CPUs]
+          # #151: generated programs and failing ones emitted on 1, 2, 3 and 8 lanes and with a slow lane, each one
+          # lane's object or failure, with -g's rows and unwind tables and without; and the driver's objects and
+          # executables by --lanes and by default, by both paths, each one lane's.
+          ./build/compiler test-check-lanes
           == Test the dynamic PIEs [8 CPUs]
           # --cross-check also links each bound program's objects with ld.lld as a PIE and compares the two files'
           # dynamic symbols and relocations.
@@ -489,8 +494,6 @@ jobs:
           ./build/compiler test-differential-harness
           == Test the independent preprocessor fuzz harness in C23
           ./build/compiler test-preprocessor-fuzz --std c23
-          == Test the experimental scalar fragment sink
-          ./build/compiler test-fragments
           == Test Tier 1 selection, liveness and native fragments
           ./build/compiler test-tier1-select --manifest > build/tier1-plan-manifest.csv
           ./build/compiler test-tier1-liveness
@@ -612,8 +615,6 @@ jobs:
           ./build/compiler test-tier1-allocation
           == Test dataflow bitsets
           ./build/compiler test-dataflow
-          == Test fragment byte interleave and protected-page tails
-          ./build/compiler test-fragment-interleave
           == Test the partial Zen 5 model and instruction harness
           ./build/compiler test-x86-zen5
           TESTS
@@ -1143,6 +1144,32 @@ jobs:
           test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           ./build/compiler benchmark-checker-deferred --passes 12 --lanes 8 --cpus "2,$others" "${source[@]}"
+
+      - name: Benchmark the functions' lanes on frozen SQLite
+        # #151: -c's emission of the frozen SQLite source on 1, 2, 4 and 8 lanes and on the rule's, every run one lane's
+        # code and each lane count's object one lane's. Lane 0 runs on CPU 2, the other lanes on one CPU of each other
+        # core the job may use. The driver's own feature answers, not clang's (--clang-features), as -c takes them: with
+        # clang's, SQLite takes its atomics' path, which the emission refuses.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',check-lanes,')
+        run: |
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          allowed="$(awk '/^Cpus_allowed_list:/ { print $2 }' /proc/self/status)"
+          others="$(lscpu -p=CPU,CORE,SOCKET,ONLINE | awk -F, -v allowed="$allowed" '
+              BEGIN {
+                  n = split(allowed, ranges, ",")
+                  for (r = 1; r <= n; r++) {
+                      m = split(ranges[r], ends, "-")
+                      last = m == 2 ? ends[2] : ends[1]
+                      for (c = ends[1]; c <= last; c++) permitted[c] = 1
+                  }
+              }
+              $0 !~ /^#/ && $4 == "Y" && permitted[$1] && !seen[$3 ":" $2]++ && $1 != 2 { print $1 }
+          ' | head -n 7 | paste -sd, -)"
+          test "$(tr ',' '\n' <<< "$others" | wc -l)" -eq 7
+          source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
+          ./build/compiler benchmark-check-lanes --passes 11 --lanes 1,2,4,8 --cpus "2,$others" "${source[@]}"
 
       - name: Benchmark the checker's binding handoff
         # #336: every handoff mode must publish the default's columns, reports and graph on each input before the

@@ -3053,6 +3053,103 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // #126: the builtins this compiler's own main.c calls, which clang checks as these show.
+        {
+            "atomic read-modify-write builtins and their result types",
+            "typedef unsigned long U64;\nint f(U64* u, int* i, unsigned char* c, _Bool* b, int** p, double* d)\n{\n    _Static_assert(_Generic(__atomic_fetch_add(u, 1, __ATOMIC_RELAXED), U64: 1, default: 0), \"fetch_add\");\n    _Static_assert(_Generic(__atomic_add_fetch(i, 1, __ATOMIC_SEQ_CST), int: 1, default: 0), \"add_fetch\");\n    _Static_assert(_Generic(__atomic_exchange_n(c, 1, __ATOMIC_ACQ_REL), unsigned char: 1, default: 0), \"exchange_n\");\n    _Static_assert(_Generic(__atomic_compare_exchange_n(i, i, 3, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED), _Bool: 1, default: 0), \"cas\");\n    _Static_assert(_Generic(__atomic_fetch_add(p, 4, __ATOMIC_RELAXED), int*: 1, default: 0), \"pointer add\");\n    _Static_assert(_Generic(__atomic_fetch_sub(d, 1, __ATOMIC_RELAXED), double: 1, default: 0), \"fetch_sub double\");\n    _Static_assert(_Generic(__sync_val_compare_and_swap(u, 1, 2), U64: 1, default: 0), \"sync val cas\");\n    _Static_assert(_Generic(__sync_bool_compare_and_swap(u, 1, 2), _Bool: 1, default: 0), \"sync bool cas\");\n    __sync_lock_release(b);\n    (void)__sync_fetch_and_or(u, 1, i, c);\n    (void)__atomic_fetch_nand(u, 1, __ATOMIC_RELAXED);\n    (void)__atomic_xor_fetch(b, 1, __ATOMIC_RELAXED);\n    return __sync_fetch_and_add(i, 1) + __sync_lock_test_and_set(c, 1);\n}\n",
+            false,
+            false
+        },
+        {
+            "atomic min and max",
+            "unsigned f(unsigned* u, int* i, float* x, _Bool* b)\n{\n    _Static_assert(_Generic(__atomic_fetch_min(u, 1, __ATOMIC_RELAXED), unsigned: 1, default: 0), \"fetch_min\");\n    _Static_assert(_Generic(__atomic_max_fetch(x, 1, __ATOMIC_RELAXED), float: 1, default: 0), \"max_fetch\");\n    return __atomic_fetch_max(i, 1, 5) + __atomic_min_fetch(u, 2, 0) + __atomic_fetch_min(b, 1, 5);\n}\n",
+            false,
+            false
+        },
+        {
+            "an atomic min of a pointer refused",
+            "int* f(int** p) { return __atomic_fetch_min(p, 0, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic and of a float refused",
+            "float f(float* p) { return __atomic_fetch_and(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic compare-exchange of a float refused",
+            "_Bool f(float* p, float* e) { return __atomic_compare_exchange_n(p, e, 1, 0, 5, 2); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic exchange of a const object refused",
+            "int f(const int* p) { return __atomic_exchange_n(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic read-modify-write of a _BitInt refused",
+            "unsigned _BitInt(32) f(unsigned _BitInt(32)* p) { return __atomic_fetch_add(p, 1, 5); }\n",
+            true,
+            false
+        },
+        {
+            "an atomic fetch with an order too few refused",
+            "int f(int* p) { return __atomic_fetch_add(p, 1); }\n",
+            true,
+            false
+        },
+        {
+            "128-bit operands of the overflow builtins",
+            "int f(__int128 a, unsigned __int128 b, long c)\n{\n    __int128 r = 0;\n    unsigned __int128 u = 0;\n    return __builtin_mul_overflow(a, b, &r) + __builtin_add_overflow(c, a, &u) + __builtin_sub_overflow(b, c, &r);\n}\n",
+            false,
+            false
+        },
+        {
+            "the rotates, unpredictable and assume",
+            "unsigned long long f(unsigned char a, unsigned short b, unsigned c, unsigned long long d, long x)\n{\n    __builtin_assume(x > 0);\n    return __builtin_rotateleft8(a, 1) + __builtin_rotateright8(a, 9) + __builtin_rotateleft16(b, 3) + __builtin_rotateright16(b, 3) +\n           __builtin_rotateleft32(c, 7) + __builtin_rotateright32(c, 7) + __builtin_rotateleft64(d, 9) + __builtin_rotateright64(d, 9) +\n           (__builtin_unpredictable(x > 2) ? 1 : 0);\n}\n",
+            false,
+            false
+        },
+        {
+            "a rotate of a struct refused",
+            "struct S { int a; } s;\nunsigned f(void) { return __builtin_rotateleft32(s, 1); }\n",
+            true,
+            false
+        },
+        {
+            "an assumption of a struct refused",
+            "void f(void) { struct S { int a; } s = { 0 }; __builtin_assume(s); }\n",
+            true,
+            false
+        },
+        {
+            "rdtsc, pause and xgetbv",
+            "unsigned long long f(void)\n{\n    __builtin_ia32_pause();\n    return __rdtsc() + __builtin_ia32_xgetbv(0);\n}\n",
+            false,
+            false
+        },
+        {
+            "the build's immediates of the x86 builtins in range",
+            "typedef int I16 __attribute__((vector_size(64)));\ntypedef long long L8 __attribute__((vector_size(64)));\ntypedef long long L4 __attribute__((vector_size(32)));\ntypedef long long L2 __attribute__((vector_size(16)));\ntypedef int I8 __attribute__((vector_size(32)));\ntypedef int I4 __attribute__((vector_size(16)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef char C32 __attribute__((vector_size(32)));\ntypedef short S32 __attribute__((vector_size(64)));\nunsigned long long f(I16 a, L8 q, L4 h, L2 t, I8 e, I4 i, C16 c, C32 w, S32 s, const void* p, void* o)\n{\n    unsigned long long r = __builtin_ia32_ucmpd512_mask(a, a, 7, 0xffff) + __builtin_ia32_ucmpd256_mask(e, e, 0, 0xff) +\n                           __builtin_ia32_ucmpb128_mask(c, c, 4, 0xffff) + __builtin_ia32_ucmpb256_mask(w, w, 4, ~0u) +\n                           __builtin_ia32_ucmpw512_mask(s, s, 6, ~0u) + __builtin_ia32_kshiftlihi(1, 255) + __builtin_ia32_kshiftlidi(1, 0);\n    I16 g = __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 4) + __builtin_ia32_alignd512(a, a, 255) + __builtin_ia32_shuf_i32x4(a, a, 0) +\n            __builtin_ia32_inserti32x4(a, i, 3) + __builtin_ia32_prold512(a, 31);\n    L8 l = __builtin_ia32_gathersiv8di(q, p, e, 0xff, 8) + __builtin_ia32_gatherdiv8di(q, p, q, 0xff, 1) + __builtin_ia32_alignq512(q, q, 7);\n    __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 2);\n    __builtin_ia32_scatterdiv8di(o, 0xff, q, q, 8);\n    __builtin_ia32_scattersiv16si(o, 0xffff, a, a, 4);\n    L4 x = __builtin_ia32_extracti64x4_mask(q, 1, h, 0xff) + __builtin_ia32_insert128i256(h, t, 1);\n    I4 v = __builtin_ia32_vec_set_v4si(i, 5, 3);\n    return r + (unsigned long long)g[0] + (unsigned long long)l[0] + (unsigned long long)x[0] + (unsigned long long)v[0] +\n           (unsigned)__builtin_ia32_vec_ext_v4si(i, 3) + (unsigned char)__builtin_ia32_vec_ext_v16qi(c, 15);\n}\n",
+            false,
+            false
+        },
+        {
+            "a gather's scale refused",
+            "typedef int I16 __attribute__((vector_size(64)));\nI16 f(I16 a, const void* p) { return __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 3); }\n",
+            true,
+            false
+        },
+        {
+            "a scatter's scale refused",
+            "typedef long long L8 __attribute__((vector_size(64)));\ntypedef int I8 __attribute__((vector_size(32)));\nvoid f(L8 q, I8 e, void* o) { __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 16); }\n",
+            true,
+            false
+        },
         {
             "unsigned one-bit _BitInt",
             "unsigned _BitInt(1) a = 1;\n_BitInt(1) unsigned b;\ntypedef unsigned _BitInt(1) B1;\nB1 c;\nint f(void) { unsigned _BitInt(1) d = 1; return d + (int)sizeof d + (int)sizeof(unsigned _BitInt(1)); }\n",
@@ -4023,6 +4120,59 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
 
+// The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
+// builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
+// that take a record and that don't, at random places.
+static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* test)
+{
+    static const uint16_t recorded[] = {
+        CBUILTIN_HUGE_VAL,
+        CBUILTIN_FLT_ROUNDS,
+        CBUILTIN_CONSTANT_P,
+        CBUILTIN_OBJECT_SIZE,
+        CBUILTIN_ATOMIC_LOAD_N,
+        CBUILTIN_ATOMIC_FETCH_ADD,
+        CBUILTIN_ATOMIC_MAX_FETCH,
+        CBUILTIN_SYNC_LOCK_RELEASE,
+        CBUILTIN_SHUFFLEVECTOR,
+    };
+    static const uint16_t unrecorded[] = {
+        CBUILTIN_BSWAP16,
+        CBUILTIN_ADD_OVERFLOW,
+        CBUILTIN_UMULL_OVERFLOW,
+        CBUILTIN_EXPECT,
+        CBUILTIN_MEMCPY,
+        CBUILTIN_BIT_CAST,
+        CBUILTIN_ELEMENTWISE_ABS,
+    };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "guarded builtin column allocation");
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint16_t* builtins = (uint16_t*)(mapping + page) - count;
+        uint32_t expected = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t draw = check_test_random(test) % 16;
+            const uint32_t pick = check_test_random(test);
+            builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
+            expected += draw < 2;
+        }
+        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
+        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
+        char description[160];
+        snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
+                 vector, scalar, expected);
+        check_test_expect(test, vector == expected && scalar == expected, description);
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page);
+    }
+}
+
 static void check_test_source_benchmark(CheckTest* test);
 static void check_test_lowering_source_benchmark(CheckTest* test);
 static void check_test_corpus_symbol_reasons(CheckTest* test, const char* clang);
@@ -4098,6 +4248,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_target_options(&test);
             check_test_bindings(&test);
             check_test_builtin_graph(&test, &types.table, clang);
+            check_test_builtin_capacity(&test);
             check_test_varargs_graph(&test, &types.table);
             check_test_special_graph(&test, &types.table, clang);
             check_test_builtin_vector_graph(&test, &types.table, clang);

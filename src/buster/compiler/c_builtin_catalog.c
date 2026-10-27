@@ -133,6 +133,10 @@
     X(ATOMIC_SIGNAL_FENCE, 0x197u, "__atomic_signal_fence") \
     X(ATOMIC_ALWAYS_LOCK_FREE, 0x198u, "__atomic_always_lock_free") \
     X(ATOMIC_IS_LOCK_FREE, 0x199u, "__atomic_is_lock_free") \
+    X(ATOMIC_FETCH_MIN, 0x19au, "__atomic_fetch_min") \
+    X(ATOMIC_FETCH_MAX, 0x19bu, "__atomic_fetch_max") \
+    X(ATOMIC_MIN_FETCH, 0x19cu, "__atomic_min_fetch") \
+    X(ATOMIC_MAX_FETCH, 0x19du, "__atomic_max_fetch") \
     X(SYNC_FETCH_AND_ADD, 0x1c0u, "__sync_fetch_and_add") \
     X(SYNC_FETCH_AND_SUB, 0x1c1u, "__sync_fetch_and_sub") \
     X(SYNC_FETCH_AND_OR, 0x1c2u, "__sync_fetch_and_or") \

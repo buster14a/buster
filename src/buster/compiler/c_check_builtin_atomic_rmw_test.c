@@ -64,7 +64,13 @@ static const CheckBuiltinAtomicRmwTestCase check_builtin_atomic_rmw_test_cases[]
     { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, true },
     { CBUILTIN_SYNC_LOCK_TEST_AND_SET, CHECK_BUILTIN_ATOMIC_RMW_EXCHANGE, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 2, true },
     { CBUILTIN_SYNC_LOCK_RELEASE, CHECK_BUILTIN_ATOMIC_RMW_RELEASE, CHECK_BUILTIN_ATOMIC_RMW_VOID, 1, true },
+    { CBUILTIN_ATOMIC_FETCH_MIN, CHECK_BUILTIN_ATOMIC_RMW_MIN, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, false },
+    { CBUILTIN_ATOMIC_FETCH_MAX, CHECK_BUILTIN_ATOMIC_RMW_MAX, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, false },
+    { CBUILTIN_ATOMIC_MIN_FETCH, CHECK_BUILTIN_ATOMIC_RMW_MIN, CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS, 3, false },
+    { CBUILTIN_ATOMIC_MAX_FETCH, CHECK_BUILTIN_ATOMIC_RMW_MAX, CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS, 3, false },
 };
+
+#define BUSTER_CHECK_ATOMIC_RMW_TEST_CASES ((uint32_t)BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_test_cases))
 
 static bool check_builtin_atomic_rmw_test_expect(CheckBuiltinAtomicRmwTest* test, bool condition, const char* description, uint32_t item)
 {
@@ -159,7 +165,7 @@ static void check_builtin_atomic_rmw_test_values(CheckBuiltinAtomicRmwTest* test
     const TypeId types[] = { BUSTER_TYPE_BOOL, BUSTER_TYPE_CHAR, BUSTER_TYPE_SCHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_USHORT,
         BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_LLONG, BUSTER_TYPE_ULLONG, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, type_pointer(table, BUSTER_TYPE_INT) };
     const uint64_t sizes[] = { 1, 1, 1, 1, 2, 2, 4, 4, 8, 8, 8, 8, 4, 8, 8 };
-    check_builtin_atomic_rmw_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_test_cases) == 30, "all30 identities have independent expected semantic fixtures", 0);
+    check_builtin_atomic_rmw_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_test_cases) == 34, "all 34 identities have independent expected semantic fixtures", 0);
     for (uint32_t item = 0; item < BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_test_cases); item += 1)
     {
         const CheckBuiltinAtomicRmwTestCase fixture = check_builtin_atomic_rmw_test_cases[item];
@@ -173,9 +179,11 @@ static void check_builtin_atomic_rmw_test_values(CheckBuiltinAtomicRmwTest* test
             const bool exchange = fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_EXCHANGE;
             const bool compare = fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE;
             const bool release = fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_RELEASE;
+            // Clang's min and max take integers and floating values, never pointers.
+            const bool ordered = fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_MAX;
             const bool pointer = t == BUSTER_ARRAY_LENGTH(types) - 1;
             const bool floating = types[t] == BUSTER_TYPE_FLOAT || types[t] == BUSTER_TYPE_DOUBLE;
-            const bool eligible = floating ? !fixture.legacy && (exchange || arithmetic) : !pointer || fixture.legacy || exchange || compare || arithmetic;
+            const bool eligible = floating ? !fixture.legacy && (exchange || arithmetic || ordered) : !pointer || fixture.legacy || exchange || compare || arithmetic;
             if (!eligible)
             {
                 check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.atomic.action.diagnostic_operand == 0,
@@ -184,7 +192,7 @@ static void check_builtin_atomic_rmw_test_values(CheckBuiltinAtomicRmwTest* test
             else
             {
                 const TypeId returned = fixture.returned == CHECK_BUILTIN_ATOMIC_RMW_BOOLEAN ? BUSTER_TYPE_BOOL : release ? BUSTER_TYPE_VOID : types[t];
-                const uint32_t gap = floating && arithmetic ? BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW : types[t] == BUSTER_TYPE_BOOL &&
+                const uint32_t gap = floating && (arithmetic || ordered) ? BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW : types[t] == BUSTER_TYPE_BOOL &&
                     (arithmetic || fixture.operation == CHECK_BUILTIN_ATOMIC_RMW_NAND) ? BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BOOL_RMW : 0;
                 check_builtin_atomic_rmw_test_expect(test, result.atomic.action.diagnostic == CHECK_DIAG_NONE && result.atomic.unsupported == gap && result.atomic.action.value.type == returned &&
                     result.atomic.value_type == types[t] && result.atomic.object_size == sizes[t] && result.atomic.required_alignment == sizes[t] && result.atomic.volatile_access &&
@@ -407,7 +415,7 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
         uint32_t total = 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
-            total += check_builtin_atomic_rmw_test_cases[i % 30].fixed;
+            total += check_builtin_atomic_rmw_test_cases[i % BUSTER_CHECK_ATOMIC_RMW_TEST_CASES].fixed;
         }
         CheckBuiltinAtomicRmwAction* actions = (CheckBuiltinAtomicRmwAction*)(input_end - count * sizeof(*actions));
         CheckBuiltinAtomicRmwResult* results = (CheckBuiltinAtomicRmwResult*)(output_end - count * sizeof(*results));
@@ -419,7 +427,7 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
         CheckBuiltinAtomicRmwResult expected[BUSTER_CHECK_ATOMIC_RMW_TEST_BATCH];
         for (uint32_t i = 0; i < count; i += 1)
         {
-            const uint32_t item = i % 30;
+            const uint32_t item = i % BUSTER_CHECK_ATOMIC_RMW_TEST_CASES;
             const uint32_t fixed = check_builtin_atomic_rmw_test_cases[item].fixed;
             CheckValue temporary[BUSTER_CHECK_ATOMIC_RMW_TEST_ARGUMENTS];
             actions[i] = check_builtin_atomic_rmw_test_input(table, item, BUSTER_TYPE_INT, temporary);
@@ -466,7 +474,7 @@ static void check_builtin_atomic_rmw_test_pages(CheckBuiltinAtomicRmwTest* test,
     }
     if (ready)
     {
-        for (uint32_t i = 0; i < 30; i += 1)
+        for (uint32_t i = 0; i < BUSTER_CHECK_ATOMIC_RMW_TEST_CASES; i += 1)
         {
             CheckValue temporary[BUSTER_CHECK_ATOMIC_RMW_TEST_ARGUMENTS];
             CheckBuiltinAtomicRmwAction input = check_builtin_atomic_rmw_test_input(table, i, BUSTER_TYPE_INT, temporary);
@@ -655,6 +663,13 @@ static void check_builtin_atomic_rmw_test_clang(CheckBuiltinAtomicRmwTest* test,
         { "void f(int*p){__sync_lock_release(p);}\n", "-Werror=atomic-implicit-seq-cst", true },
         { "int f(int*p){return __atomic_exchange_n(p,1,5,0);}\n", NULL, true },
         { "int f(int*p){return __sync_fetch_and_add(p);}\n", NULL, true },
+        { "unsigned f(unsigned*p){return __atomic_fetch_min(p,1,5)+__atomic_max_fetch(p,1,0);}\n", NULL, false },
+        { "float f(float*p){return __atomic_min_fetch(p,1,5);}\n", NULL, false },
+        { "_Bool f(_Bool*p){return __atomic_fetch_max(p,1,5);}\n", NULL, false },
+        { "int*f(int**p){return __atomic_fetch_min(p,0,5);}\n", NULL, true },
+        { "long double f(long double*p){return __atomic_fetch_max(p,1,5);}\n", NULL, true },
+        { "unsigned _BitInt(32) f(unsigned _BitInt(32)*p){return __atomic_fetch_min(p,1,5);}\n", NULL, true },
+        { "int f(int*p){return __atomic_fetch_min(p,1);}\n", NULL, true },
     };
     static const char native_source[] =
         "static int bad(void){__builtin_trap();return 7;}\n"
