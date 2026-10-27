@@ -511,34 +511,34 @@ result.
 ### Levels
 
 `abi_classify_all` (and its twin `abi_classify_all_scalar`) schedules complete
-object types and `void` in ready frontiers. An aligned typedef waits for its
-base, an array for its element, an `_Atomic` for its value, and every record
-for its members. A flexible array member waits for its element, since the
-incomplete array itself is never classified. Waiting for wide records' members
-also covers the transitive storage reads of `abi_wide_alignment` for arrays
-of no elements. The vector classifier takes each frontier as a batch. A
-singleton record with at most one member takes the scalar classifier directly;
-arrays and records with more members retain the vector fold across their
-sixteen offsets.
+object types and `void` in vector frontiers. Shallow graphs retain the measured
+scan path for at most 16 levels, including the early-classification shortcut
+for wide records whose rows need no member data when no `LARGER` root exists.
+Forcing every wide record to wait lost that batching and regressed the general
+ABI benchmark; the rejected all-member experiment is retained in the evidence.
 
-The scheduler links a pending type to just its next unfinished dependency.
-Once a frontier is classified, its waiters resume their member scans and
-either enter the next frontier or link to their next dependency. Each type
-enters the ready queue once, and each member is inspected at most twice.
-Scheduling therefore takes O(types + members) work and O(types) scratch,
-including chains whose type IDs run opposite to dependency order (#613).
-Unlike the earlier repeated scans, all records can wait for their members
-without revisiting every other pending record at each level.
+After 16 scans, `abi_classify_pending` computes topological levels with an
+explicit stack and per-type member cursors, then counting-sorts the remaining
+types into frontiers. It walks every by-value dependency, including descendants
+of already-classified wide records, but emits and counts only pending types.
+A flexible array member uses its element because the incomplete array itself
+is never classified. This also orders transitive `abi_wide_alignment` reads.
+Potential wide-storage reads by zero-length arrays or empty flexible records
+select the topological path immediately, avoiding repeated readiness walks.
+The wrapper probe that selects that path is itself bounded at 16 steps; an
+unresolved longer chain conservatively selects the graph walk.
 
-Four private u32 columns hold the ready queue, wait-list heads and links, and
-member cursors, sized to the smaller of the current type count and ABI table
-capacity (16 bytes per entry). No padding is read, no dependency-edge array is
-materialized, and no state survives the call: tag completion and additional
-types are observed by the next call. Already classified rows are retained;
-types beyond an `abi_initialize_types` table's capacity are left alone.
-Without room for all four columns, the exact scalar scan fallback retains
-its previous readiness rules, including wide-storage checks. That fallback
-can still take multiple table passes; the linear-work guarantee needs scratch.
+Scheduling therefore has O(types + members) work: at most 16 scans plus one
+memoized graph traversal and counting sort. Forward and reverse type-ID chains
+have the same bound. The ordinary path uses two u32 columns, 8 bytes per table
+entry. The topological path adds levels, cursors and an explicit stack, another
+12 bytes per entry plus one cursor slot. These are private arena allocations
+sized to the smaller of the current type count and ABI capacity, without tail
+padding reads or an edge array. No graph state survives the call; incremental
+completion observes the next snapshot and retains existing ABI rows. Types
+beyond an `abi_initialize_types` table's capacity remain untouched. Scratch
+exhaustion retains the original scalar scan fallback, whose work can still
+take multiple table passes and has no linear-time guarantee.
 
 The source lowering's `check_lower_prepare` omits the ABI table altogether
 when the selected program has no function bodies. Static object initializers
@@ -1704,9 +1704,9 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   indexed by the classes and the type's kind or from the fold's vectors four
   types at a time, are the next try.
 - **The levels.** The historical scans took 18% of this profile's vector
-  classification cycles. #613 replaces them with the wait lists and ready
-  frontiers described above; wide records now wait for their members too.
-  The earlier profile and measurements do not describe that new scheduler.
+  classification cycles. #613 bounds the scan prefix and uses a topological
+  schedule for deep graphs, retaining the shallow path and wide-record shortcut.
+  The all-member wait-list experiment was rejected after a measured regression.
 - **Bit-fields' access units.** `abi_layout` and the parts take a run of
   bit-fields within an eightbyte as its first bit-field's type, at its type's
   offset, where clang's `accumulateBitFields` makes access units of the run's
@@ -1770,8 +1770,9 @@ only full independent call ranges may be repartitioned.
 A future frontend can collect signatures across a unit, avoiding a one-call API
 that underfills vector work. It must expose real completion/ready frontiers,
 not sort types through dependencies or give later tag completion to earlier
-source contexts. Classification uses private wait lists and ready frontiers;
-a producer completion list could remove their construction. `abi_finish`'s
+source contexts. Classification bounds readiness scans and constructs private
+topological frontiers for deep graphs; a producer completion list could remove
+that construction. `abi_finish`'s
 storage/LLVM-shape work is retained for correctness and must be charged, even
 when the two-byte class result looks cheap.
 

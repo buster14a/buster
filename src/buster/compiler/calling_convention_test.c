@@ -3384,7 +3384,7 @@ static bool abi_test_wide_dependencies(bool reverse, bool scalar)
 static bool abi_test_dependencies(void)
 {
     AbiTestTally tally = { 0 };
-    const uint32_t counts[] = { 0, 1, 15, 16, 17, 65, 4096 };
+    const uint32_t counts[] = { 0, 1, 15, 16, 17, 31, 32, 33, 65, 4096 };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
     {
         for (uint32_t mode = 0; mode < 4; mode += 1)

@@ -78,7 +78,7 @@
 //     abi_fold_groups, abi_store_row and abi_classify_vector.
 //   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
 //     abi_is_classified, abi_wide_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root,
-//     abi_next_dependency, abi_classify_levels, abi_classify_all, abi_classify_all_scalar and abi_classes.
+//     abi_schedule_wide, abi_classify_pending, abi_classify_levels, abi_classify_all, abi_classify_all_scalar and abi_classes.
 //   - Assignment: abi_stack_place, abi_assign_call (the twin, one call), abi_assign_scalar, the vector path's AbiScan,
 //     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
@@ -3071,135 +3071,243 @@ static bool abi_is_larger_root(const TypeTable* table, uint32_t index)
     return table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC && table->types.size[abi_resolved_index(table, table->types.base[index])] == 0;
 }
 
-// The next unclassified dependency, or UINT32_MAX when ready. A record resumes at its first unfinished member, so each
-// member is inspected at most twice: once to wait, once after its dependency finishes. All records wait for their
-// members, including wide ones: readiness then covers the transitive storage reads of abi_wide_alignment without
-// walking the same wide subgraph to discover readiness. A flexible array member waits for its element instead.
-static uint32_t abi_next_dependency(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t* member)
+// Bound both the common scan prefix and probing of zero-array wrapper chains. A longer wrapper chain conservatively
+// selects the topological path; readiness must not repeatedly walk a shared wide-record graph in the scan prefix.
+#define BUSTER_ABI_SCAN_LEVELS 16
+
+static bool abi_schedule_wide(const TypeTable* table, TypeId type)
 {
-    const uint8_t kind = table->types.kind[index];
-    uint32_t dependency = UINT32_MAX;
-    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+    uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    uint32_t probes = 0;
+    uint8_t kind = table->types.kind[index];
+    bool wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+    while (wrapper && probes < BUSTER_ABI_SCAN_LEVELS)
     {
-        const uint32_t base = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
-        if (base >= abi->capacity || !abi_is_classified(abi, table->types.base[index]))
-        {
-            dependency = base;
-        }
+        index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
+        probes += 1;
+        kind = table->types.kind[index];
+        wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
     }
-    else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
-    {
-        const uint32_t tag = table->types.index[index];
-        const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
-        const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
-        while (*member < end && dependency == UINT32_MAX)
-        {
-            TypeId type = table->members.type[*member];
-            if (flexible && *member == end - 1)
-            {
-                type = table->types.base[abi_resolved_index(table, type)];
-            }
-            const uint32_t needed = type >> BUSTER_TYPE_INDEX_SHIFT;
-            if (needed >= abi->capacity || !abi_is_classified(abi, type))
-            {
-                dependency = needed;
-            }
-            else
-            {
-                *member += 1;
-            }
-        }
-    }
-    return dependency;
+    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    return wrapper || (record && table->types.size[index] > BUSTER_ABI_REGISTER_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0);
 }
 
-// Classifies ready frontiers with one wait-list link per pending type, rather than rescanning every pending type per
-// dependency level (#613). The four count-sized columns are private bounded scratch, with no padding contract: ready
-// holds each type once, heads/next link a type to just its next dependency, and members resumes record scans. Thus
-// scheduling takes O(types + members) work and O(types) space, independent of nesting depth and duplicate edges.
-// Scratch exhaustion retains the scalar scan fallback, including its existing rare wide-storage readiness rules.
+// Topological levels for pending types after the bounded scan prefix. Unlike ABI pass bits, these levels include
+// every by-value dependency, even for wide records classified early. Thus a pending zero-length array cannot read
+// storage through an already-classified wide record before that record's descendants have finished. The graph is
+// walked once on an explicit stack, then pending types are counting-sorted into vector frontiers.
+// A level of 0 is unseen, the high bit is a live DFS frame with its longest child level, and UINT32_MAX is blocked.
+// Type indices have 29 bits, so a valid longest path cannot reach the high bit.
+static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, const uint32_t* pending, uint32_t pending_count, TypeId* ready,
+                                     uint32_t count, Arena* arena, bool scalar)
+{
+    const uint32_t live = 1u << 31;
+    uint32_t* levels = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
+    uint32_t* cursors = levels != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* stack = cursors != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count) : 0;
+    uint32_t result = UINT32_MAX;
+    if (stack != 0)
+    {
+        memset(levels, 0, (uint64_t)count * sizeof(uint32_t));
+        uint32_t largest = 0;
+        for (uint32_t i = 0; i < pending_count; i += 1)
+        {
+            const uint32_t root = pending[i];
+            uint32_t depth = 0;
+            if (levels[root] == 0)
+            {
+                stack[depth] = root;
+                depth += 1;
+            }
+            while (depth != 0)
+            {
+                const uint32_t index = stack[depth - 1];
+                const uint8_t kind = table->types.kind[index];
+                const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                if (levels[index] == 0)
+                {
+                    levels[index] = live;
+                    cursors[index] = record ? table->tags.member_begin[table->types.index[index]] : 0;
+                }
+                uint32_t dependency = UINT32_MAX;
+                if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+                {
+                    dependency = cursors[index] == 0 ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : UINT32_MAX;
+                }
+                else if (record)
+                {
+                    const uint32_t tag = table->types.index[index];
+                    const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
+                    if (cursors[index] < end)
+                    {
+                        TypeId type = table->members.type[cursors[index]];
+                        if (cursors[index] == end - 1 && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
+                        {
+                            type = table->types.base[abi_resolved_index(table, type)];
+                        }
+                        dependency = type >> BUSTER_TYPE_INDEX_SHIFT;
+                    }
+                }
+                if (dependency == UINT32_MAX)
+                {
+                    levels[index] = (levels[index] & ~live) + 1;
+                    largest = levels[index] > largest ? levels[index] : largest;
+                    depth -= 1;
+                }
+                else if (dependency >= count || !abi_classifiable(table, dependency) || (levels[dependency] & live) != 0)
+                {
+                    levels[index] = UINT32_MAX;
+                    depth -= 1;
+                }
+                else if (levels[dependency] == 0)
+                {
+                    stack[depth] = dependency;
+                    depth += 1;
+                }
+                else
+                {
+                    const uint32_t longest = levels[index] & ~live;
+                    levels[index] = live | (levels[dependency] > longest ? levels[dependency] : longest);
+                    cursors[index] += 1;
+                }
+            }
+        }
+        // Reuse cursors for bucket ends after the graph walk. Only unclassified pending types are emitted; existing
+        // ABI rows participated in readiness without being rewritten or counted a second time.
+        memset(cursors, 0, ((uint64_t)largest + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < pending_count; i += 1)
+        {
+            const uint32_t level = levels[pending[i]];
+            if (level != UINT32_MAX)
+            {
+                cursors[level] += 1;
+            }
+        }
+        uint32_t offset = 0;
+        for (uint32_t level = 1; level <= largest; level += 1)
+        {
+            const uint32_t size = cursors[level];
+            cursors[level] = offset;
+            offset += size;
+        }
+        for (uint32_t i = 0; i < pending_count; i += 1)
+        {
+            const uint32_t index = pending[i];
+            const uint32_t level = levels[index];
+            if (level != UINT32_MAX)
+            {
+                ready[cursors[level]] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+                cursors[level] += 1;
+            }
+        }
+        result = 0;
+        for (uint32_t level = 1; level <= largest; level += 1)
+        {
+            const uint32_t end = cursors[level];
+            if (end != result)
+            {
+                if (scalar)
+                {
+                    abi_classify_scalar(abi, table, ready + result, end - result);
+                }
+                else
+                {
+                    abi_classify(abi, table, ready + result, end - result);
+                }
+                result = end;
+            }
+        }
+    }
+    return result;
+}
+
+// Common shallow tables keep the measured scan/frontier path. After a fixed number of scans, classify the remainder
+// topologically: at most 16 visits per type/member plus one graph walk, so deep chains cannot make scheduling
+// quadratic. Wide records retain their early-classification shortcut. Without scratch, keep the original scalar scan.
 static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool scalar)
 {
     Scratch scratch = scratch_begin(0);
-    // The types the table has rows for: a table of abi_initialize_types' leaves the types made after it alone (a type's
-    // members are made before it, so none of the types it classifies waits for one of them).
     const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
-    uint32_t* heads = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
-    uint32_t* next = heads != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count) : 0;
-    uint32_t* members = next != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count) : 0;
-    TypeId* ready = members != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count) : 0;
+    uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
+    TypeId* ready = pending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count) : 0;
     uint32_t classified = 0;
     bool all = abi->larger != 0;
+    bool fallback = ready == 0;
     if (ready != 0)
     {
-        memset(heads, 0, (uint64_t)count * sizeof(uint32_t));
-        uint32_t ready_count = 0;
+        uint32_t pending_count = 0;
+        bool atomics = false;
+        bool wide = false;
         for (uint32_t index = 1; index < count; index += 1)
         {
             const uint8_t kind = (abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 ? abi_classifiable_kind(table, index) : BUSTER_TYPE_KIND_NONE;
             if (kind != BUSTER_TYPE_KIND_NONE)
             {
-                const uint8_t original = table->types.kind[index];
-                members[index] = original == BUSTER_TYPE_KIND_STRUCT || original == BUSTER_TYPE_KIND_UNION ?
-                                 table->tags.member_begin[table->types.index[index]] : 0;
-                const uint32_t dependency = abi_next_dependency(abi, table, index, &members[index]);
-                if (dependency == UINT32_MAX)
+                pending[pending_count] = index;
+                pending_count += 1;
+                atomics |= kind == BUSTER_TYPE_KIND_ATOMIC;
+                if (!wide && table->types.size[index] == 0)
                 {
-                    ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                    ready_count += 1;
-                }
-                else if (dependency < count)
-                {
-                    next[index] = heads[dependency];
-                    heads[dependency] = index;
+                    const uint8_t original = table->types.kind[index];
+                    if (original == BUSTER_TYPE_KIND_ARRAY)
+                    {
+                        wide = abi_schedule_wide(table, table->types.base[index]);
+                    }
+                    else if ((original == BUSTER_TYPE_KIND_STRUCT || original == BUSTER_TYPE_KIND_UNION) &&
+                             (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
+                    {
+                        const uint32_t tag = table->types.index[index];
+                        const uint32_t last = table->tags.member_begin[tag] + table->tags.member_count[tag] - 1;
+                        const uint32_t array = abi_resolved_index(table, table->members.type[last]);
+                        wide = abi_schedule_wide(table, table->types.base[array]);
+                    }
                 }
             }
         }
-        while (classified < ready_count)
+        for (uint32_t i = 0; atomics && i < pending_count; i += 1)
         {
-            const uint32_t end = ready_count;
-            bool scalar_record = false;
-            if (end - classified == 1)
+            all = all || abi_is_larger_root(table, pending[i]);
+        }
+        bool progress = true;
+        uint32_t scans = 0;
+        while (pending_count != 0 && progress && scans < BUSTER_ABI_SCAN_LEVELS && !wide)
+        {
+            uint32_t ready_count = 0;
+            uint32_t kept = 0;
+            for (uint32_t i = 0; i < pending_count; i += 1)
             {
-                const uint32_t index = ready[classified] >> BUSTER_TYPE_INDEX_SHIFT;
-                const uint8_t kind = table->types.kind[index];
-                // A chain's one-member record needs no fold setup. A lone array or many-member record still benefits
-                // from folding all sixteen offsets together, so it keeps the vector path.
-                scalar_record = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
-                                table->tags.member_count[table->types.index[index]] <= 1;
+                if (abi_dependencies_classified(abi, table, pending[i], all))
+                {
+                    ready[ready_count] = (TypeId)pending[i] << BUSTER_TYPE_INDEX_SHIFT;
+                    ready_count += 1;
+                }
+                else
+                {
+                    pending[kept] = pending[i];
+                    kept += 1;
+                }
             }
-            if (scalar || scalar_record)
+            pending_count = kept;
+            progress = ready_count != 0;
+            if (scalar)
             {
-                abi_classify_scalar(abi, table, ready + classified, end - classified);
+                abi_classify_scalar(abi, table, ready, ready_count);
             }
             else
             {
-                abi_classify(abi, table, ready + classified, end - classified);
+                abi_classify(abi, table, ready, ready_count);
             }
-            for (uint32_t i = classified; i < end; i += 1)
-            {
-                uint32_t waiting = heads[ready[i] >> BUSTER_TYPE_INDEX_SHIFT];
-                while (waiting != 0)
-                {
-                    const uint32_t following = next[waiting];
-                    const uint32_t dependency = abi_next_dependency(abi, table, waiting, &members[waiting]);
-                    if (dependency == UINT32_MAX)
-                    {
-                        ready[ready_count] = (TypeId)waiting << BUSTER_TYPE_INDEX_SHIFT;
-                        ready_count += 1;
-                    }
-                    else if (dependency < count)
-                    {
-                        next[waiting] = heads[dependency];
-                        heads[dependency] = waiting;
-                    }
-                    waiting = following;
-                }
-            }
-            classified = end;
+            classified += ready_count;
+            scans += 1;
+        }
+        if (pending_count != 0 && progress)
+        {
+            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena, scalar);
+            fallback = extra == UINT32_MAX;
+            classified += fallback ? 0 : extra;
         }
     }
-    else
+    if (fallback)
     {
         for (uint32_t index = 1; index < count; index += 1)
         {
