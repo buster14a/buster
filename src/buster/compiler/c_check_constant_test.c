@@ -508,8 +508,8 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .source = "enum { A=sizeof(int (*)(int,int,int,int)) }; _Static_assert(A==8,\"unnamed parameters\");\n",
         },
         {
-            .name = "type name duplicate precedes later invalid parameter",
-            .source = "enum { A=sizeof(int (*)(int x,int x,\nvoid bad)) };\n",
+            .name = "type name duplicate precedes later invalid declaration",
+            .source = "enum { A=sizeof(int (*)(int x,int x)) };\nint f(void){return missing;}\n",
             .rejected = true,
         },
         {
