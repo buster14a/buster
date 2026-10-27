@@ -123,7 +123,9 @@ static bool check_lower_batch_node(const CheckLowerWriter* writer, uint32_t node
             // A window may straddle bodies. Another lane owns that body's local_map entries, so speculative
             // classification must never read them. Globals use their immutable symbol, and each body's
             // cache is invalidated after its own locals have been assigned.
-            const uint32_t declaration = program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+            // Source object identities are their canonical declaration token plus one. object_declarations
+            // lists static objects alone, so it cannot identify the body's parameters and automatic locals.
+            const uint32_t declaration = object - 1;
             const bool own = writer->body == NULL || (declaration < program->input->token_count &&
                                                        program->input->declaration_bodies[declaration] == writer->body->opening);
             const uint32_t local = own ? writer->local_map[object] : BUSTER_CHECK_NONE;

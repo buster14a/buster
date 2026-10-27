@@ -161,7 +161,7 @@ static void check_test_program_batch(CheckTest* test)
         CheckOp ops[2] = { CHECK_OP_VALUE, CHECK_OP_VALUE };
         uint32_t operands[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t source_tokens[2] = { 0, 1 };
-        uint32_t declarations[3] = { BUSTER_CHECK_NONE, 0, 1 };
+        uint32_t declarations[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t bodies[2] = { 10, 20 };
         uint8_t flags[2] = { 0 };
         SymbolId object_symbols[3] = { 0 };
