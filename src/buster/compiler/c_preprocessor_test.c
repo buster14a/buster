@@ -6862,6 +6862,8 @@ static bool pp_test_implemented_features(const char* directory)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cbuiltin_catalog); i += 1)
     {
         result &= (cbuiltin_catalog[i].capabilities & compile_capabilities) == 0;
+        // cbuiltin_resolve refuses a name that doesn't start with "__" before it looks at the catalog.
+        result &= cbuiltin_catalog[i].length >= 2 && cbuiltin_catalog[i].name[0] == '_' && cbuiltin_catalog[i].name[1] == '_';
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(inventory); i += 1)
     {

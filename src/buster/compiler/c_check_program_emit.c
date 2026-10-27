@@ -87,15 +87,18 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
            (renamed.length == 0 && input->declaration_bodies[declaration] != BUSTER_CHECK_NONE && input->linkage[declaration] == 0);
 }
 
-// Adds `spelling`, the name the source gives a symbol, to the link's names and to the names a made one must not be: its
-// NameId, or 0 when the link has no room.
-static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length)
+// Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
+// it could be one: its NameId, or 0 when the link has no room. Every made name has a '.', which no identifier has, so
+// only an asm label with one can be a made name, and only it goes in the table (#442: most units' given names are
+// identifiers, whose probes the table then doesn't pay for).
+static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length, bool label)
 {
     const uint64_t hash = link_hash(spelling, length);
     uint32_t slot = 0;
-    const bool taken = check_program_emit_taken(link, names, spelling, length, hash, &slot);
+    const bool dotted = label && memchr(spelling, '.', length) != 0;
+    const bool taken = dotted && check_program_emit_taken(link, names, spelling, length, hash, &slot);
     const NameId result = link_add_name_hashed(link, spelling, length, hash);
-    if (!taken && result != 0)
+    if (dotted && !taken && result != 0)
     {
         names->taken[slot] = result;
     }
@@ -195,7 +198,8 @@ struct CheckProgramLaneArenas
 
 // How check_program_emit_lanes runs a unit's functions on lanes, and what it ran. The caller keeps it until it is done
 // with the emission's link and lowering: the atoms' bytes and the functions' columns of the lanes past the first are in
-// their arenas here (check_program_lanes_release), which the next emission with it reuses.
+// their arenas here (check_program_lanes_release), which the next emission with it reuses, as it reuses the first's
+// scratch for lane 0's writer's columns (CheckEmitRun.columns).
 typedef struct CheckProgramLanes CheckProgramLanes;
 struct CheckProgramLanes
 {
@@ -291,6 +295,8 @@ struct CheckEmitLane
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // The arena of its writer's columns (check_lower_writer_begin): its scratch, but lane 0's (CheckEmitRun.columns).
+    Arena* columns;
     bool prepared;
     bool ready;
 };
@@ -316,6 +322,10 @@ struct CheckEmitRun
     Arena* output;
     Arena* scratch;
     Arena* bytes;
+    // Lane 0's writer's columns, in base pages, as the other lanes' scratch is: each column has room for any of the
+    // program's bodies, of which a body touches a little at the column's start, and in the caller's scratch, whose pages
+    // past its first 64 KB are huge, each column's first touch cleared a huge page of its own (#531).
+    Arena* columns;
     Tier0Code* codes;
     CheckEmitBody* bodies;
     UnwindFunction* frames;
@@ -463,8 +473,9 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
     }
 }
 
-// Lane `index`'s arenas, for its first part: the caller's for lane 0, and for another lane its own, reserved the first
-// time and otherwise put back (the emission before this one's are done with). Returns false if one can't be reserved.
+// Lane `index`'s arenas, for its first part: the caller's for lane 0, but its writer's columns' (CheckEmitRun.columns),
+// and for another lane its own, reserved the first time and otherwise put back (the emission before this one's are done
+// with), its scratch its writer's columns'. Returns false if one can't be reserved.
 static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     bool valid = true;
@@ -473,6 +484,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = run->output;
         lane->scratch = run->scratch;
         lane->bytes = run->bytes;
+        lane->columns = run->columns;
     }
     else
     {
@@ -494,6 +506,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
         lane->output = &arenas->output;
         lane->scratch = &arenas->scratch;
         lane->bytes = &arenas->bytes;
+        lane->columns = &arenas->scratch;
     }
     return valid;
 }
@@ -502,7 +515,7 @@ static bool check_program_emit_lane_arenas(CheckEmitRun* run, CheckEmitLane* lan
 static bool check_program_emit_lane_prepare(CheckEmitRun* run, CheckEmitLane* lane, uint32_t index)
 {
     return check_program_emit_lane_arenas(run, lane, index) &&
-           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+           check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
 }
 
 // A part's failure before it lowered anything: its lane had no room for its writer.
@@ -523,22 +536,24 @@ static void check_program_emit_part_refused(CheckEmitPart* part)
 
 // The part `part` on lane `index`, which holds the test's squeezed body (CheckProgramLanes.squeeze_body): each of the
 // lane's arenas that squeeze_arenas names has only squeeze_room bytes to spare while the lane makes its writer, if this
-// is its first part, and works on the part; then its room comes back. Out of line, so that the lanes' loop carries none
-// of it.
+// is its first part, and works on the part; then its room comes back. Lane 0's writer's columns, an arena of their own,
+// are squeezed with its scratch. Out of line, so that the lanes' loop carries none of it.
 static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint32_t index)
 {
     CheckProgramLanes* lanes = run->lanes;
     const bool arenas = lane->prepared ? lane->ready : check_program_emit_lane_arenas(run, lane, index);
-    Arena* each[3] = { lane->output, lane->scratch, lane->bytes };
-    uint64_t capacities[3] = { 0, 0, 0 };
-    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    Arena* each[4] = { lane->output, lane->scratch, lane->bytes, lane->columns };
+    const uint32_t names[4] = { BUSTER_CHECK_EMIT_SQUEEZE_OUTPUT, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH, BUSTER_CHECK_EMIT_SQUEEZE_BYTES, BUSTER_CHECK_EMIT_SQUEEZE_SCRATCH };
+    const uint32_t count = arenas && lane->columns != lane->scratch ? 4 : 3;
+    uint64_t capacities[4] = { 0, 0, 0, 0 };
+    for (uint32_t i = 0; arenas && i < count; i += 1)
     {
         capacities[i] = each[i]->capacity;
-        const bool named = (lanes->squeeze_arenas & (UINT32_C(1) << i)) != 0;
+        const bool named = (lanes->squeeze_arenas & names[i]) != 0;
         each[i]->capacity = named && lanes->squeeze_room < capacities[i] - each[i]->length ? each[i]->length + lanes->squeeze_room : capacities[i];
     }
     lane->ready = lane->prepared ? lane->ready :
-                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->scratch);
+                                   arenas && check_lower_writer_begin(&lane->writer, &lane->abi, &lane->status, run->shared, run->sources, lane->columns);
     lane->prepared = true;
     if (lane->ready)
     {
@@ -548,7 +563,7 @@ static __attribute__((noinline)) void check_program_emit_squeezed(CheckEmitRun* 
     {
         check_program_emit_part_refused(part);
     }
-    for (uint32_t i = 0; arenas && i < 3; i += 1)
+    for (uint32_t i = 0; arenas && i < count; i += 1)
     {
         each[i]->capacity = capacities[i];
     }
@@ -627,17 +642,19 @@ static void check_program_emit_alone(CheckEmitRun* run)
 // another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
 // check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
 // (check_program_emit_lanes) and check_program_access's share it.
-static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, uint32_t* declaring, bool scalar)
 {
     memset(defined, 0, (uint64_t)program->object_count + 1);
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         defined[program->bodies[b].object] = 1;
     }
-    for (uint32_t token = 0; token < program->input->token_count; token += 1)
+    const uint32_t declaring_count = check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar);
+    for (uint32_t d = 0; d < declaring_count; d += 1)
     {
+        const uint32_t token = declaring[d];
         const uint32_t object = program->input->objects[token];
-        if (program->input->declarations[token] == token && object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
+        if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
             (program->input->defined[token] || program->input->tentative[token]))
         {
             defined[object] = 1;
@@ -671,12 +688,15 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
     const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
     uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
     uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
-    const bool valid = access != 0 && defined != 0;
+    // The tokens that declare, for check_program_object_access: pushed last, and given back once it has read them.
+    const uint64_t declaring_mark = scratch->length;
+    uint32_t* declaring = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16);
+    const bool valid = access != 0 && defined != 0 && declaring != 0;
     *defined_objects = defined;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined);
+        check_program_object_access(program, access, defined, declaring, false);
         for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
         {
             const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
@@ -688,6 +708,7 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
             lowered->functions[b].symbol_count = access_count;
         }
     }
+    arena_pop_to(scratch, declaring_mark);
     return valid;
 }
 
@@ -736,13 +757,25 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
-    valid = valid && access != 0 && defined != 0;
+    // The tokens that declare, which the pass below visits rather than every token of the unit: pushed last, and given
+    // back before the bodies compile.
+    const uint64_t declaring_mark = scratch->length;
+    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    valid = valid && access != 0 && defined != 0 && declaring != 0;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined);
+        check_program_object_access(program, access, defined, declaring, scalar);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
+    arena_pop_to(scratch, declaring_mark);
+    // Lane 0's writer's columns (CheckEmitRun.columns): the lanes' first arenas' scratch, as the other lanes' scratch in
+    // base pages, reserved the first time and otherwise put back; or without lanes, an arena of this emission's own.
+    Arena own_columns = { 0 };
+    Arena* columns = lanes != NULL ? &lanes->arenas[0].scratch : &own_columns;
+    *columns = valid && columns->base == 0 ? arena_reserve_small(UINT64_C(1) << 36, UINT64_C(1) << 36) : *columns;
+    arena_pop_to(columns, 0);
+    valid = valid && columns->base != 0;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
     const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
     CheckEmitRun run = {
@@ -761,6 +794,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         .output = output,
         .scratch = scratch,
         .bytes = bytes,
+        .columns = columns,
     };
     run.codes = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Code, count) : 0;
     run.bodies = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitBody, count) : 0;
@@ -828,6 +862,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
             arena_pop_to(scratch, scratch_before);
+            arena_pop_to(columns, 0);
             memset(run.lane_states, 0, sizeof(CheckEmitLane));
             check_program_emit_alone(&run);
         }
@@ -883,27 +918,34 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && (count == 0 || result->function_atoms != 0);
+    // The declaring tokens again, for the attributes' passes (one vector pass: cheaper than holding them through the
+    // bodies' compiles), pushed last and given back after them.
+    const uint64_t attributes_mark = scratch->length;
+    uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
+    valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
+    const uint32_t declared_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declared, scalar) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(retained_objects, 0, program->object_count);
-        for (uint32_t token = 0; token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; d < declared_count; d += 1)
         {
+            const uint32_t token = declared[d];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count)
             {
                 bool gnu_inline = false;
                 retained_objects[object] |= check_program_attribute_roots(program->input->attributes[token],
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t token = 0; valid && token < program->input->token_count; token += 1)
+        for (uint32_t d = 0; valid && d < declared_count; d += 1)
         {
+            const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
-            if (program->input->declarations[token] == token && attributes != 0 && object != 0 && object < program->object_count)
+            if (attributes != 0 && object != 0 && object < program->object_count)
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];
@@ -946,6 +988,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
             }
         }
     }
+    arena_pop_to(scratch, attributes_mark);
     // Tier 0's failures, the first body's: its own refusals are features it doesn't have yet (an entry without a
     // template, or values past its depth tables that its deep slots don't take: tier0_select_deep).
     uint32_t failed = count;
@@ -1088,9 +1131,9 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         if (declaration != BUSTER_CHECK_NONE && !made)
         {
             const uint32_t identifier = parser->tokens.names[declaration];
-            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
+            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length, true) :
                                              check_program_emit_given_name(&result->link, &names, intern_bytes(identifiers, identifier),
-                                                                           intern_length(identifiers, identifier));
+                                                                           intern_length(identifiers, identifier), false);
             valid = given[s] != 0;
         }
     }
@@ -1421,6 +1464,7 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
         }
     }
     arena_pop_to(scratch, temporary);
+    arena_release(&own_columns);
     if (timing)
     {
         lanes->merge_ns = check_program_lanes_now() - lanes_end;

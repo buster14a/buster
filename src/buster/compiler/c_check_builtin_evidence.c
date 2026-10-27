@@ -3,7 +3,8 @@
 //
 // Builtin witnesses describe syntax which the producer has actually seen. A pointer's type or a value's default
 // object-zero fields never prove its origin. Unknown paths remain unknown; the typed query action supplies the
-// specified conservative result and never reads source-program memory.
+// specified conservative result and never reads source-program memory. An atomic's address also takes, from here, the
+// alignment of the declaration its lvalue path starts at (base_token), as clang gives a declaration's.
 
 static bool check_input_complex_builtin(CBuiltinId builtin)
 {
@@ -70,9 +71,77 @@ static bool check_input_builtin_syntax_effects(CheckInputReader* reader, uint32_
     return !reader->output->resource && root < reader->builtin_syntax_count && reader->builtin_syntax_effects[root] != 0;
 }
 
+// clang's alignment of an object's declaration, its log2 (ASTContext::getDeclAlign): an aligned attribute's alone, which
+// may be less than the type's, or else the type's, at least 16 for an array of 16 bytes or more (x86-64's large arrays).
+static uint32_t check_input_declaration_alignment(const CheckInputReader* reader, uint32_t declaration, TypeId type)
+{
+    const CheckInputAttributes* attributes = reader->output->attributes[declaration];
+    const TypeId plain = type_strip_aligned(reader->types, type);
+    uint32_t result = type_alignment_log2(reader->types, type);
+    if (attributes != 0 && attributes->alignment_log2 != 0)
+    {
+        result = (uint32_t)attributes->alignment_log2 - 1;
+    }
+    else if (type_kind_is_array(type_kind(reader->types, plain)) && type_size(reader->types, type) >= 16 && result < 4)
+    {
+        result = 4;
+    }
+    return result;
+}
+
+// The object an identifier names, of a complete type that isn't variably modified, or BUSTER_CHECK_NONE: its declaration.
+static uint32_t check_input_evidence_object(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+    {
+        const uint32_t declaration = reader->output->declarations[token];
+        const TypeId type = reader->declared_types[token];
+        const uint8_t kind = type != 0 ? type_kind(reader->types, type_strip_aligned(reader->types, type)) : 0;
+        if (declaration < parser->tokens.count && type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(reader->types, type) &&
+            (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0)
+        {
+            result = declaration;
+        }
+    }
+    return result;
+}
+
 static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t first, uint32_t end, CheckBuiltinCall* evidence)
 {
     const Parser* parser = reader->parser;
+    // The leftmost identifier past prefix operators, casts and parentheses, whose declaration starts an lvalue path there.
+    uint32_t base = first;
+    bool leading = true;
+    while (leading && base < end)
+    {
+        const uint8_t role = parser->tree.roles[base];
+        const uint8_t kind = parser->tokens.kinds[base];
+        const uint32_t close = parser->tree.parents[base];
+        if (kind == PARSE_KIND_L_PAREN && role == PARSE_ROLE_OPEN_GROUP)
+        {
+            base += 1;
+        }
+        else if (role == PARSE_ROLE_OPEN_CAST && close > base && close + 1 < end)
+        {
+            base = close + 1;
+        }
+        else if ((kind == PARSE_KIND_AMP || kind == PARSE_KIND_STAR) && role == PARSE_ROLE_PREFIX)
+        {
+            base += 1;
+        }
+        else
+        {
+            leading = false;
+        }
+    }
+    const uint32_t object = base < end ? check_input_evidence_object(reader, base) : BUSTER_CHECK_NONE;
+    if (object != BUSTER_CHECK_NONE)
+    {
+        evidence->base_token = base;
+        evidence->base_alignment = (uint8_t)(check_input_declaration_alignment(reader, object, reader->declared_types[base]) + 1);
+    }
     bool address = false;
     while (first < end)
     {
@@ -123,20 +192,11 @@ static void check_input_builtin_evidence(CheckInputReader* reader, uint32_t firs
     }
     else if (first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER)
     {
-        const uint32_t declaration = reader->output->declarations[first];
+        const uint32_t declaration = check_input_evidence_object(reader, first);
         const TypeId type = reader->declared_types[first];
-        const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
-        if (declaration < parser->tokens.count && type != 0 && (address || type_kind_is_array(kind)) &&
-            kind != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(reader->types, type) &&
-            (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0)
+        if (declaration != BUSTER_CHECK_NONE && (address || type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)))))
         {
-            uint32_t alignment = type_alignment_log2(reader->types, type);
-            const CheckInputAttributes* attributes = reader->output->attributes[declaration];
-            if (attributes != 0 && attributes->alignment_log2 > alignment + 1)
-            {
-                alignment = attributes->alignment_log2 - 1;
-            }
-            evidence->minimum_alignment = UINT64_C(1) << alignment;
+            evidence->minimum_alignment = UINT64_C(1) << check_input_declaration_alignment(reader, declaration, type);
             evidence->alignment_known = true;
             size = type_size(reader->types, type);
         }
