@@ -24,8 +24,9 @@
 // Legacy pointer operations instead convert fixed values to the pointer VALUE type, then operate on raw address bits.
 // GNU rejects every _BitInt pointee; legacy accepts only power-of-two bit counts. Sub-byte legacy integers have a
 // distinct runtime representation gap. GNU exchange/add/sub also accept floating types except direct x87 long double;
-// compare_exchange accepts integer/pointer only. Floating exchange has exact F32/F64 raw-bit helper formats, while
-// floating arithmetic remains a valid typed operation with an explicit unsupported runtime reason.
+// compare_exchange accepts integer/pointer only. Clang's min/max extensions (fetch_min, max_fetch, ...) accept integers
+// and the same floating types, never pointers. Floating exchange has exact F32/F64 raw-bit helper formats, while
+// floating arithmetic and min/max remain valid typed operations with an explicit unsupported runtime reason.
 //
 // Canonical boolean exchange/CAS/AND/OR/XOR/release preserve valid byte representations. Boolean ADD/SUB/NAND may
 // create noncanonical storage bytes; Clang's bool-memory policy and optimization level affect returned values. Such
@@ -64,6 +65,9 @@ typedef enum CheckBuiltinAtomicRmwOperation
     CHECK_BUILTIN_ATOMIC_RMW_XOR,
     CHECK_BUILTIN_ATOMIC_RMW_NAND,
     CHECK_BUILTIN_ATOMIC_RMW_RELEASE,
+    // clang's GNU extensions: the smaller or the larger of the value and the operand, by the value type's ordering.
+    CHECK_BUILTIN_ATOMIC_RMW_MIN,
+    CHECK_BUILTIN_ATOMIC_RMW_MAX,
 } CheckBuiltinAtomicRmwOperation;
 
 typedef enum CheckBuiltinAtomicRmwReturn
@@ -153,7 +157,44 @@ static const CheckBuiltinAtomicRmwRule check_builtin_atomic_rmw_rules[] =
     { CBUILTIN_SYNC_VAL_COMPARE_AND_SWAP, CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, true },
     { CBUILTIN_SYNC_LOCK_TEST_AND_SET, CHECK_BUILTIN_ATOMIC_RMW_EXCHANGE, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 2, true },
     { CBUILTIN_SYNC_LOCK_RELEASE, CHECK_BUILTIN_ATOMIC_RMW_RELEASE, CHECK_BUILTIN_ATOMIC_RMW_VOID, 1, true },
+    { CBUILTIN_ATOMIC_FETCH_MIN, CHECK_BUILTIN_ATOMIC_RMW_MIN, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, false },
+    { CBUILTIN_ATOMIC_FETCH_MAX, CHECK_BUILTIN_ATOMIC_RMW_MAX, CHECK_BUILTIN_ATOMIC_RMW_OLD_BITS, 3, false },
+    { CBUILTIN_ATOMIC_MIN_FETCH, CHECK_BUILTIN_ATOMIC_RMW_MIN, CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS, 3, false },
+    { CBUILTIN_ATOMIC_MAX_FETCH, CHECK_BUILTIN_ATOMIC_RMW_MAX, CHECK_BUILTIN_ATOMIC_RMW_NEW_BITS, 3, false },
 };
+
+// The read/modify/write rule of a builtin identity, or NULL: the source checker's dispatch to this module, which every
+// builtin call's op takes, so that an identity outside the atomic families' range reads no rule.
+static __attribute__((unused)) const CheckBuiltinAtomicRmwRule* check_builtin_atomic_rmw_rule(CBuiltinId id)
+{
+    const CheckBuiltinAtomicRmwRule* rule = NULL;
+    const bool family = id >= CBUILTIN_ATOMIC_EXCHANGE_N && id <= CBUILTIN_SYNC_LOCK_RELEASE;
+    for (uint32_t i = 0; family && i < BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules); i += 1)
+    {
+        if (check_builtin_atomic_rmw_rules[i].id == id)
+        {
+            rule = check_builtin_atomic_rmw_rules + i;
+        }
+    }
+    return rule;
+}
+
+// The order positions whose source arguments are integer constant expressions, as the source checker proves them (a
+// value's ICE flag from the expression's own analysis): the action's order_ice_arguments.
+static __attribute__((unused)) uint8_t check_builtin_atomic_rmw_order_ice(CBuiltinId id, const CheckValue* arguments, uint32_t count)
+{
+    const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(id);
+    uint8_t ice = 0;
+    if (rule != NULL && !rule->legacy && arguments != NULL && count == rule->fixed_count)
+    {
+        const bool compare = rule->operation == CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE;
+        for (uint32_t i = compare ? 4 : 2; i < count; i += 1)
+        {
+            ice |= (arguments[i].flags & BUSTER_CHECK_ICE) != 0 ? (uint8_t)(1u << i) : 0;
+        }
+    }
+    return ice;
+}
 
 static bool check_builtin_atomic_rmw_floating(const TypeTable* table, TypeId type)
 {
@@ -183,10 +224,12 @@ static void check_builtin_atomic_rmw_object(TypeTable* table, const CheckBuiltin
         const bool arithmetic = output->operation == CHECK_BUILTIN_ATOMIC_RMW_ADD || output->operation == CHECK_BUILTIN_ATOMIC_RMW_SUB;
         const bool exchange = output->operation == CHECK_BUILTIN_ATOMIC_RMW_EXCHANGE;
         const bool compare = output->operation == CHECK_BUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE;
+        const bool ordered = output->operation == CHECK_BUILTIN_ATOMIC_RMW_MIN || output->operation == CHECK_BUILTIN_ATOMIC_RMW_MAX;
         const bool integer = check_action_is_integer(table, plain);
+        // Clang's min and max take integers and its floating types but not pointers (AOEVT_FP alone).
         const bool allowed = output->legacy ? integer || pointer_value :
             integer || (pointer_value && (arithmetic || exchange || compare)) ||
-            (floating && (arithmetic || exchange) && unqualified != BUSTER_TYPE_LONG_DOUBLE);
+            (floating && (arithmetic || exchange || ordered) && unqualified != BUSTER_TYPE_LONG_DOUBLE);
         atomic->object_type = object;
         atomic->value_type = output->legacy ? unqualified : plain & ~(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
         atomic->object_address = *pointer;
@@ -264,7 +307,7 @@ static void check_builtin_atomic_rmw_object(TypeTable* table, const CheckBuiltin
             {
                 atomic->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_FLOAT_FORMAT;
             }
-            if (floating && arithmetic)
+            if (floating && (arithmetic || ordered))
             {
                 atomic->unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_FP_RMW;
                 output->reads_fp_environment = true;
@@ -348,14 +391,7 @@ static __attribute__((unused)) void check_builtin_atomic_rmw_one(TypeTable* tabl
 {
     *output = (CheckBuiltinAtomicRmwResult){ 0 };
     const CheckBuiltinAtomicAction* source = &input->source;
-    const CheckBuiltinAtomicRmwRule* rule = NULL;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_builtin_atomic_rmw_rules); i += 1)
-    {
-        if (check_builtin_atomic_rmw_rules[i].id == source->id)
-        {
-            rule = check_builtin_atomic_rmw_rules + i;
-        }
-    }
+    const CheckBuiltinAtomicRmwRule* rule = check_builtin_atomic_rmw_rule(source->id);
     CheckBuiltinAtomicResult* atomic = &output->atomic;
     if (rule == NULL)
     {

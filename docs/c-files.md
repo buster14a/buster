@@ -99,9 +99,10 @@ What a run does (the reads and mappings are those of 8 lanes):
 `sqlite3.c`'s unused tokens are 85% of its headers': clang's AVX-512 intrinsic
 headers (`avx512fintrin.h` alone is 64,533 tokens), which an
 `#include <immintrin.h>` under an `#if` that is false here reaches, and ICU's
-`urename.h` (`SQLITE_ENABLE_ICU`). The repository's are mostly the fragment
-experiment's sources, which `main.c` includes only for `main_unit_fragments.c`
-(not among the benchmark's units), and clang's headers for other targets
+`urename.h` (`SQLITE_ENABLE_ICU`). The repository's were mostly the fragment
+experiment's sources, which `main.c` included only for that experiment's unit
+(not among the benchmark's units, and since removed: [the
+decision](c-parser-fragments.md)), and clang's headers for other targets
 (`arm_acle.h`, `intrin.h`). musl's units enter every header the walk reaches.
 
 ## Design
