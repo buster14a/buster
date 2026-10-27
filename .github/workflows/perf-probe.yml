@@ -59,8 +59,8 @@ jobs:
         run: |
           set -euo pipefail
           clang --version | head -n 1
-          ./build.sh
+          BUSTER_DEBUG_INFO=0 ./build.sh
 
       - name: Probe
         if: steps.cpu.outputs.capable == 'true'
-        run: bash .github/perf-probe/probe12.sh
+        run: bash .github/perf-probe/probe13.sh

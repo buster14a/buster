@@ -889,6 +889,35 @@ static void builtins_heavy(unsigned n)
     printf("    return y;\n}\n");
 }
 
+
+// N statements that each call one builtin, by name.
+static int builtin_statements(const char* name, unsigned n)
+{
+    static const struct { const char* name; const char* format; } forms[] = {
+        { "expect", "    if (__builtin_expect(x > %u, 0)) y += 1;\n" },
+        { "popcount", "    y += __builtin_popcount((unsigned)x + %uu);\n" },
+        { "clz", "    y += __builtin_clz((unsigned)x | %uu | 1u);\n" },
+        { "ctz", "    y += __builtin_ctz((unsigned)x | %uu | 1u);\n" },
+        { "bswap", "    y += (int)__builtin_bswap32((unsigned)x + %uu);\n" },
+        { "overflow", "    { int r; if (__builtin_add_overflow(x, %u, &r)) y += 1; else y += r; }\n" },
+        { "constant", "    y += __builtin_constant_p(x + %u);\n" },
+        { "abs", "    y += __builtin_abs(x - %u);\n" },
+    };
+    int found = 0;
+    for (unsigned f = 0; f < sizeof(forms) / sizeof(forms[0]); f++)
+    {
+        if (strcmp(forms[f].name, name) == 0)
+        {
+            printf("int f(int x)\n{\n    int y = 0;\n");
+            for (unsigned i = 0; i < n; i++)
+                printf(forms[f].format, i);
+            printf("    return y;\n}\n");
+            found = 1;
+        }
+    }
+    return found;
+}
+
 int main(int count, char** arguments)
 {
     if (count < 3)
@@ -998,6 +1027,7 @@ int main(int count, char** arguments)
     else if (strcmp(mode, "inline-asm") == 0) inline_asm(n);
     else if (strcmp(mode, "offsetofs") == 0) offsetofs(n);
     else if (strcmp(mode, "builtins-heavy") == 0) builtins_heavy(n);
+    else if (strncmp(mode, "builtin-", 8) == 0 && builtin_statements(mode + 8, n)) status = 0;
     else
     {
         fprintf(stderr, "gen: unknown mode %s\n", mode);
