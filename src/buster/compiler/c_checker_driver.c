@@ -290,9 +290,10 @@ static void check_driver_visibility_report(const Parser* parser, Preprocessor* p
                                        severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         const uint32_t publication = record->warning == 1 && !record->error ? record->source :
                                      check_driver_publication_position(parser, pp, record->token, pp->output.count);
+        const PPDiagnosticPhase phase = record->warning == 1 && !record->error ? PP_DIAGNOSTIC_LEXICAL : PP_DIAGNOSTIC_SEMANTIC;
         if (record->warning == 2)
         {
-            pp_diagnose_output_at(pp, pp_severity, record->diagnostic_source, publication, "unknown visibility '%.*s' [%s-Wignored-attributes]",
+            pp_diagnose_output_phase(pp, pp_severity, record->diagnostic_source, publication, phase, "unknown visibility '%.*s' [%s-Wignored-attributes]",
                                (int)record->name.length, record->name.pointer, severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
         }
         else
@@ -314,7 +315,7 @@ static void check_driver_visibility_report(const Parser* parser, Preprocessor* p
             }
             else
             {
-                pp_diagnose_output_at(pp, pp_severity, record->diagnostic_source, publication, "%s", message);
+                pp_diagnose_output_phase(pp, pp_severity, record->diagnostic_source, publication, phase, "%s", message);
             }
         }
     }
@@ -346,12 +347,12 @@ static void check_driver_return_reports(const Parser* parser, const Parser* orig
     {
         const CheckProgramBody* body = program->bodies + b;
         const uint32_t token = parser->tree.parents[body->opening];
-        const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
-        if (body->return_warning != 0 && token < parser->tokens.count && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error &&
+        if (body->return_warning != 0 && token < parser->tokens.count &&
             (pp->options.system_header_warnings || !check_graph_system_token(&program->input->graph, token)))
         {
+            const uint32_t publication = check_driver_publication_position(original, pp, token + 1u, pp->output.count);
             const CheckWarningSeverity severity = check_diagnostic_severity_from(program->input, token, BUSTER_CHECK_NONE, CHECK_WARNING_RETURN_TYPE, baseline);
-            if (severity != CHECK_WARNING_IGNORE)
+            if (severity != CHECK_WARNING_IGNORE && (uint64_t)publication * 4 + PP_DIAGNOSTIC_RETURN < first_error)
             {
                 const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
@@ -428,7 +429,7 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                 {
                     *--text = '-';
                 }
-                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (event->default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
                     severity == CHECK_WARNING_ERROR ? (event->default_error ?
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, phase,
