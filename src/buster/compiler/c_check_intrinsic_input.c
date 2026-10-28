@@ -95,7 +95,7 @@ static uint64_t check_input_intrinsic_operands(const CheckInputReader* reader, u
     const uint32_t count = parser->tokens.count;
     const uint8_t* deferred_tokens = reader->output->deferred_tokens;
     uint64_t result = check_input_scan_all(first, count);
-    if (!parser->options.scalar)
+    if (!BUSTER_SCALAR_PATH(parser->options.scalar))
     {
         result = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_IDENTIFIER) &
                  check_input_scan_equal(parser->tree.roles, first, count, PARSE_ROLE_OPERAND);
@@ -120,7 +120,7 @@ static bool check_input_intrinsic_lookup(const Parser* parser, BuiltinIntrinsicN
                                          uint32_t* cache, uint32_t* declarations)
 {
     const BuiltinIntrinsicInfo* infos[8];
-    builtin_intrinsic_lookup_batch(names, infos, lanes, parser->options.scalar);
+    builtin_intrinsic_lookup_batch(names, infos, lanes, BUSTER_SCALAR_PATH(parser->options.scalar));
     bool valid = true;
     for (uint32_t lane = 0; valid && lane < lanes; lane += 1)
     {

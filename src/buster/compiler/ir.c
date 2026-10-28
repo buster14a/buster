@@ -19,7 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_IR_NONE UINT32_MAX
 #define BUSTER_IR_VECTOR_COUNT 16
@@ -866,13 +866,15 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
 
 static IrCheck ir_check_rows(const IrFunction* f, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     uint32_t block = 0;
     uint32_t first = 0;
     while (check.error == IR_OK && first < f->instruction_count)
     {
         const uint32_t remaining = f->instruction_count - first;
-        const uint32_t count = vector && remaining > BUSTER_IR_VECTOR_COUNT ? BUSTER_IR_VECTOR_COUNT : vector ? remaining : 1;
+        const uint32_t count = BUSTER_VECTOR_PATH(vector) && remaining > BUSTER_IR_VECTOR_COUNT ? BUSTER_IR_VECTOR_COUNT : BUSTER_VECTOR_PATH(vector) ? remaining : 1;
         __mmask16 expected = 0;
         while (block < f->block_count && f->block_offsets[block + 1] - first <= count)
         {
@@ -881,7 +883,7 @@ static IrCheck ir_check_rows(const IrFunction* f, bool vector)
         }
         __mmask16 actual = 0;
         uint32_t pending = 1;
-        if (vector)
+        if (BUSTER_VECTOR_PATH(vector))
         {
             pending = ir_check_batch(f, first, count, &actual);
         }
@@ -1223,9 +1225,11 @@ struct IrUseBatch
 
 static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     uint32_t bad = 0;
-    if (vector)
+    if (BUSTER_VECTOR_PATH(vector))
     {
         const __m512i definition_blocks = _mm512_loadu_si512(batch->definition_blocks);
         const __m512i use_blocks = _mm512_loadu_si512(batch->use_blocks);
@@ -1258,6 +1262,8 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool 
 
 static IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUseBatch batch = { 0 };
     for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
@@ -1284,20 +1290,22 @@ static IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const I
             batch.count += 1;
             if (batch.count == BUSTER_IR_VECTOR_COUNT)
             {
-                check = ir_check_use_batch(&batch, dominance != 0, vector);
+                check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
                 batch.count = 0;
             }
         }
     }
     if (check.error == IR_OK && batch.count != 0)
     {
-        check = ir_check_use_batch(&batch, dominance != 0, vector);
+        check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
     }
     return check;
 }
 
 static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     bool ok = true;
     uint32_t* seen = ir_allocate(scratch, f->block_count, 4, &ok);
@@ -1359,7 +1367,7 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_dominance(f, cfg, dominance, vector);
+        check = ir_check_dominance(f, cfg, dominance, BUSTER_VECTOR_PATH(vector));
     }
     if (check.error == IR_OK)
     {
@@ -1371,11 +1379,13 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
 
 static IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
 {
+    (void)vector;
+
     const uint64_t mark = scratch->length;
     IrCheck check = ir_check_shape(f);
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(f, vector);
+        check = ir_check_rows(f, BUSTER_VECTOR_PATH(vector));
     }
     IrCfg cfg = { 0 };
     if (check.error == IR_OK)
@@ -1384,15 +1394,21 @@ static IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDomin
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(f, &cfg, scratch, dominance, vector);
+        check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));
     }
     arena_pop_to(scratch, mark);
     return check;
 }
 
+static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance);
+
 static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
 {
+#if !BUSTER_HOST_VECTOR
+    return ir_verify_scalar(f, scratch, dominance);
+#else
     return ir_verify_path(f, scratch, dominance, true);
+#endif
 }
 
 static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
