@@ -318,7 +318,8 @@ static const ChangesModule changes_modules[] = {
         .name = "checker",
         .sources = "c_check[a-z_]*",
     },
-    // #336's binding handoff: the reader's retained answers (c_check_binding.c), the events' producers in the reader
+    // #336's binding handoff, the default's samples (direct, alone and after scalar work, by itself and through the
+    // pipeline): the reader's retained answers (c_check_binding.c), the events' producers in the reader
     // (check_input_bind and check_input_resolve in c_check_input.c, the enumerators' and the constant readers':
     // docs/c-check-bindings.md's table), the stack and batch resolvers and the parser's replay that it was chosen
     // over. Its repeated processes took 170 s of every pull request that changed any of the checker's sources, which
@@ -328,9 +329,31 @@ static const ChangesModule changes_modules[] = {
         .sources = "c_check_binding[a-z_]*|c_check_input|c_check_enum_input|c_check_constant|c_bindings[a-z_]*|"
                    "c_parser_binding_trace|c_parser_bindings[a-z_]*",
     },
+    // The rest of #336's samples, the comparison it chose the default by: every mode on each input, and the old
+    // default (parser-batch) alone and after scalar work. The modes differ only in the handoffs, which only these
+    // sources change: the reader's retained answers and the samples' harness (c_check_binding*.c), the resolvers and
+    // the parser's replay. In a day, 15 of the 23 pull requests' runs that paid all of #336's samples, 142 s, changed
+    // none of these, only the events' producers, whose change the default's samples measure in about 32.
+    {
+        .name = "checker_binding_modes",
+        .sources = "c_check_binding[a-z_]*|c_bindings[a-z_]*|c_parser_binding_trace|c_parser_bindings[a-z_]*",
+    },
+    // #395's -g, each path alone and after scalar work, where the rows' producers or their passes change: what the
+    // source rows add to the emission (benchmark-check-debug's emit pass), and the unit built from the rows it makes
+    // (the build pass: their lines, the rows kept and the sections). The emission and the lowering copy the entries'
+    // tokens out, and Tier 0 writes each entry's first record, so a change to them changes the build pass's input.
     {
         .name = "check_debug",
         .sources = "c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0",
+    },
+    // Every pass in the same states (the synthetic raw rows, their lines and the rows kept, besides the two above),
+    // where the rows' own passes change: c_check_debug.c's code and debug.c's. Every pass's samples took 22 s, most of
+    // it 200 ms of scalar work before each of 21 samples of each pass, where the emit and build passes' take about 10;
+    // in a day, 30 of the 39 pull requests' runs that paid them changed neither file, only the emission, the lowering
+    // or Tier 0.
+    {
+        .name = "check_debug_rows",
+        .sources = "c_check_debug[a-z_]*|debug",
     },
     {
         .name = "files",
@@ -1448,34 +1471,52 @@ static const ChangesFixture changes_fixtures[] = {
     },
     {
         .name = "a checker test alone starts no conditioned samples, but the plain runs that check the twins",
-        .files = "src/buster/compiler/c_checker_test.c src/buster/compiler/c_check_binding_test.c",
+        .files = "src/buster/compiler/c_checker_test.c src/buster/compiler/c_check_binding_test.c "
+                 "src/buster/compiler/c_check_debug_test.c",
         .outputs_true = "code",
-        .outputs_false = "checker checker_bindings check_debug",
+        .outputs_false = "checker checker_bindings checker_binding_modes check_debug check_debug_rows",
         .measured = "checker-source checker-bindings",
     },
     {
-        .name = "the reader produces the binding events",
+        .name = "the reader produces the binding events: the default handoff's samples, not the modes' comparison",
         .files = "src/buster/compiler/c_check_input.c",
         .outputs_true = "checker checker_bindings",
-        .outputs_false = "parser_bindings check_debug",
+        .outputs_false = "checker_binding_modes parser_bindings check_debug",
         .measured = "checker-bindings checker-deferred lowering-source",
         .unmeasured = "lexer parser",
+    },
+    {
+        .name = "the constant readers produce binding events too",
+        .files = "src/buster/compiler/c_check_constant.c src/buster/compiler/c_check_enum_input.c",
+        .outputs_true = "checker_bindings",
+        .outputs_false = "checker_binding_modes",
     },
     {
         .name = "another checker source runs the checker's samples, not the handoff's",
         .files = "src/buster/compiler/c_check_vla_input.c",
         .outputs_true = "checker",
-        .outputs_false = "checker_bindings",
+        .outputs_false = "checker_bindings checker_binding_modes",
     },
     {
         .name = "the binding handoff itself",
         .files = "src/buster/compiler/c_check_binding.c",
-        .outputs_true = "checker checker_bindings",
+        .outputs_true = "checker checker_bindings checker_binding_modes",
+    },
+    {
+        .name = "the handoff samples' harness",
+        .files = "src/buster/compiler/c_check_binding_benchmark.c",
+        .outputs_true = "checker_bindings checker_binding_modes",
+        .measured = "checker-bindings",
+    },
+    {
+        .name = "the resolvers",
+        .files = "src/buster/compiler/c_bindings.c",
+        .outputs_true = "checker_bindings checker_binding_modes parser_bindings",
     },
     {
         .name = "the parser's replay",
         .files = "src/buster/compiler/c_parser_bindings.c",
-        .outputs_true = "checker_bindings parser_bindings",
+        .outputs_true = "checker_bindings checker_binding_modes parser_bindings",
         .outputs_false = "checker",
         .measured = "parser-bindings",
     },
@@ -1547,11 +1588,24 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "files",
     },
     {
-        .name = "the debug rows",
+        .name = "Tier 0 writes the entries' first records: the emit and build passes' -g samples, not every pass's",
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
-        .outputs_false = "checker",
+        .outputs_false = "check_debug_rows checker",
         .measured = "backend backend-source check-debug",
+    },
+    {
+        .name = "the -g rows' own passes",
+        .files = "src/buster/compiler/c_check_debug.c",
+        .outputs_true = "check_debug check_debug_rows checker",
+        .measured = "check-debug",
+    },
+    {
+        .name = "debug.c's unit",
+        .files = "src/buster/compiler/debug.c",
+        .outputs_true = "check_debug check_debug_rows",
+        .outputs_false = "checker",
+        .measured = "debug",
     },
     {
         .name = "the backend's shared measurement measures both of its benchmarks",
@@ -1574,6 +1628,7 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the emission's stage marks",
         .files = "src/buster/compiler/c_check_program_emit.c",
         .outputs_true = "code compile_time check_debug",
+        .outputs_false = "check_debug_rows",
     },
     {
         .name = "the expression templates' lowering time",
