@@ -1628,7 +1628,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         const CheckProgramOptions program_options = {
                             .initializers = &initializers,
                             .asms = &asms,
-                            .prepared_data = (emit_object || link) && !prefix_only ? &data : NULL,
+                            .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
                             .identifiers = pp.table,
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
