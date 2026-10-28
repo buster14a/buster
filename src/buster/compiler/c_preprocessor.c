@@ -19549,7 +19549,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 }
 
 // `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
-static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
@@ -19599,11 +19599,24 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
             result = preprocessed && printed ? 0 : 1;
         }
         // What a failed reservation left reserved too.
-        pp_release(&pp);
-        intern_release(&table);
+        if (release)
+        {
+            pp_release(&pp);
+            intern_release(&table);
+        }
     }
-    arena_release(&arena);
+    if (release)
+    {
+        arena_release(&arena);
+    }
     return result;
+}
+
+// Reusable command callers release all mappings. Main's terminal -E route instead lets process exit tear them down;
+// the output file has already been closed, or stdout remains open for libc to flush at exit, in either mode.
+static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

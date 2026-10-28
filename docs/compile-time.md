@@ -514,13 +514,34 @@ isn't measured here: its input is a different unit (speedtest1's with
 `sqlite3.c`), and its link is work `-c` doesn't do. Its stages would show in
 the `executable` row.
 
+## Small-unit setup and exit (#652)
+
+Main's terminal C and `check` commands, and its `-E` command, let process exit
+tear down their mappings. Output files are closed before the command returns;
+stdout is flushed by libc on ordinary process exit. The reusable
+`run_check_command` and `run_preprocessor_command` routes still release all
+owned mappings before returning, including error paths, so tests and other
+callers can compile another unit. The driver suite runs each reusable route
+twice and checks that it retains no additional mappings.
+
+On the terminal routes the `release` stage includes no explicit arena teardown.
+Whole-process measurements still include the kernel's teardown at exit; the
+old release stage's time must not be reported as an equal whole-process saving.
+The tables above retain their recorded source revisions and cleanup policy.
+
+The ordinary arena's 64 KiB base-page prefix is retained. A 1 MiB-prefix
+experiment reduced some huge-page clearing but increased base-page faults and
+whole-process time on both small units and SQLite in the local screening run.
+It is excluded from the cleanup change; the issue's remaining setup directions
+need separate target measurements.
+
 ## How it is measured
 
 **The stage clock.** `--time-stages` (`c_check_clock.c`) makes the C driver
 report, on standard error after the command, a row per stage.
 - **Laps.** A lap charges the TSC ticks since the previous lap to the stage it
   names. So the stages never overlap, and they add up to the clock's span, from
-  the driver's first instruction to its last release. The TSC's rate is
+  the driver's first instruction to its final stage mark. The TSC's rate is
   measured against `CLOCK_MONOTONIC` over the same span.
 - **Marks.** The coarse laps read `getrusage` too, for each stage's system time,
   minor faults and growth of the peak RSS. The per-function passes (lowering,
