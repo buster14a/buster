@@ -2144,10 +2144,10 @@ static CheckDeclaratorRun* check_input_declarator_begin(CheckInputReader* reader
             }
             stop = close + 1;
             // A K&R definition's declaration list after its identifier list ends the declarator: no specifier follows a
-            // group in one.
+            // group in one. Parenthesized _Atomic(T) has a query role rather than the qualifier form's SPECIFIER role.
             const uint8_t next = stop < end ? parser->tokens.kinds[stop] : PARSE_KIND_END;
             if (stop < end && (parser->tree.roles[stop] == PARSE_ROLE_SPECIFIER || next == PARSE_KIND_STRUCT || next == PARSE_KIND_ENUM ||
-                               next == PARSE_KIND_TYPEOF))
+                               next == PARSE_KIND_TYPEOF || next == PARSE_KIND_ATOMIC))
             {
                 break;
             }
