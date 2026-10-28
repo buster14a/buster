@@ -4809,7 +4809,9 @@ measures the synthetic index/query handoff and completeness checks; use
 `--only full-vector [--after-scalar 100]` for its vector states, under the
 9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
 source reader's retained events, declaration types, tag completion positions
-and body slots through `c_check_environment.c`; `test-checker` checks their
+and body slots through `c_check_environment.c` (the C driver's
+`check_input_compile` doesn't, as nothing in a compile reads them: #572);
+`test-checker` checks their
 scratch lifetime and scalar/vector replay. `c_check_deferred.c` is their
 consumer: the deferred reader below ("Deferred function bodies").
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.

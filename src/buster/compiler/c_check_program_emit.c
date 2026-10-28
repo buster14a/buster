@@ -770,23 +770,30 @@ static uint64_t check_program_emit_marked(const Tier0Code* code)
 // writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
 // another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
 // check_data_prepare selects them), its literals and whatever has no external linkage. The emission's column
-// (check_program_emit_lanes) and check_program_access's share it.
-static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, uint32_t* declaring, bool scalar)
+// (check_program_emit_lanes) and check_program_access's share it. The objects it defines are found among the tokens
+// that define or tentatively define, few of a unit's (#592), 64 at a time (the scalar path, `scalar`, takes every token).
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, bool scalar)
 {
+    const CheckInput* input = program->input;
     memset(defined, 0, (uint64_t)program->object_count + 1);
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         defined[program->bodies[b].object] = 1;
     }
-    const uint32_t declaring_count = check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar);
-    for (uint32_t d = 0; d < declaring_count; d += 1)
+    for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const uint32_t token = declaring[d];
-        const uint32_t object = program->input->objects[token];
-        if (object < program->object_count && program->input->declaration_kinds[token] == C_BINDING_OBJECT &&
-            (program->input->defined[token] || program->input->tentative[token]))
+        const uint64_t lanes = scalar ? check_input_scan_all(first, input->token_count) :
+                                        check_input_scan_nonzero(input->defined, first, input->token_count) |
+                                        check_input_scan_nonzero(input->tentative, first, input->token_count);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
-            defined[object] = 1;
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const uint32_t object = input->objects[token];
+            if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (input->defined[token] || input->tentative[token]))
+            {
+                defined[object] = 1;
+            }
         }
     }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
@@ -817,15 +824,12 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
     const uint32_t access_count = code->link.symbols.count > numbered ? code->link.symbols.count : numbered;
     uint8_t* access = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, access_count);
     uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
-    // The tokens that declare, for check_program_object_access: pushed last, and given back once it has read them.
-    const uint64_t declaring_mark = scratch->length;
-    uint32_t* declaring = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16);
-    const bool valid = access != 0 && defined != 0 && declaring != 0;
+    const bool valid = access != 0 && defined != 0;
     *defined_objects = defined;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined, declaring, false);
+        check_program_object_access(program, access, defined, false);
         for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
         {
             const uint32_t symbol = program->symbol_count + lowered->helpers.count + 1 + r;
@@ -837,7 +841,6 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
             lowered->functions[b].symbol_count = access_count;
         }
     }
-    arena_pop_to(scratch, declaring_mark);
     return valid;
 }
 
@@ -890,18 +893,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint32_t access_count = valid ? shared.provisional_tables + result->lowered.table_count : 0;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
-    // The tokens that declare, which the pass below visits rather than every token of the unit: pushed last, and given
-    // back before the bodies compile.
-    const uint64_t declaring_mark = scratch->length;
-    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
-    valid = valid && access != 0 && defined != 0 && declaring != 0;
+    valid = valid && access != 0 && defined != 0;
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined, declaring, scalar);
+        check_program_object_access(program, access, defined, scalar);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
-    arena_pop_to(scratch, declaring_mark);
     // Lane 0's writer's columns (CheckEmitRun.columns), in an arena of base pages reserved for the room they take
     // (check_lower_writer_bytes): the lanes' first arenas' scratch, kept while it has the room and otherwise reserved
     // again, or without lanes an arena of this emission's own; none without bodies, whose writer never begins. Where that
@@ -1066,7 +1064,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    // The declaring tokens again, for the attributes' passes (one vector pass: cheaper than holding them through the
+    // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
     const uint64_t attributes_mark = scratch->length;
     uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
@@ -1077,7 +1075,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
         memset(retained_objects, 0, program->object_count);
+        // Of the declaring tokens, those with attributes, which are all the passes below act on: their attributes read
+        // once, and the rest of each token's columns only for these (#592).
+        uint32_t attributed = 0;
         for (uint32_t d = 0; d < declared_count; d += 1)
+        {
+            const uint32_t token = declared[d];
+            declared[attributed] = token;
+            attributed += program->input->attributes[token] != 0;
+        }
+        for (uint32_t d = 0; d < attributed; d += 1)
         {
             const uint32_t token = declared[d];
             const uint32_t object = program->input->objects[token];
@@ -1088,12 +1095,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t d = 0; valid && d < declared_count; d += 1)
+        for (uint32_t d = 0; valid && d < attributed; d += 1)
         {
             const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
-            if (attributes != 0 && object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count)
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];

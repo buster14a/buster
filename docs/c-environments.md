@@ -119,7 +119,9 @@ It supplies no scheduler, IR merger or composite-type effect merger.
 ## Production source-reader handoff
 
 On a successful `check_input`, `check_environment_publish` builds
-`CheckInput.environment` before the reader releases its scratch. Rejected or
+`CheckInput.environment` before the reader releases its scratch. The C
+driver's reader (`check_input_compile`) doesn't: nothing in a compile reads it
+(#572). Rejected or
 unsupported source-reader constructs publish no usable environment. Publication failure empties
 the handoff, rolls back its allocations and sets the existing resource status.
 The sequential entry point, declaration columns and graph stay compatible.

@@ -432,7 +432,7 @@ edges (an ablation without them is no faster), but the per-token loop's code,
 and about two thirds of its emission's is `c_check_program_emit.c`'s (an
 ablation with main's file takes it back).
 
-So the selection, the emission and the lowering visit the tokens that declare
+The emission's attribute passes and the lowering visit the tokens that declare
 (and for the lowering, that start an initializer), which
 `check_program_declaring` gives 16 at a time with a register compress; the
 selection counts and numbers its needed objects 64 at a time
@@ -440,9 +440,10 @@ selection counts and numbers its needed objects 64 at a time
 scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
 ABI table has rows for its type table's types alone (`abi_initialize_types`):
 the lowering makes no type, and classifies only the types it has rows for. The
-emission builds the declaring tokens before each place that reads them (its
-`defined` pass before the bodies compile on lanes, its attributes' passes
-after) and gives them back after it, never holding them through Tier 0. Of the
+selection now reads the static declaration keys retained by `check_data_prepare`
+(#592). The emission finds defined/tentative bytes 64 tokens at a time before
+the bodies compile on lanes; after those compiles it builds declaring tokens
+for its attribute passes and gives them back, never holding them through Tier 0. Of the
 names a unit gives, only asm labels with a `.` go in the made names' table,
 since every made name has one and no identifier does.
 Every c-testsuite object, by both paths, is byte for byte what main wrote before.

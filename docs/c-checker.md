@@ -406,7 +406,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves` | `count` `CheckValue` records when value leaves are present. Only `VALUE` reads its leaf record. |
+| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -512,7 +512,8 @@ time (`check_graph_validate_vector`): the operators' classes come from one
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record. `test-checker` compares the two
+reads: two cache lines of each 96-byte record, which since #572 lie one after
+another, as only `VALUE` nodes have one. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -1128,6 +1129,24 @@ The test command fails if the oracle cannot run. It covers:
   last linked program's takes that program's run: the same files would link
   into the same executable (#465). A program that fails is linked and run, and
   its directory kept with `driver.c` and `oracle.c`.
+- The passes after checking that visit a unit's few records rather than every
+  token (#592), on every program fixture by both paths
+  (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
+  replaced, kept as the test's oracle, record for record, with each object's
+  last declaration (`check_data_latest`) and the static declarations' keys;
+  `check_program_token_body` against the token-sized column of every body's
+  tokens; and the objects `check_program_object_access` finds the unit defines
+  against a walk of every token. `check_init_declarations` runs at every count
+  to 200 and larger ones, ending at `PROT_NONE` pages, beside #442's kernels.
+- The diagnostics' report (`check_driver_reports`, #592) against the walk of
+  every token it replaced, kept as the test's oracle
+  (`check_test_driver_reports` in `c_checker_driver_test.c`): units with
+  warnings of each kind, an error and a fatal error, reported as checked and
+  with their sparse records rewritten at random (constants' and nodes'
+  warnings, floating-point pragmas and packed members' addresses in token order
+  and out of it, the original pragmas apart, reports, the driver's own
+  diagnostics and excess elements, quiet and not). The text, the counts and the
+  fatal flag must be the oracle's by both paths.
 
 The fixtures that ask clang for acceptance and first errors go to it many at a
 time (`parse_test_clang`), split in order among up to eight processes that run
@@ -1180,7 +1199,7 @@ conversions are distinguished from source conversions: `__builtin_assume_aligned
 retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
 can cancel it. The existing diagnostic pragma history controls suppression and
 promotion, and `-w` silences the diagnostic. Source records remain ordered and
-the driver consumes them sparsely without widening its dense warning columns.
+the driver merges them with its sparse warning and report keys.
 
 The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
 `llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation

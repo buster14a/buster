@@ -24,7 +24,15 @@ struct CheckDataPrepared
     uint32_t reference_count;
     uint32_t* reference_offsets;
     uint32_t* reference_counts;
-    uint32_t* latest_declarations;
+    // The static declarations (the tokens that declare an object with static storage: a function, a file-scope object,
+    // a static local, an extern declaration, a compound literal at file scope), as keys of the object (a token's id,
+    // check_input's `objects`) in the high half and the token in the low, in object order and each object's in token
+    // order; and the static objects, in object order, with each one's last declaration: check_data_latest's.
+    uint64_t* declaration_keys;
+    uint32_t declaration_count;
+    uint32_t* declared_objects;
+    uint32_t* declared_latest;
+    uint32_t declared_count;
     uint32_t object_count;
     LinkCapacity capacity;
     uint32_t token;
@@ -50,8 +58,42 @@ static CheckDataInputStatus check_data_input_status(CheckDataStatus status)
     return result;
 }
 
+// Where `object` is among prepared's declared objects (check_data_prepare's, in object order), or declared_count where it
+// isn't one (a string literal's, or a non-object). The search halves its range without a branch, each step a select of
+// the half: its callers ask of objects in an order the branch predictor can't learn (the selection's definitions, in
+// token order).
+static uint32_t check_data_declared_index(const CheckDataPrepared* prepared, uint32_t object)
+{
+    const uint32_t* objects = prepared->declared_objects;
+    uint32_t base = 0;
+    uint32_t length = prepared->declared_count;
+    while (length > 1)
+    {
+        const uint32_t half = length / 2;
+        base = objects[base + half] < object ? base + half : base;
+        length -= half;
+    }
+    // The first declared object not below `object`.
+    const uint32_t lower = length != 0 ? base + (objects[base] < object) : 0;
+    const uint32_t index = lower < prepared->declared_count && objects[lower] == object ? lower : prepared->declared_count;
+    return index;
+}
+
+// The last static declaration of `object`, or BUSTER_CHECK_NONE where it has none.
+static uint32_t check_data_latest(const CheckDataPrepared* prepared, uint32_t object)
+{
+    const uint32_t index = check_data_declared_index(prepared, object);
+    const uint32_t token = index < prepared->declared_count ? prepared->declared_latest[index] : BUSTER_CHECK_NONE;
+    return token;
+}
+
+// The static data: each static object's last declaration, and for each one the unit defines or tentatively defines, in
+// object order, its definition, type, alignment and initializer's references; then the string literals. Few of a unit's
+// tokens declare a static object (#592), so the vector path finds them 64 tokens at a time (the scalar path, `scalar`,
+// takes every token), as keys of their object and token, which c_bindings_sort puts in object order, each object's
+// declarations in token order: no token-sized column is filled or read past them.
 static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* input, const CheckStream* stream,
-                               const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
+                               const CheckInitializers* initializers, TypeTable* types, bool scalar, Arena* output, Arena* scratch)
 {
     *result = (CheckDataPrepared){ .token = BUSTER_CHECK_NONE };
     const uint64_t output_mark = output->length;
@@ -61,55 +103,90 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                  stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
                  initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
     result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
-    result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
-    if (valid && (result->latest_declarations == 0 || definition == 0 || alignments == 0))
+    uint64_t* keys = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+    uint64_t* sorting = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+    if (valid && sorting == 0)
     {
         valid = false;
         result->status = CHECK_DATA_INPUT_RESOURCE;
     }
-    for (uint32_t object = 0; valid && object <= count; object += 1)
+    uint32_t declared = 0;
+    uint32_t varying = 0;
+    for (uint32_t first = 0; valid && first < count; first += 64)
     {
-        result->latest_declarations[object] = BUSTER_CHECK_NONE;
-        definition[object] = BUSTER_CHECK_NONE;
-        alignments[object] = 0;
-    }
-    for (uint32_t token = 0; valid && token < count; token += 1)
-    {
-        if (input->declarations[token] == token && input->static_objects[token])
+        const uint64_t lanes = scalar ? check_input_scan_all(first, count) : check_input_scan_nonzero(input->static_objects, first, count);
+        for (uint64_t selected = lanes; valid && selected != 0; selected &= selected - 1)
         {
-            const uint32_t object = input->objects[token];
-            valid = object != 0 && object <= count;
-            if (valid)
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            if (input->declarations[token] == token && input->static_objects[token])
             {
-                result->latest_declarations[object] = token;
-                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
-                if (attributes != 0 && attributes->alignment_log2 > alignments[object])
+                const uint32_t object = input->objects[token];
+                valid = object != 0 && object <= count;
+                if (valid)
                 {
-                    alignments[object] = attributes->alignment_log2;
+                    keys[declared++] = (uint64_t)object << 32 | token;
+                    varying |= object;
                 }
-                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+                else
                 {
-                    const uint32_t previous = definition[object];
-                    if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
-                    {
-                        definition[object] = token;
-                    }
+                    result->status = CHECK_DATA_INPUT_INVALID;
+                    result->token = token;
                 }
-            }
-            else
-            {
-                result->status = CHECK_DATA_INPUT_INVALID;
-                result->token = token;
             }
         }
     }
+    const uint64_t* sorted = valid ? c_bindings_sort(keys, sorting, declared, !scalar, varying) : 0;
+    result->declaration_keys = valid && declared != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, declared) : 0;
+    if (result->declaration_keys != 0)
+    {
+        memcpy(result->declaration_keys, sorted, (uint64_t)declared * sizeof(uint64_t));
+        result->declaration_count = declared;
+    }
+    // Each static object's last declaration (the walk's last in token order), its definition (its first declaration that
+    // defines it, or else its last tentative definition) and its largest alignment, in object order.
+    result->declared_objects = result->declaration_keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, declared) : 0;
+    result->declared_latest = result->declared_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, declared) : 0;
+    uint32_t* definition = result->declared_latest != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, declared) : 0;
+    uint8_t* alignments = definition != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, declared) : 0;
+    if (valid && declared != 0 && alignments == 0)
+    {
+        valid = false;
+        result->status = CHECK_DATA_INPUT_RESOURCE;
+    }
+    uint32_t objects = 0;
+    for (uint32_t i = 0; valid && i < declared; i += 1)
+    {
+        const uint32_t object = (uint32_t)(sorted[i] >> 32);
+        const uint32_t token = (uint32_t)sorted[i];
+        if (objects == 0 || result->declared_objects[objects - 1] != object)
+        {
+            result->declared_objects[objects] = object;
+            definition[objects] = BUSTER_CHECK_NONE;
+            alignments[objects] = 0;
+            objects += 1;
+        }
+        const uint32_t at = objects - 1;
+        result->declared_latest[at] = token;
+        const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+        if (attributes != 0 && attributes->alignment_log2 > alignments[at])
+        {
+            alignments[at] = attributes->alignment_log2;
+        }
+        if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+        {
+            const uint32_t previous = definition[at];
+            if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+            {
+                definition[at] = token;
+            }
+        }
+    }
+    result->declared_count = objects;
     uint64_t object_capacity = input->string_count;
     uint64_t reference_capacity = 0;
-    for (uint32_t object = 1; valid && object <= count; object += 1)
+    for (uint32_t at = 0; valid && at < objects; at += 1)
     {
-        const uint32_t token = definition[object];
+        const uint32_t token = definition[at];
         if (token != BUSTER_CHECK_NONE)
         {
             object_capacity += 1;
@@ -139,12 +216,13 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                 (reference_capacity == 0 || result->references != 0);
         result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_RESOURCE;
     }
-    for (uint32_t object = 1; valid && object <= count; object += 1)
+    for (uint32_t at = 0; valid && at < objects; at += 1)
     {
-        const uint32_t selected = definition[object];
+        const uint32_t selected = definition[at];
         if (selected != BUSTER_CHECK_NONE)
         {
-            const uint32_t latest = result->latest_declarations[object];
+            const uint32_t object = result->declared_objects[at];
+            const uint32_t latest = result->declared_latest[at];
             const uint32_t plan_index = initializers->declaration_plans[selected];
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
@@ -171,16 +249,16 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             }
             if (valid)
             {
-                const uint32_t at = result->count;
-                result->objects[at] = (CheckDataObject){
+                const uint32_t written = result->count;
+                result->objects[written] = (CheckDataObject){
                     .type = type,
                     .object = object,
                     .initializer = input->initializer_nodes[selected],
                     .token = selected,
                     .initializer_plan = plan,
-                    .alignment_log2 = alignments[object] != 0 ? (uint8_t)(alignments[object] - 1) : 0,
+                    .alignment_log2 = alignments[at] != 0 ? (uint8_t)(alignments[at] - 1) : 0,
                 };
-                result->reference_offsets[at] = result->reference_count;
+                result->reference_offsets[written] = result->reference_count;
                 const uint64_t reference_mark = scratch->length;
                 uint32_t* references = 0;
                 uint32_t reference_count = 0;
@@ -211,7 +289,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                     result->token = selected;
                 }
                 arena_pop_to(scratch, reference_mark);
-                result->reference_counts[at] = result->reference_count - result->reference_offsets[at];
+                result->reference_counts[written] = result->reference_count - result->reference_offsets[written];
                 result->count += 1;
             }
         }
@@ -219,7 +297,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     for (uint32_t i = 0; valid && i < input->string_count; i += 1)
     {
         const CheckInitString* string = input->strings + i;
-        valid = string->object != 0 && string->object <= count && result->latest_declarations[string->object] == BUSTER_CHECK_NONE;
+        valid = string->object != 0 && string->object <= count && check_data_latest(result, string->object) == BUSTER_CHECK_NONE;
         if (valid)
         {
             const uint32_t at = result->count++;
@@ -310,7 +388,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
     CheckDataPrepared prepared = { .status = CHECK_DATA_INPUT_INVALID, .token = BUSTER_CHECK_NONE };
     if (valid)
     {
-        valid = check_data_prepare(&prepared, input, stream, initializers, types, output, scratch);
+        valid = check_data_prepare(&prepared, input, stream, initializers, types, parser->options.scalar, output, scratch);
     }
     result->status = prepared.status;
     result->token = prepared.token;
@@ -341,7 +419,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
     {
         if (needed[object])
         {
-            const uint32_t token = prepared.latest_declarations[object];
+            const uint32_t token = check_data_latest(&prepared, object);
             valid = definitions[object] != 0 || (token != BUSTER_CHECK_NONE && input->linkage[token] == 2);
             if (valid)
             {
@@ -385,7 +463,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
     {
         if (needed[object])
         {
-            const uint32_t token = prepared.latest_declarations[object];
+            const uint32_t token = check_data_latest(&prepared, object);
             const bool literal = token == BUSTER_CHECK_NONE;
             const bool compound = !literal && input->compound_objects != 0 && input->compound_objects[token];
             const uint32_t name = !literal ? parser->tokens.names[token] : 0;

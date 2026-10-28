@@ -99,6 +99,14 @@ struct CBindingReplay
     uint32_t capacity;
 };
 
+// The most bytes c_bindings_initialize pushes for `names` and `capacity`, with each push's alignment: room to reserve an
+// arena for the table alone.
+static __attribute__((unused)) uint64_t c_bindings_bytes(uint32_t names, uint32_t capacity)
+{
+    const uint64_t events = (uint64_t)capacity + 1;
+    return (uint64_t)names * C_BINDING_NAMESPACES * 4 + events * (7 * 4 + 2) + 10 * 63;
+}
+
 static __attribute__((unused)) bool c_bindings_initialize(CBindings* bindings, Arena* arena, uint32_t names, uint32_t capacity)
 {
     const uint64_t mark = arena->length;
