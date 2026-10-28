@@ -444,8 +444,9 @@ struct CheckLowerWriter
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
-    // A return's value that its CHECK_CONTROL_RESULT kept for after its cleanups (check_lower_result): the local its
-    // RETURN reads, by LOCAL_ADDRESS where `kept_address` says, of `kept_class` (BUSTER_CHECK_NONE, VOID: nothing).
+    // This function's shared return slot for CHECK_CONTROL_RESULT and its RETURN, after cleanups. Nested returns in a
+    // statement expression use the same slot, so their expansion cannot rebind an enclosing return's pending store.
+    // LOCAL_ADDRESS where `kept_address` says, of `kept_class` (BUSTER_CHECK_NONE, VOID: nothing).
     uint32_t kept_local;
     uint8_t kept_class;
     bool kept_address;
@@ -5845,11 +5846,13 @@ static void check_lower_result(CheckLowerWriter* writer, uint32_t node)
     const uint8_t class = aggregate || writer->result_object != BUSTER_CHECK_NONE ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, writer->result);
     writer->kept_class = aggregate && !hidden && !registers ? BUSTER_TYPED_CLASS_VOID : class;
     writer->kept_address = registers || (!aggregate && writer->result_object != BUSTER_CHECK_NONE);
-    writer->kept_local = BUSTER_CHECK_NONE;
     if (hidden || registers)
     {
         const uint64_t size = type_size(types, writer->result);
-        writer->kept_local = hidden ? writer->hidden : check_lower_object(writer, size, type_alignment_log2(types, writer->result));
+        if (writer->kept_local == BUSTER_CHECK_NONE)
+        {
+            writer->kept_local = hidden ? writer->hidden : check_lower_object(writer, size, type_alignment_log2(types, writer->result));
+        }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false,
                                                  .volatile_copy = check_lower_copy_node_volatile(writer, node, writer->result) });
         check_lower_expression(writer, node, false, 0);
@@ -5863,7 +5866,10 @@ static void check_lower_result(CheckLowerWriter* writer, uint32_t node)
     }
     else if (writer->kept_class != BUSTER_TYPED_CLASS_VOID)
     {
-        writer->kept_local = check_lower_temporary(writer, class);
+        if (writer->kept_local == BUSTER_CHECK_NONE)
+        {
+            writer->kept_local = check_lower_temporary(writer, class);
+        }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, writer->kept_local);
         check_lower_expression(writer, node, false, 0);
     }
@@ -6729,6 +6735,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->vectors = false;
         writer->operation_count = 0;
         writer->result_object = BUSTER_CHECK_NONE;
+        writer->kept_local = BUSTER_CHECK_NONE;
+        writer->kept_class = BUSTER_TYPED_CLASS_VOID;
+        writer->kept_address = false;
         writer->x87_constant_count = 1;
         writer->x87_constants[0] = 0;
         writer->x87_constants[1] = 0;
