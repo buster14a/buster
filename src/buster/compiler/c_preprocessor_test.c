@@ -7451,6 +7451,7 @@ static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
+#include "c_preprocessor_print_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
@@ -7746,6 +7747,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= predefines_test_target();
         passed_all &= predefines_test_refused();
         passed_all &= pp_test_history(directory, with_clang);
+        passed_all &= pp_test_print_offsets();
+        passed_all &= pp_test_print_batches(directory);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);
