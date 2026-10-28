@@ -12,11 +12,21 @@
 static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
 {
     ForeignTestEdge values_edge = { 0 };
-    const bool mapped = foreign_test_edge(&values_edge, (uint64_t)UINT32_MAX * 4);
+    const uint64_t page = 4096;
+    const uint64_t span = (1ull << 32) * 4;
+    uint8_t* mapping = mmap(0, span + 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    bool mapped = mapping != MAP_FAILED;
+    if (mapped)
+    {
+        values_edge = (ForeignTestEdge){ .mapping = mapping, .mapping_size = span + 2 * page, .end = mapping + page + span };
+        mapped = mprotect(mapping + page, page, PROT_READ | PROT_WRITE) == 0 &&
+                 mprotect(mapping + page + (1ull << 31) * 4, page, PROT_READ | PROT_WRITE) == 0 &&
+                 mprotect(mapping + span, page, PROT_READ | PROT_WRITE) == 0;
+    }
     foreign_test_expect(tally, mapped, "reserve sparse value map for unsigned high-ID addressing", 0);
     if (mapped)
     {
-        uint32_t* values = (uint32_t*)values_edge.end - UINT32_MAX;
+        uint32_t* values = (uint32_t*)(mapping + page);
         values[0] = 11;
         values[0x80000000u] = 23;
         values[UINT32_MAX - 2] = 37;
