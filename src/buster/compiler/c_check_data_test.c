@@ -1432,7 +1432,7 @@ static void check_data_test_symbolic_zero(CheckTest* test, TypeTable* types)
             CheckDataStatus expected = CHECK_DATA_OK;
             if (variant == 12 || variant == 13)
             {
-                fixture.scratch.capacity = variant == 12 ? 128 : 192;
+                fixture.scratch.capacity = variant == 12 ? 64 : 128;
                 expected = CHECK_DATA_RESOURCE;
             }
             else if (variant == 14)
@@ -1532,6 +1532,60 @@ static void check_data_test_zero_batch(CheckTest* test, TypeTable* types)
     check_data_test_close(&fixture);
 }
 
+static void check_data_test_dense_cache(CheckTest* test, TypeTable* types)
+{
+    enum { COUNT = 8, SIZE = 256 };
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, SIZE);
+    CheckInitPart parts[SIZE];
+    uint8_t expected[SIZE];
+    for (uint32_t i = 0; i < SIZE; i += 1)
+    {
+        expected[i] = (uint8_t)(i + 1);
+        parts[i] = (CheckInitPart){
+            .kind = CHECK_INIT_VALUE,
+            .type = BUSTER_TYPE_UCHAR,
+            .bit_offset = (uint64_t)i * 8,
+            .value = check_test_integer(BUSTER_TYPE_UCHAR, expected[i]),
+        };
+    }
+    const CheckInitializer initializer = { .type = array, .parts = parts, .count = SIZE };
+    CheckDataObject objects[COUNT];
+    SymbolId map[COUNT + 1] = { 0 };
+    CheckDataTestLink fixture = { 0 };
+    bool ready = check_data_test_open(&fixture, COUNT + 2);
+    for (uint32_t i = 0; ready && i < COUNT; i += 1)
+    {
+        char name[32];
+        snprintf(name, sizeof(name), "dense_%u", i);
+        map[i + 1] = check_data_test_symbol(&fixture.link, name, BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+        ready = map[i + 1] != 0;
+        objects[i] = (CheckDataObject){
+            .type = array,
+            .object = i + 1,
+            .initializer = BUSTER_CHECK_NONE,
+            .initializer_plan = &initializer,
+        };
+    }
+    check_test_expect(test, ready, "dense byte-array cache fixture");
+    if (ready)
+    {
+        fixture.scratch.capacity = 4096;
+        CheckDataResult result = { 0 };
+        bool valid = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 0,
+                                     &fixture.bytes, &fixture.scratch, &result);
+        for (uint32_t i = 0; valid && i < COUNT; i += 1)
+        {
+            const AtomId atom = fixture.link.symbols.atom[map[i + 1]];
+            valid = atom != 0 && fixture.link.atoms.class[atom] == BUSTER_LINK_CLASS_DATA &&
+                    memcmp(fixture.link.atoms.bytes[atom], expected, SIZE) == 0;
+        }
+        check_test_expect(test, valid && result.byte_count == COUNT * SIZE && fixture.scratch.length == 0,
+                          "dense byte objects use compact scalar slots and release each cache before the next object within 4-KiB scratch");
+        fixture.scratch.capacity = 65536;
+    }
+    check_data_test_close(&fixture);
+}
+
 static void check_data_test_overwrite_oracle(CheckTest* test, TypeTable* types)
 {
     enum { SIZE = 96, COUNT = 33 };
@@ -1619,6 +1673,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_zero_bits(test);
     check_data_test_symbolic_zero(test, types);
     check_data_test_zero_batch(test, types);
+    check_data_test_dense_cache(test, types);
     check_data_test_overwrite_oracle(test, types);
 }
 
