@@ -2108,6 +2108,12 @@ they do per token where little of it was per declaration or expression:
   construction remain separate work. It does not repeat #646's sparse walks,
   #640's traversal derivation, #628's retained parser buffers, #658's compact
   integer tables or #641's post-check work.
+  The [frozen qualification](https://github.com/buster14a/buster-performance/blob/e227084cbe0f9b064b9a506ca3e34c9826f49965/docs/measurements/check-input-comma-529-2026-10-28/README.md)
+  compares `e7f89091` with `b8ee2900`: three six-placement SQLite cohorts improve
+  whole-process wall time 1.16–1.31%, with pooled RSS +22–56KiB. Tiny startup
+  cost remains unresolved and individual copy tails are retained. These are
+  frozen measurements, separate from later composition correctness; they
+  establish no current-main or general-corpus speedup.
 - **Scans for few tokens.** The passes that act on few tokens test 64 of them
   at once (16 or 8, by the column's width) and visit only those
   (`check_input_scan_*`): the constant contexts (static objects, static
