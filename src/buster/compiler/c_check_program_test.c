@@ -1403,6 +1403,7 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
+        uint64_t return_flow_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1411,8 +1412,15 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
+            .return_flow_work = &return_flow_work,
         };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch);
+        if (ready && strcmp(name, "many-aggregate-return-bodies") == 0)
+        {
+            check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
+                                   return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
+                              "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -2059,12 +2067,117 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+// A small aggregate body must not clear its unit's unrelated graph. Poison the dead control-task suffix, as the
+// next body's builder may, and retain reference epochs for nodes reached by earlier bodies. Both a completed walk
+// and its conservative early stop must restore those marks before builtin/reference selection reads them.
+static void check_test_program_return_marks(CheckTest* test)
+{
+    enum { TOKENS = 1024, CAPACITY = 8 * TOKENS + 16, NODES = 4096 };
+    CheckTestTypes types = { 0 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    bool ready = scratch.base != NULL && check_test_types_open(&types);
+    const TypeId record = ready ? type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, 1) : 0;
+    const TypeMember member = { .name = 1, .type = BUSTER_TYPE_LONG, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    ready = ready && record != 0 && type_complete_record(&types.table, record, &member, 1, (TypeRecordAttributes){ 0 });
+    TypeId function = ready ? type_function(&types.table, record, NULL, 0, 0) : 0;
+    CheckOp* ops = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckOp, NODES);
+    uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* seconds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* absent = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
+    uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, CAPACITY + 1);
+    CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
+    ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
+    check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
+    for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
+    {
+        for (uint32_t node = 0; node < NODES; node += 1)
+        {
+            ops[node] = CHECK_OP_VALUE;
+            operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
+            marks[node] = node == 0 ? unsafe : node % 2;
+        }
+        ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
+        ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
+        operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
+        seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
+        marks[NODES] = stack[NODES] = labels[CAPACITY] = UINT32_C(0x71625344);
+        memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
+        const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
+                                   .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
+        CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+        CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = CAPACITY };
+        CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
+        check_program_return_flow(&writer, &body, marks, stack, NULL);
+        bool same = body.return_flow && !body.falls && body.return_warning == 0 &&
+                    marks[NODES] == UINT32_C(0x71625344) && stack[NODES] == UINT32_C(0x71625344) && labels[CAPACITY] == UINT32_C(0x71625344);
+        for (uint32_t node = 0; same && node < NODES; node += 1)
+        {
+            same = marks[node] == (node == 0 ? unsafe : node % 2);
+        }
+        // The call stops its comma expression with the other operand still queued. Only one or three ledger words change.
+        const uint8_t* bytes = (const uint8_t*)tasks;
+        for (uint32_t byte = CAPACITY + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < CAPACITY + NODES; byte += 1)
+        {
+            same = bytes[byte] == 0xa5;
+        }
+        check_test_expect(test, same, "small return warning walks preserve liveness epochs and touch only visited-node scratch, including early stops");
+    }
+    arena_release(&scratch);
+    check_test_types_close(&types);
+}
+
 #include "c_check_program_batch_test.c"
+
+static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
+{
+    for (uint32_t bodies = 64; bodies <= 128; bodies *= 2)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "many aggregate bodies have bounded source output storage");
+        if (text != NULL)
+        {
+            fputs("struct S{long a,b;};", text);
+            for (uint32_t b = 0; b < bodies; b += 1)
+            {
+                fprintf(text, "struct S f%u(int n,struct S s){if(n)return s;}", b);
+            }
+            fprintf(text, "int tested(int n){struct S s={n,n+1};struct S a=f0(1,s),b=f%u(1,s);return a.a+a.b+b.a+b.b;}", bodies - 1);
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "many aggregate bodies complete without truncation");
+            if (written)
+            {
+                check_test_program_source(test, source, "many-aggregate-return-bodies", clang);
+            }
+        }
+        free(source);
+    }
+}
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_return_marks(test);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
+    check_test_program_many_aggregate_returns(test, clang);
+    check_test_program_source(test,
+        "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
+        "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
+        "struct L chain(int n,struct L s){if(n>0)return s;else if(n<0){s.b+=3;return s;}else{s.d+=5;return s;}}"
+        "struct D select(int n,struct D s){switch(n&3){case 0:return s;case 1:s.a+=1;return s;default:s.b+=2;return s;}}"
+        "struct S loop(int n,struct S s){for(;;){if(n&1)return s;else{s.a+=3;return s;}}}"
+        "struct L nested(int n,struct L s){if(n){if(n&1)return s;s.c+=7;}else{return s;}return s;}"
+        "struct S partial(int n,struct S s){if(n)return s;}struct L wide_partial(int n,struct L s){if(n)return s;}"
+        "struct S labels(int n,struct S s){if(n)goto live;return s;live:s.a+=11;return s;}"
+        "int tested(int n){struct S s={n,n+2};struct L l={n,n+1,n+2,n+3};struct D d={n*0.5,n*0.25};"
+        "struct S a=choose(n,s),b=loop(n,s),c=partial(1,s),e=labels(n,s);"
+        "struct L p=chain(n,l),q=nested(n,l),r=wide_partial(1,l);struct D v=select(n,d);"
+        "partial(0,s);wide_partial(0,l);return a.a+a.b+b.a+b.b+c.a+c.b+e.a+e.b+p.a+p.b+p.c+p.d+q.c+r.d+(int)(v.a*4+v.b*8);}",
+        "aggregate-return-control-flow", clang);
     check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
         "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
