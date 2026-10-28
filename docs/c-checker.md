@@ -20,6 +20,28 @@ static or inline function gets no code, and an object only such a function
 refers to no data. `--lower-all` lowers every definition that may be emitted,
 referenced or not, a test option for measuring what that saves.
 
+`#pragma GCC visibility push(default|hidden|protected|internal)` and `pop`
+retain a source-ordered state stack (#620). Declarations sample that state;
+the first applied visibility follows the linked entity through later
+declarations, and an explicit attribute on the same declaration takes priority
+over the pragma. Internal visibility maps to hidden on this x86-64 target, as
+Clang does. The object writer receives the ELF visibility on defined and
+undefined global symbols; local symbols keep default visibility. Malformed
+directives carry bounded syntax diagnostics, and an unmatched pop rejects the
+unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
+units allocate no visibility history or object column.
+
+Before C23, a direct call of an undeclared identifier creates the compatibility
+declaration `extern int name()` in that block's source scope (#623). Repeated
+calls in the same scope share it; later prototypes use the ordinary linked
+entity compatibility rules. Arguments use the default integer and floating
+promotions until a prototype is visible. C99 and later diagnose the first call
+with its identifier and `-Wimplicit-function-declaration`, as Clang does;
+`-Wno-error=implicit-function-declaration` demotes it, while
+`-Wno-implicit-function-declaration` suppresses it. Source diagnostic pragmas
+apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
+Parenthesized identifiers and non-call uses do not acquire an implicit type.
+
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
@@ -352,6 +374,14 @@ is normally quiet, while the corresponding folded file-scope array bound warns.
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
+
+Preprocessor-completed `#pragma message`, `#pragma GCC warning`, `#pragma GCC
+error`, `#ident` and `#sccs` records are accepted without another semantic action
+or diagnostic (#662). The checker recognizes their bounded canonical shapes;
+unrelated or malformed records retain their own handler/refusal. A GCC error
+still rejects the unit during preprocessing. `#sccs` is canonicalized to `#ident`.
+The strings from `#ident` and `#sccs` are deliberately omitted from object
+`.comment` sections; they affect neither program behavior nor source acceptance.
 
 The action layer is broader than that adapter. It can check enum promotions,
 bit-field restrictions, compatible record assignment, nested const members,
@@ -1152,6 +1182,23 @@ What the lowering covers past scalars (#145's programs):
   of a `long double`, in st0) returns its bytes' address too. Those larger than
   64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
   stack aligned to it at the call, which realigns the caller's frame.
+- **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
+  aggregate-returning body's control graph removes unreachable transfers
+  without renumbering labels. A reachable implicit return supplies an address
+  for a register result or preserves the hidden result pointer; the value is
+  unspecified. Tier 0's aggregate-end rule remains unchanged. Its validation
+  also checks emitted unreachable statement tails, which retain the existing
+  implicit-return safeguard. A second walk selects constant conditions for
+  `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
+  suppression. Return warnings currently cover aggregate bodies without
+  statement-expression regions, assembly, reachable call or semantic-query
+  expressions, or nonconstant enum selectors. Calls, queries and enum switches
+  retain conservative handling until their noreturn, context-sensitive constant
+  and exhaustive-enumerator facts are available to the control graph. Constant
+  switch dispatch follows converted side-effect-free source selector
+  values and signed case ranges only in the warning walk; the Tier 0 walk
+  retains every dispatch edge. Source/native tests cover register and hidden
+  results, branches, switch, loops, labels and defined paths through partial returns.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
@@ -1464,6 +1511,25 @@ closed, in Clang's constraint order. Earlier complete initializer/asm/control
 errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
+
+The source driver caps its published errors as Clang 23 does (#669): nineteen
+ordinary errors by default, followed, only if another error occurs, by the fatal
+`too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
+ordinary errors before that fatal diagnostic, and zero leaves them unlimited.
+Warnings do not consume the error budget; each accepted diagnostic keeps its
+macro notes, while the cutoff has neither a location nor notes. Suppressed
+warnings (`-w`) do not enter the counts. The final line gives the published
+warning and error totals with Clang's singular/plural spelling; clean units print
+no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
+does in Clang. Both output paths share the publication gate, including deferred
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
+graph's construction.
+
+Collection still has two pre-existing recovery boundaries: a preprocessing
+error prevents semantic collection of earlier source (#698), and an undeclared
+identifier can leave later independent expression warnings outside the safe
+graph prefix (#699). The publication limit does not supply those missing
+diagnostics or establish a combined source-order merge across stages.
 
 ### What the lowering costs (#531)
 
