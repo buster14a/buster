@@ -17,6 +17,12 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The aggregate return control-flow walk, warning handling and original fixtures
+in `c_check_program.c`, `c_check_program_test.c` and
+`c_check_return_driver_test.c` (#670) use the project default terms. Clang is
+an external behavior oracle. The dr_wav header used for compile qualification
+remains an external input; no upstream implementation or fixtures are imported.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream
