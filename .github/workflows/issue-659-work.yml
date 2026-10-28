@@ -3,36 +3,64 @@ on:
   push:
     branches: [chatgpt/issue-659-work]
 permissions:
-  contents: read
+  contents: write
 concurrency:
   group: issue-659-isolated-work
   cancel-in-progress: true
 jobs:
-  integrate:
+  validate:
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 45
+    env:
+      BUSTER_HOST_ARCH: x86-64
+      BUSTER_DEBUG_INFO: 0
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
-      - name: Inspect the exact integration
+      - name: Integrate current main and preserve atomic parameter ABIs
         shell: bash
         run: |
           set -euo pipefail
-          git switch --detach 66b3b87da2fed441441c7f9df2804f5b8dabc55e
+          printf '%s' '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' | sed 's/EFDsmlFlFluL/EFDsmlFluL/' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-659-integrate.patch"
+          printf '6d2a93d0fce8758159cda137f350ae698d718f6fa0f8f319366640cc38e32aa2  %s\n' "$RUNNER_TEMP/issue-659-integrate.patch" | sha256sum -c
+          git switch -c issue-659-integrated 66b3b87da2fed441441c7f9df2804f5b8dabc55e
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git merge --no-commit 201e520d5be86720907b5019b62571d1e5507c68 > "$RUNNER_TEMP/issue-659-merge.log" 2>&1 || test -f .git/MERGE_HEAD
-          git diff --name-only --diff-filter=U >> "$RUNNER_TEMP/issue-659-merge.log"
-          git diff --cc > "$RUNNER_TEMP/issue-659-conflicts.patch"
-          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-main.tar.gz" 201e520d5be86720907b5019b62571d1e5507c68
-          tar --exclude=.git -czf "$RUNNER_TEMP/issue-659-worktree.tar.gz" .
+          test "$(git diff --name-only --diff-filter=U)" = src/buster/compiler/c_check_program_lower.c
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659-integrate.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-659-integrate.patch"
+          git add src/buster/compiler/c_check_input.c src/buster/compiler/c_check_program_lower.c src/buster/compiler/c_check_program_test.c docs/c-checker.md
+          git diff --check --cached
+          git commit -m 'Merge main atomic support while preserving K&R atomic parameter ABIs'
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-659-head.log"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-source.tar.gz" HEAD
+      - name: Install official Clang 23.1.4 and test tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Build compiler
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build.sh 2>&1 | tee "$RUNNER_TEMP/issue-659-build.log"
+      - name: Validate checker, driver and deferred reader
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          build/compiler test-checker --seed 133 2>&1 | tee "$RUNNER_TEMP/issue-659-checker.log" || status=1
+          build/compiler test-checker-driver --executable build/compiler 2>&1 | tee "$RUNNER_TEMP/issue-659-driver.log" || status=1
+          build/compiler test-checker-deferred 2>&1 | tee "$RUNNER_TEMP/issue-659-deferred.log" || status=1
+          exit "$status"
+      - name: Publish validated integration
+        run: git push origin HEAD:refs/heads/chatgpt/issue-659-integrated
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: issue-659-integration
+          name: issue-659-validation
           path: |
-            ${{ runner.temp }}/issue-659-merge.log
-            ${{ runner.temp }}/issue-659-conflicts.patch
-            ${{ runner.temp }}/issue-659-*.tar.gz
+            ${{ runner.temp }}/issue-659-*.log
+            ${{ runner.temp }}/issue-659-integrate.patch
+            ${{ runner.temp }}/issue-659-source.tar.gz
+            build/compiler
           retention-days: 7
