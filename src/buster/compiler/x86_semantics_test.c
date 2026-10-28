@@ -290,7 +290,7 @@ static uint8_t x86_semantics_test_native[X86_FORM_COUNT];
 
 // The target table fails closed on unclassified forms. These covered legacy forms are nevertheless baseline
 // instructions; keep executing them rather than treating an absent target-table row as a missing CPU feature.
-static bool x86_semantics_test_known_legacy(uint32_t form)
+static bool x86_semantics_test_known_legacy(uint32_t form, uint64_t features)
 {
     static const char* const prefixes[] = {
         "LOCK_XADD_", "LOCK_ADD_", "LOCK_OR_", "LOCK_ADC_", "LOCK_SBB_", "LOCK_AND_", "LOCK_SUB_", "LOCK_XOR_",
@@ -305,7 +305,7 @@ static bool x86_semantics_test_known_legacy(uint32_t form)
     }
     if (strncmp(name, "ROUNDSS_", 8) == 0 || strncmp(name, "ROUNDSD_", 8) == 0)
     {
-        known |= __builtin_cpu_supports("sse4.1") != 0;
+        known |= (features & BUSTER_X86_FEATURE(SSE41)) != 0;
     }
     return known && x86_form_descriptions[form].family == BUSTER_X86_FAMILY_LEGACY;
 }
@@ -2797,14 +2797,14 @@ static int run_x86_semantics_tests(int argc, char** argv)
         x86_target_forms(&native, x86_semantics_test_native);
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (x86_target_requirement(form) == 0 && x86_semantics_test_known_legacy(form))
+            if (x86_target_requirement(form) == 0 && x86_semantics_test_known_legacy(form, native.features))
             {
                 x86_semantics_test_native[form] = 1;
             }
         }
         // RORX's substitution fixture executes it even though the effects table does not cover it.
-        x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = __builtin_cpu_supports("bmi2") != 0;
-        x86_semantics_test_wide = __builtin_cpu_supports("avx512f") != 0;
+        x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = (native.features & BUSTER_X86_FEATURE(BMI2)) != 0;
+        x86_semantics_test_wide = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
         if (!x86_semantics_test_wide)
         {
             printf("x86 semantics: native vector state checked through 128 bits (AVX-512 unavailable)\n");
