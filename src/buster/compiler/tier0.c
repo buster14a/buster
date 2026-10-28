@@ -236,8 +236,9 @@
 #define BUSTER_TYPED_ALLOCA 42
 #define BUSTER_TYPED_STACK_SAVE 43
 #define BUSTER_TYPED_STACK_RESTORE 44
-#define BUSTER_TYPED_JUMP_INDIRECT 45
-#define BUSTER_TYPED_FRAME_ADDRESS 46
+// After the stack's other kinds, so that the four are one range (tier0_moves_stack).
+#define BUSTER_TYPED_FRAME_ADDRESS 45
+#define BUSTER_TYPED_JUMP_INDIRECT 46
 // The vectors' kind, the last, which the validators' paths test as one with the kinds past it.
 #define BUSTER_TYPED_X86 47
 #define BUSTER_TYPED_KINDS 48
@@ -619,7 +620,9 @@ static const uint8_t tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS] = {
 // A function with any of them has the frame of one whose rsp moves.
 static bool tier0_moves_stack(uint32_t kind)
 {
-    return (kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE) || kind == BUSTER_TYPED_FRAME_ADDRESS;
+    _Static_assert(BUSTER_TYPED_FRAME_ADDRESS == BUSTER_TYPED_STACK_RESTORE + 1 && BUSTER_TYPED_STACK_RESTORE == BUSTER_TYPED_ALLOCA + 2,
+                   "the stack's kinds are one range");
+    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_FRAME_ADDRESS;
 }
 
 // The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer (one whose
