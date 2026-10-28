@@ -61,17 +61,20 @@ static uint8_t check_input_optimize_line(CheckInputReader* reader, uint32_t prag
     }
     if (result == 3 && diagnostic != NULL)
     {
-        // The token's spelling, as clang's PP.getSpelling gives it, in clang's message.
+        // The token's spelling, as clang's PP.getSpelling gives it, in clang's message: a name's interned bytes or an
+        // integer's digits (pp_spelling writes 24 bytes at most of those, a name's value being its IdentId), or another
+        // token's bytes, which end at its value.
         const uint64_t mark = reader->scratch->length;
         const uint32_t location = output->locations[error];
         const uint32_t value = output->values[error];
-        const uint64_t room = value >= location ? (uint64_t)value - location + 24 : 24;
+        const bool raw = check_input_pragma_name(reader, error) == 0 && output->kinds[error] != BUSTER_PP_KIND_INTEGER;
+        const uint64_t room = raw && value >= location ? (uint64_t)value - location + 1 : 24;
         uint8_t* buffer = arena_push(reader->scratch, room, 1);
         reader->output->resource |= buffer == 0;
         if (buffer != 0)
         {
             const uint8_t* spelling = buffer;
-            const uint32_t length = pp_spelling(reader->pp, output->kinds[error], value, location, buffer, &spelling);
+            const uint32_t length = !raw || value >= location ? pp_spelling(reader->pp, output->kinds[error], value, location, buffer, &spelling) : 0;
             const char* format = error == argument ? "unexpected argument '%.*s' to '#pragma clang optimize'; expected 'on' or 'off'" :
                                                      "unexpected extra argument '%.*s' to '#pragma clang optimize'";
             const int written = snprintf(NULL, 0, format, (int)length, (const char*)spelling);
