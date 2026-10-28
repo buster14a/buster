@@ -194,6 +194,33 @@ static bool lifecycle_report(const char* log, const char* artifact, const Lifecy
     return valid && summary && cleanup_failed == expected_cleanup_failure;
 }
 
+// Report the captured child output on failure; it remains in the retained workspace too.
+static void lifecycle_dump_log(const char* log)
+{
+    FILE* file = fopen(log, "r");
+    if (file != 0)
+    {
+        char buffer[4096];
+        size_t total = 0;
+        size_t count;
+        fprintf(stderr, "differential lifecycle: captured output from %s:\n", log);
+        while (total < 65536 && (count = fread(buffer, 1, sizeof(buffer), file)) > 0)
+        {
+            fwrite(buffer, 1, count, stderr);
+            total += count;
+        }
+        if (!feof(file))
+        {
+            fputs("\ndifferential lifecycle: captured output truncated\n", stderr);
+        }
+        fclose(file);
+    }
+    else
+    {
+        fprintf(stderr, "differential lifecycle: cannot open captured output %s: %s\n", log, strerror(errno));
+    }
+}
+
 static bool lifecycle_case(const LifecycleCase* test, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* no_op_path)
 {
     char temporary[PATH_MAX];
@@ -248,6 +275,11 @@ static bool lifecycle_case(const LifecycleCase* test, const char* root, const ch
         const bool workspace = lifecycle_workspace(temporary, test->retained, artifact, sizeof(artifact));
         const bool report = lifecycle_report(log, artifact, test);
         valid = status == test->status && workspace && report;
+        if (!valid)
+        {
+            fprintf(stderr, "differential lifecycle: %s workspace=%s report=%s\n", test->name, workspace ? "valid" : "invalid", report ? "valid" : "invalid");
+            lifecycle_dump_log(log);
+        }
     }
     printf("differential lifecycle: %s %s (status=%d, expected=%d)\n", test->name, valid ? "PASS" : "FAIL", status, test->status);
     return valid;
