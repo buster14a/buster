@@ -395,6 +395,42 @@ FENV_ACCESS (`CBuiltinFloatLowerCall.fenv_access`). `fabsl` clears the object's
 sign bit in place and leaves its value, F80: no x87 operation touches the
 bits, so a signaling NaN keeps its payload, as the x87's `fabs` keeps it.
 
+`isgreater`, `isgreaterequal`, `isless`, `islessequal`, `islessgreater` and
+`isunordered` (`check_builtin_float_compare`) take two arguments. The usual
+arithmetic conversions of the two, as clang makes them for a comparison, must
+give a real floating type. Otherwise it's clang's error, "ordered compare
+requires two args of floating point type", at the first argument: two integers,
+a pointer, a complex value, a struct. Both convert to that type, an integer to
+a `float` rounded (`isgreater(16777217, 16777216.0f)` is 0). Two constants fold
+to the int a quiet comparison gives, an integer constant expression, as clang
+folds them in every context. An argument with an effect or no constant value
+leaves the comparison to run, both arguments evaluated in order.
+
+The producer lowers them with quiet compares, as clang -O0's are (`ucomiss`,
+`ucomisd`, `fucomip`), so a quiet NaN raises no exception
+(`check_lower_floating_compare`). Tier 0's `EQ` and `NE` are quiet in every
+class. Its `LT` and `LE` of floats and doubles signal (`cmpsd`'s `LT_OS` and
+`LE_OS`, which C's relational operators take). The first four retain their
+common format: both arguments finish in temporaries before eager quiet
+`(a == a) & (b == b)` tests guard the ordered comparison. Either signaling
+NaN therefore raises invalid, including one beside a quiet NaN. A float's or
+double's comparison retains MXCSR's DAZ policy, and a second argument that
+clears exceptions finishes before the comparison raises one. Long double's
+ordered comparisons use its quiet `fucomip` directly. `islessgreater` is
+`(a == a) & (b == b) & (a != b)` and `isunordered` `(a != a) | (b != b)`, of
+temporaries that hold the two.
+
+`__has_builtin` answers 0 for them, as it does for the rest of the floating
+family, since the catalog's source capability asks for Tier 1 too.
+`test-check-builtins-float` checks every pair of formats' foldings against
+IEEE's rule stated apart, the conversions and the refusals. `test-checker`'s
+`floating-comparison-builtins` program checks their results and the exceptions
+they raise on the harness's special values (zeros, infinities, quiet and
+signaling NaNs, subnormals) in each format against clang's build, and
+mingw's `fmaxl`. Separate programs check float/double subnormals with DAZ on
+and off, and each ordered builtin's signaling-NaN exception after a second
+argument clears the flags, including quiet-NaN/signaling-NaN pairs.
+
 ## Atomic and terminal helper calls
 
 `c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,

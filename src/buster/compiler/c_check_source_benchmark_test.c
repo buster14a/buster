@@ -99,10 +99,11 @@ static __attribute__((noinline)) void check_test_source_benchmark(CheckTest* tes
                               graph.region_steps[2].op == CHECK_REGION_JUMP && graph.region_steps[2].node == BUSTER_CHECK_NONE && graph.region_steps[2].target == 4 &&
                               graph.region_steps[3].op == CHECK_REGION_EVAL && graph.region_steps[3].node == mapping[dependencies[0]] &&
                               graph.region_steps[4].op == CHECK_REGION_END, "region nodes remap while relative CASE, branch and jump targets remain exact");
-            for (uint32_t mode = 0; mode < 2; mode += 1)
+            // Each of the benchmark's paths: scalar, the vector path's postorder batches and its level order.
+            for (uint32_t mode = 0; mode < BUSTER_CHECK_SOURCE_PATHS; mode += 1)
             {
                 CheckStream stream = { 0 };
-                const bool ran = check_source_graph_run(&checked.types, &graph, &output, &scratch, mode == 0, &stream);
+                const bool ran = check_source_graph_run(&checked.types, &graph, &output, &scratch, mode, &stream);
                 check_test_expect(test, ran, "extracted region graph validates and checks");
                 if (ran)
                 {

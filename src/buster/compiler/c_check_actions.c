@@ -38,7 +38,6 @@ typedef enum CheckFault
     CHECK_FAULT_DIVIDE_BY_ZERO,
     CHECK_FAULT_SHIFT_COUNT,
     CHECK_FAULT_SHIFT_VALUE,
-    CHECK_FAULT_FLOAT_RANGE,
     CHECK_FAULT_UNSUPPORTED_CONSTANT,
 } CheckFault;
 
@@ -57,6 +56,9 @@ typedef enum CheckFault
 #define BUSTER_CHECK_VECTOR_ELEMENT 0x1000u
 #define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
 #define BUSTER_CHECK_GNU_DIVISION 0x4000u
+// A floating value converted to an integer type outside its range, which clang's folding saturates (a NaN to 0): a GNU
+// constant where an integer constant expression is required, and a static initializer's value, but no array bound's.
+#define BUSTER_CHECK_GNU_FLOAT_RANGE 0x8000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -388,7 +390,8 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
 
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
-    value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION);
+    value->flags |= operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION |
+                                      BUSTER_CHECK_GNU_FLOAT_RANGE);
     if (value->fault == CHECK_FAULT_NONE && operand->fault != CHECK_FAULT_NONE)
     {
         value->fault = operand->fault;
@@ -504,7 +507,12 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         const bool lower = target_signed && target_width == 128 ? input >= minimum : input > minimum - 1;
         if (!__builtin_isfinite(input) || !lower || input >= limit)
         {
-            check_action_set_fault(value, CHECK_FAULT_FLOAT_RANGE, node);
+            // Undefined, and as clang's folding takes it, APFloat's conversion: saturated to the type's range, a NaN 0. A
+            // GNU constant, not an ICE (BUSTER_CHECK_GNU_FLOAT_RANGE).
+            value->integer = __builtin_isnan(input) ? 0 : input < 0 ? (target_signed ? high_bit : 0) : (target_signed ? high_bit - 1 : check_action_mask(target_width));
+            value->constant_kind = CHECK_CONSTANT_INTEGER;
+            value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
+            value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE;
         }
         else
         {
@@ -1937,7 +1945,9 @@ static void check_action_cast(TypeTable* table, const CheckAction* action, Check
         check_action_conversion(table, &source, target, BUSTER_CHECK_CONVERT_CAST, &result->conversions[0], action->node);
         result->value = source;
         result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED);
-        result->value.flags |= (ice ? BUSTER_CHECK_ICE : (gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0)) | (null ? BUSTER_CHECK_NULL_POINTER : 0);
+        // A floating constant outside the target's range saturates (check_action_convert_plain): a GNU constant, not an ICE.
+        const bool saturated = (result->value.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0;
+        result->value.flags |= (saturated ? 0 : ice ? BUSTER_CHECK_ICE : (gnu_ice ? BUSTER_CHECK_GNU_ICE_FORM : 0)) | (null ? BUSTER_CHECK_NULL_POINTER : 0);
         if (target_kind == BUSTER_TYPE_KIND_VOID)
         {
             result->value.constant_kind = CHECK_CONSTANT_NONE;
