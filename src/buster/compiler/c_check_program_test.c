@@ -880,7 +880,10 @@ static void check_test_program_build_release(void)
     *build = (CheckTestProgramBuild){ 0 };
 }
 
-static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle, Arena* scratch)
+// Compile and link every fixture. A CPU-ineligible fixture omits only the final launch and must not publish an
+// execution-result cache entry that a later eligible comparison could mistake for a successful run.
+static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle,
+                                                       bool run_native, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -919,7 +922,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     }
     valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
-    const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
+    const bool same = run_native && valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -939,13 +942,13 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
         executable,
         0,
     };
-    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && object_test_run(run, out, err) == 0));
+    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && (!run_native || object_test_run(run, out, err) == 0)));
     if (!same)
     {
         free(build->object);
-        build->object = valid ? bytes : 0;
-        build->object_size = valid ? size : 0;
-        bytes = valid ? 0 : bytes;
+        build->object = valid && run_native ? bytes : 0;
+        build->object_size = valid && run_native ? size : 0;
+        bytes = valid && run_native ? 0 : bytes;
     }
     if (!valid && created)
     {
@@ -985,7 +988,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
 
 static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
 {
-    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, scratch);
+    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, true, scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1328,8 +1331,8 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
-static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                             int32_t expected_pools, uint32_t entry_limit)
+static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1464,9 +1467,16 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
                 arena_pop_to(&scratch, access_mark);
             }
             const bool alignment_oracle = strcmp(name, "hidden-result-direct-temporary-alignment") == 0;
-            snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
-                     alignment_oracle ? "the independent alignment expectation" : clang);
-            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, &scratch), description);
+            if (run_native)
+            {
+                snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
+                         alignment_oracle ? "the independent alignment expectation" : clang);
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "%s: generated object and oracle compile and link; native execution is unavailable on this CPU", name);
+            }
+            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, run_native, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -1478,6 +1488,17 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                             int32_t expected_pools, uint32_t entry_limit)
+{
+    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true);
+}
+
+static void check_test_program_source_native(CheckTest* test, const char* source, const char* name, const char* clang, bool run_native)
+{
+    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, run_native);
 }
 
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)

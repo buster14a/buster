@@ -194,6 +194,25 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
         "asm-naked-intel", clang);
+    // The original wide-register path also executes where CPU and OS save-state support permit AVX-512F. Its
+    // compilation, constraints, lowering, encoding, oracle compilation and link remain required on every host.
+    const bool wide_native = __builtin_cpu_supports("avx512f");
+    if (!wide_native)
+    {
+        printf("test-checker: asm-naked-intel-avx512: AVX-512F unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
+        "static __attribute__((used)) long saved_rsp;"
+        "static __attribute__((used)) long saved_arg;"
+        "static __attribute__((used)) long continuation;"
+        "static __attribute__((naked,noinline)) long enter(long x){__asm__(\".intel_syntax noprefix\\n\""
+        "\"push rbx\\nmov qword ptr [rip + saved_rsp], rsp\\nmov qword ptr [rip + saved_arg], rdi\\nlea rbx, [rdi + 5]\\n\""
+        "\"vmovdqu64 zmm16, zmm17\\nvmovdqa64 zmm17, zmm16\\njmp qword ptr [rip + continuation]\\n\""
+        "\"enter_return:\\nmov rax, rbx\\nadd rax, qword ptr [rip + saved_arg]\\nvzeroupper\\npop rbx\\nret\\n.att_syntax prefix\\n\");}"
+        "static __attribute__((used,naked,noinline)) void bounce(void){__asm__(\"addq $100, %rbx\\n\\tjmp enter_return\\n\");}"
+        "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
+        "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
+        "asm-naked-intel-avx512", clang, wide_native);
     // A naked function whose attribute isn't on its first declaration (#565's review): an unannotated prototype before a
     // naked definition that returns by its own ret, and a naked redeclaration between a prototype and an unannotated
     // definition, both naked as clang takes them; and a naked redeclaration after a definition, which clang ignores with
