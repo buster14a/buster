@@ -194,6 +194,20 @@ static bool lifecycle_report(const char* log, const char* artifact, const Lifecy
     return valid && summary && cleanup_failed == expected_cleanup_failure;
 }
 
+// Clang's installed directory need not contain its linker (LLVM's Ubuntu packages keep it elsewhere). Preserve
+// that tool search before hiding rm through PATH, so cleanup failures do not turn into fixture-build failures.
+static bool lifecycle_compiler_path(void)
+{
+    const char* configured = getenv("COMPILER_PATH");
+    const char* path = getenv("PATH");
+    const size_t capacity = (configured ? strlen(configured) : 0) + (path ? strlen(path) : 0) + 2;
+    char* tools = malloc(capacity);
+    const int length = tools ? snprintf(tools, capacity, "%s%s%s", configured ? configured : "", configured && configured[0] ? ":" : "", path ? path : "") : -1;
+    const bool valid = length >= 0 && (size_t)length < capacity && setenv("COMPILER_PATH", tools, 1) == 0;
+    free(tools);
+    return valid;
+}
+
 static bool lifecycle_case(const LifecycleCase* test, const char* root, const char* compiler, const char* clang, const char* fixture, const char* failing_fixture, const char* failing_clang, const char* empty_path, const char* no_op_path)
 {
     char temporary[PATH_MAX];
@@ -217,7 +231,8 @@ static bool lifecycle_case(const LifecycleCase* test, const char* root, const ch
             {
                 close(output);
             }
-            if ((test->kind == LIFECYCLE_CLEANUP_FAILURE || test->kind == LIFECYCLE_CLEANUP_NO_OP) && setenv("PATH", test->kind == LIFECYCLE_CLEANUP_FAILURE ? empty_path : no_op_path, 1) != 0)
+            if ((test->kind == LIFECYCLE_CLEANUP_FAILURE || test->kind == LIFECYCLE_CLEANUP_NO_OP) &&
+                (!lifecycle_compiler_path() || setenv("PATH", test->kind == LIFECYCLE_CLEANUP_FAILURE ? empty_path : no_op_path, 1) != 0))
             {
                 _exit(125);
             }
