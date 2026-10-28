@@ -2943,6 +2943,16 @@ static bool pp_test_directory_snapshot(const char* root)
     const uint32_t length = (uint32_t)strlen(directory);
     if (result)
     {
+        // A quoted include found beside the source does not pay to enumerate that source directory.
+        snprintf(query, sizeof(query), "%s/local.c", directory);
+        static InternTable local_table;
+        static Preprocessor local_unit;
+        const PPOptions local_options = { .no_standard_includes = true, .quiet = true };
+        result = pp_test_write_file(query, "#include \"value.h\"\n") && intern_initialize(&local_table) &&
+                 pp_initialize(&local_unit, &local_options, &local_table) && pp_run(&local_unit, query) && local_unit.cache->directory_opens == 0;
+        pp_release(&local_unit);
+        intern_release(&local_table);
+        unlink(query);
         file_cache_list_directory(&cache, directory, length);
         const bool supported = cache.directories != 0 && cache.directories->slots != 0;
         result = cache.directory_opens == 1 && !file_cache_directory_absent(&cache, present) && !file_cache_directory_absent(&cache, alias) &&
