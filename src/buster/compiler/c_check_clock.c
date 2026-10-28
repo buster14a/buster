@@ -4,7 +4,7 @@
 // The C driver's stage clock (#518): `--time-stages` reports where a compile's time went, stage by stage, on standard
 // error. It is off by default: every lap is a test of a null pointer, and only a driver run with the option passes a
 // clock. A lap charges the time since the previous lap to the stage it names, so the stages never overlap and add up
-// to the clock's whole span, from the driver's first instruction to its last release; what the process spends outside
+// to the clock's whole span, from the driver's first instruction to its final stage mark; what the process spends outside
 // it (exec, the loader, main's dispatch and exit) is the difference between the process's wall time and that span.
 // The clock reads the TSC, whose rate the report measures against CLOCK_MONOTONIC over the same span. A mark is a lap
 // that also reads the process's resource use (getrusage), charging the system time, minor page faults and growth of

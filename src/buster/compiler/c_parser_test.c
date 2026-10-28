@@ -3221,6 +3221,43 @@ static uint32_t parse_test_borrowed_scratch(const PPOptions* options, const char
     return failures;
 }
 
+// #628: production vector scratch fits 80 bytes/token plus alignment. Benchmark traversal arrays must not put
+// live slots and fallback scratch beyond that prefix. Reserve through a dirty arena copy, keeping caller-owned
+// bytes below its mark; neither fresh zero pages nor a shared arena high-water mark is part of the contract.
+static uint32_t parse_test_workspace_budget(void)
+{
+    const uint32_t count = 65536;
+    Arena guarded = parse_test_guarded_arena((uint64_t)count * 80 + 65536);
+    uint8_t* held = arena_push(&guarded, 12345, 1);
+    bool valid = held != 0;
+    if (valid)
+    {
+        memset(guarded.base, 0xa5, guarded.capacity);
+        memset(held, 0x3c, 12345);
+    }
+    const uint64_t mark = guarded.length;
+    Arena copy = guarded;
+    ParseVectorBuffers buffers;
+    valid = valid && parse_vector_buffers_reserve(&buffers, &copy, count);
+    if (valid)
+    {
+        valid = guarded.length == mark && buffers.last_children == 0 && buffers.before == 0 && buffers.postorder == 0 &&
+                buffers.positions == 0 && buffers.subtree_ends == 0 && buffers.first_children == 0 && buffers.next_siblings == 0 &&
+                buffers.subtree_starts == 0 && buffers.sizes == 0;
+        for (uint32_t i = 0; i < 12345; i += 1)
+        {
+            valid &= held[i] == 0x3c;
+        }
+    }
+    Arena postorder = arena_reserve((uint64_t)count * 40 + 65536);
+    valid = valid && parse_vector_postorder_reserve(&buffers, &postorder, count);
+    printf("vector workspace: %u tokens, %llu bytes within 80 bytes/token plus alignment, separate benchmark traversals: %s\n", count,
+           (unsigned long long)(copy.length - mark), valid ? "pass" : "FAIL");
+    arena_release(&postorder);
+    parse_test_release_guarded(&guarded);
+    return !valid;
+}
+
 // Every block alignment: each snippet's source, and `file`'s -E text if given, after 0 to 63 file-scope `;`.
 static uint32_t parse_test_alignments(const char* file, const PPOptions* options, const char* directory)
 {
@@ -3827,6 +3864,7 @@ static int run_parser_tests(int argument_count, char** arguments)
         // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
         OracleCache* oracle = oracle_cache();
         failures += parse_test_check_postorder_self(&arena);
+        failures += parse_test_workspace_budget();
         failures += parse_test_check_k6_tables();
         failures += parse_test_check_handoff(options.language, seed);
         failures += parse_test_check_snippets(directory, clang);
