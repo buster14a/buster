@@ -7,7 +7,8 @@
 static bool check_const_test_flags(const CheckValue* value)
 {
     const uint32_t required = BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_OBJECT_READ;
-    const uint32_t forbidden = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER;
+    // #705's source literal-zero bit must not survive a receipt read as null-pointer-constant syntax.
+    const uint32_t forbidden = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER | UINT32_C(0x20000);
     const bool valid = value->category == CHECK_RVALUE && value->fault == CHECK_FAULT_NONE &&
                        (value->flags & required) == required && (value->flags & forbidden) == 0;
     return valid;
@@ -51,7 +52,7 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
     const CheckValue integer = {
         .type = BUSTER_TYPE_INT,
         .category = CHECK_RVALUE,
-        .flags = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER,
+        .flags = BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_NULL_POINTER | UINT32_C(0x20000),
         .constant_kind = CHECK_CONSTANT_INTEGER,
         .integer = 37,
     };
@@ -79,7 +80,7 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
     const CheckValue address = {
         .type = pointer,
         .category = CHECK_RVALUE,
-        .flags = BUSTER_CHECK_STATIC_OBJECT,
+        .flags = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST,
         .constant_kind = CHECK_CONSTANT_ADDRESS,
         .object = 900,
         .offset = 12,
@@ -88,8 +89,9 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
     view = check_const_view(buffer);
     check_test_expect(test, ready && check_const_load(types, &view, 2, 0, 0, 0, cp, 20, &loaded) &&
                            loaded.type == pointer && loaded.constant_kind == CHECK_CONSTANT_ADDRESS && loaded.object == 900 && loaded.offset == 12 &&
-                           (loaded.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && check_const_test_flags(&loaded),
-                      "typed pointer receipt preserves the initializer's symbolic target and addend");
+                           (loaded.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST)) ==
+                           (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST) && check_const_test_flags(&loaded),
+                      "typed pointer receipt preserves its symbolic target, addend and later-read provenance");
     const TypeId cd = type_qualify(types, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_CONST);
     const CheckValue floating = {
         .type = BUSTER_TYPE_DOUBLE,
@@ -141,21 +143,47 @@ static void check_const_test_scalars(CheckTest* test, TypeTable* types, CheckCon
 static void check_const_test_parts(CheckTest* test, TypeTable* types, CheckConstBuffer* buffer)
 {
     const TypeId ci = type_qualify(types, BUSTER_TYPE_INT, BUSTER_TYPE_CONST);
+    const TypeId cu = type_qualify(types, BUSTER_TYPE_UINT, BUSTER_TYPE_CONST);
     const CheckValue number = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 29 };
     const CheckConstObject header = { .object = 20, .declaration = 79, .completed = 80, .type = ci, .byte_size = 4 };
-    const uint8_t field = 0xe8;
-    const CheckConstPart bit_part = { .kind = CHECK_CONST_BYTES, .type = BUSTER_TYPE_UCHAR, .bit_count = 8, .bytes = &field, .byte_count = 1 };
-    bool ready = check_const_append(buffer, header, &bit_part, 1, NULL, 0);
+    const TypeId bits = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170006);
+    const TypeMember fields[] = {
+        { .type = BUSTER_TYPE_INT, .bit_width = 3 },
+        { .name = 170007, .type = BUSTER_TYPE_INT, .bit_width = 5 },
+        { .name = 170008, .type = BUSTER_TYPE_UINT, .bit_width = 5 },
+    };
+    bool ready = bits != 0 && type_complete_record(types, bits, fields, BUSTER_ARRAY_LENGTH(fields), (TypeRecordAttributes){ 0 });
+    const uint32_t first = ready ? types->tags.member_begin[types->types.index[type_index(bits)]] : 0;
+    const uint64_t signed_at = ready ? types->members.offset[first + 1] : 0;
+    const uint64_t unsigned_at = ready ? types->members.offset[first + 2] : 0;
+    CheckConstObject bit_header = header;
+    bit_header.type = type_qualify(types, bits, BUSTER_TYPE_CONST);
+    bit_header.byte_size = ready ? type_size(types, bits) : 0;
+    const uint8_t field[] = { 0xe8, 0x1d };
+    const CheckConstPart bit_part = {
+        .kind = CHECK_CONST_BYTES,
+        .type = bits,
+        .bit_count = 16,
+        .bytes = field,
+        .byte_count = sizeof(field),
+    };
+    ready = ready && signed_at == 3 && unsigned_at == 8 && check_const_append(buffer, bit_header, &bit_part, 1, NULL, 0);
     CheckConstValues view = check_const_view(buffer);
     CheckValue loaded = { 0 };
-    check_test_expect(test, ready && check_const_load(types, &view, 20, 0, 3, 5, ci, 80, &loaded) &&
+    check_test_expect(test, ready && check_const_load(types, &view, 20, (int64_t)(signed_at / 8), (uint32_t)(signed_at % 8), 5, ci, 80, &loaded) &&
                            loaded.constant_kind == CHECK_CONSTANT_INTEGER && loaded.integer == UINT32_C(0xfffffffd) &&
                            loaded.bit_width == 5 && (loaded.flags & BUSTER_CHECK_BIT_FIELD) != 0 && check_const_test_flags(&loaded),
                       "signed five-bit const subobject is sign extended independently of its byte offset");
-    const TypeId cu = type_qualify(types, BUSTER_TYPE_UINT, BUSTER_TYPE_CONST);
-    check_test_expect(test, ready && check_const_load(types, &view, 20, 0, 3, 5, cu, 80, &loaded) && loaded.integer == 29,
-                      "unsigned interpretation of the same known five-bit range retains all five bits");
-    CheckConstObject typed_bits_header = header;
+    check_test_expect(test, ready && check_const_load(types, &view, 20, (int64_t)(unsigned_at / 8), (uint32_t)(unsigned_at % 8), 5, cu, 80, &loaded) &&
+                           loaded.integer == 29 && !check_const_load(types, &view, 20, 0, 3, 5, cu, 80, &loaded) &&
+                           !check_const_load(types, &view, 20, 1, 0, 5, ci, 80, &loaded),
+                      "declared unsigned field retains its bits without admitting a signedness reinterpretation");
+    check_test_expect(test, ready && !check_const_load(types, &view, 20, 0, 0, 3, ci, 80, &loaded) &&
+                           !check_const_load(types, &view, 20, 0, 3, 4, ci, 80, &loaded) &&
+                           !check_const_load(types, &view, 20, 0, 3, 6, ci, 80, &loaded) &&
+                           !check_const_load(types, &view, 20, 0, 3, 0, ci, 80, &loaded),
+                      "unnamed fields and fabricated bit-field widths cannot acquire a typed read witness");
+    CheckConstObject typed_bits_header = bit_header;
     typed_bits_header.object = 25;
     const CheckConstPart typed_bits = { .kind = CHECK_CONST_VALUE, .type = BUSTER_TYPE_INT, .bit_offset = 3, .bit_count = 5, .value = number };
     ready = check_const_append(buffer, typed_bits_header, &typed_bits, 1, NULL, 0);
@@ -173,6 +201,10 @@ static void check_const_test_parts(CheckTest* test, TypeTable* types, CheckConst
     view = check_const_view(buffer);
     check_test_expect(test, ready && check_const_load(types, &view, 21, 0, 0, 0, ci, 80, &loaded) && loaded.integer == 0 && check_const_test_flags(&loaded),
                       "an explicit clear proves a zero scalar without a dense object image");
+    check_test_expect(test, ready && !check_const_load(types, &view, 21, 0, 0, 0, BUSTER_TYPE_FLOAT, 80, &loaded) &&
+                           !check_const_load(types, &view, 21, 0, 0, 0, cu, 80, &loaded) &&
+                           !check_const_load(types, &view, 21, 0, 3, 5, ci, 80, &loaded),
+                      "zero coverage cannot change a declared scalar's type or manufacture a bit-field");
     CheckConstPart overlapping[3] = {
         { .kind = CHECK_CONST_VALUE, .type = BUSTER_TYPE_INT, .bit_count = 32, .value = number },
         { .kind = CHECK_CONST_VALUE, .type = BUSTER_TYPE_UCHAR, .bit_offset = 8, .bit_count = 8,
@@ -267,6 +299,9 @@ static void check_const_test_records(CheckTest* test, TypeTable* types, CheckCon
                            !check_const_union_allows(types, &view, 32, choice, 0, 3, 90) &&
                            check_const_union_allows(types, &view, 32, choice, 0, 2, 89),
                       "default union selection skips unnamed bit fields and an unavailable receipt does not restrict a designator");
+    check_test_expect(test, ready && check_const_load(types, &view, 32, 0, 0, 0, ci, 90, &loaded) && loaded.integer == 0 &&
+                           !check_const_load(types, &view, 32, 0, 0, 0, BUSTER_TYPE_DOUBLE, 90, &loaded),
+                      "default union zero coverage proves only the active declared scalar type");
     union_header.object = 33;
     const CheckConstUnion active = { .type = choice, .bit_offset = 0, .member = 3 };
     ready = ready && check_const_append(buffer, union_header, &clear, 1, &active, 1);
@@ -274,6 +309,10 @@ static void check_const_test_records(CheckTest* test, TypeTable* types, CheckCon
     check_test_expect(test, ready && check_const_union_allows(types, &view, 33, choice, 0, 3, 90) &&
                            !check_const_union_allows(types, &view, 33, choice, 0, 2, 90),
                       "explicit union activity overrides its default initializable member");
+    check_test_expect(test, ready && check_const_load(types, &view, 33, 0, 0, 0, BUSTER_TYPE_DOUBLE, 90, &loaded) &&
+                           loaded.constant_kind == CHECK_CONSTANT_FLOATING && loaded.floating == 0.0L &&
+                           !check_const_load(types, &view, 33, 0, 0, 0, ci, 90, &loaded),
+                      "explicit union selection restricts zero synthesis even when inactive members share its byte offset");
     union_header.object = 34;
     union_header.type = choice;
     ready = ready && check_const_append(buffer, union_header, &clear, 1, &active, 1);
@@ -282,8 +321,130 @@ static void check_const_test_records(CheckTest* test, TypeTable* types, CheckCon
                       "a mutable union root cannot acquire const-member folding");
 }
 
+static void check_const_test_subobjects(CheckTest* test, TypeTable* types, CheckConstBuffer* buffer)
+{
+    const TypeId atomic = type_atomic(types, BUSTER_TYPE_INT);
+    const TypeId record = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170009);
+    const TypeMember members[] = {
+        { .name = 170010, .type = BUSTER_TYPE_CHAR, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        { .name = 170011, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        { .name = 170012, .type = BUSTER_TYPE_INT | BUSTER_TYPE_VOLATILE, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        { .name = 170013, .type = atomic, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        { .name = 170014, .type = BUSTER_TYPE_FLOAT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+    };
+    bool ready = atomic != 0 && record != 0 && type_complete_record(types, record, members, BUSTER_ARRAY_LENGTH(members), (TypeRecordAttributes){ 0 });
+    const uint32_t first = ready ? types->tags.member_begin[types->types.index[type_index(record)]] : 0;
+    const uint64_t integer_at = ready ? types->members.offset[first + 1] / 8 : 0;
+    const uint64_t volatile_at = ready ? types->members.offset[first + 2] / 8 : 0;
+    const uint64_t atomic_at = ready ? types->members.offset[first + 3] / 8 : 0;
+    const uint64_t floating_at = ready ? types->members.offset[first + 4] / 8 : 0;
+    CheckConstObject object = {
+        .object = 40,
+        .declaration = 109,
+        .completed = 110,
+        .type = type_qualify(types, record, BUSTER_TYPE_CONST),
+        .byte_size = ready ? type_size(types, record) : 0,
+    };
+    const CheckConstPart clear = {
+        .kind = CHECK_CONST_CLEAR,
+        .type = record,
+        .bit_count = object.byte_size * 8,
+    };
+    ready = ready && integer_at > 1 && check_const_append(buffer, object, &clear, 1, NULL, 0);
+    CheckConstValues view = check_const_view(buffer);
+    CheckValue loaded = { 0 };
+    const uint64_t mark = buffer->arena->length;
+    const CheckConstBuffer saved = *buffer;
+    check_test_expect(test, ready && check_const_load(types, &view, 40, 0, 0, 0, BUSTER_TYPE_CHAR, 110, &loaded) && loaded.integer == 0 &&
+                           check_const_load(types, &view, 40, (int64_t)integer_at, 0, 0, BUSTER_TYPE_INT, 110, &loaded) && loaded.integer == 0 &&
+                           check_const_load(types, &view, 40, (int64_t)floating_at, 0, 0, BUSTER_TYPE_FLOAT, 110, &loaded) &&
+                           loaded.constant_kind == CHECK_CONSTANT_FLOATING && loaded.floating == 0.0L &&
+                           check_const_load(types, &view, 40, (int64_t)atomic_at, 0, 0, atomic, 110, &loaded) && loaded.integer == 0,
+                      "root zero coverage proves exact declared char, int, float and atomic member values");
+    check_test_expect(test, ready && !check_const_load(types, &view, 40, 1, 0, 0, BUSTER_TYPE_UCHAR, 110, &loaded) &&
+                           !check_const_load(types, &view, 40, (int64_t)integer_at, 0, 0, BUSTER_TYPE_FLOAT, 110, &loaded) &&
+                           !check_const_load(types, &view, 40, (int64_t)volatile_at, 0, 0, BUSTER_TYPE_INT, 110, &loaded) &&
+                           buffer->arena->length == mark && check_const_test_buffer_unchanged(&saved, buffer),
+                      "typed read witnesses reject padding, type punning and cast-stripped declared volatility without allocating or mutation");
+    object.object = 41;
+    const CheckConstPart value = {
+        .kind = CHECK_CONST_VALUE,
+        .type = BUSTER_TYPE_INT,
+        .bit_offset = volatile_at * 8,
+        .bit_count = 32,
+        .value = { .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 17 },
+    };
+    ready = ready && check_const_append(buffer, object, &value, 1, NULL, 0);
+    view = check_const_view(buffer);
+    check_test_expect(test, ready && !check_const_load(types, &view, 41, (int64_t)volatile_at, 0, 0, BUSTER_TYPE_INT, 110, &loaded),
+                      "an exact VALUE payload cannot bypass a volatile declaration path");
+
+    const TypeId flex = type_incomplete_array(types, BUSTER_TYPE_INT);
+    const TypeId flexible = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170015);
+    const TypeMember flexible_members[] = {
+        { .name = 170016, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        { .name = 170017, .type = flex, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+    };
+    ready = flex != 0 && flexible != 0 && type_complete_record(types, flexible, flexible_members, BUSTER_ARRAY_LENGTH(flexible_members), (TypeRecordAttributes){ 0 });
+    const uint32_t flexible_first = ready ? types->tags.member_begin[types->types.index[type_index(flexible)]] : 0;
+    const uint64_t tail = ready ? types->members.offset[flexible_first + 1] / 8 : 0;
+    const CheckConstObject extended = {
+        .object = 42,
+        .declaration = 109,
+        .completed = 110,
+        .type = type_qualify(types, flexible, BUSTER_TYPE_CONST),
+        .byte_size = tail + 8,
+    };
+    const CheckConstPart extended_clear = {
+        .kind = CHECK_CONST_CLEAR,
+        .type = flexible,
+        .bit_count = extended.byte_size * 8,
+    };
+    ready = ready && check_const_append(buffer, extended, &extended_clear, 1, NULL, 0);
+    view = check_const_view(buffer);
+    check_test_expect(test, ready && check_const_load(types, &view, 42, 0, 0, 0, BUSTER_TYPE_INT, 110, &loaded) && loaded.integer == 0 &&
+                           !check_const_load(types, &view, 42, (int64_t)tail, 0, 0, BUSTER_TYPE_INT, 110, &loaded) &&
+                           !check_const_load(types, &view, 42, (int64_t)(tail + 4), 0, 0, BUSTER_TYPE_INT, 110, &loaded) &&
+                           !check_const_load(types, &view, 42, (int64_t)(tail + 8), 0, 0, BUSTER_TYPE_INT, 110, &loaded),
+                      "extended instance storage preserves fixed members without supplying a flexible-array read bound");
+    CheckConstObject incomplete = extended;
+    incomplete.object = 45;
+    incomplete.type = type_qualify(types, flex, BUSTER_TYPE_CONST);
+    const CheckConstPart incomplete_clear = {
+        .kind = CHECK_CONST_CLEAR,
+        .type = flex,
+        .bit_count = incomplete.byte_size * 8,
+    };
+    ready = ready && check_const_append(buffer, incomplete, &incomplete_clear, 1, NULL, 0);
+    view = check_const_view(buffer);
+    check_test_expect(test, ready && !check_const_load(types, &view, 45, 0, 0, 0, BUSTER_TYPE_INT, 110, &loaded),
+                      "an incomplete root array cannot derive a declared bound from retained storage");
+}
+
 static void check_const_test_bytes(CheckTest* test, TypeTable* types, CheckConstBuffer* buffer)
 {
+    const uint8_t literal[] = { 'a', 'b' };
+    const TypeId chars = type_array(types, type_qualify(types, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST), BUSTER_ARRAY_LENGTH(literal));
+    const CheckConstObject characters = { .object = 43, .declaration = 99, .completed = 100, .type = chars, .byte_size = sizeof(literal) };
+    const CheckConstPart characters_part = { .kind = CHECK_CONST_BYTES, .type = chars, .bit_count = 16, .bytes = literal, .byte_count = sizeof(literal) };
+    const bool retained = chars != 0 && check_const_append(buffer, characters, &characters_part, 1, NULL, 0);
+    CheckConstValues literal_view = check_const_view(buffer);
+    CheckValue character = { 0 };
+    check_test_expect(test, retained && check_const_load(types, &literal_view, 43, 1, 0, 0, BUSTER_TYPE_CHAR, 100, &character) && character.integer == 'b' &&
+                           !check_const_load(types, &literal_view, 43, 0, 0, 0, BUSTER_TYPE_USHORT, 100, &character) &&
+                           !check_const_load(types, &literal_view, 43, 0, 0, 0, BUSTER_TYPE_UCHAR, 100, &character) &&
+                           !check_const_load(types, &literal_view, 43, 0, 1, 5, BUSTER_TYPE_CHAR, 100, &character),
+                      "string bytes prove declared char elements without integer, signedness or fabricated field aliases");
+    const uint8_t wide_bytes[] = { 0x34, 0x12, 0x78, 0x56 };
+    const TypeId wide = type_array(types, type_qualify(types, BUSTER_TYPE_USHORT, BUSTER_TYPE_CONST), 2);
+    const CheckConstObject wide_object = { .object = 44, .declaration = 99, .completed = 100, .type = wide, .byte_size = sizeof(wide_bytes) };
+    const CheckConstPart wide_part = { .kind = CHECK_CONST_BYTES, .type = wide, .bit_count = 32, .bytes = wide_bytes, .byte_count = sizeof(wide_bytes) };
+    const bool wide_retained = wide != 0 && check_const_append(buffer, wide_object, &wide_part, 1, NULL, 0);
+    literal_view = check_const_view(buffer);
+    check_test_expect(test, wide_retained && check_const_load(types, &literal_view, 44, 2, 0, 0, BUSTER_TYPE_USHORT, 100, &character) &&
+                           character.integer == 0x5678 && !check_const_load(types, &literal_view, 44, 1, 0, 0, BUSTER_TYPE_USHORT, 100, &character) &&
+                           !check_const_load(types, &literal_view, 44, 0, 0, 0, BUSTER_TYPE_UCHAR, 100, &character),
+                      "wide byte payloads retain exact declared element values without crossing or narrowing their subobjects");
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* mapping = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     const bool guarded = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
@@ -428,6 +589,7 @@ static void check_test_const_values(CheckTest* test)
         check_const_test_parts(test, &types.table, &buffer);
         check_const_test_invalid(test, &types.table, &buffer);
         check_const_test_records(test, &types.table, &buffer);
+        check_const_test_subobjects(test, &types.table, &buffer);
         check_const_test_bytes(test, &types.table, &buffer);
         check_const_test_history(test, &types.table);
         check_const_test_exhaustion(test, &types.table);

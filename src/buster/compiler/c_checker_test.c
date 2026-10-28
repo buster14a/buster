@@ -4541,6 +4541,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_attribute_test.c"
 #include "c_check_program_test.c"
 #include "c_check_const_source_test.c"
+#include "c_check_const_alias_test.c"
 #include "c_check_prefix_test.c"
 #include "c_check_repair_test.c"
 #include "c_check_input_scan_test.c"
@@ -4660,6 +4661,7 @@ static int run_checker_tests(int argc, char** argv)
         {
             check_test_const_values(&test);
             check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
         }
         else if (initialized && program_initializers)
@@ -4681,6 +4683,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_warning_policy(&test);
             check_test_warning_render(&test);
             check_test_const_sources(&test, clang);
+            check_test_const_alias_sources(&test, clang);
             check_test_const_programs(&test, clang);
             Arena storage = arena_reserve(UINT64_C(1) << 27);
             Arena output = arena_reserve(UINT64_C(1) << 28);

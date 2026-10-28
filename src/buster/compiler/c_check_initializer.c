@@ -1770,7 +1770,7 @@ static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelect
     const CheckConstObject* object = walker->const_values != NULL ? check_const_find(walker->const_values, source.object, walker->source_position, &owner) : NULL;
     bool valid = object != NULL && owner != NULL && source.category == CHECK_LVALUE && source.constant_kind == CHECK_CONSTANT_ADDRESS &&
                  source.offset >= 0 && source.object_bit_offset == 0 && source.fault == CHECK_FAULT_NONE &&
-                 (source.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                 (source.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_CAST)) == 0 &&
                  (type_qualifiers(source.type) & BUSTER_TYPE_VOLATILE) == 0 && check_const_eligible(walker->types, object->type) &&
                  type_unqualified(type_strip_aligned(walker->types, source.type)) == type_unqualified(type_strip_aligned(walker->types, selected->type));
     const uint64_t size = type_size(walker->types, selected->type);
@@ -1940,7 +1940,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         else if (walker->const_values != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
                  walker->stream->values[node].category == CHECK_LVALUE && walker->stream->values[node].constant_kind == CHECK_CONSTANT_ADDRESS &&
                  walker->stream->values[node].fault == CHECK_FAULT_NONE &&
-                 (walker->stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                 (walker->stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_CAST)) == 0 &&
                  (type_qualifiers(walker->stream->values[node].type) & BUSTER_TYPE_VOLATILE) == 0 &&
                  check_const_find(walker->const_values, walker->stream->values[node].object, walker->source_position, NULL) != NULL)
         {
