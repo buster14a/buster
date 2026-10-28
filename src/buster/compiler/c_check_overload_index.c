@@ -125,6 +125,8 @@ static uint32_t check_overload_index_find(const CheckOverloadIndex* index, uint6
         uint32_t empty = 0;
         if (scalar)
         {
+            // Keep the scalar source reader an independent executable reference for the intrinsic group probe.
+            #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
             for (uint32_t lane = 0; lane < BUSTER_CHECK_OVERLOAD_INDEX_GROUP; lane += 1)
             {
                 matches |= index->keys[bucket + lane] == key ? 1u << lane : 0;

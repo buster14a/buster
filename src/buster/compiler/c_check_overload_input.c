@@ -90,8 +90,8 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         const bool hashed = check_overload_signature_hash(index, reader->types, candidate.type, reader->scratch, &signature_hash);
         const uint64_t lexical_key = check_overload_index_key(signature_hash, name, scope);
         const uint64_t linked_key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-        const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, false) : UINT32_MAX;
-        const uint32_t linked_slot = hashed ? check_overload_index_find(index, linked_key, name, UINT32_MAX, false) : UINT32_MAX;
+        const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
+        const uint32_t linked_slot = hashed ? check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
         const uint32_t lexical_head = check_overload_index_head(index, lexical_slot);
         const uint32_t linked_head = check_overload_index_head(index, linked_slot);
         const uint32_t unmarked = head != BUSTER_CHECK_NONE ? index->unmarked[head] : BUSTER_CHECK_NONE;
@@ -173,7 +173,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             index->active[name] |= (candidate.flags & BUSTER_CHECK_OVERLOADABLE) != 0;
             check_overload_index_publish(index, lexical_slot, lexical_key, name, scope, current);
             // Both lookups can choose the same empty slot before either key is published.
-            const uint32_t publish_linked = check_overload_index_find(index, linked_key, name, UINT32_MAX, false);
+            const uint32_t publish_linked = check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar);
             check_overload_index_publish(index, publish_linked, linked_key, name, UINT32_MAX, current);
             if (active)
             {

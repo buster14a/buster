@@ -2895,7 +2895,7 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
             const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
             reader->output->resource |= !hashed;
             const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, false) : UINT32_MAX;
+            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
             for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
             {
                 const TypeId candidate = reader->overload_candidates[linked].type;
