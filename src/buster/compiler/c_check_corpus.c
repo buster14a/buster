@@ -8,6 +8,7 @@
 // each file of the command line that the checker accepts, the functions and objects its -c object defines with
 // clang -O0 -c's (#129, check_corpus_symbols_file), and --symbols-minimum N fails the run unless at least N files'
 // objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
+// --id-order N checks each file with its identifiers' ids in another order, as the driver's --id-order gives them (#153).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
@@ -625,6 +626,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
 // check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
 // check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
+// with check_corpus_deferred_scalar_merge, its merge finds the columns' entries by its scalar twin
+// (CheckDeferred.scalar_merge);
 // and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
 // may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
 // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
@@ -638,6 +641,7 @@ static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
 static bool check_corpus_deferred_late_first;
+static bool check_corpus_deferred_scalar_merge;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
 static uint32_t check_corpus_deferred_reread;
@@ -726,6 +730,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                         .fail_after_replay = check_corpus_deferred_fail_merge,
                         .hold_lanes = check_corpus_deferred_hold_lanes,
                         .late_first = check_corpus_deferred_late_first,
+                        .scalar_merge = check_corpus_deferred_scalar_merge,
                         .timing = check_corpus_deferred_timing,
                         .cpus = check_corpus_deferred_cpus,
                     };
@@ -1202,9 +1207,13 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
             check_program_select(&kept, &model, &data, false, &path->output_arena, &path->scratch);
     const bool lowered = valid && check_program_emit(&code, &selected.program, parser, pp->table, selected.data.capacity, false, &output, &bytes,
                                                      &path->scratch, NULL, NULL, true, true);
-    const bool published = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
-                                                         selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
-    const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !published && emission.status == CHECK_DATA_UNSUPPORTED));
+    const bool emitted = lowered && check_data_publish(&selected.data, &path->types, selected.program.stream, selected.program.object_symbols,
+                                                       selected.program.object_count, &code.link, 0, &bytes, &path->scratch, &emission);
+    // The definitions' named sections, as -c places them (#619).
+    ObjectAtomSection* sections = 0;
+    const bool published = emitted && check_program_sections(&code, &selected.program, &bytes, &output, &sections);
+    const bool unsupported = valid && ((!lowered && code.status == CHECK_PROGRAM_UNSUPPORTED) || (lowered && !emitted && emission.status == CHECK_DATA_UNSUPPORTED) ||
+                                       (emitted && !published && code.status == CHECK_PROGRAM_UNSUPPORTED));
     char ours_path[PATH_MAX];
     char theirs_path[PATH_MAX];
     snprintf(ours_path, sizeof(ours_path), "%s/symbols-ours.o", symbols->directory);
@@ -1214,7 +1223,8 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     char report[1024] = { 0 };
     uint64_t written_report = 0;
     const char* failure = !valid ? "the checked program couldn't be selected" : !lowered && !unsupported ? "the backend failed" :
-                          lowered && !published && !unsupported ? "its static data couldn't be published" : NULL;
+                          lowered && !emitted && !unsupported ? "its static data couldn't be published" :
+                          emitted && !published && !unsupported ? "its sections couldn't be placed" : NULL;
     if (published)
     {
         ObjectUnits units = { 0 };
@@ -1223,7 +1233,11 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
                        object_map_symbols(&object_symbols, &code.link, &path->scratch);
         if (written)
         {
-            const Object object = object_build(&code.link, &units, &object_symbols, 0, (ObjectOptions){ 0 }, (String8){ .pointer = (char*)file, .length = strlen(file) },
+            const ObjectOptions object_options = {
+                .atom_sections = sections,
+                .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
+            };
+            const Object object = object_build(&code.link, &units, &object_symbols, 0, object_options, (String8){ .pointer = (char*)file, .length = strlen(file) },
                                                &path->scratch);
             written = object.error == OBJECT_ERROR_NONE && object_write_file(ours_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
         }
@@ -2158,6 +2172,12 @@ struct CheckCorpusOutcome
     char spelling[96];
 };
 
+// With check_corpus_id_ordered (--id-order N, and test-checker-deferred's runs), check_corpus_measure hands the unit's
+// identifiers their ids in another order by check_corpus_id_order, as the driver's --id-order does (check_driver_id_order,
+// #153): its paths' results must still be alike, and clang's.
+static bool check_corpus_id_ordered;
+static uint64_t check_corpus_id_order;
+
 // Preprocesses `file` and checks it on the scalar path and, when `both`, on the vector path too, which must give the
 // same results exactly (`equal`; true when the vector path doesn't run). With --deferred, a third path, the vector
 // path's with every body read apart (#113, check_input_deferred), must give the vector path's results exactly too.
@@ -2171,7 +2191,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     const uint32_t count = both ? (check_corpus_deferred_lanes != 0 ? 3 : 2) : 1;
     paths[2].deferred_lanes = check_corpus_deferred_lanes;
     paths[2].deferred_bindings = check_corpus_deferred_bindings;
-    bool prepared = intern_initialize(&identifiers) && pp_initialize(&pp, options, &identifiers);
+    bool prepared = intern_initialize(&identifiers) && (!check_corpus_id_ordered || check_driver_id_order(&identifiers, options, file, check_corpus_id_order)) &&
+                    pp_initialize(&pp, options, &identifiers);
     prepared = prepared && pp_run(&pp, file);
     bool accepted[3] = { false, false, false };
     for (uint32_t path = 0; prepared && path < count; path += 1)
@@ -2826,6 +2847,8 @@ static int run_checker_corpus(int count, char** arguments)
     bool rejections = false;
     bool symbols_requested = false;
     uint64_t symbols_minimum = 0;
+    bool id_ordered = false;
+    uint64_t id_order = 0;
     const uint32_t file_capacity = 1u << 20;
     char** files = calloc(file_capacity, sizeof(char*));
     char** inputs = calloc((size_t)count + 1, sizeof(char*));
@@ -2855,7 +2878,7 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
                            strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--deferred") == 0 ||
-                           strcmp(argument, "--deferred-bindings") == 0 || strcmp(argument, "--symbols-minimum") == 0;
+                           strcmp(argument, "--deferred-bindings") == 0 || strcmp(argument, "--symbols-minimum") == 0 || strcmp(argument, "--id-order") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2896,8 +2919,10 @@ static int run_checker_corpus(int count, char** arguments)
                                             strcmp(argument, "--mutations") == 0 ? &mutation_count : strcmp(argument, "--semantic-mutations") == 0 ? &semantic_count :
                                             strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize :
                                             strcmp(argument, "--deferred") == 0 ? &deferred_lanes :
-                                            strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum : &report_limit;
+                                            strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum :
+                                            strcmp(argument, "--id-order") == 0 ? &id_order : &report_limit;
                     valid = check_corpus_number(text, destination);
+                    id_ordered |= destination == &id_order;
                     // A floor on the files compared asks for the comparison.
                     symbols_requested |= destination == &symbols_minimum;
                 }
@@ -3092,6 +3117,8 @@ static int run_checker_corpus(int count, char** arguments)
         check_corpus_deferred_lanes = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES ? (uint32_t)deferred_lanes : 0;
         check_corpus_deferred_bindings = deferred_bindings;
         check_corpus_symbols = symbols_requested ? &symbols : NULL;
+        check_corpus_id_ordered = id_ordered;
+        check_corpus_id_order = id_order;
         valid = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES &&
                 check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit,
                                    bases);
@@ -3106,7 +3133,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--id-order N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
                 "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)

@@ -1048,10 +1048,23 @@ each set, clang preprocesses the header with its own set and with ours
 
 Then our preprocessor with `--buster-headers` must give clang's tokens on all
 the headers and their macros in each mode, and warn no more than clang does in
-the unit itself: it reports warnings in system headers too, which clang hides
-without `-Wsystem-headers`, and the headers must give none. In strict C89,
+the unit itself. Ordinary preprocessing warnings in system headers are hidden
+and not counted unless `-Wsystem-headers` enables them; `-Wno-system-headers`
+restores suppression. System directories and `#pragma GCC system_header` use
+the same expansion-location judgment as the checker. `#warning` remains visible
+there, and errors are never hidden. Macro-redefinition notes follow their primary
+warning's visibility. In strict C89,
 clang's own `<stdint.h>` and `<stdckdint.h>` put their `//` comments in the
 output as tokens; the check drops those lines from clang's side.
+
+For deferred history, exact source-level runs classify the preprocessing
+warnings without constructing expansion history. A warning whose run crosses a
+system-level boundary requests the existing replay, which supplies its canonical
+visibility and count, including for quiet clients. The system-warning tests cover
+both kernels, immediate/deferred history, quiet counting, both option states,
+macro uses in both directions, nested headers, predefined-macro whitespace and
+invocations spanning header exits. Destringized `_Pragma` messages retain their
+scratch-spelling step and column as a generated diagnostic source.
 
 Then the headers among others (#255's review), in each mode, hosted and
 freestanding: two units include buster's 11, the C library's headers that
@@ -1764,6 +1777,24 @@ flushes the complete prefix and resumes direct printing, preserving the full
 message rather than truncating it. Rendering follows the required note order;
 the optimization removes the per-piece system calls without changing how
 source locations and note identities are computed.
+
+The checker source command enables `PPOptions.collect_diagnostics` only after
+setup succeeds (#698). Visible diagnostic messages, locations, origin identities
+and explicit notes are retained lazily; a clean unit allocates no queue.
+Preprocessing uses expansion-output insertion boundaries, including interior
+positions for copied file runs' raw errors. Later stages use
+`pp_diagnose_output_at` when a semantic completion boundary differs from the
+located output token. A stable allocation-free merge orders these sparse
+records before `pp_diagnostic_publish` applies the ordinary gate and renders
+each complete group. Include-stack suppression therefore follows publication
+order. The immediate `pp_diagnose_output` API and standalone `-E` behavior
+remain available.
+
+Deferred-history replay groups keep their recording preprocessor alive through
+publication, including a rejected reporting replay. A silent failed replay
+still receives one replacement fatal; first-capture exhaustion cannot lose that
+fatal. Rejection state remains distinct from final published counts, so a
+hidden error or failed diagnostic allocation never permits object publication.
 
 [The frozen #636 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-636/target)
 compares `60ff4b25` with `bc1b4861` on the locked 9700X, with exact bytes,

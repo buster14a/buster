@@ -6,7 +6,9 @@
 // vector path, and the vector path with every body read apart, which must give the vector path's results exactly,
 // column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
 // direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
-// whether the deferred reader must merge it or leave it to source order. A merged unit's bodies must run on that many
+// whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
+// in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 8 lanes through each
+// resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
 // lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
 // group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
@@ -27,7 +29,7 @@
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
 // unmapped by check_deferred_release.
 //
-//   ./build/compiler test-checker-deferred [--keep]
+//   ./build/compiler test-checker-deferred [--id-order N] [--keep]
 //
 // Include after c_check_corpus.c.
 
@@ -64,6 +66,13 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },
     { "loop-placement", "void f(int n) {\n#pragma unroll\n n = 1; }\n", false },
     { "loop-conflict-control-error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n while(n--) { L:; L:; } }\n", false },
+    // #619: a unit with #pragma clang section is source order's (its settings and conflicts read the walk's declarations in
+    // order), as is one whose body has a section attribute (a lane refuses its section event); #pragma clang optimize
+    // changes nothing a body's reading does, at the top level or in a body.
+    { "section-pragma", "#pragma clang section text = \".x\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\nint g(void) { return 2; }\n", false },
+    { "section-attribute-in-a-body", "int f(void) { static int s __attribute__((section(\".x\"))) = 1; return s; }\nint g(void) { return 2; }\n", false },
+    { "optimize-pragma", "#pragma clang optimize off\nint f(void) { return 1; }\n#pragma clang optimize on\nint g(void) { return 2; }\n", true },
+    { "optimize-pragma-in-a-body", "int f(void) {\n#pragma clang optimize off\n return 1; }\nint g(void) { return 2; }\n", true },
     // The issue's three: a later declaration and a later completion aren't seen by an earlier body, and an
     // initializer's enumerator is.
     { "later-declaration", "int f(void) { return later; }\nint later = 7;\n", true },
@@ -111,6 +120,14 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-function-after-its-definition", "int f1(char *p) { return *p + 1; }\nint main(void) { char s = 1; int f1(char *); return f1(&s) != 2; }\n", true },
     { "block-scope-array-before-its-size", "extern int a[];\nint f(void) { extern int a[]; return a[0]; }\nint a[4] = { 7 };\n", true },
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "visibility-extern-source-order", "int shared;\n#pragma GCC visibility push(hidden)\nint hidden;\n"
+      "int f(void){extern int shared;return shared;}\nint g(void){extern int shared;return shared;}\n#pragma GCC visibility pop\n", false },
+    { "visibility-attribute-extern-source-order", "int shared;\n"
+      "int f(void){extern int shared __attribute__((visibility(\"hidden\")));return shared;}\nint g(void){return shared;}\n", false },
+    { "visibility-locals-still-merge", "#pragma GCC visibility push(hidden)\n"
+      "int f(void){int local=3;return local;}\nint g(void){int local=7;return local;}\n#pragma GCC visibility pop\n", true },
+    { "implicit-functions-source-order", "typedef __typeof__(top_missing()) T;\nint f(void){return first_missing();}\n"
+      "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     { "block-scope-extern-first", "int f(void) { extern int e; return e; }\nint g(void) { extern int e; return e + 1; }\n", false },
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
     { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
@@ -405,6 +422,159 @@ static bool check_deferred_test_memory(void)
     return valid;
 }
 
+// The merge's scans of a column's tokens (check_deferred_entries, check_deferred_entries64 and check_deferred_count_bytes)
+// against their scalar twins, on ranges of every length to 300 from five starts, of columns that end at a PROT_NONE page,
+// with entries at random tokens at four densities: of 32-bit values whose none is 0 or BUSTER_CHECK_NONE, of 64-bit ones
+// and of bytes. The same positions in order, each in the range, the same counts, and no read past a column, which
+// faults.
+static bool check_deferred_test_entries(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    uint32_t vector_positions[301];
+    uint32_t scalar_positions[301];
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    // Entries per 64 tokens, and the ranges' starts.
+    const uint32_t densities[] = { 0, 3, 32, 64 };
+    const uint32_t begins[] = { 0, 1, 13, 64, 65 };
+    for (uint32_t end = 0; valid && end <= 300; end += 1)
+    {
+        for (uint32_t s = 0; valid && s < BUSTER_ARRAY_LENGTH(begins) && begins[s] <= end; s += 1)
+        {
+            const uint32_t begin = begins[s];
+            for (uint32_t d = 0; valid && d < BUSTER_ARRAY_LENGTH(densities); d += 1)
+            {
+                for (uint32_t kind = 0; valid && kind < 4; kind += 1)
+                {
+                    uint32_t vector_count = 0;
+                    uint32_t scalar_count = 0;
+                    if (kind < 2)
+                    {
+                        uint32_t* column = (uint32_t*)(mapping + page) - end;
+                        const uint32_t none = kind == 0 ? 0 : BUSTER_CHECK_NONE;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint32_t)(state >> 16) % 1000 + 1 : none;
+                        }
+                        vector_count = check_deferred_entries(column, begin, end, none, true, vector_positions);
+                        scalar_count = check_deferred_entries(column, begin, end, none, false, scalar_positions);
+                    }
+                    else if (kind == 2)
+                    {
+                        uint64_t* column = (uint64_t*)(mapping + page) - end;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? state | 1 : 0;
+                        }
+                        vector_count = check_deferred_entries64(column, begin, end, true, vector_positions);
+                        scalar_count = check_deferred_entries64(column, begin, end, false, scalar_positions);
+                    }
+                    else
+                    {
+                        uint8_t* column = mapping + page - end;
+                        for (uint32_t i = 0; i < end; i += 1)
+                        {
+                            state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                            column[i] = (uint32_t)(state >> 58) < densities[d] ? (uint8_t)(state >> 24 | 1) : 0;
+                        }
+                        vector_count = check_deferred_count_bytes(column, begin, end, true);
+                        scalar_count = check_deferred_count_bytes(column, begin, end, false);
+                    }
+                    const uint32_t listed = kind < 3 ? vector_count : 0;
+                    valid = vector_count == scalar_count && memcmp(vector_positions, scalar_positions, (uint64_t)listed * sizeof(uint32_t)) == 0;
+                    for (uint32_t e = 0; valid && e < listed; e += 1)
+                    {
+                        valid = begin <= vector_positions[e] && vector_positions[e] < end && (e == 0 || vector_positions[e - 1] < vector_positions[e]);
+                    }
+                }
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    return valid;
+}
+
+// A dominant trailing top-level item leaves the last lane an empty range past every item. It must not inspect the
+// unused cut after the real bodies, or form a position from it; the real cuts end at a protected page here.
+static bool check_deferred_test_empty_pass(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    if (valid)
+    {
+        enum { BODIES = 8 };
+        CheckDeferredCut* cuts = (CheckDeferredCut*)(mapping + page) - BODIES;
+        uint64_t costs[BODIES + 1];
+        for (uint32_t b = 0; b < BODIES; b += 1)
+        {
+            cuts[b] = (CheckDeferredCut){ .opening = b * 2, .closing = b * 2 + 1 };
+            costs[b] = cuts[b].closing + 1;
+        }
+        costs[BODIES] = 4097;
+        const Range64 range = range_part_by_cost(costs, BODIES + 1, 7, 8);
+        valid = range.begin == BODIES + 1 && range.end == range.begin;
+        Parser parser = { .tokens.count = 4096 };
+        CheckInput input = { 0 };
+        CheckInputReader reader = { .parser = &parser, .output = &input };
+        CheckDeferred deferred = { .cuts = cuts, .body_count = BODIES };
+        uint32_t position = UINT32_MAX;
+        CheckDeferredPass pass = { .deferred = &deferred, .reader = &reader, .positions = &position };
+        for (uint32_t vector = 0; valid && vector < 2; vector += 1)
+        {
+            pass.vector = vector != 0;
+            valid = check_deferred_pass_items(&pass, (uint32_t)range.begin, (uint32_t)range.end) == 0 && position == UINT32_MAX;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    return valid;
+}
+
+// The merge's explicit scalar twin survives the state's reset, including alternation and poisoned reused storage.
+static bool check_deferred_test_merge_modes(void)
+{
+    static InternTable names;
+    static Preprocessor pp;
+    static Parser parser;
+    static CheckDeferred deferred;
+    static const char source[] = "int f(int n){return n+1;}int g(int n){return f(n)+2;}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { 0 };
+    bool valid = intern_initialize(&names) && pp_initialize(&pp, &options, &names) &&
+                 pp_run_source(&pp, "merge-modes.c", (const uint8_t*)source, sizeof(source) - 1) &&
+                 parse_initialize(&parser, &parsing, options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
+    const bool modes[] = { true, false, true };
+    for (uint32_t m = 0; valid && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+    {
+        CheckTestTypes types = { 0 };
+        CheckInput input = { 0 };
+        Arena output = arena_reserve(UINT64_C(1) << 27);
+        Arena scratch = arena_reserve(UINT64_C(1) << 27);
+        deferred.scalar_merge = modes[m];
+        valid = output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
+                check_input_deferred(&deferred, &input, &parser, &pp, &types.table, &output, &scratch, 1, CHECK_INPUT_BINDINGS_DEFAULT) &&
+                !deferred.unsupported && deferred.scalar_merge == modes[m];
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        check_deferred_poison(&deferred, 0xa5);
+    }
+    check_deferred_release(&deferred);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&names);
+    return valid;
+}
+
 // The bodies' tokens that pay for a lane in a unit whose top level has `top` tokens (outside its bodies), written again
 // from the rule (docs/c-deferred-bodies.md, "How many lanes").
 static uint64_t check_deferred_test_lane_tokens(uint64_t top)
@@ -595,10 +765,20 @@ static int run_checker_deferred_tests(int count, char** arguments)
 {
     bool keep = false;
     bool valid = true;
+    uint64_t id_order = 153;
     for (int i = 0; i < count; i += 1)
     {
-        keep |= strcmp(arguments[i], "--keep") == 0;
-        valid &= strcmp(arguments[i], "--keep") == 0;
+        char* end = NULL;
+        if (strcmp(arguments[i], "--id-order") == 0 && i + 1 < count)
+        {
+            id_order = strtoull(arguments[++i], &end, 10);
+            valid &= end != arguments[i] && *end == 0;
+        }
+        else
+        {
+            keep |= strcmp(arguments[i], "--keep") == 0;
+            valid &= strcmp(arguments[i], "--keep") == 0;
+        }
     }
     char directory[] = "/tmp/buster-check-deferred-XXXXXX";
     valid = valid && mkdtemp(directory) != NULL;
@@ -615,6 +795,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
     uint64_t failures = 0;
     uint64_t merged = 0;
     uint64_t bodies = 0;
+    uint64_t ordered = 0;
     for (uint32_t f = 0; valid && f < fixtures; f += 1)
     {
         // The listed fixtures, the many bodies, and the rule's sides, which the reader reads by its own rule alone.
@@ -678,6 +859,30 @@ static int run_checker_deferred_tests(int count, char** arguments)
                             copied ? "" : " (not the rule's lanes, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
                 }
+            }
+        }
+        // With the identifiers' ids in another order (#153: check_corpus_id_ordered, by --id-order's N plus the fixture's
+        // index), on 8 lanes with every binding resolution: the paths must still be alike, and merge as before.
+        for (uint32_t m = 0; valid && m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+        {
+            check_corpus_deferred_lanes = 8;
+            check_corpus_deferred_bindings = modes[m];
+            check_corpus_deferred_every_lane = every;
+            check_corpus_id_ordered = true;
+            check_corpus_id_order = id_order + f;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_id_ordered = false;
+            check_corpus_deferred_every_lane = true;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected;
+            checks += 1;
+            failures += !passed;
+            ordered += 1;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on 8 lanes through %s, with the ids in another order (%" PRIu64 "): %s\n", name, mode_names[m],
+                        id_order + f, !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : expected ? "not merged" : "merged");
             }
         }
         // The reader's own rule on 8 lanes, which reads most of the listed fixtures on one.
@@ -749,6 +954,25 @@ static int run_checker_deferred_tests(int count, char** arguments)
                 fprintf(stderr, "test-checker-deferred: %s on 8 lanes with the first taking every part: %s\n", name,
                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" : "a lane without a part copied the reader");
+            }
+        }
+        // A unit that merges, with its merge finding the columns' entries by the scalar twin: the same result.
+        for (uint32_t l = 0; valid && expected && size == 0 && l < 2; l += 1)
+        {
+            check_corpus_deferred_lanes = l == 0 ? 1 : 8;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_scalar_merge = true;
+            CheckCorpusOutcome outcome;
+            check_corpus_measure(path, &options, false, true, &outcome);
+            check_corpus_deferred_scalar_merge = false;
+            const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred;
+            checks += 1;
+            failures += !passed;
+            if (!passed)
+            {
+                fprintf(stderr, "test-checker-deferred: %s on %u lanes with the merge's scalar twin: %s\n", name, check_corpus_deferred_lanes,
+                        !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                        !outcome.equal ? "the scalar and vector paths differ" : "not merged");
             }
         }
         // A unit that merges, with its merge failing after the replay into the caller's table: source order's result,
@@ -881,6 +1105,27 @@ static int run_checker_deferred_tests(int count, char** arguments)
     {
         fprintf(stderr, "test-checker-deferred: the difference report on a deferred path without an input didn't say so\n");
     }
+    const bool entries = check_deferred_test_entries();
+    checks += 1;
+    failures += !entries;
+    if (!entries)
+    {
+        fprintf(stderr, "test-checker-deferred: the merge's scans of a column's tokens and their scalar twins differ\n");
+    }
+    const bool empty_pass = check_deferred_test_empty_pass();
+    checks += 1;
+    failures += !empty_pass;
+    if (!empty_pass)
+    {
+        fprintf(stderr, "test-checker-deferred: an empty merge share reads past the real cuts or writes positions\n");
+    }
+    const bool merge_modes = check_deferred_test_merge_modes();
+    checks += 1;
+    failures += !merge_modes;
+    if (!merge_modes)
+    {
+        fprintf(stderr, "test-checker-deferred: the requested scalar merge mode is lost across state reuse\n");
+    }
     const bool memory = check_deferred_test_memory();
     checks += 1;
     failures += !memory;
@@ -893,7 +1138,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
         rmdir(directory);
     }
     arena_release(&option_arena);
-    printf("test-checker-deferred: %u fixtures, %" PRIu64 " checks, %" PRIu64 " merged, %" PRIu64 " bodies read apart, %" PRIu64 " failures%s\n", fixtures, checks,
-           merged, bodies, failures, valid ? "" : " (a fixture couldn't be written or preprocessed)");
+    printf("test-checker-deferred: %u fixtures, %" PRIu64 " checks (%" PRIu64 " with the ids in another order), %" PRIu64 " merged, %" PRIu64
+           " bodies read apart, %" PRIu64 " failures%s\n", fixtures, checks, ordered, merged, bodies, failures,
+           valid ? "" : " (a fixture couldn't be written or preprocessed, or an option is invalid)");
     return valid && failures == 0 ? 0 : 1;
 }
