@@ -64,6 +64,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include <errno.h>
+#include <time.h>
 
 // OS-dependent includes
 #include <dirent.h>
@@ -3259,6 +3260,167 @@ static void abi_test_char_signedness(AbiTestTally* tally)
             }
         }
     }
+}
+
+// Deep graphs in both type-ID orders, with completion and classification split across calls. The unions' first
+// dependency finishes before their second, and shared/duplicate members exercise resuming and relinking waiters.
+// Every record still has the independent ABI of one int; neither twin agreement nor a repeated schedule proves that.
+static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
+{
+    AbiTestTables tables;
+    TypeId* records = malloc(((uint64_t)count + 1) * sizeof(TypeId));
+    bool valid = records != 0 && abi_test_tables_open(&tables, count + BUSTER_TYPE_BUILTIN_COUNT + 16);
+    if (valid)
+    {
+        TypeTable* table = &tables.types.table;
+        const uint8_t kind = reverse ? BUSTER_TYPE_KIND_UNION : BUSTER_TYPE_KIND_STRUCT;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            records[reverse ? count - 1 - i : i] = type_tag(table, kind, i + 1);
+            valid = records[reverse ? count - 1 - i : i] != 0;
+        }
+        valid = valid && abi_test_tables_start(&tables, 16);
+        uint32_t completed = 0;
+        uint64_t classification_ns = 0;
+        const bool deep = count >= 131072;
+        for (uint32_t part = 0; valid && part < 2; part += 1)
+        {
+            const uint32_t end = part == 0 && !deep ? count / 2 : count;
+            for (uint32_t i = completed; valid && i < end; i += 1)
+            {
+                const TypeId previous = i == 0 ? BUSTER_TYPE_INT : records[i - 1];
+                TypeMember members[2];
+                members[0] = type_test_member(1, reverse && i > 1 ? records[i - 2] : previous, BUSTER_TYPE_NOT_BIT_FIELD);
+                members[1] = type_test_member(2, previous, BUSTER_TYPE_NOT_BIT_FIELD);
+                valid = type_complete_record(table, records[i], members, reverse ? 2 : 1, (TypeRecordAttributes){ 0 });
+            }
+            struct timespec before = { 0 };
+            struct timespec after = { 0 };
+            valid = valid && (!deep || clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &before) == 0);
+            const uint32_t classified = valid ? (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
+            if (deep)
+            {
+                valid = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &after) == 0 && valid;
+                const uint64_t begin_ns = (uint64_t)before.tv_sec * 1000000000ull + (uint64_t)before.tv_nsec;
+                const uint64_t end_ns = (uint64_t)after.tv_sec * 1000000000ull + (uint64_t)after.tv_nsec;
+                classification_ns += end_ns - begin_ns;
+                if (classification_ns > 5000000000ull)
+                {
+                    fprintf(stderr, "test-calling-convention: deep classification used %.3f CPU seconds\n", (double)classification_ns / 1e9);
+                    valid = false;
+                }
+            }
+            valid = valid && classified == end - completed;
+            completed = end;
+            valid = valid && (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) == 0;
+            for (uint32_t i = 0; valid && i < count; i += 1)
+            {
+                const uint32_t index = records[i] >> BUSTER_TYPE_INDEX_SHIFT;
+                valid = abi_is_classified(&tables.abi, records[i]) == (i < completed);
+                if (valid && i < completed)
+                {
+                    valid = tables.abi.stack_bytes[index] == 8 && tables.abi.storage[index] == 2 &&
+                            tables.abi.results[index].kind == BUSTER_ABI_RESULT_REGISTERS && tables.abi.results[index].registers[0] == BUSTER_ABI_RAX &&
+                            (tables.abi.pass[index] & BUSTER_ABI_PASS_UNSUPPORTED) == 0;
+                    for (uint32_t offset = 0; valid && offset < BUSTER_ABI_ROW_BYTES; offset += 1)
+                    {
+                        const AbiClasses integer = offset < 8 ? BUSTER_ABI_TEST_INTEGER_ONLY : BUSTER_ABI_CLASSES(BUSTER_ABI_NO_CLASS, BUSTER_ABI_INTEGER);
+                        const AbiClasses expected = offset % 4 == 0 ? integer : BUSTER_ABI_IN_MEMORY;
+                        valid = tables.abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset] == expected;
+                    }
+                }
+            }
+        }
+        abi_test_tables_close(&tables);
+    }
+    free(records);
+    return valid;
+}
+
+// Wide records used to share one frontier without waiting for their members when no LARGER type existed. Both ID
+// orders must still have the independent memory ABI after scheduling the full dependency chain (#629 review).
+static bool abi_test_wide_dependencies(bool reverse, bool scalar)
+{
+    const uint32_t count = 4096;
+    AbiTestTables tables;
+    TypeId* records = malloc((uint64_t)count * sizeof(TypeId));
+    bool valid = records != 0 && abi_test_tables_open(&tables, count + BUSTER_TYPE_BUILTIN_COUNT + 16);
+    if (valid)
+    {
+        TypeTable* table = &tables.types.table;
+        TypeId previous = type_array(table, BUSTER_TYPE_INT, 32);
+        valid = previous != 0;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            records[reverse ? count - 1 - i : i] = type_tag(table, BUSTER_TYPE_KIND_STRUCT, i + 1);
+            valid = records[reverse ? count - 1 - i : i] != 0;
+        }
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            const TypeMember member = type_test_member(1, previous, BUSTER_TYPE_NOT_BIT_FIELD);
+            valid = type_complete_record(table, records[i], &member, 1, (TypeRecordAttributes){ 0 });
+            previous = records[i];
+        }
+        valid = valid && abi_test_tables_start(&tables, 16);
+        const uint32_t classified = valid ? (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
+        valid = valid && classified == count + 1;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            const uint32_t index = records[i] >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t expected = BUSTER_ABI_PASS_MEMORY | BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_CLASSIFIED;
+            valid = (tables.abi.pass[index] & expected) == expected && (tables.abi.pass[index] & BUSTER_ABI_PASS_UNSUPPORTED) == 0 &&
+                    tables.abi.stack_bytes[index] == 128 && tables.abi.results[index].kind == BUSTER_ABI_RESULT_MEMORY;
+            for (uint32_t offset = 0; valid && offset < BUSTER_ABI_ROW_BYTES; offset += 1)
+            {
+                valid = tables.abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset] == BUSTER_ABI_IN_MEMORY;
+            }
+        }
+        abi_test_tables_close(&tables);
+    }
+    free(records);
+    return valid;
+}
+
+static bool abi_test_dependencies(void)
+{
+    AbiTestTally tally = { 0 };
+    const uint32_t counts[] = { 0, 1, 15, 16, 17, 31, 32, 33, 65, 4096 };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        for (uint32_t mode = 0; mode < 4; mode += 1)
+        {
+            abi_test_expect(&tally, abi_test_dependency_graph(counts[c], (mode & 1) != 0, (mode & 2) != 0),
+                            "dependencies", "incomplete, incremental or shared graph classification differs from the int ABI");
+        }
+    }
+    for (uint32_t mode = 0; mode < 4; mode += 1)
+    {
+        abi_test_expect(&tally, abi_test_wide_dependencies((mode & 1) != 0, (mode & 2) != 0),
+                        "dependencies", "4096 wide records in dependency order or reverse ID order differ from the memory ABI");
+    }
+    // A five-CPU-second classification budget excludes construction, verification and time descheduled on a busy
+    // runner. These cases complete the full chain before classification; smaller cases above check incremental
+    // completion. A separate generous wall watchdog bounds a hung child, as the shared-record fixtures do.
+    for (uint32_t mode = 0; mode < 2; mode += 1)
+    {
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            alarm(60);
+            _exit(abi_test_dependency_graph(131072, mode != 0, mode != 0) ? 0 : 1);
+        }
+        int status = 0;
+        pid_t waited;
+        do
+        {
+            waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        }
+        while (waited < 0 && errno == EINTR);
+        abi_test_expect(&tally, child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                        "dependencies", "131072-type chain failed, exceeded five CPU seconds of classification, or hit the 60-second watchdog");
+    }
+    abi_test_report("dependencies", tally);
+    return tally.failures == 0;
 }
 
 static bool abi_test_fixtures(void)
@@ -7230,6 +7392,7 @@ static int run_calling_convention_tests(int argc, char** argv)
     else
     {
         bool passed = abi_test_merge();
+        passed = abi_test_dependencies() && passed;
         passed = abi_test_fixtures() && passed;
         passed = abi_test_worlds(seed, (uint32_t)count) && passed;
         passed = abi_test_gcc_bit_fields() && passed;

@@ -1098,6 +1098,18 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
                 }
                 check_test_expect(test, program.reference_count == references && writes == initializations,
                                   "checked body preserves exact live reference and ordered initializer counts");
+                if (program.body_count == 0)
+                {
+                    const uint64_t output_mark = output.length;
+                    const uint64_t scratch_mark = scratch.length;
+                    CheckLowerShared shared = { 0 };
+                    CheckProgramLowered prepared = { 0 };
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
+                                      "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    arena_pop_to(&output, output_mark);
+                    arena_pop_to(&scratch, scratch_mark);
+                }
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
@@ -1681,6 +1693,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
         "vla-typedef-captures-bound-once", clang);
+    check_test_program_source(test,
+        "int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;"
+        "x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];"
+        "return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}", "vla-declaration-span-scopes-and-commas", clang);
     check_test_program_source(test,
         "int tested(int n){n+=10;int(*p)[++n],x=(n*=2),(*q)[++n];return (int)sizeof(*p)+(int)sizeof(*q)+n+x;}",
         "vla-declarator-and-initializer-order", clang);
@@ -2346,6 +2362,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test, source, name, clang);
     }
     check_test_program_boundary(test, "", "empty-program", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S0{int x;};struct S1{struct S0 x;};", "types-only-no-abi", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S{int x;};struct S value={42};int values[3]={1,2,3};", "objects-only-no-abi", true, true, 0, 0);
     check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
     check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);

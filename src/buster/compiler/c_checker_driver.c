@@ -483,7 +483,7 @@ static void check_driver_emission_failed(const Parser* parser, Preprocessor* pp,
     char message[256];
     if (code->status == CHECK_PROGRAM_RESOURCE)
     {
-        snprintf(message, sizeof(message), "code output capacity exhausted");
+        snprintf(message, sizeof(message), "code output capacity exhausted%s%s", code->reason != NULL ? ": " : "", code->reason != NULL ? code->reason : "");
     }
     else if (code->status == CHECK_PROGRAM_UNSUPPORTED)
     {

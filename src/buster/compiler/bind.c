@@ -191,6 +191,9 @@ struct Bind
 {
     const Runtime* runtime;
     BindPath path;
+    // Published by bind_end after as-needed pruning, so the writer needn't receive an unused library's catalog.
+    // Fits the padding after path; the other members' offsets and Bind's size stay the same.
+    bool gcc_s_needed;
     // Where the runtime's atoms' bytes are copied.
     Arena* bytes;
     // The link's unit for the runtime's unit 0: the runtime's units follow it in their order.
@@ -240,6 +243,7 @@ struct Bind
     bool resolving;
     bool bound;
     bool tail_joined;
+    bool deferred_checked;
     SymbolId resolved;
     // The link's imports from libc.so.6, the loader and the libraries it names, and the definitions it exports, room for
     // `capacity` of each.
@@ -922,8 +926,30 @@ static void bind_import(Bind* bind, LinkSymbols* symbols, SymbolId symbol, const
     }
 }
 
-// Binds `symbol`, which nothing in the link defines (see the orientation comment); with `members`, a member of libgcc.a
-// or libc_nonshared.a that defines it is marked as needed.
+// Imported runtimes already read these files. A loaded snapshot checks the optional library once per binding, only
+// when a strong import or an otherwise unresolved name can depend on it. Weak-only imports are discarded below.
+static void bind_check_deferred(Bind* bind)
+{
+    if (!bind->deferred_checked)
+    {
+        bind->deferred_checked = true;
+        if (!runtime_deferred_probes_current(bind->runtime))
+        {
+            bind->error = BIND_ERROR_SNAPSHOT;
+            bind->name = 0;
+        }
+    }
+}
+
+static void bind_check_undefined(Bind* bind)
+{
+    if (bind->error == BIND_ERROR_UNDEFINED || bind->error == BIND_ERROR_MEMBER_UNDEFINED || bind->error == BIND_ERROR_LIBRARY_UNDEFINED)
+    {
+        bind_check_deferred(bind);
+    }
+}
+
+// Binds `symbol`, which nothing in the link defines; with `members`, an archive member defining it is marked needed.
 static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool members)
 {
     const Runtime* runtime = bind->runtime;
@@ -940,8 +966,6 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     const uint32_t export = entry != 0 ? names->export[entry - 1] : 0;
     // libgcc_s.so.1's export, which a member of libgcc.a that defines the name comes before.
     const bool after_members = export != 0 && runtime_export_after_members(runtime, export - 1);
-    uint32_t index = 0;
-    const ImportExports* exports = export != 0 ? &runtime_export_library(runtime, export - 1, &index)->exports : 0;
     const uint32_t member = entry != 0 ? names->member[entry - 1] : 0;
     const bool weak = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_WEAK;
     // A reference with a visibility other than default needs a definition within the executable: a library's can't be
@@ -969,7 +993,9 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     }
     else if (export != 0 && !after_members && shareable)
     {
-        bind_import(bind, symbols, symbol, exports, index);
+        uint32_t index = 0;
+        const ImportLibrary* library = runtime_export_library(runtime, export - 1, &index);
+        bind_import(bind, symbols, symbol, &library->exports, index);
     }
     else if (member != 0 && members && !weak)
     {
@@ -983,7 +1009,15 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
     else if (after_members && shareable)
     {
         // libgcc_s.so.1's, needed only for a strong reference (bind_keep_as_needed).
-        bind_import(bind, symbols, symbol, exports, index);
+        if (!weak)
+        {
+            bind_check_deferred(bind);
+        }
+        if (bind->error == BIND_ERROR_NONE)
+        {
+            const uint32_t index = export - 1 - runtime->libc.exports.count - runtime->loader.exports.count;
+            bind_import(bind, symbols, symbol, &runtime->gcc_s.exports, index);
+        }
     }
     else if (weak)
     {
@@ -999,6 +1033,8 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
         // the libraries the program loads, as GNU ld and lld leave it (-shared allows it: -z undefs); but not one that
         // only members refer to (BIND_ERROR_MEMBER_UNDEFINED).
         symbols->source[symbol] = BUSTER_LINK_SOURCE_NONE;
+        // A newly installed library could define this strong name even though a shared link permits it undefined.
+        bind_check_deferred(bind);
     }
     else if (member_name)
     {
@@ -1119,27 +1155,39 @@ static void bind_keep_imports(Bind* bind, const Link* link)
 // ones among them. An import is the library's by its version, whose index follows libc.so.6's and the other's
 // (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens,
 // shared by both paths.
-static void bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
+static bool bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
 {
     LinkSymbols* symbols = &link->symbols;
+    // runtime_move_versions gives each library a disjoint range; gaps cannot contain another library's version.
+    uint16_t first = UINT16_MAX;
+    uint16_t last = 0;
+    for (uint32_t v = 0; v < library->version_count; v += 1)
+    {
+        const uint16_t version = library->versions[v].index;
+        first = version < first ? version : first;
+        last = version > last ? version : last;
+    }
     bool needed = forced;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {
         const SymbolId symbol = bind->imports[i];
         const bool strong = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
-        needed = needed || (strong && runtime_library_version(library, symbols->version[symbol]));
+        const uint16_t version = symbols->version[symbol];
+        needed = needed || (strong && version >= first && version <= last);
     }
     uint32_t kept = 0;
     for (uint32_t i = 0; i < bind->import_count; i += 1)
     {
         const SymbolId symbol = bind->imports[i];
-        const bool dropped = !needed && runtime_library_version(library, symbols->version[symbol]);
+        const uint16_t version = symbols->version[symbol];
+        const bool dropped = !needed && version >= first && version <= last;
         symbols->source[symbol] = dropped ? BUSTER_LINK_SOURCE_NONE : symbols->source[symbol];
         symbols->version[symbol] = dropped ? 0 : symbols->version[symbol];
         bind->imports[kept] = symbol;
         kept += dropped ? 0 : 1;
     }
     bind->import_count = kept;
+    return needed;
 }
 
 // The link's definitions of names that libc.so.6, the loader or libgcc_s.so.1 defines too, or libc.so.6 refers to, with
@@ -1491,7 +1539,11 @@ static void bind_library_versions(Bind* bind, uint32_t needed)
         {
             uint32_t provider = UINT32_MAX;
             const ImportLibrary* library = needs->weak[n] ? 0 : runtime_libraries_provider(libraries, bind->runtime, needs->file[n], &provider);
-            if (library != 0 && !runtime_library_defines_version(library, needs->name[n], needs->hash[n]))
+            if (library == &bind->runtime->gcc_s)
+            {
+                bind_check_deferred(bind);
+            }
+            if (bind->error == BIND_ERROR_NONE && library != 0 && !runtime_library_defines_version(library, needs->name[n], needs->hash[n]))
             {
                 bind->library = l;
                 bind->need = n;
@@ -2048,6 +2100,7 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
         }
     }
     bind->symbols_begun = link->symbols.count;
+    bind_check_undefined(bind);
     return bind->error == BIND_ERROR_NONE;
 }
 
@@ -2100,8 +2153,12 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     }
     bind_keep_imports(bind, link);
     bind_keep_libraries(bind, link);
+    if (bind->error == BIND_ERROR_NONE && (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0)
+    {
+        bind_check_deferred(bind);
+    }
     bind_keep_as_needed(bind, link, &bind->runtime->loader, (bind->runtime_needed & BUSTER_BIND_NEEDS_LOADER) != 0);
-    bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
+    bind->gcc_s_needed = bind_keep_as_needed(bind, link, &bind->runtime->gcc_s, (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0);
     if (bind->error == BIND_ERROR_NONE && bind->runtime->kind == RUNTIME_KIND_SHARED)
     {
         bind_shared_exports(bind, link);
@@ -2111,5 +2168,6 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
         bind_find_exports(bind, link);
         bind_library_exports(bind, link);
     }
+    bind_check_undefined(bind);
     return bind->error == BIND_ERROR_NONE;
 }
