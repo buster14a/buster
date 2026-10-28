@@ -241,12 +241,41 @@ does, each rule checked against clang's answers on probes of it:
   retained line keeps its tokens as written), and an error at the line's end,
   whose place the retained line doesn't keep. A setting applies to the
   definitions after it that have no section attribute of their own: text to
-  the functions', the others to the variables' with static storage. `-c` and
-  the direct path refuse the first such definition they emit by name ("a
-  definition '#pragma clang section' places in a section"), as they refuse a
-  `section` attribute, until definitions go into named sections (#619's part
-  2). The deferred reader leaves a unit with a setting to source order, and a
-  lane refuses a body with a section attribute.
+  the functions', the others to the variables' with static storage. The
+  deferred reader leaves a unit with a setting to source order, and a lane
+  refuses a body with a section attribute.
+- **Named sections in `-c` and the direct path** (#619's part 2): a
+  definition with a `section` attribute, its own or the latest of its earlier
+  declarations' as clang passes them on, and a function a text setting places
+  go in their sections (`CheckInputSections.placements`,
+  `check_program_sections`). `-c`'s object has one section of each name and
+  flags (`ObjectOptions.atom_sections`), of the kind LLVM gives a global with
+  an explicit section: a function's text (`ax`); a variable's data (`aw`),
+  read-only (`a`), read-only after relocation (`aw`) or thread-local data
+  (`awT`), by its class, or `.bss`'s and `.tbss`'s zero fill (`NOBITS`) by
+  its name's family. A zero-filled variable in another name's section is data,
+  zeros in a section with bytes, as LLVM puts no global with an explicit
+  section in BSS, and a function in another kind's section (`.data`) is a
+  section of that name of its own, `ax`, as clang makes it. The direct path's
+  executable merges each into its class's output section, as a linker's
+  script merges `.text.*` and `.data.*`. Refused by name: a variable a data
+  setting places ("a variable a '#pragma clang section' setting places in a
+  section": clang gives it the setting of the section its kind puts it in,
+  through the pragmas' attributes its tentative definitions pass on, which
+  the reader doesn't follow yet); a name LLVM gives another kind than the
+  definition's (an initialized variable in a `.bss`, which clang's code
+  generation refuses too, or one not thread-local in a `.tdata`); and a name
+  ELF gives another type (`.note*`, the init and fini arrays').
+- **File-scope `asm`** (#619's part 2), which `main.c` makes
+  `.text.buster_checker` with: its statements' templates in source order, a
+  line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
+  atoms join the unit's link before its functions', as clang emits a module's
+  `asm` first (`check_program_emit_file_asm`), each in its section in `-c`'s
+  object. Refused by name: a template the assembler doesn't take, one that
+  defines or refers to a symbol (a label, an instruction's operand, CFI),
+  which the unit's symbols don't join yet, and a section of a class C's
+  definitions don't have or of another type than its class's (an init
+  array's, a note).
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
@@ -1370,8 +1399,12 @@ The test command fails if the oracle cannot run. It covers:
   `check_test_driver_optimize_pragmas`, on all four routes): each line's
   settings and errors, and the section type conflicts in clang's order, against
   clang's first error, place and message; the refusals by name pinned; and
-  `-c` of each unit clang takes, which must refuse a definition a setting or
-  an attribute places, by name, and write the object of every other.
+  `-c` of each unit clang takes, whose object must put every function, object
+  and thread-local in a section of the name, type, flags and alignment clang
+  -O0 -c's object puts it in, and have a file-scope `asm`'s sections as
+  clang's, with their bytes (`check_test_driver_same_sections`); its
+  executable by the direct path, which must exit with 0; and `-c`'s refusals by
+  name.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on

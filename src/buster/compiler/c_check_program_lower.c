@@ -5495,16 +5495,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         shared->terminal |= lowered->helpers.items[i].terminates;
     }
-    for (uint32_t i = 0; valid && i < input->asm_count; i += 1)
-    {
-        if (input->asm_statements[i].body == BUSTER_CHECK_NONE)
-        {
-            lowered->status = CHECK_PROGRAM_UNSUPPORTED;
-            lowered->reason = "file-scope assembly";
-            lowered->token = input->asm_statements[i].token;
-            valid = false;
-        }
-    }
+    // File-scope assembly is the emission's (check_program_emit_file_asm, #619): it lowers no code.
     shared->capacity = valid ? (uint32_t)capacity64 : 0;
     shared->local_capacity = valid ? (uint32_t)local_capacity64 : 0;
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;

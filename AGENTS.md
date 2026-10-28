@@ -312,7 +312,10 @@ designs and the compilers already built this way.
   helper; a template of no instructions, a barrier's, is no code at all. A
   naked function's templates are its whole code. Templates' labels are local
   symbols, and the other names they refer to are the unit's symbols of those
-  link names or undefined globals (`check_program_emit_asm_symbols`).
+  link names or undefined globals (`check_program_emit_asm_symbols`). A
+  file-scope `asm`'s templates are assembled by the emission into atoms of
+  their sections before the functions' (`check_program_emit_file_asm`, #619),
+  each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
   `test-checker-driver` links and runs naked functions' labels and a template's
@@ -320,7 +323,8 @@ designs and the compilers already built this way.
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](docs/c-inline-assembly.md) has the placement, the substitution, the
-  helper's frame, naked functions, names, the refusals and what is pending.
+  helper's frame, naked functions, names, file-scope assembly, the refusals and
+  what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
   [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's

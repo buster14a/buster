@@ -3656,8 +3656,16 @@ builds an object in its scratch arena and writes it with one `pwrite`.
   `.init`, `.fini`, `.tdata`, `.tbss`, `.init_array`, `.fini_array`,
   `.data.rel.ro`, `.data` and `.bss`. With function sections,
   each `TEXT` atom has a section of its own, `.text.<name>`, after its first
-  named symbol at offset 0. Each section is followed by its `.rela.<section>`
-  if its atoms have fixups;
+  named symbol at offset 0. With `ObjectOptions.atom_sections`, descriptors
+  by atom (a name, a type, flags and an entry size), each class's atoms
+  without one, or with its own section's, go in that section, and after it
+  each other descriptor's atoms go in a section of theirs, in the order of
+  their first atoms, each in id order (`object_group_atoms`, #619): the
+  assembler's sections, and `-c`'s named sections, which a definition's
+  `section` attribute, a function's `#pragma clang section text` and the
+  unit's file-scope `asm` give it (`check_program_sections`), one section of
+  each name and flags, as clang's object has it. Each section is followed by
+  its `.rela.<section>` if its atoms have fixups;
 - with `ObjectOptions.debug`'s entry for the unit, the DWARF of its functions (#395):
   debug.c's `.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_addr` and
   `.debug_rnglists`, unallocated, `.debug_info` followed by its relocations

@@ -9,8 +9,11 @@
 // So is an error at the line's end, whose place the retained line doesn't keep.
 //
 // A setting names a section for the definitions after it: text the functions', and bss, data, rodata and relro those
-// of variables with static storage, each without a section attribute of its own (or inherited). The emission refuses
-// such a definition by name until it publishes sections (CheckInputSections.definitions).
+// of variables with static storage, each without a section attribute of its own (or inherited). -c and the direct path
+// put a function a text setting places, and a definition with a section attribute, in its section
+// (CheckInputSections.placements, check_program_sections); they refuse a variable a setting places by name
+// (CheckInputSections.definitions): clang gives it the setting of the section its kind puts it in, by the pragma
+// attributes its tentative definitions pass on, which this doesn't follow yet.
 //
 // Sema's UnifySection gives each section name one set of flags, its first use's: a setting, or a section attribute of a
 // function's declaration or of a variable's definition with static storage (a tentative one at the unit's end, at its
@@ -88,6 +91,16 @@ struct CheckInputSectionDiagnostic
     uint32_t source;
 };
 
+// A definition in a named section (CheckInputSections.placements): its name's token, and the section's name, its section
+// attribute's (its own, or the latest of its earlier declarations', as clang passes them on) or the text setting's in
+// effect at a function's definition.
+typedef struct CheckInputSectionPlacement CheckInputSectionPlacement;
+struct CheckInputSectionPlacement
+{
+    String8 name;
+    uint32_t token;
+};
+
 struct CheckInputSections
 {
     CheckInputSectionSetting* settings;
@@ -95,9 +108,12 @@ struct CheckInputSections
     CheckInputSectionDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
-    // The definitions a setting places, their names' tokens ascending: the emission refuses the first it emits, by name.
+    // The variables a setting places, their names' tokens ascending: the emission refuses the first it emits, by name.
     uint32_t* definitions;
     uint32_t definition_count;
+    // The definitions in named sections, their names' tokens ascending: the emission puts each it emits in its section.
+    CheckInputSectionPlacement* placements;
+    uint32_t placement_count;
 };
 
 static const char check_section_kind_message[] = "expected one of [bss|data|rodata|text|relro] section kind in '#pragma clang section'";
@@ -552,7 +568,8 @@ static void check_input_section_conflicts(CheckInputReader* reader)
         uint32_t* attributed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)objects * 4);
         uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, objects);
         uint32_t* placed = events != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, events) : 0;
-        const bool valid = table != 0 && attributed != 0 && defined != 0 && (events == 0 || placed != 0);
+        CheckInputSectionPlacement* placements = events != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputSectionPlacement, events) : 0;
+        const bool valid = table != 0 && attributed != 0 && defined != 0 && (events == 0 || (placed != 0 && placements != 0));
         input->resource |= !valid;
         if (valid)
         {
@@ -568,6 +585,7 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                 active[k] = BUSTER_CHECK_NONE;
             }
             uint32_t count = 0;
+            uint32_t placement_count = 0;
             uint32_t s = 0;
             for (uint32_t e = 0; e <= events && !input->resource; e += 1)
             {
@@ -602,9 +620,14 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                             check_input_section_unify(reader, sections, table, capacity, event->name, CHECK_SECTION_READ | CHECK_SECTION_EXECUTE,
                                                       BUSTER_CHECK_NONE, e);
                         }
-                        if ((event->flags & CHECK_SECTION_EVENT_DEFINITION) != 0 && effective == BUSTER_CHECK_NONE && active[CHECK_SECTION_TEXT] != BUSTER_CHECK_NONE)
+                        // A definition's section: its attribute's, or the text setting's.
+                        const bool setting = effective == BUSTER_CHECK_NONE && active[CHECK_SECTION_TEXT] != BUSTER_CHECK_NONE;
+                        if ((event->flags & CHECK_SECTION_EVENT_DEFINITION) != 0 && (effective != BUSTER_CHECK_NONE || setting))
                         {
-                            placed[count++] = event->token;
+                            placements[placement_count++] = (CheckInputSectionPlacement){
+                                .name = setting ? sections->settings[active[CHECK_SECTION_TEXT]].name : reader->section_events[effective].name,
+                                .token = event->token,
+                            };
                         }
                     }
                     else if ((event->flags & CHECK_SECTION_EVENT_DEFINITION) != 0)
@@ -614,6 +637,10 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                         {
                             const uint8_t flags = (event->flags & CHECK_SECTION_EVENT_CONSTANT) != 0 ? CHECK_SECTION_READ : CHECK_SECTION_READ | CHECK_SECTION_WRITE;
                             check_input_section_unify(reader, sections, table, capacity, reader->section_events[effective].name, flags, BUSTER_CHECK_NONE, e);
+                            placements[placement_count++] = (CheckInputSectionPlacement){
+                                .name = reader->section_events[effective].name,
+                                .token = event->token,
+                            };
                         }
                         else if (data)
                         {
@@ -645,9 +672,15 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                                                                                                                   CHECK_SECTION_READ | CHECK_SECTION_WRITE;
                     check_input_section_unify(reader, sections, table, capacity, reader->section_events[tentative_attributed[object]].name, flags,
                                               BUSTER_CHECK_NONE, last);
+                    // The definition the unit's end makes, in its last tentative declaration's attribute's section.
+                    placements[placement_count++] = (CheckInputSectionPlacement){
+                        .name = reader->section_events[tentative_attributed[object]].name,
+                        .token = reader->section_events[last].token,
+                    };
                 }
             }
-            // The walk's events are in source order; keep the tokens ascending anyway: the emission refuses the first it emits.
+            // The walk's events are in source order, but for the unit's end's tentative definitions; keep the tokens
+            // ascending anyway: the emission refuses the first variable it emits that a setting places.
             for (uint32_t i = 1; i < count; i += 1)
             {
                 const uint32_t token = placed[i];
@@ -658,8 +691,20 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                 }
                 placed[j] = token;
             }
+            for (uint32_t i = 1; i < placement_count; i += 1)
+            {
+                const CheckInputSectionPlacement placement = placements[i];
+                uint32_t j = i;
+                for (; j > 0 && placements[j - 1].token > placement.token; j -= 1)
+                {
+                    placements[j] = placements[j - 1];
+                }
+                placements[j] = placement;
+            }
             sections->definitions = placed;
             sections->definition_count = count;
+            sections->placements = placements;
+            sections->placement_count = placement_count;
         }
         reader->scratch->length = mark;
     }

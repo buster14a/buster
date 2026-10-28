@@ -2793,39 +2793,224 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+// An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
+// reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
+// writer's own objects' rules, which clang's needn't keep).
+typedef struct CheckTestElf CheckTestElf;
+struct CheckTestElf
+{
+    String8 file;
+    const Elf64_Shdr* sections;
+    uint32_t section_count;
+    const char* section_names;
+    uint64_t section_names_size;
+    const Elf64_Sym* symbols;
+    uint64_t symbol_count;
+    const char* symbol_names;
+    uint64_t symbol_names_size;
+};
+
+static bool check_test_elf_range(String8 file, uint64_t offset, uint64_t size)
+{
+    return offset <= file.length && size <= file.length - offset;
+}
+
+static bool check_test_elf_open(CheckTestElf* elf, String8 file)
+{
+    *elf = (CheckTestElf){ .file = file };
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)file.pointer;
+    bool valid = file.pointer != 0 && file.length >= sizeof(Elf64_Ehdr) && memcmp(header->e_ident, ELFMAG, SELFMAG) == 0 &&
+                 header->e_shentsize == sizeof(Elf64_Shdr) && header->e_shnum != 0 && header->e_shstrndx < header->e_shnum &&
+                 check_test_elf_range(file, header->e_shoff, (uint64_t)header->e_shnum * sizeof(Elf64_Shdr));
+    if (valid)
+    {
+        elf->sections = (const Elf64_Shdr*)(file.pointer + header->e_shoff);
+        elf->section_count = header->e_shnum;
+        const Elf64_Shdr* names = &elf->sections[header->e_shstrndx];
+        valid = check_test_elf_range(file, names->sh_offset, names->sh_size);
+        elf->section_names = valid ? file.pointer + names->sh_offset : 0;
+        elf->section_names_size = valid ? names->sh_size : 0;
+    }
+    for (uint32_t s = 0; valid && s < elf->section_count; s += 1)
+    {
+        const Elf64_Shdr* table = &elf->sections[s];
+        if (table->sh_type == SHT_SYMTAB)
+        {
+            const Elf64_Shdr* strings = table->sh_link < elf->section_count ? &elf->sections[table->sh_link] : 0;
+            valid = strings != 0 && table->sh_entsize == sizeof(Elf64_Sym) && check_test_elf_range(file, table->sh_offset, table->sh_size) &&
+                    check_test_elf_range(file, strings->sh_offset, strings->sh_size);
+            elf->symbols = valid ? (const Elf64_Sym*)(file.pointer + table->sh_offset) : 0;
+            elf->symbol_count = valid ? table->sh_size / sizeof(Elf64_Sym) : 0;
+            elf->symbol_names = valid ? file.pointer + strings->sh_offset : 0;
+            elf->symbol_names_size = valid ? strings->sh_size : 0;
+        }
+    }
+    return valid;
+}
+
+static const char* check_test_elf_string(const char* table, uint64_t size, uint64_t offset)
+{
+    return offset < size && memchr(table + offset, 0, size - offset) != 0 ? table + offset : 0;
+}
+
+static const char* check_test_elf_section_name(const CheckTestElf* elf, uint32_t index)
+{
+    return index < elf->section_count ? check_test_elf_string(elf->section_names, elf->section_names_size, elf->sections[index].sh_name) : 0;
+}
+
+// The section of the function, object or thread-local named `name` that `elf` defines, or 0.
+static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name)
+{
+    uint32_t result = 0;
+    for (uint64_t i = 1; result == 0 && i < elf->symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = &elf->symbols[i];
+        const uint8_t type = ELF64_ST_TYPE(symbol->st_info);
+        const char* spelling = check_test_elf_string(elf->symbol_names, elf->symbol_names_size, symbol->st_name);
+        const bool typed = type == STT_FUNC || type == STT_OBJECT || type == STT_TLS;
+        result = typed && spelling != 0 && strcmp(spelling, name) == 0 && symbol->st_shndx != SHN_UNDEF && symbol->st_shndx < SHN_LORESERVE &&
+                 symbol->st_shndx < elf->section_count ? symbol->st_shndx : 0;
+    }
+    return result;
+}
+
+// The section named `name` of `elf`, or 0.
+static uint32_t check_test_elf_named(const CheckTestElf* elf, const char* name)
+{
+    uint32_t result = 0;
+    for (uint32_t s = 1; result == 0 && s < elf->section_count; s += 1)
+    {
+        const char* spelling = check_test_elf_section_name(elf, s);
+        result = spelling != 0 && strcmp(spelling, name) == 0 ? s : 0;
+    }
+    return result;
+}
+
+// Whether -c's object `ours` puts each function, object and thread-local it defines (but the compiler's own .L names)
+// in a section of the name, type, flags and alignment that clang's object `theirs` of the same source puts it in; and,
+// with `named`, has that section as clang's has it, with its size and, with `bytes`, its contents: a file-scope
+// assembly's section, which no symbol shows. A description of the first difference goes in `error`.
+static bool check_test_driver_same_sections(const char* ours_path, const char* theirs_path, const char* named, bool bytes, char* error, uint64_t error_size)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 30);
+    CheckTestElf ours = { 0 };
+    CheckTestElf theirs = { 0 };
+    bool same = arena.base != 0 && check_test_elf_open(&ours, object_test_read_file(&arena, ours_path)) &&
+                check_test_elf_open(&theirs, object_test_read_file(&arena, theirs_path));
+    snprintf(error, error_size, "%s", same ? "" : "an object that doesn't read");
+    for (uint64_t i = 1; same && i < ours.symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = &ours.symbols[i];
+        const uint8_t type = ELF64_ST_TYPE(symbol->st_info);
+        const char* name = check_test_elf_string(ours.symbol_names, ours.symbol_names_size, symbol->st_name);
+        if ((type == STT_FUNC || type == STT_OBJECT || type == STT_TLS) && name != 0 && strncmp(name, ".L", 2) != 0 && symbol->st_shndx != SHN_UNDEF &&
+            symbol->st_shndx < ours.section_count)
+        {
+            const uint32_t theirs_index = check_test_elf_defined(&theirs, name);
+            const Elf64_Shdr* a = &ours.sections[symbol->st_shndx];
+            const Elf64_Shdr* b = theirs_index != 0 ? &theirs.sections[theirs_index] : 0;
+            const char* a_name = check_test_elf_section_name(&ours, symbol->st_shndx);
+            const char* b_name = theirs_index != 0 ? check_test_elf_section_name(&theirs, theirs_index) : 0;
+            same = b != 0 && a_name != 0 && b_name != 0 && strcmp(a_name, b_name) == 0 && a->sh_type == b->sh_type && a->sh_flags == b->sh_flags &&
+                   a->sh_addralign == b->sh_addralign;
+            if (!same)
+            {
+                snprintf(error, error_size, "%s in %s (type %u, flags %#llx, aligned to %llu), clang's in %s (type %u, flags %#llx, aligned to %llu)", name,
+                         a_name != 0 ? a_name : "?", a->sh_type, (unsigned long long)a->sh_flags, (unsigned long long)a->sh_addralign, b_name != 0 ? b_name : "none",
+                         b != 0 ? b->sh_type : 0, b != 0 ? (unsigned long long)b->sh_flags : 0, b != 0 ? (unsigned long long)b->sh_addralign : 0);
+            }
+        }
+    }
+    if (same && named != 0)
+    {
+        const uint32_t a_index = check_test_elf_named(&ours, named);
+        const uint32_t b_index = check_test_elf_named(&theirs, named);
+        const Elf64_Shdr* a = a_index != 0 ? &ours.sections[a_index] : 0;
+        const Elf64_Shdr* b = b_index != 0 ? &theirs.sections[b_index] : 0;
+        same = a != 0 && b != 0 && a->sh_type == b->sh_type && a->sh_flags == b->sh_flags && a->sh_addralign == b->sh_addralign &&
+               (!bytes || (a->sh_size == b->sh_size && (a->sh_type == SHT_NOBITS ||
+                                                         (check_test_elf_range(ours.file, a->sh_offset, a->sh_size) &&
+                                                          check_test_elf_range(theirs.file, b->sh_offset, b->sh_size) &&
+                                                          memcmp(ours.file.pointer + a->sh_offset, theirs.file.pointer + b->sh_offset, a->sh_size) == 0))));
+        if (!same)
+        {
+            snprintf(error, error_size, "%s: ours %s (type %u, flags %#llx, aligned to %llu, %llu bytes), clang's %s (type %u, flags %#llx, aligned to %llu, %llu bytes)",
+                     named, a != 0 ? "present" : "missing", a != 0 ? a->sh_type : 0, a != 0 ? (unsigned long long)a->sh_flags : 0,
+                     a != 0 ? (unsigned long long)a->sh_addralign : 0, a != 0 ? (unsigned long long)a->sh_size : 0, b != 0 ? "present" : "missing",
+                     b != 0 ? b->sh_type : 0, b != 0 ? (unsigned long long)b->sh_flags : 0, b != 0 ? (unsigned long long)b->sh_addralign : 0,
+                     b != 0 ? (unsigned long long)b->sh_size : 0);
+        }
+    }
+    arena_release(&arena);
+    return same;
+}
+
 // #619's #pragma clang section against clang: each line's settings and errors, at clang's places with its messages, and
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
-// line's end. Then -c of the units clang takes: a definition a setting places is refused by name, as one an attribute
-// places is, and a unit with neither writes its object.
+// line's end. Then -c of the units clang takes: each function and variable in the section its attribute or a function's
+// text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_emit_file_asm),
+// which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
+// variable a setting places, a section whose name gives it another kind or type, and file-scope assembly with a symbol
+// or of another kind of section.
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
-    static const char placed[] = "unsupported: a definition '#pragma clang section' places in a section";
-    static const char attributed[] = "unsupported: this attribute (alias, ifunc, constructor, destructor, weak, retain, section, common or a visibility)";
+    static const char placed[] = "unsupported: a variable a '#pragma clang section' setting places in a section";
+    static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
+    static const char typed[] = "unsupported: a section of a name ELF gives another type (a note, an init or fini array)";
+    static const char asm_symbol[] = "unsupported: file-scope assembly that defines or refers to a symbol";
+    static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
     {
         const char* name;
         const char* source;
         // Where -fsyntax-only refuses the line instead of clang's outcome (`refused`), or 0.
         uint32_t refused_line;
-        // -c of a unit clang takes: the line of its refusal, by the message `placed` or `attributed`, or 0 for an object.
+        // -c of a unit clang takes: the line of its refusal and its message, or 0 for an object whose sections are clang's.
         uint32_t c_line;
-        bool c_attribute;
+        const char* c_message;
         // Compare the first error's place alone: the checker's message for another error is its own.
         bool line_only;
+        // A section the object must have as clang's has it, and whether with its size and bytes too.
+        const char* section;
+        bool bytes;
     } fixtures[] =
     {
-        { "text around a definition", "#pragma clang section text = \".text.x\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\nint main(void) { return f() - 1; }\n", 0, 2 },
-        { "every kind in one line", "#pragma clang section text = \".t\" data = \".d\" bss = \".b\" rodata = \".r\" relro = \".rr\"\nint f(void) { return 1; }\nint g = 1;\n", 0, 2 },
-        { "a line of no settings", "#pragma clang section\nint f(void) { return 1; }\n", 0, 0 },
-        { "adjacent strings join", "#pragma clang section text = \".a\" \".b\"\nint f(void) { return 1; }\n", 0, 2 },
-        { "a name read as written after the first kind", "#define data 1\n#pragma clang section text = \".a\" data = \".b\"\nint f(void) { return data; }\n", 0, 3 },
-        { "a cleared kind places nothing", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\nint f(void) { return 1; }\n", 0, 0 },
-        { "data places a block's static", "#pragma clang section data = \".d\"\nint f(void) { static int s = 1; return s; }\n", 0, 2 },
-        { "bss places a tentative definition", "#pragma clang section bss = \".x\"\nint z;\nint f(void) { return z; }\n", 0, 2 },
-        { "rodata and relro share their flags", "#pragma clang section rodata = \".x\" relro = \".x\"\nconst int c __attribute__((section(\".x\"))) = 1;\n", 0, 2, true },
-        { "an extern declaration unifies nothing", "extern int e __attribute__((section(\".x\")));\nint f(void) __attribute__((section(\".x\")));\nint f(void) { return e; }\n", 0, 1, true },
+        { "text around a definition", "#pragma clang section text = \".text.x\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\nint main(void) { return f() - 1; }\n" },
+        { "every kind in one line", "#pragma clang section text = \".t\" data = \".d\" bss = \".b\" rodata = \".r\" relro = \".rr\"\nint f(void) { return 1; }\nint g = 1;\n", 0, 3, placed },
+        { "a line of no settings", "#pragma clang section\nint f(void) { return 1; }\n" },
+        { "adjacent strings join", "#pragma clang section text = \".a\" \".b\"\nint f(void) { return 1; }\n" },
+        { "a name read as written after the first kind", "#define data 1\n#pragma clang section text = \".a\" data = \".b\"\nint f(void) { return data; }\n" },
+        { "a cleared kind places nothing", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\nint f(void) { return 1; }\n" },
+        { "data places a block's static", "#pragma clang section data = \".d\"\nint f(void) { static int s = 1; return s; }\n", 0, 2, placed },
+        { "bss places a tentative definition", "#pragma clang section bss = \".x\"\nint z;\nint f(void) { return z; }\n", 0, 2, placed },
+        { "rodata and relro share their flags", "#pragma clang section rodata = \".x\" relro = \".x\"\nconst int c __attribute__((section(\".x\"))) = 1;\n" },
+        { "an extern declaration unifies nothing", "extern int e __attribute__((section(\".x\")));\nint f(void) __attribute__((section(\".x\")));\nint f(void) { return e; }\n" },
+        { "a function's own section", "__attribute__((section(\".text.mine\"))) int f(void) { return 1; }\nint main(void) { return f() - 1; }\n" },
+        { "a declaration's section passes to the definition", "int f(void) __attribute__((section(\".text.f\")));\nint f(void) { return 1; }\nint main(void) { return f() - 1; }\n" },
+        { "an attribute over a setting", "#pragma clang section text = \".t\"\n__attribute__((section(\".own\"))) int f(void) { return 1; }\nint g(void) { return f() + 1; }\n" },
+        { "a function in another kind's section", "int f(void) __attribute__((section(\".data\")));\nint f(void) { return 1; }\nint g = 1;\nint main(void) { return f() + g - 2; }\n" },
+        { "a variable's own section", "int g __attribute__((section(\".data.mine\"))) = 1;\nint main(void) { return g - 1; }\n" },
+        { "a zero-filled variable's section is data", "int z __attribute__((section(\".mine\"))) = 0;\nint main(void) { return z; }\n" },
+        { "a zero-filled variable in a .bss", "int z __attribute__((section(\".bss.mine\")));\nint main(void) { return z; }\n" },
+        { "a constant's section", "const int c __attribute__((section(\".rodata.mine\"))) = 1;\nint main(void) { return c - 1; }\n" },
+        { "a pointer constant's section", "static int x;\nint* const p __attribute__((section(\".relro.mine\"))) = &x;\nint main(void) { return *p; }\n" },
+        { "thread-locals' sections", "_Thread_local int t __attribute__((section(\".tdata.mine\"))) = 1;\n_Thread_local int u __attribute__((section(\".tbss.mine\")));\n"
+                                     "_Thread_local int v __attribute__((section(\".mine.tls\")));\nint main(void) { return t + u + v - 1; }\n" },
+        { "a block's static's section", "int f(void) { static int s __attribute__((section(\".data.s\"))) = 1; return s; }\n" },
+        { "main.c's file-scope assembly", "__asm__(\".section .text.buster_checker,\\\"ax\\\",@progbits\\n\\t.p2align 12\\n\\t.text\");\n"
+                                          "#pragma clang section text = \".text.buster_checker\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\n"
+                                          "int main(void) { return f() - 1; }\n", 0, 0, NULL, false, ".text.buster_checker" },
+        { "file-scope assembly's bytes", "__asm__(\".section .rodata.mine,\\\"a\\\",@progbits\\n.byte 1, 2, 3\\n.text\");\nint main(void) { return 0; }\n",
+          0, 0, NULL, false, ".rodata.mine", true },
+        { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
+                                                "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
+        { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n", 0, 1, asm_symbol },
+        { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 1, asm_kind },
+        { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
+        { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
+        { "a note's section", "int g __attribute__((section(\".note.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
         { "an unknown kind", "#pragma clang section foo = \".x\"\nint f(void) { return 1; }\n" },
         { "a missing '='", "#pragma clang section text \".x\"\nint f(void) { return 1; }\n" },
         { "a name that isn't a string", "#pragma clang section text = x\nint f(void) { return 1; }\n" },
@@ -2853,8 +3038,8 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a block's static", "int f(void) { static int s __attribute__((section(\".x\"))) = 1; return s; }\nint h(void) __attribute__((section(\".x\")));\n" },
         { "a static tentative definition after a setting", "#pragma clang section text = \".x\"\nint f(void);\nint f(void) __attribute__((section(\".y\")));\nint f(void) { return 1; }\nstatic int v __attribute__((section(\".x\")));\n" },
         { "a conflict before a body's error", "#pragma clang section text = \".x\"\n#pragma clang section data = \".x\"\nint f(void) { return missing; }\n" },
-        { "a body's error before a conflict", "int f(void) { return missing; }\n#pragma clang section text = \".x\"\n#pragma clang section data = \".x\"\n", 0, 0, false, true },
-        { "an initializer's error before a conflict", "#pragma clang section text = \".x\"\nint g = missing;\n#pragma clang section data = \".x\"\n", 0, 0, false, true },
+        { "a body's error before a conflict", "int f(void) { return missing; }\n#pragma clang section text = \".x\"\n#pragma clang section data = \".x\"\n", 0, 0, NULL, true },
+        { "an initializer's error before a conflict", "#pragma clang section text = \".x\"\nint g = missing;\n#pragma clang section data = \".x\"\n", 0, 0, NULL, true },
         { "a macro for the first kind", "#define T text\n#pragma clang section T = \".x\"\nint f(void) { return 1; }\n", 2 },
         { "a name that was a macro's", "#define text 1\n#undef text\n#pragma clang section text = \".x\"\nint f(void) { return 1; }\n", 3 },
         { "a macro for an '='", "#define EQ =\n#pragma clang section text EQ \".x\"\nint f(void) { return 1; }\n", 2 },
@@ -2862,18 +3047,26 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a missing name at the line's end", "#pragma clang section text =\nint f(void) { return 1; }\n", 1 },
     };
     const char* arguments[] = { "-std=gnu17" };
+    const CheckCorpusSymbols oracle_object = { .clang = clang, .arguments = arguments, .argument_count = BUSTER_ARRAY_LENGTH(arguments), .directory = directory };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         char source[192];
         char object[192];
-        char description[512];
+        char theirs[192];
+        char description[1024];
         snprintf(source, sizeof(source), "%s/section-%u.c", directory, i);
         snprintf(object, sizeof(object), "%s/section-%u.o", directory, i);
+        snprintf(theirs, sizeof(theirs), "%s/section-%u-clang.o", directory, i);
         CheckCorpusOracle oracle = { 0 };
         const bool ready = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source)) &&
                            check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
         snprintf(description, sizeof(description), "%s: clang's outcome", fixtures[i].name);
         check_test_expect(test, ready, description);
+        // clang's object, for the units -c writes one of.
+        const bool objects = ready && !oracle.rejected && fixtures[i].refused_line == 0 && fixtures[i].c_line == 0;
+        const bool compiled_theirs = objects && check_corpus_clang_object(&oracle_object, source, theirs);
+        snprintf(description, sizeof(description), "%s: clang's object", fixtures[i].name);
+        check_test_expect(test, !objects || compiled_theirs, description);
         const uint32_t routes = executable != NULL ? 4 : 2;
         for (uint32_t route = 0; ready && route < routes; route += 1)
         {
@@ -2896,15 +3089,42 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
             {
                 unlink(object);
                 const bool compiled = check_test_driver_run(route >= 2 ? executable : NULL, source, object, (route & 1) != 0, false, true, lazy, &checked, &warnings);
-                const char* expected = fixtures[i].c_attribute ? attributed : placed;
                 snprintf(description, sizeof(description), "%s, route %u: -c's first error %u '%s', expected %u", fixtures[i].name, route, checked.line,
                          checked.message, fixtures[i].c_line);
                 check_test_expect(test, compiled && (fixtures[i].c_line != 0 ? checked.rejected && checked.line == fixtures[i].c_line &&
-                                                                               strcmp(checked.message, expected) == 0 && access(object, F_OK) != 0 :
+                                                                               strcmp(checked.message, fixtures[i].c_message) == 0 && access(object, F_OK) != 0 :
                                                                                !checked.rejected && access(object, F_OK) == 0), description);
+                if (compiled_theirs && fixtures[i].c_line == 0 && !checked.rejected)
+                {
+                    char difference[512];
+                    const bool same = check_test_driver_same_sections(object, theirs, fixtures[i].section, fixtures[i].bytes, difference, sizeof(difference));
+                    snprintf(description, sizeof(description), "%s, route %u: the object's sections against clang's: %s", fixtures[i].name, route, difference);
+                    check_test_expect(test, same, description);
+                }
+                // The direct path's executable of a unit with a main, which exits with 0: its named sections are in their
+                // classes' (check_program_sections).
+                if (route >= 2 && fixtures[i].c_line == 0 && strstr(fixtures[i].source, "int main(") != NULL)
+                {
+                    char program[192];
+                    snprintf(program, sizeof(program), "%s/section-%u", directory, i);
+                    char* const vector_arguments[] = { (char*)executable, "-std=gnu17", "-o", program, source, NULL };
+                    char* const scalar_arguments[] = { (char*)executable, "--scalar", "-std=gnu17", "-o", program, source, NULL };
+                    char* output = NULL;
+                    const int linked = check_test_driver_spawn(route == 2 ? vector_arguments : scalar_arguments, &output);
+                    char* const run_arguments[] = { program, NULL };
+                    char* run_output = NULL;
+                    const int status = linked == 0 ? check_test_driver_spawn(run_arguments, &run_output) : -1;
+                    snprintf(description, sizeof(description), "%s, route %u: the direct path's executable links (%d: %s) and exits with 0 (%d)", fixtures[i].name,
+                             route, linked, output != NULL ? output : "", status);
+                    check_test_expect(test, linked == 0 && status == 0, description);
+                    free(output);
+                    free(run_output);
+                    unlink(program);
+                }
             }
         }
         unlink(object);
+        unlink(theirs);
         unlink(source);
     }
 }

@@ -141,8 +141,11 @@ struct ObjectDebug
     const uint32_t* fields;
 };
 
-// Optional producer-owned descriptors, indexed by AtomId. Each described atom is already a complete section.
-// Names are counted slices, not NUL-terminated strings. A non-null table must cover every atom including id 0.
+// Optional producer-owned descriptors, indexed by AtomId: an atom's section, by name, type, flags and entry size. Atoms
+// with equal descriptors share a section, in id order, after the atoms of their class's own (#619: -c's named sections,
+// which a definition's section attribute or a #pragma clang section setting gives it): an atom without one (an empty
+// name) and one whose descriptor is its class's own section's go in that, as without the table. Names are counted
+// slices, not NUL-terminated strings. A non-null table must cover every atom including id 0.
 typedef struct ObjectAtomSection ObjectAtomSection;
 struct ObjectAtomSection
 {
@@ -659,7 +662,7 @@ static bool object_map_symbols(ObjectSymbols* symbols, const Link* link, Arena* 
 // Building
 
 
-// One of an object's sections of atoms: which atoms (a range of ObjectUnits.atoms) of which class, their size, alignment
+// One of an object's sections of atoms: which atoms (a range of ObjectBuilder.atoms) of which class, their size, alignment
 // and fixups, and once placed, its index, its .rela section's (0 without fixups), its section symbol's (0 if no
 // relocation refers to it; object_count_symbols sets it to 1 first) and its name's offset in .shstrtab.
 typedef struct ObjectSection ObjectSection;
@@ -689,6 +692,9 @@ struct ObjectBuilder
     // The unit's entry of ObjectOptions.debug, or null for none.
     const ObjectDebug* debug;
     String8 source_name;
+    // The unit's atoms in the object's order, which the sections' ranges index: its slice of ObjectUnits.atoms, or with
+    // ObjectOptions.atom_sections that slice grouped by section (object_group_atoms).
+    const AtomId* atoms;
     // The sections of atoms, in the object's order.
     ObjectSection* sections;
     uint32_t section_count;
@@ -748,57 +754,166 @@ static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t adde
     return !kept && !pool;
 }
 
-// The unit's sections of atoms: a section per class with atoms (with function sections, per TEXT atom), each atom at the
-// next multiple of its alignment there, and each section's size, alignment and fixups.
-static bool object_count_sections(ObjectBuilder* builder)
+// Whether `section` is no descriptor (an empty name) or `class`'s own section's, whose atoms share that section.
+static bool object_section_is_default(const ObjectAtomSection* section, uint8_t class)
+{
+    const ObjectSectionFormat* format = &object_class_sections[class];
+    const uint64_t length = strlen(format->name);
+    return section->name.length == 0 ||
+           (section->name.length == length && memcmp(section->name.pointer, format->name, length) == 0 && section->type == format->type &&
+            section->flags == format->flags && section->entry_size == format->entry_size);
+}
+
+static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSection* b)
+{
+    return a->name.length == b->name.length && a->type == b->type && a->flags == b->flags && a->entry_size == b->entry_size &&
+           memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
+}
+
+// The class's atoms from `begin` to `end` of the unit's (`unit_atoms`, in id order), written to the same places of
+// `order` grouped by their descriptors (ObjectOptions.atom_sections): the class's own section's first, then each other
+// descriptor's, in the order of their first atoms, each group in id order. Each group's first place and descriptor (0
+// for the class's own) go to `firsts` and `descriptors`, `*groups` of them, the class's own first even without atoms,
+// and `firsts[*groups]` is `end`. The descriptors are told apart through a table of twice as many slots as atoms, by a
+// hash of their names: a unit has few named sections, and this pass runs only for units with descriptors. Returns false
+// for want of scratch memory.
+static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, const AtomId* unit_atoms, uint32_t begin, uint32_t end, AtomId* order,
+                               uint32_t* firsts, const ObjectAtomSection** descriptors, uint32_t* groups, Arena* scratch)
+{
+    const ObjectAtomSection* table = builder->options.atom_sections;
+    const uint32_t count = end - begin;
+    uint64_t capacity = 16;
+    while (capacity < 2 * (uint64_t)count)
+    {
+        capacity *= 2;
+    }
+    const uint64_t mark = scratch->length;
+    uint32_t* group = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
+    uint32_t* slots = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
+    uint32_t* sizes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    const bool result = group != 0 && slots != 0 && sizes != 0;
+    if (result)
+    {
+        memset(slots, 0, capacity * sizeof(uint32_t));
+        memset(sizes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        uint32_t found = 1;
+        descriptors[0] = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const ObjectAtomSection* descriptor = &table[unit_atoms[begin + i]];
+            uint32_t g = 0;
+            if (!object_section_is_default(descriptor, class))
+            {
+                const uint64_t hash = link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
+                                      ((uint64_t)descriptor->type << 32);
+                uint64_t slot = hash & (capacity - 1);
+                while (slots[slot] != 0 && !object_sections_equal(descriptors[slots[slot]], descriptor))
+                {
+                    slot = (slot + 1) & (capacity - 1);
+                }
+                if (slots[slot] == 0)
+                {
+                    descriptors[found] = descriptor;
+                    slots[slot] = found;
+                    found += 1;
+                }
+                g = slots[slot];
+            }
+            group[i] = g;
+            sizes[g] += 1;
+        }
+        // Each group's first place, then its atoms there in id order.
+        uint32_t place = begin;
+        for (uint32_t g = 0; g < found; g += 1)
+        {
+            firsts[g] = place;
+            place += sizes[g];
+            sizes[g] = firsts[g];
+        }
+        firsts[found] = end;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            order[sizes[group[i]]] = unit_atoms[begin + i];
+            sizes[group[i]] += 1;
+        }
+        *groups = found;
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
+// The unit's sections of atoms: a section per class with atoms (with function sections, per TEXT atom), and with
+// ObjectOptions.atom_sections one per other descriptor of the class after it (object_group_atoms); each atom at the next
+// multiple of its alignment there, and each section's size, alignment and fixups.
+static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
 {
     const LinkAtoms* atoms = &builder->link->atoms;
     ObjectUnits* units = builder->units;
     const uint64_t key = (uint64_t)builder->unit * BUSTER_LINK_CLASS_COUNT;
-    bool result = true;
+    const uint32_t unit_begin = units->atom_begin[key];
+    const uint32_t unit_count = units->atom_begin[key + BUSTER_LINK_CLASS_COUNT] - unit_begin;
+    const bool described = builder->options.atom_sections != 0;
+    AtomId* order = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, AtomId, (uint64_t)unit_count + 1) : 0;
+    uint32_t* firsts = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)unit_count + 2) : 0;
+    const ObjectAtomSection** descriptors = described ? BUSTER_ARENA_PUSH_ARRAY(scratch, const ObjectAtomSection*, (uint64_t)unit_count + 1) : 0;
+    bool memory = !described || (order != 0 && firsts != 0 && descriptors != 0);
+    bool result = memory;
+    builder->atoms = described ? order : units->atoms + unit_begin;
     for (uint8_t class = 1; result && class < BUSTER_LINK_CLASS_COUNT; class += 1)
     {
-        const uint32_t begin = units->atom_begin[key + class];
-        const uint32_t end = units->atom_begin[key + class + 1];
-        const bool apart = builder->options.atom_sections != 0 || (builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT);
-        for (uint32_t first = begin; result && first < end; first = apart ? first + 1 : end)
+        const uint32_t begin = units->atom_begin[key + class] - unit_begin;
+        const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
+        uint32_t groups = 1;
+        if (described)
         {
-            ObjectSection* section = &builder->sections[builder->section_count];
-            *section = (ObjectSection){
-                .atom_begin = first,
-                .atom_end = apart ? first + 1 : end,
-                .class = class,
-                .alignment = 1,
-                .explicit_section = builder->options.atom_sections != 0 ? &builder->options.atom_sections[units->atoms[first]] : 0,
-            };
-            const ObjectAtomSection* explicit = section->explicit_section;
-            if (explicit != 0)
+            memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, &groups, scratch);
+            result = memory;
+        }
+        for (uint32_t g = 0; result && g < groups; g += 1)
+        {
+            // The class's own section (with function sections, a section per TEXT atom), or another descriptor's.
+            const uint32_t group_begin = described ? firsts[g] : begin;
+            const uint32_t group_end = described ? firsts[g + 1] : end;
+            const ObjectAtomSection* explicit = described ? descriptors[g] : 0;
+            const bool apart = explicit == 0 && builder->options.function_sections && class == BUSTER_LINK_CLASS_TEXT;
+            for (uint32_t first = group_begin; result && first < group_end; first = apart ? first + 1 : group_end)
             {
-                result = explicit->name.pointer != 0 && explicit->name.length != 0 && explicit->name.length < UINT32_MAX &&
-                         memchr(explicit->name.pointer, 0, explicit->name.length) == 0 &&
-                         (explicit->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && explicit->type == SHT_PROGBITS)) &&
-                         ((explicit->flags & SHF_MERGE) == 0 || explicit->entry_size != 0);
+                ObjectSection* section = &builder->sections[builder->section_count];
+                *section = (ObjectSection){
+                    .atom_begin = first,
+                    .atom_end = apart ? first + 1 : group_end,
+                    .class = class,
+                    .alignment = 1,
+                    .explicit_section = explicit,
+                };
+                if (explicit != 0)
+                {
+                    result = explicit->name.pointer != 0 && explicit->name.length != 0 && explicit->name.length < UINT32_MAX &&
+                             memchr(explicit->name.pointer, 0, explicit->name.length) == 0 &&
+                             (explicit->type == object_class_sections[class].type || (!object_class_is_zero_fill(class) && explicit->type == SHT_PROGBITS)) &&
+                             ((explicit->flags & SHF_MERGE) == 0 || explicit->entry_size != 0);
+                }
+                uint64_t offset = 0;
+                for (uint32_t i = section->atom_begin; result && i < section->atom_end; i += 1)
+                {
+                    const AtomId atom = builder->atoms[i];
+                    const uint64_t alignment = 1ull << atoms->alignment_log2[atom];
+                    result = object_align(offset, alignment, &offset);
+                    units->atom_section[atom] = builder->section_count;
+                    units->atom_offset[atom] = offset;
+                    result = result && !__builtin_add_overflow(offset, atoms->size[atom], &offset);
+                    section->alignment = alignment > section->alignment ? alignment : section->alignment;
+                    section->fixup_count += atoms->fixup_count[atom];
+                }
+                section->size = offset;
+                builder->fixup_count += section->fixup_count;
+                builder->section_count += 1;
             }
-            uint64_t offset = 0;
-            for (uint32_t i = section->atom_begin; result && i < section->atom_end; i += 1)
-            {
-                const AtomId atom = units->atoms[i];
-                const uint64_t alignment = 1ull << atoms->alignment_log2[atom];
-                result = object_align(offset, alignment, &offset);
-                units->atom_section[atom] = builder->section_count;
-                units->atom_offset[atom] = offset;
-                result = result && !__builtin_add_overflow(offset, atoms->size[atom], &offset);
-                section->alignment = alignment > section->alignment ? alignment : section->alignment;
-                section->fixup_count += atoms->fixup_count[atom];
-            }
-            section->size = offset;
-            builder->fixup_count += section->fixup_count;
-            builder->section_count += 1;
         }
     }
     if (!result)
     {
-        builder->error = OBJECT_ERROR_RANGE;
+        builder->error = memory ? OBJECT_ERROR_RANGE : OBJECT_ERROR_FULL;
     }
     return result;
 }
@@ -844,7 +959,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     uint64_t names = 1 + (builder->source_name.length != 0 ? builder->source_name.length + 1 : 0) + units->unit_name_bytes[builder->unit];
     // The columns the loop reads and writes, in locals: with -fno-strict-aliasing, every store would otherwise make the
     // compiler load each of them again.
-    const AtomId* unit_atoms = units->atoms;
+    const AtomId* unit_atoms = builder->atoms;
     const FixupId* fixup_begin = atoms->fixup_begin;
     const uint32_t* fixup_count = atoms->fixup_count;
     const SymbolId* targets = fixups->target;
@@ -880,11 +995,12 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     const uint64_t info = symbol_info[target];
                     const bool defined = info >> 32 == unit;
                     entry = stamp | (defined ? (uint32_t)info : BUSTER_OBJECT_SYMBOL_UNDEFINED | (uint32_t)undefined_count);
-                    if (defined && builder->options.atom_sections != 0 && ((uint32_t)entry & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
+                    const ObjectAtomSection* section = builder->options.atom_sections != 0 ? &builder->options.atom_sections[symbols->atom[target]] : 0;
+                    if (defined && section != 0 && section->name.length != 0 && ((uint32_t)entry & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
                     {
                         // Explicit mergeable sections include fixed-width constants, not only the default string
-                        // class. Their PC-relative/addended relocations need the original local target as well.
-                        const ObjectAtomSection* section = &builder->options.atom_sections[symbols->atom[target]];
+                        // class. Their PC-relative/addended relocations need the original local target as well. An
+                        // atom without a descriptor is in its class's own section, as object_prepare found it.
                         entry &= ~(uint64_t)BUSTER_OBJECT_SYMBOL_IN_POOL;
                         entry |= (section->flags & SHF_MERGE) != 0 ? BUSTER_OBJECT_SYMBOL_IN_POOL : 0;
                     }
@@ -1198,7 +1314,7 @@ static uint64_t object_section_name_bytes(const ObjectBuilder* builder, const Ob
     }
     else if (builder->options.function_sections && section->class == BUSTER_LINK_CLASS_TEXT)
     {
-        const NameId name = builder->units->atom_name[builder->units->atoms[section->atom_begin]];
+        const NameId name = builder->units->atom_name[builder->atoms[section->atom_begin]];
         result = name != 0 ? BUSTER_OBJECT_FUNCTION_SECTION_PREFIX_BYTES + builder->link->names.length[name] : result;
     }
     return result;
@@ -1423,7 +1539,7 @@ static void object_fill_sections(const ObjectBuilder* builder, uint8_t* bytes)
             uint64_t end = 0;
             for (uint32_t i = section->atom_begin; i < section->atom_end; i += 1)
             {
-                const AtomId atom = units->atoms[i];
+                const AtomId atom = builder->atoms[i];
                 const uint64_t offset = units->atom_offset[atom];
                 memset(contents + end, gap, offset - end);
                 if (atoms->size[atom] != 0)
@@ -1442,7 +1558,7 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
 {
     const Link* link = builder->link;
     const ObjectUnits* units = builder->units;
-    const AtomId* unit_atoms = units->atoms;
+    const AtomId* unit_atoms = builder->atoms;
     const uint64_t* atom_offset = units->atom_offset;
     const uint32_t* atom_section = units->atom_section;
     const FixupId* fixup_begin = link->atoms.fixup_begin;
@@ -1761,7 +1877,7 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
             memcpy(names + name, BUSTER_OBJECT_RELA_PREFIX, BUSTER_OBJECT_RELA_PREFIX_BYTES);
             name += BUSTER_OBJECT_RELA_PREFIX_BYTES;
         }
-        const NameId atom_name = builder->units->atom_name[builder->units->atoms[section->atom_begin]];
+        const NameId atom_name = builder->units->atom_name[builder->atoms[section->atom_begin]];
         if (section->explicit_section != 0)
         {
             const String8 text = section->explicit_section->name;
@@ -1843,7 +1959,7 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* 
         built = builder.sections != 0;
         builder.error = built ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     }
-    built = built && object_count_sections(&builder);
+    built = built && object_count_sections(&builder, scratch.arena);
     built = built && object_count_symbols(&builder, scratch.arena);
     built = built && object_count_debug(&builder);
     built = built && object_place(&builder, scratch.arena);

@@ -666,6 +666,13 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
             check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
         }
     }
+    // The definitions' named sections and the file-scope assembly's (#619), each atom's section in the object.
+    ObjectAtomSection* sections = 0;
+    if (valid && !check_program_sections(&code, program, &bytes, &output, &sections))
+    {
+        check_driver_emission_failed(parser, pp, &code);
+        valid = false;
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
     if (valid)
     {
@@ -688,6 +695,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         {
             const String8 source = { .pointer = (char*)source_path, .length = strlen(source_path) };
             const ObjectOptions options = {
+                .atom_sections = sections,
+                .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
                 .temporary_symbols = temporary,
                 .temporary_symbol_count = temporary != 0 ? code.link.symbols.count : 0,
                 .debug = debug ? &dwarf.object : NULL,
@@ -945,6 +954,14 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             {
                 check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
             }
+        }
+        // The definitions' named sections (#619): the executable's classes merge them, as a linker's .text.* and .data.*
+        // do, and a zero-filled variable in one is data.
+        ObjectAtomSection* sections = 0;
+        if (valid && !check_program_sections(&code, program, &bytes, &output, &sections))
+        {
+            check_driver_emission_failed(parser, pp, &code);
+            valid = false;
         }
         check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
         if (valid)
