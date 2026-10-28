@@ -96,6 +96,19 @@ static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* fun
     uint8_t storage[4][8192] __attribute__((aligned(64)));
     Arena arenas[4];
     bool valid = true;
+    const IrError limits[] = { IR_ERROR_MEMORY, IR_ERROR_LIMIT };
+    for (uint32_t error = 0; error < BUSTER_ARRAY_LENGTH(limits); error += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            IrCheck checks[2] = { { .error = IR_OK, .dominance_checked = true }, { .error = IR_OK, .dominance_checked = true } };
+            checks[path] = (IrCheck){ .error = limits[error], .instruction = BUSTER_IR_NONE };
+            valid = ir_meta_expect(tally, ir_meta_verification_result(checks[0], checks[1], true) == IR_META_RESOURCE,
+                                  "one verifier's resource limit is inconclusive even when the other algorithm completes") && valid;
+            valid = ir_meta_expect(tally, ir_meta_verification_result(checks[0], checks[1], false) == IR_META_VERIFY,
+                                  "a resource result cannot hide scratch-prefix lifetime corruption") && valid;
+        }
+    }
     for (uint32_t a = 0; a < 4; a += 1)
     {
         memset(storage[a], 0x51 + a, 16);

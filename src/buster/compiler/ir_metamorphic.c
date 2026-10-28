@@ -548,15 +548,23 @@ static bool ir_meta_same_text(String8 left, String8 right)
     return same;
 }
 
+static IrMetaFailure ir_meta_verification_result(IrCheck vector, IrCheck scalar, bool scratch_preserved)
+{
+    const bool same = vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail &&
+                      vector.dominance_checked == scalar.dominance_checked;
+    const bool resource = vector.error == IR_ERROR_MEMORY || vector.error == IR_ERROR_LIMIT ||
+                          scalar.error == IR_ERROR_MEMORY || scalar.error == IR_ERROR_LIMIT;
+    const IrMetaFailure failure = !scratch_preserved ? IR_META_VERIFY : resource ? IR_META_RESOURCE :
+                                 !same || vector.error != IR_OK ? IR_META_VERIFY : IR_META_OK;
+    return failure;
+}
+
 static IrMetaFailure ir_meta_validate(const IrFunction* function, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const IrCheck vector = ir_verify_complete(function, scratch, true);
     const IrCheck scalar = ir_verify_complete(function, scratch, false);
-    const bool same = vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail &&
-                      vector.dominance_checked == scalar.dominance_checked && scratch->length == mark;
-    const IrMetaFailure failure = !same ? IR_META_VERIFY : vector.error == IR_ERROR_MEMORY || vector.error == IR_ERROR_LIMIT ?
-        IR_META_RESOURCE : vector.error != IR_OK ? IR_META_VERIFY : IR_META_OK;
+    const IrMetaFailure failure = ir_meta_verification_result(vector, scalar, scratch->length == mark);
     return failure;
 }
 
