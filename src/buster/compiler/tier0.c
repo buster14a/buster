@@ -3579,25 +3579,93 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
     }
 }
 
-// The locals by references, most first and by index among equals: an insertion sort, since a function's locals are few.
-// The vector path's twin, tier0_assign_registers_vector, ranks the locals instead.
-static void tier0_order_locals(uint32_t locals, const uint32_t* references, uint32_t* order)
+// At most 16 general or 16 floating registers can be homes. Only each kind's first 16 eligible locals in the stable
+// reference order can take one, whatever the clobbers. Keep those prefixes instead of sorting every local (#664).
+#define BUSTER_TIER0_HOME_CANDIDATES 16u
+_Static_assert(BUSTER_TIER0_CALLER_SAVED_DEPTHS + BUSTER_TIER0_CALLEE_SAVED <= BUSTER_TIER0_HOME_CANDIDATES, "the bounded prefix covers every general home");
+
+static uint32_t tier0_register_locals(const Tier0Function* function, const Tier0Home* homes, const uint32_t* references, uint32_t* order)
 {
-    for (uint32_t l = 0; l < locals; l += 1)
+    uint32_t count = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
     {
-        order[l] = l;
-    }
-    for (uint32_t a = 1; a < locals; a += 1)
-    {
-        const uint32_t local = order[a];
-        uint32_t b = a;
-        while (b > 0 && references[order[b - 1]] < references[local])
+        uint32_t counts[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
+        uint32_t indices[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
+        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+        for (uint32_t local = 0; local < function->local_count; local += 1)
         {
-            order[b] = order[b - 1];
-            b -= 1;
+            const uint32_t reference = references[local];
+            const bool eligible = !homes[local].is_register && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 &&
+                                  tier0_class_floating(function->local_classes[local]) == (kind != 0);
+            if (eligible && reference > counts[BUSTER_TIER0_HOME_CANDIDATES - 1])
+            {
+                uint32_t at = BUSTER_TIER0_HOME_CANDIDATES - 1;
+                #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+                while (at > 0 && reference > counts[at - 1])
+                {
+                    counts[at] = counts[at - 1];
+                    indices[at] = indices[at - 1];
+                    at -= 1;
+                }
+                counts[at] = reference;
+                indices[at] = local;
+            }
         }
-        order[b] = local;
+        for (uint32_t at = 0; at < BUSTER_TIER0_HOME_CANDIDATES && counts[at] != 0; at += 1)
+        {
+            order[count] = indices[at];
+            count += 1;
+        }
     }
+    return count;
+}
+
+// The same bounded prefixes, with 16-local eligibility and threshold masks and register-resident insertion. Locals
+// arrive by index, so a new key precedes only strictly smaller counts: equal keys retain their original index order.
+// Every insertion moves at most 16 lanes, independent of the function's local count. Loads honor the logical tails.
+static uint32_t tier0_register_locals_vector(const Tier0Function* function, const Tier0Home* homes, const uint32_t* references, uint32_t* order)
+{
+    const __m512i previous = _mm512_set_epi32(14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0);
+    const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
+    uint32_t count = 0;
+    for (uint32_t kind = 0; kind < 2; kind += 1)
+    {
+        __m512i best = _mm512_setzero_si512();
+        __m512i indices = _mm512_setzero_si512();
+        for (uint32_t first = 0; first < function->local_count; first += 16)
+        {
+            const __mmask16 lanes = (__mmask16)tier0_lanes(first, function->local_count);
+            const __m512i counts = _mm512_maskz_loadu_epi32(lanes, references + first);
+            const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, homes + first);
+            const __m512i high = (lanes >> 8) != 0 ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), homes + first + 8) : _mm512_setzero_si512();
+            const __mmask16 in_register = _mm512_kunpackb(_mm512_test_epi64_mask(high, is_register), _mm512_test_epi64_mask(low, is_register));
+            const __m128i flags = _mm_maskz_loadu_epi8(lanes, function->local_flags + first);
+            const __m128i classes = _mm_maskz_loadu_epi8(lanes, function->local_classes + first);
+            const __mmask16 address = _mm_test_epi8_mask(flags, _mm_set1_epi8((char)BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+            const __mmask16 floating = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F32)) | _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8(BUSTER_TYPED_CLASS_F64));
+            const __m512i least = _mm512_permutexvar_epi32(_mm512_set1_epi32(BUSTER_TIER0_HOME_CANDIDATES - 1), best);
+            uint32_t candidates = lanes & ~in_register & ~address & (kind != 0 ? floating : ~floating) & _mm512_cmpgt_epu32_mask(counts, least);
+            while (candidates != 0)
+            {
+                const uint32_t local = first + (uint32_t)__builtin_ctz(candidates);
+                candidates &= candidates - 1;
+                const __m512i key = _mm512_set1_epi32((int32_t)references[local]);
+                const __mmask16 after = _mm512_cmpgt_epu32_mask(key, best);
+                if (after != 0)
+                {
+                    const __mmask16 at = (__mmask16)(1u << (uint32_t)__builtin_ctz(after));
+                    best = _mm512_mask_permutexvar_epi32(best, after, previous, best);
+                    best = _mm512_mask_mov_epi32(best, at, key);
+                    indices = _mm512_mask_permutexvar_epi32(indices, after, previous, indices);
+                    indices = _mm512_mask_set1_epi32(indices, at, (int32_t)local);
+                }
+            }
+        }
+        const __mmask16 kept = _mm512_test_epi32_mask(best, best);
+        _mm512_mask_compressstoreu_epi32(order + count, kept, indices);
+        count += (uint32_t)__builtin_popcount(kept);
+    }
+    return count;
 }
 
 // The greedy loop of tier0_assign_homes for the vector path, for up to 64 locals, without the order: the loop gives the
@@ -3761,7 +3829,7 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
 // least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
 // a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
-// `order` (local_count) is scratch for the locals by them (tier0_order_locals).
+// `order` (2 * BUSTER_TIER0_HOME_CANDIDATES) is scratch for the bounded eligible prefixes by kind.
 static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
 {
     const uint32_t locals = function->local_count;
@@ -3807,18 +3875,19 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The rest by references, most first (`order`, tier0_order_locals'); for the vector path and up to 64 locals, by their
+    // The eligible prefixes by references, most first (`order`); for the vector path and up to 64 locals, by their
     // ranks (tier0_assign_registers_vector).
     const bool ranked = vector && locals <= 64;
+    uint32_t candidates = 0;
     if (ranked)
     {
         frame->saved |= tier0_assign_registers_vector(function, homes, references, taken);
     }
     else
     {
-        tier0_order_locals(locals, references, order);
+        candidates = vector ? tier0_register_locals_vector(function, homes, references, order) : tier0_register_locals(function, homes, references, order);
     }
-    for (uint32_t k = 0; k < locals && !ranked; k += 1)
+    for (uint32_t k = 0; k < candidates; k += 1)
     {
         const uint32_t local = order[k];
         const bool address_taken = (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
@@ -8013,8 +8082,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     const uint32_t locals = function->local_count;
     Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Home, locals + 1);
     uint32_t* references = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
-    if (error == TIER0_OK && (homes == 0 || references == 0 || order == 0))
+    uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
+    if (error == TIER0_OK && (homes == 0 || references == 0))
     {
         error = TIER0_ERROR_MEMORY;
     }
