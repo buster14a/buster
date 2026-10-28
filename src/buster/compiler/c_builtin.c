@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 #include "c_builtin_catalog.c"
 
 #define BUSTER_CBUILTIN_SIGNED 128u
@@ -65,6 +65,9 @@ static CBuiltinId cbuiltin_lookup_scalar(const char* name, uint32_t length)
 
 static CBuiltinId cbuiltin_lookup(const char* name, uint32_t length)
 {
+#if !BUSTER_HOST_VECTOR
+    return cbuiltin_lookup_scalar(name, length);
+#else
     CBuiltinId result = CBUILTIN_NONE;
     if (length != 0 && length < 32)
     {
@@ -80,6 +83,7 @@ static CBuiltinId cbuiltin_lookup(const char* name, uint32_t length)
         }
     }
     return result;
+#endif
 }
 
 static uint64_t cbuiltin_mask(uint32_t bits)
@@ -266,6 +270,9 @@ _Static_assert(CBUILTIN_FFSLL < 32, "bit builtin descriptors fit in two vectors"
 
 static void cbuiltin_fold(CBuiltinIntegers input, CBuiltinIntegerResults output, uint32_t count)
 {
+#if !BUSTER_HOST_VECTOR
+    cbuiltin_fold_scalar(input, output, count);
+#else
     const __m512i bit_descriptors_low = _mm512_load_si512(cbuiltin_bit_descriptors);
     const __m512i bit_descriptors_high = _mm512_load_si512(cbuiltin_bit_descriptors + 16);
     const __m512i zero = _mm512_setzero_si512();
@@ -344,6 +351,7 @@ static void cbuiltin_fold(CBuiltinIntegers input, CBuiltinIntegerResults output,
         _mm256_mask_storeu_epi32(output.status + i, active, _mm512_cvtepi64_epi32(status));
         i += lanes;
     }
+#endif
 }
 
 #endif
