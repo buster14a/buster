@@ -483,13 +483,12 @@ static void tier0_test_stream_judge(Tier0TestTally* tally, const char* name, con
     function.kinds = stream->kinds;
     function.classes = stream->classes;
     function.values = stream->values;
-    if (guard != 0 && (uint64_t)stream->count * 10 <= BUSTER_TIER0_TEST_PAGE)
+    if (guard != 0 && (uint64_t)stream->count * sizeof(uint64_t) <= BUSTER_TIER0_TEST_PAGE)
     {
-        // Each column ends at the guard page, the values (eight bytes each) first below it.
-        uint8_t* end = guard;
-        uint64_t* values = (uint64_t*)(void*)(end - (uint64_t)stream->count * sizeof(uint64_t));
-        uint8_t* classes = (uint8_t*)values - stream->count;
-        uint8_t* kinds = classes - stream->count;
+        // Three separate readable pages, each followed by its own inaccessible page.
+        uint64_t* values = (uint64_t*)(void*)(guard - (uint64_t)stream->count * sizeof(uint64_t));
+        uint8_t* classes = guard + 2 * BUSTER_TIER0_TEST_PAGE - stream->count;
+        uint8_t* kinds = guard + 4 * BUSTER_TIER0_TEST_PAGE - stream->count;
         memcpy(values, stream->values, (uint64_t)stream->count * sizeof(uint64_t));
         memcpy(classes, stream->classes, stream->count);
         memcpy(kinds, stream->kinds, stream->count);
@@ -690,6 +689,92 @@ static void tier0_test_scan_blocks(Tier0TestTally* tally, Tier0TestStream* strea
     }
     tier0_test_stream_add(stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I64, 0);
     tier0_test_stream_check(tally, "a depth past the vector path's at a block's start", stream, false, true, true, 0, taken);
+}
+
+// Interacting malformed entries must defer before byte depths become producer indices or classes become shifts.
+// Wide indirect calls additionally need one more operand than their explicit arguments.
+static void tier0_test_scan_review_regressions(Tier0TestTally* tally, Tier0TestStream* stream, uint8_t* guard, uint64_t* taken)
+{
+    const uint32_t bad_classes[] = { BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_VECTOR, UINT8_MAX };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(bad_classes); c += 1)
+    {
+        for (uint32_t call = 0; call < 2; call += 1)
+        {
+            stream->count = 0;
+            tier0_test_stream_add(stream, BUSTER_TYPED_DISCARD, bad_classes[c], 0);
+            if (call != 0)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 2);
+            }
+            tier0_test_stream_add(stream, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, call != 0 ? 3 : 2);
+            tier0_test_stream_add(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            tier0_test_stream_check(tally, "underflow or invalid class before calls and arrivals", stream, false, false, false, guard, taken);
+        }
+    }
+    for (uint32_t indirect = 0; indirect < 2; indirect += 1)
+    {
+        for (uint32_t arguments = 63; arguments <= 64; arguments += 1)
+        {
+            const SymbolId target = indirect != 0 ? 0 : 1;
+            const uint32_t first = 0;
+            const uint8_t variadic = 0;
+            uint8_t classes[64];
+            AbiLocation locations[64];
+            AbiCall call = { 0 };
+            call.stack_bytes = arguments * 8;
+            call.stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+            for (uint32_t p = 0; p < BUSTER_ABI_RESULT_PARTS; p += 1)
+            {
+                call.result.registers[p] = BUSTER_ABI_REGISTER_NONE;
+            }
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                classes[a] = BUSTER_TYPED_CLASS_I32;
+                locations[a] = (AbiLocation){
+                    .stack_offset = a * 8,
+                    .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE },
+                    .kind = BUSTER_ABI_LOCATION_STACK,
+                };
+            }
+            Tier0Function function = {
+                .call_targets = &target,
+                .call_first = &first,
+                .call_argument_counts = &arguments,
+                .call_variadic = &variadic,
+                .calls = &call,
+                .argument_locations = locations,
+                .argument_classes = classes,
+                .call_count = 1,
+                .argument_count = arguments,
+            };
+            for (uint32_t p = 0; p < BUSTER_ABI_RESULT_PARTS; p += 1)
+            {
+                function.result.registers[p] = BUSTER_ABI_REGISTER_NONE;
+            }
+            const uint32_t operands = arguments + indirect;
+            stream->count = 0;
+            // Put the final argument at entry 64 and the call just beyond the block boundary.
+            for (uint32_t pad = operands; pad < 65; pad += 1)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            }
+            if (indirect != 0)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+            }
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, a);
+            }
+            const uint32_t last = stream->count - 1;
+            tier0_test_stream_add(stream, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, 0);
+            tier0_test_stream_add(stream, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            function.count = stream->count;
+            tier0_test_stream_judge(tally, "63/64 argument direct/indirect call across blocks", stream, &function, true, operands > 64, guard, taken);
+            stream->classes[last] = BUSTER_TYPED_CLASS_U32;
+            tier0_test_stream_judge(tally, "wide call last argument has the wrong class", stream, &function, false, false, guard, taken);
+        }
+    }
 }
 
 // A function of `locals` I64 locals and `calls` calls, call c of (c % 3) I64 arguments in 16-byte stack slots but the
@@ -1112,21 +1197,26 @@ static void tier0_test_validation(Tier0TestTally* tally)
     stream.kinds = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, stream.capacity);
     stream.classes = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, stream.capacity);
     stream.values = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, stream.capacity);
-    // Two pages, the second PROT_NONE.
-    uint8_t* pages = mmap(0, 2 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const bool guarded = pages != MAP_FAILED && mprotect(pages + BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    // One readable page and one guard per stream column.
+    uint8_t* pages = mmap(0, 6 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED;
+    for (uint32_t column = 0; guarded && column < 3; column += 1)
+    {
+        guarded = mprotect(pages + (column * 2 + 1) * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    }
     if (tier0_test_expect(tally, stream.values != 0 && guarded, "validation", "no memory or no guard page for the streams"))
     {
         uint8_t* guard = pages + BUSTER_TIER0_TEST_PAGE;
         tier0_test_scan_arrivals(tally, &stream, guard, taken);
         tier0_test_scan_blocks(tally, &stream, guard, taken);
+        tier0_test_scan_review_regressions(tally, &stream, guard, taken);
         tier0_test_scan_large(tally, &stream, &arena, 200, 200, taken);
         tier0_test_scan_large(tally, &stream, &arena, 100, 100, taken);
         tier0_test_scan_metadata(tally, taken);
     }
     if (pages != MAP_FAILED)
     {
-        munmap(pages, 2 * BUSTER_TIER0_TEST_PAGE);
+        munmap(pages, 6 * BUSTER_TIER0_TEST_PAGE);
     }
     arena_release(&arena);
     printf("validation: %" PRIu64 " entries' streams; of every stream, %" PRIu64 " taken by the vector path and %" PRIu64 " by the scalar validator\n", checked, taken[0],

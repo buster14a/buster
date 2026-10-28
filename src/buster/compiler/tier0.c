@@ -11196,6 +11196,9 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
             tier0_scan_gather(call_words, low_words, calls & bounded, words);
             operands = tier0_scan_bytes(words);
         }
+        // One comparison register holds at most 64 operands. An indirect call with 64 arguments has 65; its
+        // complete operand check belongs to the scalar validator rather than dropping the last argument.
+        refused |= calls & _mm512_cmpgt_epu8_mask(operands, _mm512_set1_epi8(64));
         __m512i pops = _mm512_and_si512(shapes, _mm512_set1_epi8(3));
         pops = _mm512_mask_mov_epi8(pops, calls, operands);
         pops = _mm512_mask_mov_epi8(pops, empty_returns, zero);
@@ -11274,6 +11277,9 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         const uint32_t first_return = returns != 0 ? class_lanes[__builtin_ctzll(returns)] : return_class;
         return_class = return_class == BUSTER_TIER0_SCAN_UNREACHED ? first_return : return_class;
         refused |= returns & _mm512_cmpneq_epi8_mask(classes, _mm512_set1_epi8((char)return_class));
+        // The lane-at-a-time checks below index the producer stack and shift by classes. Only a block whose
+        // kinds, classes, bounds and depths already passed may execute them; malformed byte depths can wrap.
+        valid = valid && refused == 0;
         // The lanes' depths, producers and classes for the arrivals' and the calls' checks, which take them a lane at a
         // time; and each lane's lowest place the lanes before it in the block reached (the place 0 where none did).
         uint8_t depth_lanes[64] __attribute__((aligned(64)));
@@ -11309,7 +11315,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         const __m512i arrivals_depth = _mm512_add_epi8(_mm512_sub_epi8(depth, _mm512_maskz_mov_epi8(~jumps, one)), _mm512_maskz_mov_epi8(brought_values, one));
         const __mmask64 empty = controls & _mm512_cmpeq_epi8_mask(arrivals_depth, zero);
         bool failed = false;
-        for (uint64_t pending = empty; pending != 0; pending &= pending - 1)
+        for (uint64_t pending = empty; valid && pending != 0; pending &= pending - 1)
         {
             const uint32_t entry = first + (uint32_t)__builtin_ctzll(pending);
             const uint32_t target = (uint32_t)function->values[entry];
@@ -11321,7 +11327,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         // brings, against the target's own where the block holds it (`near`), and otherwise against the first forward
         // arrival's, which the target's block checks; backward, the scalar validator's.
         __mmask64 near = 0;
-        for (uint64_t pending = controls & ~empty; pending != 0; pending &= pending - 1)
+        for (uint64_t pending = controls & ~empty; valid && pending != 0; pending &= pending - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
             const uint32_t entry = first + lane;
@@ -11354,7 +11360,8 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         refused |= reached_before & _mm512_cmpneq_epi8_mask(expectations, depth);
         refused |= lanes & _mm512_test_epi8_mask(tier0_lookup(tier0_scan_sides, previous_kinds), _mm512_set1_epi8(BUSTER_TIER0_SIDE_TRANSFER)) & ~(reached_before | near) &
                    _mm512_test_epi8_mask(depth, depth);
-        for (uint64_t pending = reached_before & _mm512_test_epi8_mask(expectations, expectations); pending != 0; pending &= pending - 1)
+        valid = valid && refused == 0 && !failed;
+        for (uint64_t pending = reached_before & _mm512_test_epi8_mask(expectations, expectations); valid && pending != 0; pending &= pending - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
             const uint64_t brought = arrivals[first + lane];
@@ -11366,7 +11373,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
         // first pushed first) on the stack: for two or fewer, the top's and the one below's; for more, from the carried
         // stack below the lowest place the lanes before it reached and above it the values those lanes left, in order.
         const __mmask64 few_operands = calls & bounded & _mm512_cmple_epu8_mask(operands, _mm512_set1_epi8(2));
-        for (uint64_t pending = few_operands; pending != 0; pending &= pending - 1)
+        for (uint64_t pending = few_operands; valid && pending != 0; pending &= pending - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
             const uint32_t call = (uint32_t)function->values[first + lane];
@@ -11376,7 +11383,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
                                                        _mm512_set1_epi8((char)top_lanes[lane]));
             failed |= ((tier0_scan_call(function, call) >> class_lanes[lane]) & 1) == 0 || _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
         }
-        for (uint64_t pending = calls & bounded & ~few_operands; pending != 0; pending &= pending - 1)
+        for (uint64_t pending = calls & bounded & ~few_operands; valid && pending != 0; pending &= pending - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
             const uint32_t call = (uint32_t)function->values[first + lane];
