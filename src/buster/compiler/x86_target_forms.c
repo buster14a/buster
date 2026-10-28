@@ -113,6 +113,9 @@ static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
 // Unknown rows stay zero, so the nonzero test still distinguishes them from classified baseline rows.
 static void x86_target_forms(const X86Target* target, uint8_t* allowed)
 {
+#if !BUSTER_HOST_VECTOR
+    x86_target_forms_scalar(target, allowed);
+#else
     const __m512i unavailable = _mm512_set1_epi32((int)~x86_target_compact_features(target->features | BUSTER_X86_TARGET_KNOWN));
     const __m512i zero = _mm512_setzero_si512();
     for (uint32_t i = 0; i < X86_FORM_COUNT; i += 16)
@@ -125,6 +128,7 @@ static void x86_target_forms(const X86Target* target, uint8_t* allowed)
         const __m128i flags = _mm_maskz_set1_epi8(supported, 1);
         _mm_mask_storeu_epi8(allowed + i, active, flags);
     }
+#endif
 }
 
 static bool x86_target_form_allowed(const uint8_t* allowed, uint32_t form)

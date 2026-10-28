@@ -14,6 +14,8 @@
 // runs the scalar solver for MS ms before every AVX-512 sample (dataflow_benchmark_after_scalar), the state a
 // compiler's vector phases run in after lighter ones. Run on the 9700X through exclusive.sh with taskset -c 2.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -580,3 +582,12 @@ int run_dataflow_benchmark(int argc, char** argv)
     }
     return valid ? 0 : 1;
 }
+
+#else
+int run_dataflow_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

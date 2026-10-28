@@ -3987,7 +3987,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
         {
             fclose(file);
         }
-        char* compile[] = { "cc", "-O2", "-mtls-dialect=gnu", (char*)library->pic, "-c", "-o", object_path, source_path, (char*)library->option, 0 };
+        char* compile[] = { "cc", "-O2", "-fsemantic-interposition", "-mtls-dialect=gnu", (char*)library->pic, "-c", "-o", object_path, source_path, (char*)library->option, 0 };
         const bool compiled = written && object_test_run(compile, out, err) == 0;
         dynamic_test_expect(&tally, compiled, library->name, s);
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };

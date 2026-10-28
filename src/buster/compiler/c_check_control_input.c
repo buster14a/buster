@@ -251,7 +251,7 @@ static __attribute__((always_inline)) void check_input_controls_mode(CheckInputR
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = parser->options.scalar;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const bool prefix = before != BUSTER_CHECK_NONE;
     const uint32_t limit = prefix && before < count ? before : count;
     const uint64_t mark = reader->scratch->length;

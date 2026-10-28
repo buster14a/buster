@@ -27,6 +27,8 @@
 // with cycles and instructions from the hardware counters (zero when unavailable).
 // The exit status is 1 if the arguments are invalid, a case or a file can't be made or read, or the paths disagree.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -857,3 +859,12 @@ int run_import_benchmark(int argc, char** argv)
     arena_release(&arena);
     return result ? 0 : 1;
 }
+
+#else
+int run_import_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

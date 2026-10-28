@@ -74,9 +74,11 @@ static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* 
 
 static uint32_t check_generic_masks(const TypeId* keys, TypeId key, bool scalar)
 {
+    (void)scalar;
+
     uint32_t matches = 0;
     uint32_t empty = 0;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         // Keep --scalar an independent executable oracle; Clang otherwise folds both branches into the same masks.
         #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
@@ -108,7 +110,7 @@ static bool check_generic_association(CheckInputReader* reader, CheckGenericSet*
     *matches = false;
     while (valid && !inserted)
     {
-        const uint32_t masks = check_generic_masks(set->keys + group, key, reader->parser->options.scalar);
+        const uint32_t masks = check_generic_masks(set->keys + group, key, BUSTER_SCALAR_PATH(reader->parser->options.scalar));
         uint32_t candidates = masks & UINT16_MAX;
         const uint32_t empty = masks >> BUSTER_CHECK_GENERIC_GROUP;
         while (valid && candidates != 0)
