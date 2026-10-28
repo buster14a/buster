@@ -874,7 +874,7 @@ static void check_test_binding_recovery_limits(CheckTest* test)
     };
     const uint64_t capacity = storage.capacity;
     check_test_expect(test, storage.base != NULL, "diagnostic declaration-cut test storage");
-    for (uint32_t scenario = 0; storage.base != NULL && scenario < 7; scenario += 1)
+    for (uint32_t scenario = 0; storage.base != NULL && scenario < 8; scenario += 1)
     {
         arena_pop_to(&storage, 0);
         storage.capacity = scenario == 6 ? 0 : capacity;
@@ -886,6 +886,7 @@ static void check_test_binding_recovery_limits(CheckTest* test)
         reports[1].pragma = scenario == 4 ? 1 : 0;
         roles[9] = scenario == 5 ? PARSE_ROLE_MEMBER : PARSE_ROLE_OPERAND;
         CheckInput input = { .token_count = parser.tokens.count, .reports = reports, .report_count = scenario == 1 ? 0 : 2 };
+        input.deferred_tokens = scenario == 7 ? roles : NULL;
         CheckInputReader reader = { .output = &input, .parser = &parser, .arena = &storage, .postorder = postorder };
         check_input_diagnostic_recover(&reader, scenario != 2);
         if (scenario == 0)
