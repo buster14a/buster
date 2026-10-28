@@ -144,6 +144,24 @@ struct CheckX86LowerRule
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_BINARY, 1, swap, form, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512, features)
 #define BUSTER_CHECK_X86_SHIFTS(name, form, element, features) \
     BUSTER_CHECK_X86_FORMS(name, CHECK_X86_LOWER_SHIFT, element, false, form, X_X_XM128_EVEX, Y_Y_XM128_EVEX, Z_Z_XM128, features)
+// A truncation under a mask of `bytes` bytes into a result of `result` bytes (TRUNCATE's `other`), and the stores of
+// one at each width, whose forms are the register ones into memory.
+#define BUSTER_CHECK_X86_TRUNCATION(name, element, bytes, form, result, features) \
+    BUSTER_CHECK_X86_RULE_OTHER(name "_mask", CHECK_X86_LOWER_TRUNCATE, element, bytes, false, BUSTER_CHECK_X86_NO_IMMEDIATE, form, result, features)
+#define BUSTER_CHECK_X86_TRUNCATION_STORES(name, element, form, x, y, z, features) \
+    BUSTER_CHECK_X86_RULE_OTHER(name "128mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, element, 16, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form##_##x, 0, \
+                                features) \
+    BUSTER_CHECK_X86_RULE_OTHER(name "256mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, element, 32, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form##_##y, 0, \
+                                features) \
+    BUSTER_CHECK_X86_RULE_OTHER(name "512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, element, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_##form##_##z, 0, \
+                                features)
+// A truncation's three widths, `pair` its elements (`db`), and its stores: the 16- and 32-byte ones' results are 16 bytes,
+// and the 64-byte one's `wide` bytes.
+#define BUSTER_CHECK_X86_TRUNCATIONS(prefix, pair, element, form, x, y, z, wide, features) \
+    BUSTER_CHECK_X86_TRUNCATION(prefix pair "128", element, 16, X86_FORM_##form##_##x, 16, features) \
+    BUSTER_CHECK_X86_TRUNCATION(prefix pair "256", element, 32, X86_FORM_##form##_##y, 16, features) \
+    BUSTER_CHECK_X86_TRUNCATION(prefix pair "512", element, 64, X86_FORM_##form##_##z, wide, features) \
+    BUSTER_CHECK_X86_TRUNCATION_STORES(prefix pair, element, form, x, y, z, features)
 
 static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_cmp", "b", "w", "d", "q", "_mask", CHECK_X86_LOWER_COMPARE, true, 2)
@@ -158,6 +176,31 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     BUSTER_CHECK_X86_RULE("__builtin_ia32_selectsd_128", CHECK_X86_LOWER_SELECT_SCALAR, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVSD_X_X_X_EVEX, 0)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_loaddqu", "qi", "hi", "si", "di", "_mask", CHECK_X86_LOWER_LOAD, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
     BUSTER_CHECK_X86_ELEMENTS("__builtin_ia32_storedqu", "qi", "hi", "si", "di", "_mask", CHECK_X86_LOWER_STORE, false, BUSTER_CHECK_X86_NO_IMMEDIATE)
+    // The masked loads and stores of their own moves: floating elements', aligned ones' (which fault on an unaligned
+    // address, as clang's do), a scalar's (the builtin's is the whole vector's under the mask's low bits, as clang's), and
+    // the expanding loads (the elements under the mask from consecutive ones in memory).
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_loadups", "_mask", CHECK_X86_LOWER_LOAD, 4, false, VMOVUPS, X_XM128_EVEX, Y_YM256_EVEX, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_loadupd", "_mask", CHECK_X86_LOWER_LOAD, 8, false, VMOVUPD, X_XM128_EVEX, Y_YM256_EVEX, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_loadaps", "_mask", CHECK_X86_LOWER_LOAD, 4, false, VMOVAPS, X_XM128_EVEX, Y_YM256_EVEX, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_loadapd", "_mask", CHECK_X86_LOWER_LOAD, 8, false, VMOVAPD, X_XM128_EVEX, Y_YM256_EVEX, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_movdqa32load", "_mask", CHECK_X86_LOWER_LOAD, 4, false, VMOVDQA32, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_movdqa64load", "_mask", CHECK_X86_LOWER_LOAD, 8, false, VMOVDQA64, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_storeups", "_mask", CHECK_X86_LOWER_STORE, 4, false, VMOVUPS, XM128_X_EVEX, YM256_Y_EVEX, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_storeupd", "_mask", CHECK_X86_LOWER_STORE, 8, false, VMOVUPD, XM128_X_EVEX, YM256_Y_EVEX, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_storeaps", "_mask", CHECK_X86_LOWER_STORE, 4, false, VMOVAPS, XM128_X_EVEX, YM256_Y_EVEX, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_storeapd", "_mask", CHECK_X86_LOWER_STORE, 8, false, VMOVAPD, XM128_X_EVEX, YM256_Y_EVEX, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_movdqa32store", "_mask", CHECK_X86_LOWER_STORE, 4, false, VMOVDQA32, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_movdqa64store", "_mask", CHECK_X86_LOWER_STORE, 8, false, VMOVDQA64, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_loadss128_mask", CHECK_X86_LOWER_LOAD, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVUPS_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_loadsd128_mask", CHECK_X86_LOWER_LOAD, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVUPD_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_storess128_mask", CHECK_X86_LOWER_STORE, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVUPS_XM128_X_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_storesd128_mask", CHECK_X86_LOWER_STORE, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMOVUPD_XM128_X_EVEX, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloadqi", "_mask", CHECK_X86_LOWER_LOAD, 1, false, VPEXPANDB, X_XM128, Y_YM256, Z_ZM512, BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloadhi", "_mask", CHECK_X86_LOWER_LOAD, 2, false, VPEXPANDW, X_XM128, Y_YM256, Z_ZM512, BUSTER_X86_FEATURE(AVX512VBMI2))
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloadsi", "_mask", CHECK_X86_LOWER_LOAD, 4, false, VPEXPANDD, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloaddi", "_mask", CHECK_X86_LOWER_LOAD, 8, false, VPEXPANDQ, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloadsf", "_mask", CHECK_X86_LOWER_LOAD, 4, false, VEXPANDPS, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandloaddf", "_mask", CHECK_X86_LOWER_LOAD, 8, false, VEXPANDPD, X_XM128, Y_YM256, Z_ZM512, 0)
     BUSTER_CHECK_X86_RULE("__builtin_ia32_kmovb", CHECK_X86_LOWER_KMOV, 1, 1, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, 0, 0)
     BUSTER_CHECK_X86_RULE("__builtin_ia32_kmovw", CHECK_X86_LOWER_KMOV, 1, 2, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, 0, 0)
     BUSTER_CHECK_X86_RULE("__builtin_ia32_kmovd", CHECK_X86_LOWER_KMOV, 1, 4, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, 0, 0)
@@ -225,6 +268,12 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
                               BUSTER_X86_FEATURE(AVX512VBMI2))
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressstoresi", "_mask", CHECK_X86_LOWER_COMPRESS_STORE, 4, false, VPCOMPRESSD, XM128_X, YM256_Y, ZM512_Z, 0)
     BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressstoredi", "_mask", CHECK_X86_LOWER_COMPRESS_STORE, 8, false, VPCOMPRESSQ, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compresssf", "_mask", CHECK_X86_LOWER_COMPRESS, 4, false, VCOMPRESSPS, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressdf", "_mask", CHECK_X86_LOWER_COMPRESS, 8, false, VCOMPRESSPD, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expandsf", "_mask", CHECK_X86_LOWER_COMPRESS, 4, true, VEXPANDPS, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_expanddf", "_mask", CHECK_X86_LOWER_COMPRESS, 8, true, VEXPANDPD, X_XM128, Y_YM256, Z_ZM512, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressstoresf", "_mask", CHECK_X86_LOWER_COMPRESS_STORE, 4, false, VCOMPRESSPS, XM128_X, YM256_Y, ZM512_Z, 0)
+    BUSTER_CHECK_X86_SUFFIXED("__builtin_ia32_compressstoredf", "_mask", CHECK_X86_LOWER_COMPRESS_STORE, 8, false, VCOMPRESSPD, XM128_X, YM256_Y, ZM512_Z, 0)
     // Masks of elements' top bits, and vectors of masks' bits.
     BUSTER_CHECK_X86_FORMS("__builtin_ia32_cvtb2mask", CHECK_X86_LOWER_VECTOR_MASK, 1, false, VPMOVB2M, K_X, K_Y, K_Z, BUSTER_CHECK_X86_BW)
     BUSTER_CHECK_X86_FORMS("__builtin_ia32_cvtw2mask", CHECK_X86_LOWER_VECTOR_MASK, 2, false, VPMOVW2M, K_X, K_Y, K_Z, BUSTER_CHECK_X86_BW)
@@ -262,8 +311,15 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
     // Three vectors: the first is the destination. VPTERNLOG's immediate is its fourth argument and its mask its fifth.
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogd512_mask", CHECK_X86_LOWER_TERNARY, 4, 64, false, 3, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8, 0, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pternlogq512_mask", CHECK_X86_LOWER_TERNARY, 8, 64, false, 3, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpdpbusd512", CHECK_X86_LOWER_TERNARY, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPDPBUSD_Z_Z_ZM512, 0,
-                                BUSTER_X86_FEATURE(AVX512VNNI))
+    // The dot products of AVX-512VNNI: of bytes (unsigned by signed) and of words, each with signed saturation (`s`).
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpbusd", CHECK_X86_LOWER_TERNARY, 4, false, VPDPBUSD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512VNNI))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpbusds", CHECK_X86_LOWER_TERNARY, 4, false, VPDPBUSDS, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512VNNI))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpwssd", CHECK_X86_LOWER_TERNARY, 4, false, VPDPWSSD, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512VNNI))
+    BUSTER_CHECK_X86_FORMS("__builtin_ia32_vpdpwssds", CHECK_X86_LOWER_TERNARY, 4, false, VPDPWSSDS, X_X_XM128_EVEX, Y_Y_YM256_EVEX, Z_Z_ZM512,
+                           BUSTER_X86_FEATURE(AVX512VNNI))
     // VPERMT2's first table is its destination, its indices in vvvv and its second table in rm: the builtin's (a, indices, b).
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermi2vard512", CHECK_X86_LOWER_TERNARY, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPERMT2D_Z_Z_ZM512, 0, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermi2varq512", CHECK_X86_LOWER_TERNARY, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPERMT2Q_Z_Z_ZM512, 0, 0)
@@ -275,23 +331,32 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
                                 BUSTER_CHECK_X86_BW | BUSTER_X86_FEATURE(AVX512VBMI))
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_vpermi2varqi128", CHECK_X86_LOWER_TERNARY, 1, 16, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPERMT2B_X_X_XM128, 0,
                                 BUSTER_CHECK_X86_BW | BUSTER_X86_FEATURE(AVX512VBMI))
-    // Truncations under a mask: `other` is the result's bytes, and its passthrough's.
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdb512_mask", CHECK_X86_LOWER_TRUNCATE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDB_XM128_Z, 16, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdw512_mask", CHECK_X86_LOWER_TRUNCATE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDW_YM256_Z, 32, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqb512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQB_XM64_Z, 16, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqd512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQD_YM256_Z, 32, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqw512_mask", CHECK_X86_LOWER_TRUNCATE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQW_XM128_Z, 16, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDB_XM128_Z, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovdw512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 4, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVDW_YM256_Z, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQB_XM64_Z, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqd512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQD_YM256_Z, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovqw512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 8, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVQW_XM128_Z, 0, 0)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovwb512mem_mask", CHECK_X86_LOWER_TRUNCATE_STORE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVWB_YM256_Z, 0,
-                                BUSTER_CHECK_X86_BW)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovwb512_mask", CHECK_X86_LOWER_TRUNCATE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVWB_YM256_Z, 32,
-                                BUSTER_CHECK_X86_BW)
-    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pmovuswb512_mask", CHECK_X86_LOWER_TRUNCATE, 2, 64, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMOVUSWB_YM256_Z, 32,
-                                BUSTER_CHECK_X86_BW)
+    // Truncations under a mask: `other` is the result's bytes, and its passthrough's; and the masked truncating stores
+    // (`mem`), with the same forms into memory. Each of VPMOV's, VPMOVS's (signed saturation) and VPMOVUS's (unsigned)
+    // of doublewords to bytes and words and quadwords to bytes, words and doublewords at 16, 32 and 64 bytes, and of
+    // words to bytes with AVX-512BW, but for the builtins clang hasn't (pmovqd256_mask, pmovwb256_mask).
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmov", "db", 4, VPMOVDB, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmov", "dw", 4, VPMOVDW, XM64_X, XM128_Y, YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmov", "qb", 8, VPMOVQB, XM16_X, XM32_Y, XM64_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmov", "qw", 8, VPMOVQW, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATION("__builtin_ia32_pmovqd128", 8, 16, X86_FORM_VPMOVQD_XM64_X, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATION("__builtin_ia32_pmovqd512", 8, 64, X86_FORM_VPMOVQD_YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATION_STORES("__builtin_ia32_pmovqd", 8, VPMOVQD, XM64_X, XM128_Y, YM256_Z, 0)
+    BUSTER_CHECK_X86_TRUNCATION("__builtin_ia32_pmovwb128", 2, 16, X86_FORM_VPMOVWB_XM64_X, 16, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_TRUNCATION("__builtin_ia32_pmovwb512", 2, 64, X86_FORM_VPMOVWB_YM256_Z, 32, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_TRUNCATION_STORES("__builtin_ia32_pmovwb", 2, VPMOVWB, XM64_X, XM128_Y, YM256_Z, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "db", 4, VPMOVSDB, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "dw", 4, VPMOVSDW, XM64_X, XM128_Y, YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "qb", 8, VPMOVSQB, XM16_X, XM32_Y, XM64_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "qw", 8, VPMOVSQW, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "qd", 8, VPMOVSQD, XM64_X, XM128_Y, YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovs", "wb", 2, VPMOVSWB, XM64_X, XM128_Y, YM256_Z, 32, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "db", 4, VPMOVUSDB, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "dw", 4, VPMOVUSDW, XM64_X, XM128_Y, YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "qb", 8, VPMOVUSQB, XM16_X, XM32_Y, XM64_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "qw", 8, VPMOVUSQW, XM32_X, XM64_Y, XM128_Z, 16, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "qd", 8, VPMOVUSQD, XM64_X, XM128_Y, YM256_Z, 32, 0)
+    BUSTER_CHECK_X86_TRUNCATIONS("__builtin_ia32_pmovus", "wb", 2, VPMOVUSWB, XM64_X, XM128_Y, YM256_Z, 32, BUSTER_CHECK_X86_BW)
     // Gathers and scatters: `other` is the index's bytes, or a scatter's value's.
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_gathersiv16si", CHECK_X86_LOWER_GATHER, 4, 64, false, 4, X86_FORM_VPGATHERDD_Z_VM32Z, 64, 0)
     BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_gathersiv8di", CHECK_X86_LOWER_GATHER, 8, 64, false, 4, X86_FORM_VPGATHERDQ_Z_VM32Y, 32, 0)
@@ -353,6 +418,9 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
 #undef BUSTER_CHECK_X86_BINARIES
 #undef BUSTER_CHECK_X86_FORMS
 #undef BUSTER_CHECK_X86_ELEMENTS
+#undef BUSTER_CHECK_X86_TRUNCATIONS
+#undef BUSTER_CHECK_X86_TRUNCATION_STORES
+#undef BUSTER_CHECK_X86_TRUNCATION
 #undef BUSTER_CHECK_X86_WIDTHS
 #undef BUSTER_CHECK_X86_RULE
 
@@ -571,11 +639,13 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
         }
         else if (rule->family == CHECK_X86_LOWER_LOAD || rule->family == CHECK_X86_LOWER_STORE)
         {
-            // The load merges into W's register and leaves it in VECTOR(0); the store writes A's elements alone.
+            // The load merges into W's register and leaves it in VECTOR(0); the store writes A's elements alone. The move
+            // is the rule's form where it names one (the aligned and floating moves, and the expanding loads), else the
+            // element's VMOVDQU.
             const bool store = rule->family == CHECK_X86_LOWER_STORE;
+            const uint16_t move = rule->form != X86_FORM_NONE ? rule->form : check_x86_lower_move(rule->element, width, store);
             row->records[0] = check_x86_lower_record(check_x86_lower_mask_in(lanes), 1, 0, BUSTER_TIER0_ROLE_INTEGER(2));
-            row->records[1] = (X86Instruction){ .form = check_x86_lower_move(rule->element, width, store), .reg = v1, .rm = BUSTER_TIER0_ROLE_INTEGER(0),
-                                                .mode = BUSTER_X86_MEMORY_BASE, .decorations = 1 };
+            row->records[1] = (X86Instruction){ .form = move, .reg = v1, .rm = BUSTER_TIER0_ROLE_INTEGER(0), .mode = BUSTER_X86_MEMORY_BASE, .decorations = 1 };
             row->record_count = 2;
             if (!store)
             {
