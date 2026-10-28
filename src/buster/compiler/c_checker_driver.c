@@ -125,6 +125,7 @@ struct CheckDriverDiagnostic
     uint32_t token;
     const char* message;
     uint32_t position;
+    uint32_t completion;
 };
 
 // The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
@@ -174,6 +175,18 @@ static uint32_t check_driver_warning_position(const Parser* parser, const Prepro
         }
     }
     const uint32_t constant = input->constant_warnings != NULL && token < input->token_count ? input->constant_warnings[token] : 0;
+    if (warning == CHECK_WARNING_EXCESS_INITIALIZERS)
+    {
+        for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[parent];
+            if (role == PARSE_ROLE_CLOSE_INITIALIZER || role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+            {
+                boundary = parent + 1u;
+            }
+            parent = parser->tree.parents[parent];
+        }
+    }
     if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
     {
         const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
@@ -489,9 +502,11 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t located = phase == 2 ? extra[index].token : token;
                 const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
-                const uint32_t node = phase == 1 ? stream->reports[index].node : BUSTER_CHECK_NONE;
+                const uint32_t node = phase == 1 ? stream->reports[index].node :
+                                      phase == 2 && located < input->token_count && input->token_nodes != NULL ? input->token_nodes[located] : BUSTER_CHECK_NONE;
                 const uint32_t completion = phase == 0 ? input->reports[index].completion :
-                                            phase == 2 ? extra[index].position :
+                                            phase == 2 && extra[index].completion != 0 ? extra[index].completion :
+                                            phase == 2 && extra[index].position != located ? extra[index].position :
                                             node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
                 if (source != BUSTER_CHECK_NONE)
                 {
@@ -1568,7 +1583,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         {
                             promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
                         }
-                        if (!expression_valid || repairing || additional_count != 0 || promoted)
+                        if (!expression_valid || repairing || additional_count != 0 || promoted || pp.errors != 0)
                         {
                             CheckProgramDiagnostic control = { 0 };
                             const uint32_t control_before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
@@ -1576,7 +1591,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
                             {
                                 additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
-                                    control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position };
+                                    control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position,
+                                    control.position < tokens ? control.position + 1u : tokens };
                             }
                         }
                         if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL,
@@ -1610,7 +1626,12 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             .initializer_reference_count = data.reference_count,
                             .scalar = scalar,
                         };
-                        if (result == 0 && !check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch))
+                        const bool program_diagnostics = result == 0 ||
+                            (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp.errors != 0 &&
+                             !pp.diagnostic_collection_failed && !pp.history_failed);
+                        const bool program_checked = program_diagnostics &&
+                            check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch);
+                        if (program_diagnostics && !program_checked)
                         {
                             const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
                                                   program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
