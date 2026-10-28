@@ -77,6 +77,9 @@ static uint32_t check_program_declaring_scalar(const uint32_t* declarations, con
 // stored whole (vpcompressd to memory is 8 µops on Zen 5, the register form 2).
 static uint32_t check_program_declaring_vector(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
+#if !BUSTER_HOST_VECTOR
+    return check_program_declaring_scalar(declarations, nodes, limit, count, tokens);
+#else
     uint32_t written = 0;
     const __m512i bound = _mm512_set1_epi32((int)limit);
     __m512i index = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -93,11 +96,14 @@ static uint32_t check_program_declaring_vector(const uint32_t* declarations, con
         index = _mm512_add_epi32(index, _mm512_set1_epi32(16));
     }
     return written;
+#endif
 }
 
 static uint32_t check_program_declaring(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
 {
-    return scalar ? check_program_declaring_scalar(declarations, nodes, limit, count, tokens) :
+    (void)scalar;
+
+    return BUSTER_SCALAR_PATH(scalar) ? check_program_declaring_scalar(declarations, nodes, limit, count, tokens) :
                     check_program_declaring_vector(declarations, nodes, limit, count, tokens);
 }
 
@@ -115,6 +121,9 @@ static uint32_t check_program_needed_count_scalar(const uint8_t* needed, uint32_
 // The same, 64 objects at a time, the loads masked to the column.
 static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_t objects)
 {
+#if !BUSTER_HOST_VECTOR
+    return check_program_needed_count_scalar(needed, objects);
+#else
     uint32_t count = 0;
     for (uint32_t object = 0; object < objects; object += 64)
     {
@@ -123,6 +132,7 @@ static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_
         count += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(live, bytes, bytes));
     }
     return count;
+#endif
 }
 
 // Numbers the needed objects 1 to `objects` - 1 in object order: object_symbols[object] the object's symbol (from 1;
@@ -143,6 +153,9 @@ static void check_program_needed_number_scalar(const uint8_t* needed, uint32_t o
 // The same, finding the needed objects 64 at a time: few objects of a unit are needed, so a block of none is the rule.
 static void check_program_needed_number_vector(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
 {
+#if !BUSTER_HOST_VECTOR
+    check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
+#else
     SymbolId symbol = 0;
     for (uint32_t object = 0; object < objects; object += 64)
     {
@@ -157,16 +170,21 @@ static void check_program_needed_number_vector(const uint8_t* needed, uint32_t o
             found &= found - 1;
         }
     }
+#endif
 }
 
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar)
 {
-    return scalar ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
+    (void)scalar;
+
+    return BUSTER_SCALAR_PATH(scalar) ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
 }
 
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar)
 {
-    if (scalar)
+    (void)scalar;
+
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
     }
@@ -213,6 +231,8 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                       bool scalar, Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     CheckProgramSelection candidate = { .token = BUSTER_CHECK_NONE, .status = CHECK_PROGRAM_INVALID };
@@ -265,6 +285,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         // are in object order, so each declaration's object is found by stepping through the objects.
         uint32_t group = 0;
         for (uint32_t d = 0; d < data->declaration_count; d += 1)
+
         {
             const uint32_t token = (uint32_t)data->declaration_keys[d];
             const uint32_t object = (uint32_t)(data->declaration_keys[d] >> 32);
@@ -294,7 +315,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         {
             order[full->body_count + object] = ((uint64_t)data->objects[object].token << 32) | (full->body_count + object);
         }
-        order = c_bindings_sort(order, sorting, definitions, !scalar, UINT32_MAX);
+        order = c_bindings_sort(order, sorting, definitions, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX);
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
         {
             const uint32_t raw = (uint32_t)order[definition];
@@ -371,7 +392,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                                       .reference_source = sources, .reference_target = targets, .reference_kind = kinds };
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (scalar ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
         if (valid)
         {
             for (uint32_t selected = 0; selected < plan.selected_count; selected += 1)
@@ -479,12 +500,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             }
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-        candidate.program.symbol_count = check_program_needed_count(needed, objects, scalar);
+        candidate.program.symbol_count = check_program_needed_count(needed, objects, BUSTER_SCALAR_PATH(scalar));
         candidate.program.symbol_objects = candidate.program.symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.symbol_count) : 0;
         valid = valid && (candidate.program.symbol_count == 0 || candidate.program.symbol_objects != 0);
         if (valid)
         {
-            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, scalar);
+            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, BUSTER_SCALAR_PATH(scalar));
         }
     }
     if (valid)
@@ -512,7 +533,9 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
 static bool check_program_select(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, bool scalar,
                                  Arena* output, Arena* scratch)
 {
-    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, scalar, output, scratch);
+    (void)scalar;
+
+    return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), output, scratch);
 }
 
 #endif

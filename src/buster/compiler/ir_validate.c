@@ -14,6 +14,8 @@
 
 static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cfg, const Dominators* tree, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     IrUseBatch batch = { 0 };
     for (uint32_t instruction = 0; check.error == IR_OK && instruction < function->instruction_count; instruction += 1)
@@ -39,7 +41,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
                 batch.count += 1;
                 if (batch.count == BUSTER_IR_VECTOR_COUNT)
                 {
-                    check = ir_check_use_batch(&batch, true, vector);
+                    check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
                     batch.count = 0;
                 }
             }
@@ -47,7 +49,7 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
     }
     if (check.error == IR_OK && batch.count != 0)
     {
-        check = ir_check_use_batch(&batch, true, vector);
+        check = ir_check_use_batch(&batch, true, BUSTER_VECTOR_PATH(vector));
     }
     if (check.error == IR_OK)
     {
@@ -58,6 +60,8 @@ static IrCheck ir_validate_reachable(const IrFunction* function, const IrCfg* cf
 
 static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* function, Arena* scratch, bool vector)
 {
+    (void)vector;
+
     IrCheck check = ir_check(IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
     const uint64_t mark = scratch != 0 ? scratch->length : 0;
     Arena columns = { 0 };
@@ -78,7 +82,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
             temporary.base = base + left_bytes;
             temporary.capacity = available - left_bytes;
             // Keep all existing structural, type, phi coverage and same-block ordering checks, including dead code.
-            check = vector ? ir_verify(function, &temporary, 0) : ir_verify_scalar(function, &temporary, 0);
+            check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, &temporary, 0) : ir_verify_scalar(function, &temporary, 0);
             IrCfg cfg = { 0 };
             if (check.error == IR_OK)
             {
@@ -100,7 +104,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                 const uint64_t retained = (uint64_t)cfg.block_count * (sizeof(DominatorFrame) + 3 * sizeof(uint32_t)) + 126;
                 const uint64_t budget = temporary.capacity > retained ? temporary.capacity - retained : 0;
                 const DominatorOptions options = {
-                    .path = vector ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
+                    .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_AUTO : DOMINATOR_SCALAR,
                     .outputs = 0,
                     .max_matrix_bytes = budget < BUSTER_IR_VALIDATE_MATRIX_BYTES ? budget : BUSTER_IR_VALIDATE_MATRIX_BYTES,
                 };
@@ -108,7 +112,7 @@ static __attribute__((unused)) IrCheck ir_verify_complete(const IrFunction* func
                 const DominatorStatus status = dominators_analyze(&columns, &temporary, &graph, options, &tree);
                 if (status == DOMINATOR_OK)
                 {
-                    check = ir_validate_reachable(function, &cfg, &tree, vector);
+                    check = ir_validate_reachable(function, &cfg, &tree, BUSTER_VECTOR_PATH(vector));
                 }
                 else
                 {

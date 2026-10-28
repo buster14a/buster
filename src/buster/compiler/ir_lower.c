@@ -313,7 +313,9 @@ static const uint8_t ir_typed_floating_ops[64] = {
 // That replay is shared with its scalar twin, including count/place/fill.
 static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t* types, bool vector)
 {
-    if (vector)
+    (void)vector;
+
+    if (BUSTER_VECTOR_PATH(vector))
     {
         const __m512i integer_ops = _mm512_loadu_si512(ir_typed_integer_ops);
         const __m512i signed_ops = _mm512_loadu_si512(ir_typed_signed_ops);
@@ -544,6 +546,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
 
 static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
+    (void)vector;
+
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = {0};
@@ -673,14 +677,14 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     IrFunction candidate = {0};
     if (check.error == IR_OK)
     {
-        ir_typed_classify(input, ops, types, vector);
+        ir_typed_classify(input, ops, types, BUSTER_VECTOR_PATH(vector));
         const IrSizes sizes = ir_typed_count_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
         check.error = ir_create(output, &sizes, &candidate);
         if (check.error == IR_OK)
         {
             ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
             candidate.symbol_count = symbol_count;
-            check = vector ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+            check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
         }
     }
     if (check.error == IR_OK)
@@ -704,9 +708,15 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
 // future complete checker adapter must provide its actual prototype boundary.
 // Both paths preserve the input and caller's result on failure and reclaim all
 // scratch. Output, scratch, and input storage must be disjoint.
+static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result);
+
 static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
+#else
     return ir_lower_typed_path(input, result_type, symbol_count, output, scratch, result, true);
+#endif
 }
 
 static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)

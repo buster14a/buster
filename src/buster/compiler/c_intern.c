@@ -58,7 +58,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The predefined names
@@ -595,6 +595,9 @@ static __attribute__((noinline)) __m128i intern_chain_chunks(const uint8_t* byte
 // later chunks chained, then one mixing round before keeping the low qword.
 static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
 {
+#if !BUSTER_HOST_VECTOR
+    return intern_hash_bytes_scalar(bytes, length);
+#else
     const __mmask64 mask = length >= BUSTER_INTERN_VECTOR_BYTES ? ~0ull : _bzhi_u64(~0ull, (uint32_t)length);
     __m128i state = intern_fold(intern_with_length(_mm512_maskz_loadu_epi8(mask, bytes), length));
     if (length > BUSTER_INTERN_VECTOR_BYTES)
@@ -602,6 +605,7 @@ static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
         state = intern_chain_chunks(bytes, length, state);
     }
     return (uint64_t)_mm_cvtsi128_si64(_mm_aesenc_si128(state, _mm_setzero_si128()));
+#endif
 }
 
 // A key for intern_bucket_matches: the spelling's first 16 bytes (zero past its end) in each 128-bit lane.
@@ -636,7 +640,13 @@ BUSTER_INLINE IdentId intern_slot_id(const uint8_t* bucket, uint32_t bit)
 // The spelling's first 16 bytes, zero past its end.
 BUSTER_INLINE __m128i intern_first_bytes(const uint8_t* bytes, uint32_t length)
 {
+#if !BUSTER_HOST_VECTOR
+    __m128i result = _mm_setzero_si128();
+    memcpy(&result, bytes, length < 16 ? length : 16);
+    return result;
+#else
     return _mm_maskz_loadu_epi8((__mmask16)_bzhi_u32(0xFFFF, length < 16 ? length : 16), bytes);
+#endif
 }
 
 // The bytes of the buckets and spans of a table of `buckets` buckets, from the start of a mapping (so aligned), and the
@@ -674,6 +684,26 @@ static bool intern_lay_out(InternTable* table, Arena* arena, uint64_t buckets)
 // its probe sequence: its bucket, then the next ones.
 static void intern_place(InternTable* table, __m128i slot, uint64_t hash)
 {
+#if !BUSTER_HOST_VECTOR
+    uint64_t bucket = hash & table->bucket_mask;
+    bool placed = false;
+    while (!placed)
+    {
+        uint8_t* bucket_bytes = table->buckets + bucket * BUSTER_INTERN_BUCKET_BYTES;
+        for (uint32_t i = 0; !placed && i < BUSTER_INTERN_BUCKET_SLOTS; i += 1)
+        {
+            uint8_t* slot_bytes = bucket_bytes + i * BUSTER_INTERN_SLOT_BYTES;
+            IdentId existing;
+            memcpy(&existing, slot_bytes + BUSTER_INTERN_PREFIX_BYTES, sizeof(existing));
+            if (existing == 0)
+            {
+                memcpy(slot_bytes, &slot, sizeof(slot));
+                placed = true;
+            }
+        }
+        bucket = (bucket + 1) & table->bucket_mask;
+    }
+#else
     uint64_t bucket = hash & table->bucket_mask;
     uint32_t empties = 0;
     while (empties == 0)
@@ -687,13 +717,23 @@ static void intern_place(InternTable* table, __m128i slot, uint64_t hash)
         }
         bucket = (bucket + 1) & table->bucket_mask;
     }
+#endif
 }
 
 // The slot of spelling `id` from its first 16 bytes (`first`, zero past its end): the first BUSTER_INTERN_PREFIX_BYTES,
 // then the id in place of the rest.
 BUSTER_INLINE __m128i intern_slot(__m128i first, IdentId id)
 {
+#if !BUSTER_HOST_VECTOR
+    uint32_t words[4];
+    memcpy(words, &first, sizeof(words));
+    words[BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId)] = id;
+    __m128i result;
+    memcpy(&result, words, sizeof(result));
+    return result;
+#else
     return _mm_insert_epi32(first, (int)id, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+#endif
 }
 
 // Doubles the buckets (and the spans' room) and places every spelling again.
@@ -757,6 +797,30 @@ static IdentId intern_insert(InternTable* table, const uint8_t* bytes, uint32_t 
 // found by its prefix alone; a longer one is confirmed against its record), until a bucket with an empty slot.
 static IdentId intern_find_hashed(const InternTable* table, const uint8_t* bytes, uint32_t length, uint64_t hash)
 {
+#if !BUSTER_HOST_VECTOR
+    uint64_t bucket = hash & table->bucket_mask;
+    IdentId result = 0;
+    bool done = false;
+    while (!done)
+    {
+        const uint8_t* bucket_bytes = table->buckets + bucket * BUSTER_INTERN_BUCKET_BYTES;
+        bool empty = false;
+        for (uint32_t i = 0; !done && i < BUSTER_INTERN_BUCKET_SLOTS; i += 1)
+        {
+            IdentId id;
+            memcpy(&id, bucket_bytes + i * BUSTER_INTERN_SLOT_BYTES + BUSTER_INTERN_PREFIX_BYTES, sizeof(id));
+            empty |= id == 0;
+            if (id != 0 && table->spans[id].length == length && memcmp(table->records + table->spans[id].offset, bytes, length) == 0)
+            {
+                result = id;
+                done = true;
+            }
+        }
+        done |= empty;
+        bucket = (bucket + 1) & table->bucket_mask;
+    }
+    return result;
+#else
     const __m512i key = intern_bucket_key(intern_first_bytes(bytes, length));
     uint64_t bucket = hash & table->bucket_mask;
     IdentId result = 0;
@@ -779,6 +843,7 @@ static IdentId intern_find_hashed(const InternTable* table, const uint8_t* bytes
         bucket = (bucket + 1) & table->bucket_mask;
     }
     return result;
+#endif
 }
 
 // The id of a spelling with `hash` (intern_hash_bytes's), which is added if it is new. Returns 0 if a new spelling
@@ -806,6 +871,11 @@ static IdentId intern_find_or_add(InternTable* table, const uint8_t* bytes, uint
 // intern_find_or_add does; the vectorized refinement interns the identifiers it defers with it.
 static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* bytes, uint32_t length, uint64_t bucket_mask, uint64_t home)
 {
+#if !BUSTER_HOST_VECTOR
+    (void)bucket_mask;
+    (void)home;
+    return intern_find_or_add_hashed(table, bytes, length, intern_hash_bytes_scalar(bytes, length));
+#else
     const __m512i spelling = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length), bytes);
     const __m512i key = intern_bucket_key(_mm512_castsi512_si128(spelling));
     const __mmask64 compare_mask = _bzhi_u64(~0ull, length + 1);
@@ -852,6 +922,7 @@ static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* byte
         intern_place(table, intern_slot(_mm512_castsi512_si128(spelling), result), place);
     }
     return result;
+#endif
 }
 
 // intern_find_or_add_vector's insertion of a spelling of 1 to BUSTER_INTERN_FAST_LENGTH bytes, `spelling` (zero past its

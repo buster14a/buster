@@ -20,7 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_LIVENESS_MAX_MATRIX_BYTES (64ull << 20)
 
@@ -70,6 +70,8 @@ static uint32_t tier1_liveness_parameter_mask(uint32_t parameter)
 
 static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* plan, Arena* scratch, bool vector)
 {
+    (void)vector;
+
     const IrFunction* function = plan->function;
     const uint32_t count = function->instruction_count;
     Tier1LivenessError error = TIER1_LIVENESS_OK;
@@ -85,7 +87,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
     {
         // Dominance was already checked by the successful selector plan; this validates the borrowed IR's shape and
         // local rules without fabricating another dominance view. Mutation invalidates both the plan and this API.
-        const IrCheck check = vector ? ir_verify(function, scratch, 0) : ir_verify_scalar(function, scratch, 0);
+        const IrCheck check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, 0) : ir_verify_scalar(function, scratch, 0);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_LIVENESS_MEMORY : TIER1_LIVENESS_INVALID;
@@ -176,12 +178,14 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
 
 static uint32_t tier1_liveness_dense(const uint8_t* cross, uint32_t count, uint32_t* ids, uint32_t* values, bool vector)
 {
+    (void)vector;
+
     uint32_t dense = 0;
     if (count != 0)
     {
         memset(ids, 0xff, (uint64_t)count * sizeof(ids[0]));
     }
-    if (vector)
+    if (BUSTER_VECTOR_PATH(vector))
     {
         const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
         const __m512i prefixes = _mm512_setr_epi32(0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095, 8191, 16383, 32767);
@@ -217,7 +221,9 @@ static uint32_t tier1_liveness_dense(const uint8_t* cross, uint32_t count, uint3
 // rather than scattering or losing duplicate-word updates. A row has whole 512-bit vectors, initialized to zero.
 static void tier1_liveness_set_row(uint64_t* row, const uint32_t* ids, uint32_t count, bool vector)
 {
-    if (vector)
+    (void)vector;
+
+    if (BUSTER_VECTOR_PATH(vector))
     {
         const __mmask16 tail = (__mmask16)((1u << count) - 1);
         const __m512i values = _mm512_maskz_loadu_epi32(tail, ids);
@@ -255,6 +261,8 @@ static void tier1_liveness_set_row(uint64_t* row, const uint32_t* ids, uint32_t 
 
 static void tier1_liveness_rows(const Tier1SelectPlan* plan, const IrCfg* cfg, const uint32_t* dense_ids, Dataflow* dataflow, bool vector)
 {
+    (void)vector;
+
     const IrFunction* function = plan->function;
     if (dataflow->row_words != 0)
     {
@@ -274,7 +282,7 @@ static void tier1_liveness_rows(const Tier1SelectPlan* plan, const IrCfg* cfg, c
                     const uint32_t value = plan->effective_use_values[first + lane];
                     ids[lane] = cfg->instruction_blocks[value] != block || function->op[value] == IR_PARAM ? dense_ids[value] : BUSTER_IR_NONE;
                 }
-                tier1_liveness_set_row(use, ids, count, vector);
+                tier1_liveness_set_row(use, ids, count, BUSTER_VECTOR_PATH(vector));
             }
             for (uint32_t first = first_node; first < end_node; first += 16)
             {
@@ -285,7 +293,7 @@ static void tier1_liveness_rows(const Tier1SelectPlan* plan, const IrCfg* cfg, c
                     // PARAM emits no definition on an entry backedge: the original incoming value must survive.
                     ids[lane] = function->op[first + lane] == IR_PARAM ? BUSTER_IR_NONE : dense_ids[first + lane];
                 }
-                tier1_liveness_set_row(def, ids, count, vector);
+                tier1_liveness_set_row(def, ids, count, BUSTER_VECTOR_PATH(vector));
             }
         }
     }
@@ -323,6 +331,8 @@ static void tier1_liveness_envelopes(const IrFunction* function, const Dataflow*
 
 static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tier1SelectPlan* plan, Arena* output, Arena* scratch, bool vector, Tier1Liveness* result)
 {
+    (void)vector;
+
     const bool arguments = plan && plan->function && output && scratch && output != scratch && output->base != scratch->base && result;
     Tier1LivenessError error = arguments ? TIER1_LIVENESS_OK : TIER1_LIVENESS_INVALID;
     const uint64_t output_mark = arguments ? output->length : 0;
@@ -333,7 +343,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
     IrCfg cfg = { 0 };
     if (error == TIER1_LIVENESS_OK)
     {
-        error = tier1_liveness_validate_plan(plan, scratch, vector);
+        error = tier1_liveness_validate_plan(plan, scratch, BUSTER_VECTOR_PATH(vector));
     }
     if (error == TIER1_LIVENESS_OK)
     {
@@ -382,7 +392,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
     Dataflow dataflow = { 0 };
     if (error == TIER1_LIVENESS_OK)
     {
-        live.cross_block_values = tier1_liveness_dense(cross, count, dense_ids, dense_values, vector);
+        live.cross_block_values = tier1_liveness_dense(cross, count, dense_ids, dense_values, BUSTER_VECTOR_PATH(vector));
         const uint64_t row_words = ((uint64_t)live.cross_block_values + 511) / 512 * 8;
         live.matrix_bytes = 4 * (uint64_t)function->block_count * row_words * sizeof(uint64_t);
         if (live.matrix_bytes > BUSTER_TIER1_LIVENESS_MAX_MATRIX_BYTES)
@@ -448,7 +458,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
         {
             memcpy(dataflow.successors, cfg.successors, (uint64_t)cfg.edge_count * sizeof(uint32_t));
         }
-        tier1_liveness_rows(plan, &cfg, dense_ids, &dataflow, vector);
+        tier1_liveness_rows(plan, &cfg, dense_ids, &dataflow, BUSTER_VECTOR_PATH(vector));
         live.scratch_bytes = scratch->length - scratch_mark + (uint64_t)function->block_count * (sizeof(DataflowVisit) + 1) + 2 * _Alignof(DataflowVisit);
         if (!dataflow_postorder(&dataflow, scratch))
         {
@@ -456,7 +466,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
         }
         else
         {
-            live.iterations = vector ? dataflow_liveness_vector(&dataflow) : dataflow_liveness_scalar(&dataflow);
+            live.iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&dataflow) : dataflow_liveness_scalar(&dataflow);
             tier1_liveness_envelopes(function, &dataflow, dense_values, intervals, starts, ends);
             live.allocation = (Tier1AllocationInput){
                 .starts = starts,

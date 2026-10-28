@@ -140,6 +140,8 @@ static bool check_builtin_typed_overflow_prepare(TypeTable* table, const CheckBu
 
 static __attribute__((unused)) void check_builtin_typed_overflow(TypeTable* table, const CheckBuiltinAction* actions, CheckBuiltinTypedOverflowResult* results, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     for (uint32_t first = 0; first < count;)
     {
         const uint32_t lanes = count - first < BUSTER_CBUILTIN_LANES ? count - first : BUSTER_CBUILTIN_LANES;
@@ -154,7 +156,7 @@ static __attribute__((unused)) void check_builtin_typed_overflow(TypeTable* tabl
         }
         if (any)
         {
-            check_builtins(table, converted, folded, lanes, scalar);
+            check_builtins(table, converted, folded, lanes, BUSTER_SCALAR_PATH(scalar));
             for (uint32_t lane = 0; lane < lanes; lane += 1)
             {
                 if (accepted[lane])
@@ -179,7 +181,9 @@ static __attribute__((unused)) void check_builtin_typed_overflow(TypeTable* tabl
 
 static __attribute__((unused)) void check_builtin_typed_overflow_one(TypeTable* table, const CheckBuiltinAction* action, CheckBuiltinTypedOverflowResult* result, bool scalar)
 {
-    check_builtin_typed_overflow(table, action, result, 1, scalar);
+    (void)scalar;
+
+    check_builtin_typed_overflow(table, action, result, 1, BUSTER_SCALAR_PATH(scalar));
 }
 
 #endif

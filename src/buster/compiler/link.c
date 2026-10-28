@@ -82,7 +82,7 @@
 #include <string.h>
 
 // CPU architecture dependent includes
-#include <immintrin.h>
+#include "host_isa.h"
 
 // The linkage of the linker's entry points that main.c's units compile in one of them, their home, and call there
 // (main.c), in the modules that build on this file (import.c, runtime.c, bind.c, executable.c, dynamic.c and
@@ -670,6 +670,12 @@ static __m512i link_hash_rows(const __m512i* rows, __m512i lengths)
 // A name past 64 bytes goes to link_hash.
 static void link_hash_names(const uint8_t* const* names, const uint32_t* lengths, uint64_t count, uint64_t* hashes)
 {
+#if !BUSTER_HOST_VECTOR
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        hashes[i] = link_hash(names[i], lengths[i]);
+    }
+#else
     for (uint64_t i = 0; i < count; i += BUSTER_LINK_HASH_BATCH)
     {
         const uint32_t batch = count - i < BUSTER_LINK_HASH_BATCH ? (uint32_t)(count - i) : BUSTER_LINK_HASH_BATCH;
@@ -692,6 +698,7 @@ static void link_hash_names(const uint8_t* const* names, const uint32_t* lengths
             }
         }
     }
+#endif
 }
 
 static NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length)

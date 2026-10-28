@@ -229,13 +229,13 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         if (builtin == CBUILTIN_UMULL_OVERFLOW)
         {
             CheckBuiltinTypedOverflowResult checked;
-            check_builtin_typed_overflow(reader->types, &action, &checked, 1, reader->parser->options.scalar);
+            check_builtin_typed_overflow(reader->types, &action, &checked, 1, BUSTER_SCALAR_PATH(reader->parser->options.scalar));
             result = checked.builtin.action;
         }
         else
         {
             CheckBuiltinResult checked;
-            check_builtins(reader->types, &action, &checked, 1, reader->parser->options.scalar);
+            check_builtins(reader->types, &action, &checked, 1, BUSTER_SCALAR_PATH(reader->parser->options.scalar));
             result = checked.action;
         }
     }

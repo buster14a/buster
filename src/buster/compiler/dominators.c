@@ -20,7 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_DOMINATOR_NONE UINT32_MAX
 #define BUSTER_DOMINATOR_VECTOR_WORDS 8
