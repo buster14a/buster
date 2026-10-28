@@ -238,7 +238,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 101 fixtures, 86 of the
+- `./build/compiler test-checker-deferred [--id-order N] [--keep]`: 101 fixtures, 86 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -246,7 +246,12 @@ passes every checker test.
   on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct binding
   resolution, the issue's cases on every lane their bodies can take
   (`CheckDeferred.every_lane`). The deferred result must be the vector path's
-  column for column, and each fixture says whether the reader merges it. A
+  column for column, and each fixture says whether the reader merges it. Each
+  fixture runs again with its identifiers' IDs in another order
+  ([#153](https://github.com/buster14a/buster/issues/153): the driver's
+  `--id-order` table, `check_driver_id_order`, from `--id-order N` on, 153 by
+  default), on 1 and 8 lanes through each resolution: the three paths must
+  still be alike, and the reader must merge it as before. A
   merged unit's bodies must run on the rule's lanes (`CheckDeferred.active`),
   in as many parts as a group of them cuts (`CheckDeferred.parts`), its reader
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
@@ -363,7 +368,8 @@ passes every checker test.
   bodies, the differences, and the units left to source order by reason.
 
 The 9700X job runs `test-checker-deferred`, c-testsuite's programs with
-`--deferred 8`, and the frozen SQLite source's check with `--deferred 8`.
+`--deferred 8` and the IDs in another order (`test-checker-corpus --id-order
+153`), and the frozen SQLite source's check with `--deferred 8`.
 
 On the 9700X, with #697's item 4 (the bodies above merged) and `--deferred 8`,
 each against clang 23.1.1: c-testsuite on the system's headers, as the 9700X

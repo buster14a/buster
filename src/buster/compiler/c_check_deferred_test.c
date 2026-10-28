@@ -6,7 +6,9 @@
 // vector path, and the vector path with every body read apart, which must give the vector path's results exactly,
 // column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
 // direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
-// whether the deferred reader must merge it or leave it to source order. A merged unit's bodies must run on that many
+// whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
+// in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 1 and 8 lanes through each
+// resolution: the paths must still be alike, and merge as before. A merged unit's bodies must run on that many
 // lanes, its reader be copied by one of them at least and by no more (#432's review), and its parts be as many as a
 // group of them cuts. Each fixture is read again on 8 lanes by the reader's rule of how many (one lane, and one more per
 // BUSTER_CHECK_DEFERRED_LANE_TOKENS, and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens, of
@@ -27,7 +29,7 @@
 // say so rather than read its columns, and the state's memory: a lane's arenas in one mapping, kept across readings and
 // unmapped by check_deferred_release.
 //
-//   ./build/compiler test-checker-deferred [--keep]
+//   ./build/compiler test-checker-deferred [--id-order N] [--keep]
 //
 // Include after c_check_corpus.c.
 
@@ -595,10 +597,20 @@ static int run_checker_deferred_tests(int count, char** arguments)
 {
     bool keep = false;
     bool valid = true;
+    uint64_t id_order = 153;
     for (int i = 0; i < count; i += 1)
     {
-        keep |= strcmp(arguments[i], "--keep") == 0;
-        valid &= strcmp(arguments[i], "--keep") == 0;
+        char* end = NULL;
+        if (strcmp(arguments[i], "--id-order") == 0 && i + 1 < count)
+        {
+            id_order = strtoull(arguments[++i], &end, 10);
+            valid &= end != arguments[i] && *end == 0;
+        }
+        else
+        {
+            keep |= strcmp(arguments[i], "--keep") == 0;
+            valid &= strcmp(arguments[i], "--keep") == 0;
+        }
     }
     char directory[] = "/tmp/buster-check-deferred-XXXXXX";
     valid = valid && mkdtemp(directory) != NULL;
@@ -615,6 +627,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
     uint64_t failures = 0;
     uint64_t merged = 0;
     uint64_t bodies = 0;
+    uint64_t ordered = 0;
     for (uint32_t f = 0; valid && f < fixtures; f += 1)
     {
         // The listed fixtures, the many bodies, and the rule's sides, which the reader reads by its own rule alone.
@@ -677,6 +690,34 @@ static int run_checker_deferred_tests(int count, char** arguments)
                             !outcome.equal ? "the scalar and vector paths differ" : "", outcome.deferred != expected ? (expected ? "not merged" : "merged") : "",
                             copied ? "" : " (not the rule's lanes, their parts or tokens, or its reader copied by too many of them or by none)",
                             sized_right ? "" : " (not the bodies' tokens it was made with, not the lanes it was made for, or its largest body not the first lane's)");
+                }
+            }
+        }
+        // With the identifiers' ids in another order (#153: check_corpus_id_ordered, by --id-order's N plus the fixture's
+        // index), on one lane and on 8 with every binding resolution: the paths must still be alike, and merge as before.
+        for (uint32_t l = 0; valid && l < 2; l += 1)
+        {
+            for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+            {
+                check_corpus_deferred_lanes = l == 0 ? 1 : 8;
+                check_corpus_deferred_bindings = modes[m];
+                check_corpus_deferred_every_lane = every;
+                check_corpus_id_ordered = true;
+                check_corpus_id_order = id_order + f;
+                CheckCorpusOutcome outcome;
+                check_corpus_measure(path, &options, false, true, &outcome);
+                check_corpus_id_ordered = false;
+                check_corpus_deferred_every_lane = true;
+                const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred == expected;
+                checks += 1;
+                failures += !passed;
+                ordered += 1;
+                if (!passed)
+                {
+                    fprintf(stderr, "test-checker-deferred: %s on %u lanes through %s, with the ids in another order (%" PRIu64 "): %s\n", name,
+                            check_corpus_deferred_lanes, mode_names[m], id_order + f, !outcome.prepared ? "not preprocessed" :
+                            !outcome.deferred_equal ? "the deferred result differs" : !outcome.equal ? "the scalar and vector paths differ" :
+                            expected ? "not merged" : "merged");
                 }
             }
         }
@@ -893,7 +934,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
         rmdir(directory);
     }
     arena_release(&option_arena);
-    printf("test-checker-deferred: %u fixtures, %" PRIu64 " checks, %" PRIu64 " merged, %" PRIu64 " bodies read apart, %" PRIu64 " failures%s\n", fixtures, checks,
-           merged, bodies, failures, valid ? "" : " (a fixture couldn't be written or preprocessed)");
+    printf("test-checker-deferred: %u fixtures, %" PRIu64 " checks (%" PRIu64 " with the ids in another order), %" PRIu64 " merged, %" PRIu64
+           " bodies read apart, %" PRIu64 " failures%s\n", fixtures, checks, ordered, merged, bodies, failures,
+           valid ? "" : " (a fixture couldn't be written or preprocessed, or an option is invalid)");
     return valid && failures == 0 ? 0 : 1;
 }

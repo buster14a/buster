@@ -8,6 +8,7 @@
 // each file of the command line that the checker accepts, the functions and objects its -c object defines with
 // clang -O0 -c's (#129, check_corpus_symbols_file), and --symbols-minimum N fails the run unless at least N files'
 // objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
+// --id-order N checks each file with its identifiers' ids in another order, as the driver's --id-order gives them (#153).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
@@ -2158,6 +2159,12 @@ struct CheckCorpusOutcome
     char spelling[96];
 };
 
+// With check_corpus_id_ordered (--id-order N, and test-checker-deferred's runs), check_corpus_measure hands the unit's
+// identifiers their ids in another order by check_corpus_id_order, as the driver's --id-order does (check_driver_id_order,
+// #153): its paths' results must still be alike, and clang's.
+static bool check_corpus_id_ordered;
+static uint64_t check_corpus_id_order;
+
 // Preprocesses `file` and checks it on the scalar path and, when `both`, on the vector path too, which must give the
 // same results exactly (`equal`; true when the vector path doesn't run). With --deferred, a third path, the vector
 // path's with every body read apart (#113, check_input_deferred), must give the vector path's results exactly too.
@@ -2171,7 +2178,8 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     const uint32_t count = both ? (check_corpus_deferred_lanes != 0 ? 3 : 2) : 1;
     paths[2].deferred_lanes = check_corpus_deferred_lanes;
     paths[2].deferred_bindings = check_corpus_deferred_bindings;
-    bool prepared = intern_initialize(&identifiers) && pp_initialize(&pp, options, &identifiers);
+    bool prepared = intern_initialize(&identifiers) && (!check_corpus_id_ordered || check_driver_id_order(&identifiers, options, file, check_corpus_id_order)) &&
+                    pp_initialize(&pp, options, &identifiers);
     prepared = prepared && pp_run(&pp, file);
     bool accepted[3] = { false, false, false };
     for (uint32_t path = 0; prepared && path < count; path += 1)
@@ -2826,6 +2834,8 @@ static int run_checker_corpus(int count, char** arguments)
     bool rejections = false;
     bool symbols_requested = false;
     uint64_t symbols_minimum = 0;
+    bool id_ordered = false;
+    uint64_t id_order = 0;
     const uint32_t file_capacity = 1u << 20;
     char** files = calloc(file_capacity, sizeof(char*));
     char** inputs = calloc((size_t)count + 1, sizeof(char*));
@@ -2855,7 +2865,7 @@ static int run_checker_corpus(int count, char** arguments)
                            strcmp(argument, "--root") == 0 || strcmp(argument, "--reports") == 0 || strcmp(argument, "--limit") == 0 ||
                            strcmp(argument, "--random") == 0 || strcmp(argument, "--mutations") == 0 || strcmp(argument, "--semantic-mutations") == 0 ||
                            strcmp(argument, "--seed") == 0 || strcmp(argument, "--minimize") == 0 || strcmp(argument, "--deferred") == 0 ||
-                           strcmp(argument, "--deferred-bindings") == 0 || strcmp(argument, "--symbols-minimum") == 0;
+                           strcmp(argument, "--deferred-bindings") == 0 || strcmp(argument, "--symbols-minimum") == 0 || strcmp(argument, "--id-order") == 0;
         if (value)
         {
             valid = i + 1 < count;
@@ -2896,8 +2906,10 @@ static int run_checker_corpus(int count, char** arguments)
                                             strcmp(argument, "--mutations") == 0 ? &mutation_count : strcmp(argument, "--semantic-mutations") == 0 ? &semantic_count :
                                             strcmp(argument, "--seed") == 0 ? &seed : strcmp(argument, "--minimize") == 0 ? &minimize :
                                             strcmp(argument, "--deferred") == 0 ? &deferred_lanes :
-                                            strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum : &report_limit;
+                                            strcmp(argument, "--symbols-minimum") == 0 ? &symbols_minimum :
+                                            strcmp(argument, "--id-order") == 0 ? &id_order : &report_limit;
                     valid = check_corpus_number(text, destination);
+                    id_ordered |= destination == &id_order;
                     // A floor on the files compared asks for the comparison.
                     symbols_requested |= destination == &symbols_minimum;
                 }
@@ -3092,6 +3104,8 @@ static int run_checker_corpus(int count, char** arguments)
         check_corpus_deferred_lanes = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES ? (uint32_t)deferred_lanes : 0;
         check_corpus_deferred_bindings = deferred_bindings;
         check_corpus_symbols = symbols_requested ? &symbols : NULL;
+        check_corpus_id_ordered = id_ordered;
+        check_corpus_id_order = id_order;
         valid = deferred_lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES &&
                 check_corpus_files(&tally, files, selected, &options, clang, clang_arguments, clang_count, report, selection, rejections, report_limit,
                                    bases);
@@ -3106,7 +3120,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--id-order N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
                 "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)
