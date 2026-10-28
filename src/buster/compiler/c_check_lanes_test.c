@@ -410,6 +410,8 @@ static bool check_lanes_test_same(const CheckLanesTestEmission* a, const CheckLa
     return same && (a->size == 0 || memcmp(a->object, b->object, a->size) == 0);
 }
 
+#include "c_check_backend_startup_test.c"
+
 // `unit` emitted on one lane, then on 2, 3 and 8 lanes, every lane forced, on 8 with lanes 0, 1 and 7 each slow in
 // turn, and on 8 that can't be pinned, with and without -g's rows and unwind tables: each emission the one lane's, the
 // unpinned one run again on one lane, the others not. Returns how many emissions it compared, and `emitted` whether the
@@ -1370,6 +1372,7 @@ static int run_check_lanes_tests(int argc, char** argv)
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)
     {
+        check_lanes_test_backend_startup(&tally, directory);
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
         check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
         check_lanes_test_programs(&tally, directory, programs);
