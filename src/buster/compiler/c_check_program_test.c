@@ -2948,6 +2948,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}"
         "int tested(int n){return f(n&127,(short)(n&63));}", "kr-promoted-atomic-parameter-objects", clang);
+    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+    check_test_program_source(test,
+        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+        "kr-atomic-and-promoted-parameters", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.

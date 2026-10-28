@@ -517,10 +517,16 @@ adjusted as a parameter's, under C17 6.9.1p6's constraints:
 A struct, union or enum defined in the list, and a variably modified
 parameter there, are still refused by name. An identifier list outside a
 definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+Inline deferred type specifiers such as `_Atomic(T)` in the declaration list
+remain outside this reader; the equivalent `_Atomic T` qualifier form and
+previously declared typedefs are accepted.
 
 The definition retains a prototype of its parameters' default argument
 promotions for compatibility checking and ABI lowering, as clang types it
 (`float f(a) float a; { ... }` has that internal signature `float (double)`).
+As in clang, `_Atomic` parameters retain their declared ABI types instead:
+`_Atomic float` is not promoted to double, and an atomic aggregate keeps its
+storage padding. Known calls retain these ABI types as well as their value conversions.
 At expression uses its designator instead has a no-prototype type. Known
 direct calls, including an addressed function, retain the definition's
 argument conversions, but a wrong argument count is a warning rather than

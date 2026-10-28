@@ -2631,8 +2631,10 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
         type = type_strip_aligned(types, type_element(types, type));
     }
     uint32_t parameters = 0;
-    const TypeId* parameter_types = type_parameters(types, type, &parameters);
     const uint8_t flags = types->types.flags[type_index(type)];
+    // Keep a known K&R signature's atomic ABI types even though its designator has no prototype.
+    const bool kr = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 && type_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_FUNCTION;
+    const TypeId* parameter_types = type_parameters(types, kr ? graph->types[node] : type, &parameters);
     const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
     CheckLowerAbi* abi = writer->abi;
     // What the parameters' and the arguments' types need that isn't lowered, the first one's (a struct or a union passes
@@ -6638,7 +6640,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
         {
             const TypeId declared_type = input->declared_types[parameter];
-            const TypeId parameter_type = kr ? type_default_argument_promote(types, type_unqualified(declared_type)) : declared_type;
+            const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
             const bool promoted = type_unqualified(parameter_type) != type_unqualified(declared_type);
             // A promoted argument's ABI slot is distinct from the declared object, including its requested alignment.
             const CheckInputAttributes* attributes = promoted ? NULL : input->attributes[parameter];
@@ -6663,8 +6665,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
             const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
                                             check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            if (((!promoted && (type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0) ||
-                 type_kind(types, type_strip_aligned(types, parameter_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+            if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                              type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
             {
                 writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
@@ -6680,7 +6682,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
              parameter != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK; parameter = input->parameter_next[parameter])
         {
             const TypeId declared_type = input->declared_types[parameter];
-            const TypeId incoming_type = type_default_argument_promote(types, type_unqualified(declared_type));
+            const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
             if (incoming_type != type_unqualified(declared_type))
             {
                 const CheckInputAttributes* attributes = input->attributes[parameter];
@@ -6697,8 +6699,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
                 const uint32_t local = alignment > 3 ? check_lower_object(writer, type_size(types, declared_type), alignment) :
                                                       check_lower_temporary(writer, class);
-                if (((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
-                     type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+                if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
                 {
                     writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                 }
