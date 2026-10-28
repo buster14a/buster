@@ -1383,6 +1383,52 @@ errors can be reported even when a later declaration or parser error prevents
 full checking. Recovery only supplies diagnostic fragments; the original
 rejection remains final and cannot emit an object.
 
+The source driver caps its published errors as Clang 23 does (#669): nineteen
+ordinary errors by default, followed, only if another error occurs, by the fatal
+`too many errors emitted` diagnostic. Explicit `-ferror-limit=N` permits N
+ordinary errors before that fatal diagnostic, and zero leaves them unlimited.
+Warnings do not consume the error budget; each accepted diagnostic keeps its
+macro notes, while the cutoff has neither a location nor notes. Suppressed
+warnings (`-w`) do not enter the counts. The final line gives the published
+warning and error totals with Clang's singular/plural spelling; clean units print
+no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
+does in Clang. Both output paths share the publication gate, including deferred
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
+graph's construction.
+
+The source driver collects preprocessing, parser and checker groups before
+publication (#698). Their order follows expansion-output boundaries and proven
+semantic completion points, independently of the diagnostic's located token.
+For example, an earlier missing name precedes a later `#error`; runtime shift
+warnings complete after their function's closing brace and its lookahead, so
+an EOF preprocessing diagnostic can precede that warning. Required constant
+evaluation retains its own expression-completion boundary in a sparse warning
+fact. Include stacks and macro/explicit notes are rendered with their primary
+after the final order is known. The shared gate then counts only published
+groups and applies the error budget once. Standalone preprocessing retains
+immediate publication.
+
+A nonfatal preprocessing error leaves the source stream available for
+diagnostics. A real preprocessing fatal leaves only its produced prefix;
+existing complete-declaration/statement recovery can diagnose safe original
+fragments there. Either outcome remains a rejected unit and cannot replace an
+object file, even if the final budget hides a later error. Diagnostic capture
+exhaustion also rejects the unit and publishes one fatal rather than accepting
+an incompletely diagnosed warning-only source. Failed history replays keep
+queued groups' backing alive or replace a silent failure safely.
+
+After the whole declaration/body resolver has completed, ordinary missing-name
+binding reports can retain independent later declarations (#699). Two bounded
+forest passes give each rejected top-level declaration its earlier safe graph
+prefix; independent declarations keep their full graphs. Missing operands
+acquire no invented value or type. Initializer, assembly and control scans use
+the same local completion cuts, including whole-switch completion barriers,
+and independent tentative-definition constraints still run at translation-unit
+end. Type-query/declarator failures, unsupported pragmas, resource failures and
+unfinished resolver states retain the conservative prefix. Repaired/deferred
+views do not enable this new binding recovery. All these views remain
+diagnostic-only and preserve the original source rejection.
+
 ### What the lowering costs (#531)
 
 On the 9700X, the lowering (`check_lower_prepare`, then the bodies'

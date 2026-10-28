@@ -124,6 +124,7 @@ struct CheckDriverDiagnostic
     uint32_t token;
     const char* message;
     uint32_t position;
+    uint32_t completion;
 };
 
 // The warnings a token has, as check_driver_reports sorts and walks them: a key whose high half is the token, then the
@@ -134,6 +135,82 @@ static uint64_t check_driver_warning_key(uint32_t token, uint32_t flags, uint32_
 {
     return (uint64_t)token << 32 | (uint64_t)(uint16_t)flags << 16 | (uint16_t)enabled;
 }
+
+static uint32_t check_driver_publication_position(const Parser* parser, const Preprocessor* pp, uint32_t boundary)
+{
+    return boundary < parser->tokens.count ? parser->tokens.sources[boundary] :
+           boundary == parser->tokens.count ? pp->output.count : pp->output.count + 1u;
+}
+
+// Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
+// brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
+// sparse warning; no clean unit acquires a token-wide completion column.
+static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
+                                              const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning)
+{
+    const uint32_t runtime = CHECK_WARNING_INTEGER_OVERFLOW | CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW |
+                             CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW;
+    uint32_t boundary = token;
+    bool completed = false;
+    uint32_t low = 0;
+    uint32_t high = completion_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = (completions[middle] >> 32) < token;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    // The stable token sort preserves append order, so the final matching rewrite supplies its completion. Each
+    // token has at most eight legacy warning bits: all such lookups inspect at most eight times the sparse facts.
+    for (uint32_t i = low; i < completion_count && (completions[i] >> 32) == token; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + (uint32_t)completions[i];
+        if (event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id < 8 && event->payload.data == warning)
+        {
+            boundary = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ? parser->tokens.count + 1u :
+                       event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u);
+            completed = true;
+        }
+    }
+    const uint32_t constant = input->constant_warnings != NULL && token < input->token_count ? input->constant_warnings[token] : 0;
+    if (warning == CHECK_WARNING_EXCESS_INITIALIZERS)
+    {
+        for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[parent];
+            if (role == PARSE_ROLE_CLOSE_INITIALIZER || role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+            {
+                boundary = parent + 1u;
+            }
+            if (role == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+            {
+                break;
+            }
+            parent = parser->tree.parents[parent];
+        }
+    }
+    if (!completed && (warning & runtime) != 0 && (constant & warning) == 0)
+    {
+        const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        if (node < input->graph.count && input->graph.source_positions != NULL)
+        {
+            boundary = input->graph.source_positions[node];
+        }
+        for (uint32_t parent = token, steps = 0; parent < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+        {
+            if (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY)
+            {
+                boundary = repair != NULL && parent >= repair->original_end ? parser->tokens.count + 1u : parent + 1u;
+                break;
+            }
+            parent = parser->tree.parents[parent];
+        }
+    }
+    return check_driver_publication_position(parser, pp, boundary);
+}
+
+#include "c_check_warning_render.c"
 
 static void check_driver_pragma_report(Preprocessor* pp, const CheckInput* input, const CheckInputFpPragma* record, bool quiet)
 {
@@ -240,15 +317,24 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
     const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
+    const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* report_sorting = report_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
     uint64_t* warning_keys = fits && show_warnings ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
     uint64_t* warning_sorting = warning_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, warning_room) : NULL;
-    const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL);
+    uint64_t* completion_keys = completion_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, completion_count) : NULL;
+    uint64_t* completion_sorting = completion_keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, completion_count) : NULL;
+    const bool ready = fits && (!reports || report_sorting != NULL) && (!show_warnings || warning_sorting != NULL) &&
+                       (completion_count == 0 || (completion_sorting != NULL && input->warning_events.events != NULL));
     if (ready)
     {
+        for (uint32_t i = 0; i < completion_count; i += 1)
+        {
+            completion_keys[i] = (uint64_t)input->warning_events.events[i].token << 32 | i;
+        }
+        const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
         uint32_t report_total = 0;
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
@@ -396,7 +482,8 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-                    pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s", check_diagnostic_message(warning_flag));
+                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag);
+                    pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "%s", check_diagnostic_message(warning_flag));
                 }
                 flags &= flags - 1;
             }
@@ -420,10 +507,25 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                      check_driver_input_report_message(input, input->reports + index);
-                const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                const uint32_t located = phase == 2 ? extra[index].token : token;
+                const uint32_t requested = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
+                const uint32_t node = phase == 1 ? stream->reports[index].node :
+                                      phase == 2 && located < input->token_count && input->token_nodes != NULL ? input->token_nodes[located] : BUSTER_CHECK_NONE;
+                const uint32_t completion = phase == 0 ? input->reports[index].completion :
+                                            phase == 2 && extra[index].completion != 0 ? extra[index].completion :
+                                            phase == 2 && extra[index].position != located ? extra[index].position :
+                                            node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
                 if (source != BUSTER_CHECK_NONE)
                 {
-                    pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    if (completion != 0)
+                    {
+                        pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, check_driver_publication_position(parser, pp, completion), "%s", message);
+                    }
+                    else
+                    {
+                        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    }
                 }
                 else
                 {
@@ -1310,7 +1412,16 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
             bool original_pragmas_ready = false;
             bool original_pragmas_printed = false;
             check_clock_mark(stage_clock, CHECK_STAGE_SETUP);
+            pp.options.collect_diagnostics = true;
             ready = pp_run(&pp, path);
+            if (!ready && pp.errors != 0 && !pp.diagnostic_collection_failed && !pp.history_failed)
+            {
+                // Only the produced source prefix is parsed after a real preprocessing fatal. Nonfatal errors
+                // leave the whole stream. Either remains a rejected unit, independent of publication's cutoff.
+                pp.fatal = false;
+                ready = true;
+            }
+            pp.diagnostic_source = true;
             check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
             // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
             memcpy(pp_ticks, pp.ticks, sizeof(pp_ticks));
@@ -1472,6 +1583,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         }
                         uint32_t promoted_token = BUSTER_CHECK_NONE;
                         bool promoted = !quiet && check_diagnostic_first_error(&input, &stream, &promoted_token);
+                        promoted |= check_driver_warning_promoted(&pp, &input, &input.warning_events, repairing ? &repair : NULL);
                         uint32_t promoted_source = BUSTER_CHECK_NONE;
                         const CheckInput* pragma_input = original_pragmas_ready ? &original_pragmas : &input;
                         const uint32_t pragma_end = original_pragmas_ready || !repairing ? BUSTER_CHECK_NONE : check_repair_pragma_end(&repair);
@@ -1480,7 +1592,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         {
                             promoted = check_diagnostic_severity(&input, excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS) >= CHECK_WARNING_ERROR;
                         }
-                        if (!expression_valid || repairing || additional_count != 0 || promoted)
+                        if (!expression_valid || repairing || additional_count != 0 || promoted || pp.errors != 0)
                         {
                             CheckProgramDiagnostic control = { 0 };
                             const uint32_t control_before = repairing ? repair.record_begin : BUSTER_CHECK_NONE;
@@ -1488,12 +1600,14 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                             if ((control_diagnosed && control.status != CHECK_PROGRAM_OK) || control.status == CHECK_PROGRAM_RESOURCE)
                             {
                                 additional[additional_count++] = (CheckDriverDiagnostic){ control.token,
-                                    control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position };
+                                    control.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" : "invalid C statement or control flow", control.position,
+                                    control.position < tokens ? control.position + 1u : tokens };
                             }
                         }
                         if (!check_driver_reports(checking, &pp, &input, &stream, repairing ? &repair : NULL,
                                                   original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
-                                                  excess_tokens, excess_count, quiet, &scratch))
+                                                  excess_tokens, excess_count, quiet, &scratch) ||
+                            !check_driver_warning_events(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, &scratch))
                         {
                             fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                             ready = false;
@@ -1503,7 +1617,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         {
                             check_driver_dump(&input.graph, &stream, &types, &scratch);
                         }
-                        result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 ? 0 : 1;
+                        result = ready && expression_valid && additional_count == 0 && !repairing && pp.errors == 0 &&
+                                 !pp.diagnostic_collection_failed && !pp.history_failed ? 0 : 1;
                         CheckProgram program;
                         CheckDataPrepared data = { 0 };
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
@@ -1516,13 +1631,18 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         const CheckProgramOptions program_options = {
                             .initializers = &initializers,
                             .asms = &asms,
-                            .prepared_data = (emit_object || link) && !prefix_only ? &data : NULL,
+                            .prepared_data = result == 0 && (emit_object || link) && !prefix_only ? &data : NULL,
                             .identifiers = pp.table,
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
                             .scalar = scalar,
                         };
-                        if (result == 0 && !check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch))
+                        const bool program_diagnostics = result == 0 ||
+                            (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && pp.errors != 0 &&
+                             !pp.diagnostic_collection_failed && !pp.history_failed);
+                        const bool program_checked = program_diagnostics &&
+                            check_program(&program, checking, &input, &stream, &types, program_options, &output_arena, &scratch);
+                        if (program_diagnostics && !program_checked)
                         {
                             const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
                                                   program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
@@ -1582,7 +1702,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                 else
                 {
                     if (!check_driver_reports(checking, &pp, &input, NULL, repairing ? &repair : NULL,
-                                              original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch))
+                                              original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch) ||
+                        !check_driver_warning_events(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, &scratch))
                     {
                         fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                     }
@@ -1604,6 +1725,9 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+        pp_diagnostic_publish(&pp);
+        pp_diagnostic_summary(&pp);
+        result = pp.errors != 0 ? 1 : result;
         if (release)
         {
             parse_release(&parser);
