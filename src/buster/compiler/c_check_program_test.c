@@ -2045,27 +2045,30 @@ static void check_test_program_return_marks(CheckTest* test)
     TypeId function = ready ? type_function(&types.table, record, NULL, 0, 0) : 0;
     CheckOp* ops = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckOp, NODES);
     uint32_t* operands = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
+    uint32_t* seconds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
     uint32_t* absent = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES);
     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
     uint32_t* stack = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, NODES + 1);
     uint32_t* labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, CAPACITY + 1);
     CheckControlTask* tasks = BUSTER_ARENA_PUSH_ARRAY(&scratch, CheckControlTask, CAPACITY);
-    ready = ready && function != 0 && ops != NULL && operands != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
+    ready = ready && function != 0 && ops != NULL && operands != NULL && seconds != NULL && absent != NULL && marks != NULL && stack != NULL && labels != NULL && tasks != NULL;
     check_test_expect(test, ready, "return warning mark fixture has bounded graph and control scratch");
     for (uint32_t unsafe = 0; ready && unsafe < 2; unsafe += 1)
     {
         for (uint32_t node = 0; node < NODES; node += 1)
         {
             ops[node] = CHECK_OP_VALUE;
-            operands[node] = absent[node] = BUSTER_CHECK_NONE;
+            operands[node] = seconds[node] = absent[node] = BUSTER_CHECK_NONE;
             marks[node] = node == 0 ? unsafe : node % 2;
         }
-        ops[0] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
-        operands[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
+        ops[0] = unsafe ? CHECK_OP_COMMA : CHECK_OP_VALUE;
+        ops[1] = unsafe ? CHECK_OP_CALL : CHECK_OP_VALUE;
+        operands[0] = unsafe ? 2 : BUSTER_CHECK_NONE;
+        seconds[0] = unsafe ? 1 : BUSTER_CHECK_NONE;
         marks[NODES] = stack[NODES] = labels[CAPACITY] = UINT32_C(0x71625344);
         memset(tasks, 0xa5, (uint64_t)CAPACITY * sizeof(*tasks));
         const CheckInput input = { .token_count = TOKENS, .declared_types = &function,
-                                   .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = absent, .operand2 = absent } };
+                                   .graph = { .count = NODES, .ops = ops, .operand0 = operands, .operand1 = seconds, .operand2 = absent } };
         CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .body_count = 2 };
         CheckControl entries[] = { { .kind = CHECK_CONTROL_RETURN, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
         CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = CAPACITY };
@@ -2077,9 +2080,9 @@ static void check_test_program_return_marks(CheckTest* test)
         {
             same = marks[node] == (node == 0 ? unsafe : node % 2);
         }
-        // The early-stop path also queues its callee before stopping. Only these one or two ledger words may change.
+        // The call stops its comma expression with the other operand still queued. Only one or three ledger words change.
         const uint8_t* bytes = (const uint8_t*)tasks;
-        for (uint32_t byte = CAPACITY + (1 + unsafe) * sizeof(uint32_t); same && byte < CAPACITY + NODES; byte += 1)
+        for (uint32_t byte = CAPACITY + (1 + 2 * unsafe) * sizeof(uint32_t); same && byte < CAPACITY + NODES; byte += 1)
         {
             same = bytes[byte] == 0xa5;
         }

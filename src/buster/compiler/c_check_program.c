@@ -1319,7 +1319,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
 static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work)
 {
-    const CheckProgram* program = writer->program;
+    CheckProgram* program = writer->program;
     const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
@@ -1422,8 +1422,8 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                // Calls may be declared noreturn. Until that contract is carried by controls, avoid diagnosing a
-                // conservative fall-off after an expression containing a call or a terminal builtin.
+                // Calls may be declared noreturn. Query operands also affect Clang's source-flow warning even
+                // when unevaluated. Until these contracts reach controls, keep their warnings conservative.
                 if (pass != 0 && warning_safe && entry->node < graph->count && (node_marks[entry->node] & warning_mark) == 0)
                 {
                     uint32_t depth = 1;
@@ -1439,9 +1439,19 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         }
                         const CheckOp op = graph->ops[node];
                         warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
-                        if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+                        if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
                         {
                             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                            if (op == CHECK_OP_VARARGS)
+                            {
+                                const uint32_t effect = graph->argument_offsets[node];
+                                warning_safe = effect < program->stream->varargs_count && program->stream->varargs[effect].node == node;
+                                const uint32_t evaluated = warning_safe ? program->stream->varargs[effect].evaluated_operands : 0;
+                                for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                                {
+                                    operands[o] = (evaluated & (1u << o)) != 0 ? operands[o] : BUSTER_CHECK_NONE;
+                                }
+                            }
                             bool truth = false;
                             if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
                                 check_program_runtime_truth(program, node, operands[0], &truth))
@@ -1455,7 +1465,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                                     operands[1] = BUSTER_CHECK_NONE;
                                 }
                             }
-                            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                            for (uint32_t o = 0; warning_safe && o < BUSTER_ARRAY_LENGTH(operands); o += 1)
                             {
                                 const uint32_t operand = operands[o];
                                 if (operand < graph->count && (node_marks[operand] & warning_mark) == 0)
@@ -1463,6 +1473,21 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                                     node_marks[operand] |= warning_mark;
                                     touched[touched_count++] = operand;
                                     node_stack[depth++] = operand;
+                                }
+                            }
+                            if (warning_safe && check_graph_has_arguments(op))
+                            {
+                                const uint32_t mask = check_program_argument_mask(program, node);
+                                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+                                {
+                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+                                    const bool evaluated = op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
+                                    if (evaluated && argument < graph->count && (node_marks[argument] & warning_mark) == 0)
+                                    {
+                                        node_marks[argument] |= warning_mark;
+                                        touched[touched_count++] = argument;
+                                        node_stack[depth++] = argument;
+                                    }
                                 }
                             }
                         }
