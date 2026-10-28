@@ -1320,9 +1320,9 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_seen, uint32_t* node_stack, uint64_t* work)
 {
     const CheckProgram* program = writer->program;
-    const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
+    const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
-    const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
     if (program->status == CHECK_PROGRAM_OK && aggregate && body->count != 0 && body->count == body->entry_count)
     {
         CheckControl* entries = writer->entries + body->first;

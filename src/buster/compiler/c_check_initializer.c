@@ -997,6 +997,12 @@ static bool check_init_character(TypeId type)
 static uint32_t check_init_compound(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t begin, uint32_t end,
                                     uint32_t node, TypeId* root_type, uint64_t* source_offset)
 {
+    CheckInitSelection value_selection = *selected;
+    if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
+    {
+        value_selection.type = type_conversion_operand(walker->types, selected->type);
+        selected = &value_selection;
+    }
     uint32_t opener = BUSTER_CHECK_NONE;
     const uint8_t kind = type_kind(walker->types, type_strip_aligned(walker->types, selected->type));
     const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || check_vector_type(walker->types, selected->type);
@@ -1556,7 +1562,10 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
         }
         if (type_is_valid(walker->types, source))
         {
-            const TypeAnswer compatible = type_compatible(walker->types, type, type_unqualified(type_strip_aligned(walker->types, source)));
+            const TypeId target = type_kind(walker->types, type_strip_aligned(walker->types, source)) == BUSTER_TYPE_KIND_ATOMIC
+                                      ? type_unqualified(type_strip_aligned(walker->types, selected->type))
+                                      : type;
+            const TypeAnswer compatible = type_compatible(walker->types, target, type_unqualified(type_strip_aligned(walker->types, source)));
             whole = compatible == TYPE_ANSWER_YES;
             if (compatible == TYPE_ANSWER_FULL)
             {
@@ -2162,12 +2171,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .scratch = scratch,
             .result = result,
         };
-        const TypeId plain = type_conversion_operand(types, type);
-        const uint8_t kind = type_kind(types, plain);
-        const bool atomic_record = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC &&
-                                   (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX);
-        const TypeId value = atomic_record ? plain : type;
-        valid = check_init_walk(&walker, value, begin, end);
+        valid = check_init_walk(&walker, type, begin, end);
     }
     if (scratch != 0)
     {
