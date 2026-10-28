@@ -450,6 +450,7 @@ static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 #define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
 #define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
 #define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
+#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
 #define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
 
 // A type's facts (BUSTER_CHECK_LOWER_TYPE_*): the rule that the table of every type's holds (check_lower_classify_types),
@@ -536,6 +537,92 @@ static void check_lower_classify_types(const TypeTable* types, uint32_t count, u
             facts[index] = check_lower_type_facts(types, type);
         }
     }
+}
+
+// A record's volatile subobjects are computed once before bodies share this immutable column. Pointer pointees are
+// not contained storage. The explicit memoized DFS visits each type and by-value edge once, with no depth cap.
+// A bounded member scan avoids the graph and its scratch when the unit has no volatile member.
+static bool check_lower_copy_type_facts(const TypeTable* types, uint32_t count, uint8_t* facts, Arena* scratch, bool scalar)
+{
+    bool needed = false;
+    const uint32_t members = types->members.count;
+    if (scalar)
+    {
+        for (uint32_t m = 1; !needed && m < members; m += 1)
+        {
+            needed = (type_qualifiers(types->members.type[m]) & BUSTER_TYPE_VOLATILE) != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t m = 1; !needed && m < members; m += 16)
+        {
+            const uint32_t left = members - m;
+            const __mmask16 active = left < 16 ? (__mmask16)((1u << left) - 1) : UINT16_MAX;
+            const __m512i values = _mm512_maskz_loadu_epi32(active, types->members.type + m);
+            needed = _mm512_test_epi32_mask(values, _mm512_set1_epi32(BUSTER_TYPE_VOLATILE)) != 0;
+        }
+    }
+    const uint64_t mark = scratch->length;
+    uint8_t* state = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint32_t* nodes = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint32_t* next = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    bool valid = !needed || (state != NULL && nodes != NULL && next != NULL);
+    if (needed && valid)
+    {
+        memset(state, 0, count);
+        for (uint32_t root = 0; valid && root < count; root += 1)
+        {
+            uint32_t depth = 0;
+            if (state[root] == 0)
+            {
+                nodes[depth] = root;
+                next[depth++] = 0;
+                state[root] = 1;
+            }
+            while (valid && depth != 0)
+            {
+                const uint32_t index = nodes[depth - 1];
+                const uint8_t kind = types->types.kind[index];
+                const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                const bool base = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+                const uint32_t tag = record ? types->types.index[index] : 0;
+                const uint32_t children = record ? types->tags.member_count[tag] : base ? 1 : 0;
+                const uint32_t child_at = next[depth - 1];
+                if (child_at == children || (facts[index] & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0)
+                {
+                    state[index] = 2;
+                    depth -= 1;
+                }
+                else
+                {
+                    const TypeId child = record ? types->members.type[types->tags.member_begin[tag] + child_at] : types->types.base[index];
+                    const uint32_t child_index = type_index(child);
+                    if ((type_qualifiers(child) & BUSTER_TYPE_VOLATILE) != 0)
+                    {
+                        facts[index] |= BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY;
+                    }
+                    else if (child_index >= count || state[child_index] == 1)
+                    {
+                        valid = false;
+                    }
+                    else if (state[child_index] == 2)
+                    {
+                        facts[index] |= facts[child_index] & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY;
+                        next[depth - 1] += 1;
+                    }
+                    else
+                    {
+                        nodes[depth] = child_index;
+                        next[depth++] = 0;
+                        state[child_index] = 1;
+                    }
+                }
+            }
+        }
+    }
+    scratch->length = mark;
+    return valid;
 }
 
 // A type's class (check_lower_type_class's) from the writer's table of every type's (check_lower_classify_types). The
@@ -1251,10 +1338,11 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
 
 static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
 
-static bool check_lower_copy_volatile(const CheckValue* source, TypeId destination)
+static bool check_lower_copy_volatile(const CheckLowerWriter* writer, const CheckValue* source, TypeId destination)
 {
     return ((type_qualifiers(source->type) | type_qualifiers(destination)) & BUSTER_TYPE_VOLATILE) != 0 ||
-           (source->flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+           (source->flags & BUSTER_CHECK_VOLATILE_PART) != 0 ||
+           ((check_lower_facts(writer, source->type) | check_lower_facts(writer, destination)) & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0;
 }
 
 // Aggregate comma, conditional and statement values forward an address after lvalue conversion erased its qualifier.
@@ -1272,12 +1360,12 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
     while (!volatile_copy && at < stream->count && budget != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
         budget -= 1;
-        volatile_copy = check_lower_copy_volatile(&stream->values[at], 0);
+        volatile_copy = check_lower_copy_volatile(writer, &stream->values[at], 0);
         uint32_t next = BUSTER_CHECK_NONE;
         if (!volatile_copy)
         {
             const CheckOp op = graph->ops[at];
-            if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE)
+            if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_CONVERT)
             {
                 next = graph->operand0[at];
             }
@@ -1319,11 +1407,11 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
 static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t node, TypeId destination)
 {
     const CheckValue* source = &writer->program->stream->values[node];
-    bool volatile_copy = check_lower_copy_volatile(source, destination);
+    bool volatile_copy = check_lower_copy_volatile(writer, source, destination);
     if (!volatile_copy && (source->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
     {
         const CheckOp op = writer->program->input->graph.ops[node];
-        if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
+        if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_CONVERT || op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
         {
             volatile_copy = check_lower_copy_forward_volatile(writer, node);
         }
@@ -4177,7 +4265,7 @@ static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart
 
 // Part `index` of plan `plan` written into frame object `object`, as tasks: its zeros or bytes (check_lower_fill), or
 // its value stored at its offset, or for an aggregate copied there.
-static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uint32_t index, uint32_t object)
+static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uint32_t index, uint32_t object, TypeId destination)
 {
     const TypeTable* types = writer->program->types;
     const CheckInitPart* write = &writer->program->initializers->plans[plan].parts[index];
@@ -4230,10 +4318,12 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     {
         if (aggregate)
         {
+            // Initializer plans carry a part's value type; the declared object's volatility still governs its stores.
+            const TypeId copy_type = write->type | type_qualifiers(destination);
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type),
                                                      .volatile_copy = write->node < writer->program->stream->count ?
-                                                                      check_lower_copy_node_volatile(writer, write->node, write->type) :
-                                                                      check_lower_copy_volatile(&write->value, write->type) });
+                                                                      check_lower_copy_node_volatile(writer, write->node, copy_type) :
+                                                                      check_lower_copy_volatile(writer, &write->value, copy_type) });
         }
         else
         {
@@ -4275,7 +4365,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             check_lower_source(writer, write->token);
             if (object)
             {
-                check_lower_object_part(writer, control.target, part, local);
+                check_lower_object_part(writer, control.target, part, local, program->input->declared_types[declaration]);
             }
             else if (write->bit_offset != 0 || write->bit_width != 0 || write->kind == CHECK_INIT_BYTES)
             {
@@ -5305,6 +5395,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
         }
+        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;

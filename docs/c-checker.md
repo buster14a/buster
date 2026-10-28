@@ -682,6 +682,14 @@ What the lowering covers past scalars (#145's programs):
   The producer follows the copied value through comma, conditional, selected
   and statement expressions, whose lvalue conversions can erase a source's
   volatile qualifier. Its bounded private worklist borrows unused task storage.
+  A shared type-facts bit also retains volatile subobjects through by-value
+  records, arrays and aligned/atomic wrappers, stopping at pointer pointees.
+  Its memoized nonrecursive preparation visits each type and member edge once;
+  a bounded scalar/vector member scan skips that preparation when no member
+  is volatile. Initializer copies retain the declared destination's qualifiers
+  even when a plan's part type is unqualified. Shape and native regressions
+  cover destination-only volatility, nested volatile arrays, self-copy,
+  initialization/return and nonvolatile pointers to volatile storage.
   The [9700X comparison](https://github.com/buster14a/buster-performance/blob/3d131b17c8b08bc2688da9c929e26ffea01055d2/docs/measurements/aggregate-copies-597-2026-10-27/README.md)
   at compiler `03d79f50` records an 8192-byte discarded assignment shrinking
   from 223 typed entries, 1152 machine records and 6197 text bytes to 6, 11

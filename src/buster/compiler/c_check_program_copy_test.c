@@ -63,8 +63,8 @@ static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool v
         counts[path][2] = code.code_bytes;
         check_test_expect(test, ready && code.records <= (volatile_copy ? 512u : 160u) && code.code_bytes <= (volatile_copy ? 2048u : 768u),
                           "discarded, consumed and self copies have bounded machine records and code bytes");
-        check_test_expect(test, ready && code.lowered.runtime_symbol_count == (uint32_t)(size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy),
-                          "small copies stay inline and large copies share one runtime symbol");
+        snprintf(description, sizeof(description), "copy runtime symbols match volatility for %.100s", source);
+        check_test_expect(test, ready && code.lowered.runtime_symbol_count == (uint32_t)(size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy), description);
         parse_release(&parser);
         check_test_types_close(&types);
         arena_release(&scratch);
@@ -79,12 +79,71 @@ static void check_test_program_copy_shape(CheckTest* test, uint32_t size, bool v
 
 static void check_test_program_copies(CheckTest* test, const char* clang)
 {
+    const long page = sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, 2 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool mapped = mapping != MAP_FAILED && mprotect(mapping, page, PROT_READ | PROT_WRITE) == 0;
+    check_test_expect(test, mapped, "volatile-member scan guarded storage is available");
+    for (uint32_t count = 0; mapped && count <= 80; count += 1)
+    {
+        TypeId* members = (TypeId*)(mapping + page) - count;
+        memset(members, 0, count * sizeof(*members));
+        TypeTable types = { .members = { .type = members, .count = count } };
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            Arena unavailable = { 0 };
+            uint8_t fact = 0;
+            check_test_expect(test, check_lower_copy_type_facts(&types, 1, &fact, &unavailable, scalar != 0),
+                              "a guarded no-volatile member tail needs no graph scratch");
+            if (count > 1)
+            {
+                members[count - 1] = BUSTER_TYPE_VOLATILE;
+                check_test_expect(test, !check_lower_copy_type_facts(&types, 1, &fact, &unavailable, scalar != 0) && unavailable.length == 0,
+                                  "the final volatile member is detected and graph allocation failure is transactional");
+                members[count - 1] = 0;
+            }
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * page);
+    }
     static const uint32_t sizes[] = { 1, 15, 16, 255, 256, 257, 1024, 4096, 16384, 65536, 262144 };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sizes); i += 1)
     {
         check_test_program_copy_shape(test, sizes[i], false, NULL);
     }
     check_test_program_copy_shape(test, 513, true, NULL);
+    check_test_program_copy_shape(test, 513, true,
+        "struct S{unsigned char bytes[513];};"
+        "void copy(volatile struct S*d,const struct S*s){*d=*s;}"
+        "volatile unsigned char* kept(volatile struct S*d,const struct S*s){return (*d=*s).bytes;}"
+        "void same(volatile struct S*d){*d=*d;}");
+    check_test_program_copy_shape(test, 513, true,
+        "struct S{unsigned char bytes[512];volatile unsigned char last;};"
+        "void copy(struct S*d,const struct S*s){*d=*s;}"
+        "unsigned char* kept(struct S*d,const struct S*s){return (*d=*s).bytes;}"
+        "void same(struct S*d){*d=*d;}");
+    check_test_program_copy_shape(test, 513, true,
+        "struct I{unsigned char bytes[512];volatile unsigned char last;};"
+        "typedef struct I A[1];struct S{union{A inner;}u;};"
+        "void copy(struct S*d,const struct S*s){*d=*s;}"
+        "unsigned char* kept(struct S*d,const struct S*s){return (*d=*s).u.inner[0].bytes;}"
+        "void same(struct S*d){*d=*d;}");
+    check_test_program_copy_shape(test, 513, false,
+        "struct S{unsigned char bytes[505];volatile int*p;};"
+        "void copy(struct S*d,const struct S*s){*d=*s;}"
+        "unsigned char* kept(struct S*d,const struct S*s){return (*d=*s).bytes;}"
+        "void same(struct S*d){*d=*d;}");
+    check_test_program_copy_shape(test, 513, true,
+        "struct S{unsigned char bytes[513];};"
+        "void copy(const struct S*s){volatile struct S r=*s;}"
+        "struct S kept(const volatile struct S*s){return *s;}"
+        "void same(volatile struct S*d){struct S r=*d;*d=r;}");
+    check_test_program_copy_shape(test, 513, true,
+        "struct S{volatile unsigned char bytes[3][171];};"
+        "void copy(struct S*d,const struct S*s){*d=*s;}"
+        "volatile unsigned char* kept(struct S*d,const struct S*s){return (*d=*s).bytes[0];}"
+        "void same(struct S*d){*d=*d;}");
     check_test_program_copy_shape(test, 513, true,
         "struct S{unsigned char bytes[513];};"
         "void copy(struct S*d,const volatile struct S*s){*d=_Generic(0,int:(0,*s));}"
@@ -116,6 +175,17 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
         "struct S{unsigned char c[513];};static volatile struct S a,b;"
         "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);b=a;b=b;"
         "struct S r=a;b=r;return (b=a).c[512]+r.c[0];}", "aggregate-copy-volatile-accesses", clang);
+    check_test_program_source(test,
+        "struct S{volatile unsigned char c[3][171];};static struct S a,b;"
+        "struct S returned(void){return a;}"
+        "int tested(int n){for(int i=0;i<3;i++)for(int j=0;j<171;j++)a.c[i][j]=(unsigned char)(n+i+j);"
+        "b=a;b=b;struct S r=returned();return b.c[2][170]+r.c[0][0];}",
+        "aggregate-copy-volatile-array-subobjects", clang);
+    check_test_program_source(test,
+        "struct S{unsigned char c[513];};static struct S a;"
+        "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);"
+        "volatile struct S r=a;return r.c[0]+r.c[512];}",
+        "aggregate-copy-volatile-initializer-destination", clang);
     check_test_program_source(test,
         "extern void* memmove(void*,const void*,unsigned long);struct S{char c[513];};static struct S a,b;"
         "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(char)(n+i);b=a;return (b=a).c[512]+b.c[0];}",
