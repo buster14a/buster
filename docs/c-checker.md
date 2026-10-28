@@ -1276,6 +1276,46 @@ they do per token where little of it was per declaration or expression:
   distinct identifier, refuses a name that doesn't start with `__` before it
   scans its catalog, whose names all do (`test-preprocessor` checks it).
 
+Both ordinary and declaration-time `_Generic` readers use the same association
+index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
+nominal struct or union use that tag as a necessary compatibility key. Other
+types share an ambiguous key: enums and integers, function prototypes,
+transparent-union parameters and the two vector kinds still receive exact
+source-position-aware compatibility checks. Qualifiers and alignment never
+replace those checks. The control's key also filters provably incompatible
+control matches.
+
+The producer appends associations in source order into scratch-owned key and
+type columns. Each hash probe compares sixteen owned keys at once; the scalar
+twin computes the same candidate and empty masks. Equal-key candidates stay in
+insertion order through collisions and wraparound, so the first failing
+association and expression/warning handling keep their existing order. Up to
+eight associations use local storage; larger lists reserve a bounded,
+at-most-half-full table from the token span. Allocation and sizing failures
+propagate as resource failures, and each reader restores its scratch mark.
+The index records exact duplicate and control compatibility-query counts.
+
+For A distinct nominal tags, including pointers to forward-declared tags,
+duplicate validation makes zero compatibility queries; a control with one of
+those keys needs one exact query. Hash probing and input reading remain. This
+is a bounded improvement for the nominal families in #602; a large family
+sharing an ambiguous key can still require quadratic compatibility work.
+`test-checker` compares the index with independent pairwise semantic queries,
+checks source-time transparent unions, guarded groups, collisions, exhaustion
+and the query-count bound, and checks both source readers against Clang.
+
+On the locked 9700X (CPU 2, one lane, six repeated fresh-process samples),
+10,000 pointer associations went from 738.960 to 12.474 ms in an ordinary
+expression and from 785.990 to 58.097 ms in a declaration-time constant.
+Duplicate compatibility queries fell from 49,995,000 to zero in both readers,
+and control queries from 10,000 to one. The complete constant-expression
+compile still grows faster than linearly; this removes its quadratic
+association-compatibility work, without claiming every other operation is
+linear. SQLite's control instructions were effectively unchanged. The
+[source pins, full scaling/RSS/instruction table, exact-query logs and validation](https://github.com/buster14a/buster-performance/blob/b6424ad152a7cdc49ee9d3ca89e66ac850c90dbb/docs/measurements/generic-association-index-602-2026-10-27/README.md)
+retain both record and pointer families, scalar/vector/native equivalence and
+the experiment's limits.
+
 `test-checker` checks every scan, count and syntax bit, by both paths,
 against its own reading of columns of every length to 200 that end at a
 `PROT_NONE` page (`c_check_input_scan_test.c`).
