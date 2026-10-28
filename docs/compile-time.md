@@ -435,6 +435,24 @@ retained-object bytes are initialized only at the collected objects. Parameters 
 so their alias/retain refusal is preserved. These are representation/work reductions; fresh 9700X timing
 and small/large corpus comparisons are required before assigning them a speedup.
 
+Static-data preparation also reduces each declared object's root/inline policy while grouping its declarations,
+and records each emitted data definition's position in that group. String definitions carry the default sentinel;
+the selection neither searches for them among declarations nor repeats the policy reduction. Definition lookup
+uses compact object/definition keys sorted by the existing stable radix sorter, and selected definitions/references
+form a sorted, deduplicated symbol list; the selection's own object-domain `object_definitions` and `needed` clears
+are gone. The returned symbol map remains dense because lowering addresses it by canonical object id.
+
+The program producer marks its immutable body list ordered and retains each reached builtin's body from the
+reference walk. Selection consumes those owners directly and remaps them to selected bodies. Hand-built programs
+without the order marker or builtin owners retain the ordering check and body search, and tests compare both
+forms. Dense source-order reductions check the prepared metadata, guarded tails check the compact definition
+lookup, and emitted symbol/runtime fixtures continue to check the selected code/data against Clang.
+
+The emitted attribute candidates still read the pointer column once, selecting nonnull pointers before testing
+declaration identity. A producer-owned attributed-declaration list is a remaining representation opportunity;
+it must cover parameters and every attribute writer, including deferred-lane merge/fallback, before replacing
+that exact scan.
+
 **Measured against `main` on the 9700X.** Medians of 15 interleaved
 `--time-stages` runs of each build, pinned to CPU 2, the order rotating by
 round: `main` at `8ab9a208` and #592's head (`d4be6a47`), both built as the

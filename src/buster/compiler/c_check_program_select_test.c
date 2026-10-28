@@ -137,6 +137,22 @@ static void check_test_program_selection_run(CheckTest* test, const char* source
             }
             if (ready)
             {
+                const uint64_t fallback_mark = retained.length;
+                CheckProgram fallback_program = full;
+                fallback_program.bodies_ordered = false;
+                fallback_program.builtin_bodies = NULL;
+                CheckProgramSelection fallback = { 0 };
+                bool same = check_program_select(&fallback, &fallback_program, &data, path == 0, &retained, &scratch) &&
+                            fallback.program.symbol_count == selection.program.symbol_count && fallback.program.body_count == selection.program.body_count &&
+                            fallback.data.count == selection.data.count && fallback.program.builtin_count == selection.program.builtin_count;
+                same = same && (fallback.program.symbol_count == 0 || memcmp(fallback.program.symbol_objects, selection.program.symbol_objects,
+                                (uint64_t)fallback.program.symbol_count * sizeof(uint32_t)) == 0) &&
+                       (fallback.program.builtin_count == 0 || (memcmp(fallback.program.builtin_nodes, selection.program.builtin_nodes,
+                                (uint64_t)fallback.program.builtin_count * sizeof(uint32_t)) == 0 &&
+                            memcmp(fallback.program.builtin_bodies, selection.program.builtin_bodies,
+                                (uint64_t)fallback.program.builtin_count * sizeof(uint32_t)) == 0));
+                check_test_expect(test, same, "producer body order and builtin owners select the same symbols and builtins as the searching fallback");
+                arena_pop_to(&retained, fallback_mark);
                 snprintf(description, sizeof(description), "%s: independently stated code/data emission counts", name);
                 check_test_expect(test, selection.selected_functions == functions && selection.selected_objects == objects &&
                                        selection.program.body_count == functions && selection.data.count == objects, description);
@@ -315,8 +331,39 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
     }
 }
 
+static void check_test_program_definition_index(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && page >= 129 * sizeof(uint64_t);
+    if (valid)
+    {
+        valid = mprotect(mapping + page, page, PROT_NONE) == 0;
+    }
+    for (uint32_t count = 0; valid && count <= 129; count += 1)
+    {
+        uint64_t* keys = (uint64_t*)(mapping + page) - count;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            keys[i] = (uint64_t)(i * 3 + 1) << 32 | (count - i);
+        }
+        for (uint32_t object = 0; valid && object < 400; object += 1)
+        {
+            const bool present = object % 3 == 1 && object / 3 < count;
+            valid = check_program_definition(keys, count, object) == (present ? count - object / 3 : 0);
+        }
+        valid = valid && check_program_definition(keys, count, UINT32_MAX) == 0;
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    check_test_expect(test, valid, "compact definition lookup matches independent keys at every count 0..129 with protected tails and absent endpoints");
+}
+
 static void check_test_program_selection(CheckTest* test, const char* clang)
 {
+    check_test_program_definition_index(test);
     check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, clang, false);
     check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, clang, false);
     check_test_program_selection_case(test,

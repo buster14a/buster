@@ -135,6 +135,8 @@ struct CheckProgram
     CheckProgramRegion* regions;
     uint32_t* references;
     uint32_t* builtin_nodes;
+    // The reference walk's body index plus one for each builtin_nodes entry, or zero for no body.
+    uint32_t* builtin_bodies;
     uint32_t* asm_offsets;
     uint32_t* asm_targets;
     SymbolId* object_symbols;
@@ -156,6 +158,8 @@ struct CheckProgram
     uint32_t symbol_count;
     uint32_t token;
     uint32_t diagnostic_position;
+    // Successful source construction publishes disjoint bodies in source order. Mutation invalidates this flag.
+    bool bodies_ordered;
     CheckProgramStatus status;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands and folded_ifs.
@@ -2124,10 +2128,21 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     valid = valid && program->status == CHECK_PROGRAM_OK;
     program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, options.scalar) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
-    valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
+    program->builtin_bodies = program->builtin_nodes != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : NULL;
+    valid = valid && (program->builtin_count == 0 || program->builtin_bodies != NULL);
     if (valid && program->builtin_count != 0)
     {
         check_program_builtins(&input->graph, nodes, program->builtin_nodes, options.scalar);
+        for (uint32_t builtin = 0; builtin < program->builtin_count; builtin += 1)
+        {
+            const uint32_t node = program->builtin_nodes[builtin];
+            const uint32_t body = nodes[node];
+            const uint32_t token = input->graph.tokens[node];
+            // A VLA parameter bound can be reached by this body's walk while its token precedes the opening.
+            // Preserve the selection's source-body domain without searching the body table again.
+            const uint32_t opening = body != 0 ? program->bodies[body - 1].opening : count;
+            program->builtin_bodies[builtin] = body != 0 && token >= opening && token <= parser->tree.parents[opening] ? body : 0;
+        }
     }
     program->controls = valid && writer.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckControl, writer.count) : 0;
     valid = valid && (writer.count == 0 || program->controls != 0);
@@ -2181,6 +2196,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     }
     else
     {
+        program->bodies_ordered = true;
         program->output_bytes = output->length - mark;
     }
     arena_pop_to(scratch, temporary);

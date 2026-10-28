@@ -105,6 +105,7 @@ static bool check_lanes_benchmark_file(const char* file, char** options, uint32_
         .initializers = &path.initializers,
         .asms = &path.asms,
         .identifiers = pp.table,
+        .prepared_data = &data,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
     };

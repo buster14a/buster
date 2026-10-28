@@ -40,23 +40,6 @@ struct CheckProgramSelection
     CheckProgramStatus status;
 };
 
-static uint32_t check_program_attribute_roots(const CheckInputAttributes* attributes, bool function, bool* gnu_inline)
-{
-    uint32_t flags = 0;
-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
-    {
-        const CheckInputAttribute* attribute = attributes->records + i;
-        if (!attribute->ignored)
-        {
-            flags |= attribute->kind == CHECK_ATTRIBUTE_USED || attribute->kind == CHECK_ATTRIBUTE_RETAIN ? BUSTER_C_LOWERING_USED : 0;
-            flags |= function && attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR ? BUSTER_C_LOWERING_CONSTRUCTOR : 0;
-            flags |= function && attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR ? BUSTER_C_LOWERING_DESTRUCTOR : 0;
-            *gnu_inline |= attribute->kind == CHECK_ATTRIBUTE_GNU_INLINE;
-        }
-    }
-    return flags;
-}
-
 // The tokens a unit's post-checking stages visit for its declarations: those that declare (`declarations[t] == t`), and
 // with `nodes`, those whose nodes[t] is below `limit` too (the lowering's initializers), in token order into `tokens`,
 // which has room for `count` + 16: how many. The emission's attributes and the lowering's initializer pass visit these
@@ -210,6 +193,23 @@ static bool check_program_bodies_ordered(const CheckProgram* program)
     return ordered;
 }
 
+// The definition's id plus one, or zero for an external object. Keys are compact, ordered by object, then definition;
+// no object-domain table has to be initialized for the small subset that defines code or data in this unit.
+static uint32_t check_program_definition(const uint64_t* keys, uint32_t count, uint32_t object)
+{
+    uint32_t base = 0;
+    uint32_t length = count;
+    while (length > 1)
+    {
+        const uint32_t half = length / 2;
+        base = (uint32_t)(keys[base + half] >> 32) < object ? base + half : base;
+        length -= half;
+    }
+    const uint32_t lower = length != 0 ? base + ((uint32_t)(keys[base] >> 32) < object) : 0;
+    const uint32_t definition = lower < count && (uint32_t)(keys[lower] >> 32) == object ? (uint32_t)keys[lower] : 0;
+    return definition;
+}
+
 static bool check_program_select_mode(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                       bool scalar, Arena* output, Arena* scratch)
 {
@@ -221,22 +221,24 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     const uint64_t definitions64 = (uint64_t)full->body_count + data->count;
     // A reference of each body and each object, and an edge from a body to each of its block-scope statics.
     const uint64_t references64 = (uint64_t)full->reference_count + data->reference_count + data->count;
+    const uint64_t needed64 = definitions64 + references64;
     bool valid = output != scratch && full->status == CHECK_PROGRAM_OK && data->status == CHECK_DATA_INPUT_OK && input != 0 &&
-                 objects == data->object_count && objects == (uint64_t)input->token_count + 1 && definitions64 < UINT32_MAX && references64 < UINT32_MAX &&
-                 check_program_bodies_ordered(full);
+                 objects == data->object_count && objects == (uint64_t)input->token_count + 1 && definitions64 < UINT32_MAX && references64 < UINT32_MAX && needed64 < UINT32_MAX &&
+                 (full->bodies_ordered || check_program_bodies_ordered(full)) && data->declared_roots != NULL && data->declared_inline != NULL &&
+                 (data->count == 0 || data->definition_declared != NULL);
     const uint32_t definitions = valid ? (uint32_t)definitions64 : 0;
     const uint32_t reference_capacity = valid ? (uint32_t)references64 : 0;
     uint64_t* order = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint64_t* sorting = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
     uint32_t* definition_objects = sorting != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)definitions + 1) : 0;
     uint32_t* definition_flags = definition_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)definitions + 1) : 0;
-    uint32_t* object_definitions = definition_flags != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, objects) : 0;
-    // Each static object's root flags and inline rules, in the order of the data's declared objects (#592), and past them
-    // the defaults, an object's that isn't one (a string literal's): no roots, and the inline rule's default.
-    uint32_t* roots = object_definitions != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)data->declared_count + 1) : 0;
-    uint8_t* inline_rules = roots != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)data->declared_count + 1) : 0;
-    uint8_t* needed = inline_rules != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, objects) : 0;
-    uint8_t* body_selected = needed != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)full->body_count + 1) : 0;
+    uint64_t* object_definitions = definition_flags != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : 0;
+    uint64_t* definition_sort = object_definitions != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)definitions + 1) : NULL;
+    const uint32_t* roots = data->declared_roots;
+    const uint8_t* inline_rules = data->declared_inline;
+    uint64_t* needed = definition_sort != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, needed64 + 1) : NULL;
+    uint64_t* needed_sort = needed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, needed64 + 1) : NULL;
+    uint8_t* body_selected = needed_sort != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)full->body_count + 1) : 0;
     uint8_t* data_selected = body_selected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)data->count + 1) : 0;
     uint32_t* body_map = data_selected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)full->body_count + 1) : 0;
     uint32_t* sources = body_map != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
@@ -250,41 +252,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     uint32_t edges = 0;
     uint32_t body_references = 0;
     uint32_t data_references = 0;
+    uint32_t needed_count = 0;
     CLowering plan = { 0 };
     if (valid)
     {
-        memset(object_definitions, 0, (uint64_t)objects * sizeof(uint32_t));
-        memset(roots, 0, ((uint64_t)data->declared_count + 1) * sizeof(uint32_t));
-        memset(inline_rules, 1, (uint64_t)data->declared_count + 1);
-        memset(needed, 0, objects);
         memset(body_selected, 0, (uint64_t)full->body_count + 1);
         memset(data_selected, 0, (uint64_t)data->count + 1);
         memset(body_map, 0xff, ((uint64_t)full->body_count + 1) * sizeof(uint32_t));
-        // The static declarations, which check_data_prepare found (#592): of all the tokens that declare, the only ones whose
-        // attributes and spellings make an object a root or an inline-only function. Both they and the declared objects
-        // are in object order, so each declaration's object is found by stepping through the objects.
-        uint32_t group = 0;
-        for (uint32_t d = 0; d < data->declaration_count; d += 1)
-        {
-            const uint32_t token = (uint32_t)data->declaration_keys[d];
-            const uint32_t object = (uint32_t)(data->declaration_keys[d] >> 32);
-            while (group < data->declared_count && data->declared_objects[group] < object)
-            {
-                group += 1;
-            }
-            const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
-            bool gnu_inline = false;
-            roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
-            inline_rules[group] |= gnu_inline ? 2 : 0;
-            if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
-            {
-                const uint8_t spelling = input->function_flags != 0 ? input->function_flags[token] : 0;
-                if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
-                {
-                    inline_rules[group] &= (uint8_t)~1u;
-                }
-            }
-        }
         for (uint32_t body = 0; body < full->body_count; body += 1)
         {
             const CheckProgramBody* function = full->bodies + body;
@@ -300,12 +274,12 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             const uint32_t raw = (uint32_t)order[definition];
             const bool function = raw < full->body_count;
             const uint32_t object = function ? full->bodies[raw].object : data->objects[raw - full->body_count].object;
-            valid = object != 0 && object < objects && object_definitions[object] == 0;
+            valid = object != 0 && object < objects;
             if (valid)
             {
                 // The definition's object among the static objects, or past them (check_data_declared_index).
-                const uint32_t declared = check_data_declared_index(data, object);
-                object_definitions[object] = definition + 1;
+                const uint32_t declared = function ? check_data_declared_index(data, object) : data->definition_declared[raw - full->body_count];
+                object_definitions[definition] = (uint64_t)object << 32 | (definition + 1);
                 definition_objects[definition] = object;
                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
                 const uint32_t declaration = full->object_declarations[object];
@@ -323,6 +297,11 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 }
                 definition_flags[definition] = flags;
             }
+        }
+        object_definitions = valid ? c_bindings_sort(object_definitions, definition_sort, definitions, !scalar, UINT32_MAX) : object_definitions;
+        for (uint32_t definition = 1; valid && definition < definitions; definition += 1)
+        {
+            valid = (object_definitions[definition - 1] >> 32) != (object_definitions[definition] >> 32);
         }
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
@@ -344,7 +323,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     // the function's code defines the label's symbol.
                     const uint32_t label = object - 1;
                     const uint32_t owner = full->parser->tree.roles[label] == PARSE_ROLE_LABEL ? check_program_token_body(full, label) : 0;
-                    const uint32_t target = object_definitions[owner != 0 ? full->bodies[owner - 1].object : object];
+                    const uint32_t target = check_program_definition(object_definitions, definitions, owner != 0 ? full->bodies[owner - 1].object : object);
                     sources[edges] = definition;
                     targets[edges] = target != 0 ? target - 1 : BUSTER_C_LOWERING_NONE;
                     kinds[edges++] = target != 0 ? C_LOWERING_REFERENCE_EVALUATED : C_LOWERING_REFERENCE_EXTERNAL;
@@ -357,7 +336,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                                   input->linkage[declaration] == 0 && !input->compound_objects[declaration] ? check_program_token_body(full, declaration) : 0;
             if (valid && body != 0)
             {
-                const uint32_t source = object_definitions[full->bodies[body - 1].object];
+                const uint32_t source = check_program_definition(object_definitions, definitions, full->bodies[body - 1].object);
                 valid = source != 0 && edges < reference_capacity;
                 if (valid)
                 {
@@ -378,7 +357,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             {
                 const uint32_t definition = plan.selected[selected];
                 const uint32_t raw = (uint32_t)order[definition];
-                needed[definition_objects[definition]] = 1;
+                needed[needed_count++] = (uint64_t)definition_objects[definition] << 32;
                 if (raw < full->body_count)
                 {
                     body_selected[raw] = 1;
@@ -410,11 +389,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.data.objects = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, candidate.selected_objects) : 0;
         candidate.data.reference_offsets = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_objects) : 0;
         candidate.data.reference_counts = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_objects) : 0;
+        candidate.data.definition_declared = candidate.selected_objects != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.selected_objects) : 0;
         candidate.data.references = data_references != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, data_references) : 0;
         candidate.program.object_symbols = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, objects);
         valid = (candidate.selected_functions == 0 || candidate.program.bodies != 0) && (body_references == 0 || candidate.program.references != 0) &&
                 (full->region_count == 0 || candidate.program.regions != 0) && candidate.program.object_symbols != 0 &&
-                (candidate.selected_objects == 0 || (candidate.data.objects != 0 && candidate.data.reference_offsets != 0 && candidate.data.reference_counts != 0)) &&
+                (candidate.selected_objects == 0 || (candidate.data.objects != 0 && candidate.data.reference_offsets != 0 && candidate.data.reference_counts != 0 &&
+                                                    candidate.data.definition_declared != NULL)) &&
                 (data_references == 0 || candidate.data.references != 0);
     }
     if (valid)
@@ -433,7 +414,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 {
                     const uint32_t object = full->references[source->reference_first + r];
                     candidate.program.references[references++] = object;
-                    needed[object] = 1;
+                    needed[needed_count++] = (uint64_t)object << 32;
                 }
             }
         }
@@ -450,41 +431,58 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             if (data_selected[record])
             {
                 candidate.data.objects[written] = data->objects[record];
+                candidate.data.definition_declared[written] = data->definition_declared[record];
                 candidate.data.reference_offsets[written] = references;
                 candidate.data.reference_counts[written++] = data->reference_counts[record];
                 for (uint32_t r = 0; r < data->reference_counts[record]; r += 1)
                 {
                     const uint32_t object = data->references[data->reference_offsets[record] + r];
                     candidate.data.references[references++] = object;
-                    needed[object] = 1;
+                    needed[needed_count++] = (uint64_t)object << 32;
                 }
             }
         }
         for (uint32_t builtin = 0; builtin < full->builtin_count; builtin += 1)
         {
             const uint32_t node = full->builtin_nodes[builtin];
-            const uint32_t body = check_program_token_body(full, input->graph.tokens[node]);
+            const uint32_t body = full->builtin_bodies != NULL ? full->builtin_bodies[builtin] : check_program_token_body(full, input->graph.tokens[node]);
             candidate.program.builtin_count += body != 0 && body_selected[body - 1];
         }
         candidate.program.builtin_nodes = candidate.program.builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.builtin_count) : 0;
-        valid = candidate.program.builtin_count == 0 || candidate.program.builtin_nodes != 0;
+        candidate.program.builtin_bodies = candidate.program.builtin_nodes != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.builtin_count) : NULL;
+        valid = candidate.program.builtin_count == 0 || candidate.program.builtin_bodies != NULL;
         uint32_t builtins = 0;
         for (uint32_t builtin = 0; valid && builtin < full->builtin_count; builtin += 1)
         {
             const uint32_t node = full->builtin_nodes[builtin];
-            const uint32_t body = check_program_token_body(full, input->graph.tokens[node]);
+            const uint32_t body = full->builtin_bodies != NULL ? full->builtin_bodies[builtin] : check_program_token_body(full, input->graph.tokens[node]);
             if (body != 0 && body_selected[body - 1])
             {
+                candidate.program.builtin_bodies[builtins] = body_map[body - 1] + 1;
                 candidate.program.builtin_nodes[builtins++] = node;
             }
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
-        candidate.program.symbol_count = check_program_needed_count(needed, objects, scalar);
+        needed = c_bindings_sort(needed, needed_sort, needed_count, !scalar, UINT32_MAX);
+        uint32_t symbols = 0;
+        for (uint32_t i = 0; i < needed_count; i += 1)
+        {
+            if (symbols == 0 || needed[symbols - 1] != needed[i])
+            {
+                needed[symbols++] = needed[i];
+            }
+        }
+        candidate.program.symbol_count = symbols;
         candidate.program.symbol_objects = candidate.program.symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, candidate.program.symbol_count) : 0;
         valid = valid && (candidate.program.symbol_count == 0 || candidate.program.symbol_objects != 0);
         if (valid)
         {
-            check_program_needed_number(needed, objects, candidate.program.object_symbols, candidate.program.symbol_objects, scalar);
+            for (uint32_t symbol = 0; symbol < symbols; symbol += 1)
+            {
+                const uint32_t object = (uint32_t)(needed[symbol] >> 32);
+                candidate.program.object_symbols[object] = symbol + 1;
+                candidate.program.symbol_objects[symbol] = object;
+            }
         }
     }
     if (valid)
@@ -494,6 +492,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         candidate.statistics = plan.statistics;
         candidate.status = CHECK_PROGRAM_OK;
         candidate.program.output_bytes = output->length - mark;
+        candidate.program.bodies_ordered = true;
         candidate.data.capacity.atoms = candidate.data.count;
         candidate.data.capacity.fixups = candidate.data.reference_count;
         candidate.data.capacity.wide_addends = candidate.data.reference_count;
