@@ -255,6 +255,105 @@ static void test_arithmetic(void)
     }
 }
 
+static void test_output_offsets_arithmetic(void)
+{
+    HostV256 words = {0};
+    HostV512 source = {0}, a = {0}, b = {0};
+    for (unsigned i = 0; i < 32; i += 1)
+    {
+        source.u16[i] = (uint16_t)(0x1234u + i);
+        a.u16[i] = (uint16_t)(UINT16_MAX - i);
+        b.u16[i] = (uint16_t)(i * 2 + 1);
+        if (i < 16)
+        {
+            words.u16[i] = (uint16_t)(0x8000u + i * 0x111u);
+        }
+    }
+    for (unsigned i = 0; i < 16; i += 1)
+    {
+        assert(_mm256_extract_epi16(words.value, i) == (int)words.u16[i]);
+    }
+    for (unsigned test = 0; test < 67; test += 1)
+    {
+        const uint32_t mask = test < 32 ? UINT32_C(1) << test : test < 65 ? (uint32_t)_bzhi_u64(UINT32_MAX, test - 32) : test == 65 ? 0xaaaaaaaa : 0x55555555;
+        const HostV512 result = {.value = _mm512_mask_add_epi16(source.value, mask, a.value, b.value)};
+        for (unsigned i = 0; i < 32; i += 1)
+        {
+            const uint16_t expected = (mask >> i & 1) != 0 ? (uint16_t)((uint32_t)a.u16[i] + b.u16[i]) : source.u16[i];
+            assert(result.u16[i] == expected);
+        }
+    }
+    for (unsigned test = 0; test < 131; test += 1)
+    {
+        const uint64_t bits = test < 64 ? UINT64_C(1) << test : test < 129 ? _bzhi_u64(UINT64_MAX, test - 64) : test == 129 ? UINT64_C(0xaaaaaaaaaaaaaaaa) : UINT64_C(0x5555555555555555);
+        unsigned expected = 0;
+        for (unsigned i = 0; i < 64; i += 1)
+        {
+            expected += (unsigned)(bits >> i & 1);
+        }
+        assert(_mm_popcnt_u64(bits) == expected);
+    }
+}
+
+static void test_narrow_store(void* memory, __mmask8 mask, __m512i value, unsigned width)
+{
+    if (width == 1)
+    {
+        _mm512_mask_cvtepi64_storeu_epi8(memory, mask, value);
+    }
+    else if (width == 2)
+    {
+        _mm512_mask_cvtepi64_storeu_epi16(memory, mask, value);
+    }
+    else
+    {
+        _mm512_mask_cvtepi64_storeu_epi32(memory, mask, value);
+    }
+}
+
+static void test_narrow_stores(void)
+{
+    // Truncation keeps the low bits of signed and unsigned lanes, without saturation or sign extension.
+    const HostV512 input = {.u64 = {0, UINT64_MAX, UINT64_C(0x8000000000000000), UINT64_C(0x123456789abcdef0), 0xff, 0x100, 0xffff, UINT64_C(0x100000000)}};
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 128);
+    uint8_t* mapping = mmap(NULL, (size_t)page_size * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mapping != MAP_FAILED);
+    assert(mprotect(mapping + page_size, (size_t)page_size, PROT_READ | PROT_WRITE) == 0);
+    uint8_t* end = mapping + page_size * 2;
+    for (unsigned width = 1; width <= 4; width *= 2)
+    {
+        for (unsigned mask = 0; mask < 256; mask += 1)
+        {
+            uint8_t actual[40], expected[40];
+            memset(actual, 0xa5, sizeof(actual));
+            memset(expected, 0xa5, sizeof(expected));
+            for (unsigned i = 0; i < 8; i += 1)
+            {
+                for (unsigned byte = 0; (mask >> i & 1) != 0 && byte < width; byte += 1)
+                {
+                    expected[3 + i * width + byte] = (uint8_t)(input.u64[i] >> (byte * 8));
+                }
+            }
+            test_narrow_store(actual + 3, (__mmask8)mask, input.value, width);
+            assert(memcmp(actual, expected, sizeof(actual)) == 0);
+            // Every mask's highest active lane ends at the guard page; higher inactive lanes must not touch it.
+            unsigned last = 0;
+            for (unsigned i = 0; i < 8; i += 1)
+            {
+                last = (mask >> i & 1) != 0 ? i + 1 : last;
+            }
+            uint8_t* tail = end - last * width;
+            memset(tail - 1, 0xa5, last * width + 1);
+            test_narrow_store(tail, (__mmask8)mask, input.value, width);
+            assert(tail[-1] == 0xa5);
+            assert(memcmp(tail, expected + 3, last * width) == 0);
+        }
+        test_narrow_store(NULL, 0, input.value, width);
+    }
+    assert(munmap(mapping, (size_t)page_size * 3) == 0);
+}
+
 static void test_aes(void)
 {
     const uint8_t input[16] = {0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0};
@@ -273,6 +372,8 @@ int main(void)
     test_prefix_tails();
     test_i64_address_wrap();
     test_arithmetic();
+    test_output_offsets_arithmetic();
+    test_narrow_stores();
     test_aes();
     puts("host fallback edge cases passed");
     return 0;
