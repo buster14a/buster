@@ -327,12 +327,12 @@ static void check_deferred_arena(Arena* arena, uint64_t capacity)
 
 // A lane's arenas taken back to empty, reserved first if the state hasn't run the lane yet: whether it has them. They
 // are reserved on the calling thread before the lanes start, since reserving memory takes the process's address-space
-// lock for writing, on which lanes that reserve at once wait for each other: on the 9700X a lane's copy of the reader,
-// which reserved five arenas inside the lane (an mmap and two madvise calls each), took 30 to 70 µs when one lane made
-// it and 175 to 295 µs on average when eight did (docs/c-deferred-bodies.md, "How many lanes"). So they are one
-// mapping, in base pages throughout: a lane touches its copies of the top level's columns, with room for the largest
-// body that it mostly leaves untouched, and its bodies' results, a few megabytes on sqlite3.c, where a huge page would
-// be cleared whole the first time any of it is touched.
+// lock for writing, on which lanes that reserve at once wait for each other: on the 9700X a lane's copy of the reader
+// took 101 µs on two lanes and 264 µs on eight (the medians of 42 units) when each lane reserved its five arenas
+// itself, an mmap and two madvise calls each, and 69 and 102 µs reserved here, which takes 2 to 20 µs
+// (docs/c-deferred-bodies.md, "How many lanes"). So they are one mapping, in base pages throughout: a lane touches its
+// copies of the top level's columns, with room for the largest body that it mostly leaves untouched, and its bodies'
+// results, a few megabytes on sqlite3.c, where a huge page would be cleared whole the first time any of it is touched.
 static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
 {
     Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index };
