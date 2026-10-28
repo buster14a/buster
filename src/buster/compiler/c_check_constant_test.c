@@ -116,6 +116,33 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     // Clang 23 tests only the low 64 bits of this GNU condition; GCC and the full-width C integer truth rule
     // select 7. Keep the original counterexample as a direct checker regression and an explicit oracle probe.
     const char* wide_truth_source = "enum { N=__builtin_choose_expr(((__int128)1<<100),7,0) }; _Static_assert(N==7, \"full-width truth\");\n";
+    char nested_selections[4][8192];
+    for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(nested_selections); shape += 1)
+    {
+        // Clang's ICE validation stalls on deep choose-expression enums; runtime syntax is a bounded oracle.
+        uint32_t used = (uint32_t)snprintf(nested_selections[shape], sizeof(nested_selections[shape]), shape < 2 ? "int f(void){return " : "enum { N=");
+        const char* opening = shape == 0 ? "__builtin_choose_expr(1," : shape == 1 ? "__builtin_choose_expr(0," :
+                              shape == 2 ? "_Generic(0,int:" : "_Generic(0,default:";
+        const char* closing = shape < 2 ? ",0)" : shape == 2 ? ",default:0)" : ",int:0)";
+        for (uint32_t depth = 0; depth < 128; depth += 1)
+        {
+            used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "%s", opening);
+        }
+        used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "7");
+        for (uint32_t depth = 0; depth < 128; depth += 1)
+        {
+            used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "%s", closing);
+        }
+        if (shape < 2)
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, ";}\n");
+        }
+        else
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used,
+                     " }; _Static_assert(N==%u, \"nested selection\");\n", shape % 2 == 0 ? 7u : 0u);
+        }
+    }
     char nested_source[4096];
     uint32_t length = (uint32_t)snprintf(nested_source, sizeof(nested_source), "enum { N=");
     for (uint32_t i = 0; i < 96; i += 1)
@@ -156,6 +183,23 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ")))]]; _Static_assert(_Alignof(T)==2048, \"raw long shuffle operand slice\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        { .name = "deep selected choose expressions", .source = nested_selections[0] },
+        { .name = "deep unselected choose expressions", .source = nested_selections[1] },
+        { .name = "deep selected generic expressions", .source = nested_selections[2] },
+        { .name = "deep unselected generic expressions", .source = nested_selections[3] },
+        {
+            .name = "nested selections retain prefix, infix and comma roots",
+            .source = "enum { A=__builtin_choose_expr(1,-(2+3),0), B=_Generic(0,int:2*3+1,default:0), C=__builtin_choose_expr(0,0,_Generic(0,int:(2,7),default:0)) }; _Static_assert(A==-5 && B==7 && C==7,\"selection roots\");\n",
+        },
+        {
+            .name = "nested selections retain vector values and lvalues",
+            .source = "typedef int V __attribute__((vector_size(16))); V a,b; V f(void){return _Generic(0,int:__builtin_choose_expr(1,a,b),default:b);} int g(void){_Generic(0,int:__builtin_choose_expr(0,b,a),default:b)[0]=9; return a[0];}\n",
+        },
+        {
+            .name = "unselected nested operands remain type checked in source order",
+            .source = "int f(void){return __builtin_choose_expr(1,7,_Generic(0,int:missing,default:0));}\n",
+            .rejected = true,
+        },
         { .name = "bitcast declaration integer representation", .source = "enum { N=__builtin_bit_cast(int,0xffffffffu), P=__builtin_bit_cast(unsigned, -1) }; _Static_assert(N==-1 && P==0xffffffffu,\"integer representation\");\n" },
         { .name = "bitcast raw attribute is not an integer constant expression", .source = "typedef int T [[gnu::aligned(__builtin_bit_cast(unsigned,16))]];\n", .rejected = true },
         { .name = "bitcast half operand is not promoted", .source = "__fp16 x; enum { N=sizeof(__builtin_bit_cast(unsigned short,x)), M=sizeof(__builtin_bit_cast(__fp16,(unsigned short)0x3c00)) }; _Static_assert(N==2 && M==2,\"half representation\");\n" },

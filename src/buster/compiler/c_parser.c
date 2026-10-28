@@ -11745,8 +11745,8 @@ struct ParseOptions
     bool scalar;
     // Build the syntax tree and diagnostics without the postorder and the tree's columns that later stages consume.
     bool tree_only;
-    // Also each postorder position's subtree size (Parser.sizes), which test-parser checks: a stream's consumer could
-    // gather a token's children's values by it, but nothing in the compile reads it.
+    // Also each postorder position's subtree size (Parser.sizes), which test-parser checks. A checker reader borrows
+    // this optional column for complete-subtree queries or derives its own when the parse does not retain it.
     bool sizes;
     // Retain bounded GNU attribute and asm-label records for a semantic consumer; syntax-only callers leave it off.
     bool extension_metadata;

@@ -497,6 +497,9 @@ struct CheckInputReader
     uint32_t* region_roots;
     uint8_t* constant_contexts;
     uint8_t* warning_suppressed;
+    uint16_t* warning_index;
+    uint32_t warning_index_base;
+    bool warning_index_ready;
     TypeId* declaration_bases;
     uint32_t* declaration_storage;
     uint8_t* declaration_flags;
@@ -543,6 +546,9 @@ struct CheckInputReader
     // scratch: the C driver parses ParseOptions.tree_only, so that nothing derives them twice.
     const uint32_t* postorder;
     const uint32_t* postorder_positions;
+    // Complete-subtree queries consume sizes by postorder position. Borrow the parser's optional column or derive
+    // it with this reader's traversal; prefix/repair views and tree_only parses need no parser-owned copy.
+    const uint32_t* subtree_sizes;
     uint32_t* tag_completions;
     // Per tag: whether an enum has a fixed underlying type (C23's `enum E : T`), which completes it at its base, and
     // whether its enumerators were listed yet (BUSTER_CHECK_ENUM_*).
@@ -1569,6 +1575,32 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
 }
 
 static CheckOp check_input_binary(uint8_t kind);
+
+// A subtree is contiguous in token order and postorder. Its first token's own subtree starts the same postorder
+// run; extending that run to the requested length locates its root. The size and last-token checks reject slices
+// that cut a subtree or contain several roots. This shares the reader's retained traversal and subtree sizes;
+// neither selections nor constant evaluation needs another tree or a range scan.
+static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t root = BUSTER_CHECK_NONE;
+    if (first < end && end <= parser->tokens.count)
+    {
+        const uint32_t position = reader->postorder_positions[first];
+        const uint32_t size = reader->subtree_sizes[position];
+        const uint32_t length = end - first;
+        if (size != 0 && size <= length && size <= position + 1 && length - size < parser->tokens.count - position)
+        {
+            const uint32_t after = position + length - size;
+            const uint32_t candidate = reader->postorder[after];
+            if (reader->subtree_sizes[after] == length && candidate >= first && candidate < end && reader->ends[candidate] == end - 1)
+            {
+                root = candidate;
+            }
+        }
+    }
+    return root;
+}
 
 // Declaration-time ICEs and type queries use the same semantic actions as expression graphs. The helper uses
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
@@ -4922,6 +4954,12 @@ static void check_input_constant_contexts(CheckInputReader* reader)
             check_input_constant_context(reader, first + (uint32_t)__builtin_ctzll(selected));
         }
     }
+    if (reader->warning_index_ready)
+    {
+        // Static contexts may replace the earlier independent-bound bit. Reopen the compact index before later
+        // intrinsic constant evaluation, which must see the current contexts and any newly clearable warnings.
+        memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
+    }
 }
 
 // The groups of names check_input_count_tokens counts the tokens of.
@@ -5329,6 +5367,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
+    reader.warning_index_base = 1;
+    while ((uint64_t)reader.warning_index_base * BUSTER_CHECK_WARNING_BLOCK < count)
+    {
+        reader.warning_index_base *= 2;
+    }
+    reader.warning_index = valid ? arena_push_array(scratch, (uint64_t)reader.warning_index_base * 2, sizeof(uint16_t), 64) : 0;
+    valid &= reader.warning_index != 0;
     // The tree's traversal: the parser's where it derived it (parse_tree_columns), else the reader's own, in its scratch,
     // derived below once the columns are reserved: five columns with room for parse_tree_columns' sentinel, and the
     // passes' two temporaries, pushed last.
@@ -5341,6 +5386,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.ends = derived ? parser->ends : traversal != 0 ? traversal + 2 * slots : 0;
     reader.first_child = derived ? parser->first_children : traversal != 0 ? traversal + 3 * slots : 0;
     reader.next_child = derived ? parser->next_siblings : traversal != 0 ? traversal + 4 * slots : 0;
+    uint32_t* sizes = parser->sizes != 0 || !valid ? 0 : arena_push_array(scratch, slots, sizeof(uint32_t), 64);
+    valid &= parser->sizes != 0 || sizes != 0;
+    reader.subtree_sizes = parser->sizes != 0 ? parser->sizes : sizes;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
     valid &= reader.value_next != 0;
     // The columns few tokens have an entry in, and the binding table, which has room for four events a token and fills
@@ -5450,8 +5498,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
     // their pages.
     const uint64_t traversal_mark = scratch->length;
-    uint32_t* const temporaries = traversal != 0 && valid ? arena_push_array(scratch, 2 * slots, sizeof(uint32_t), 64) : 0;
-    valid &= traversal == 0 || temporaries != 0;
+    const uint64_t temporary_columns = (traversal != 0 ? 2u : 0u) + (sizes != 0 ? 1u : 0u);
+    uint32_t* const temporaries = temporary_columns != 0 && valid ? arena_push_array(scratch, temporary_columns * slots, sizeof(uint32_t), 64) : 0;
+    uint32_t* const starts = sizes != 0 && temporaries != 0 ? temporaries + (traversal != 0 ? 2 * slots : 0) : 0;
+    valid &= temporary_columns == 0 || temporaries != 0;
+
     if (valid)
     {
         memset(reader.declared_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
@@ -5533,8 +5584,23 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             else
             {
                 parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
-                                   traversal + 3 * slots, traversal + 4 * slots, 0, 0);
+                                   traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
             }
+        }
+        if (sizes != 0 && (traversal == 0 || parser->postorder != 0 || parser->options.scalar))
+        {
+            // The scalar/prefix/repair traversal already exists. Source order gives an earlier first child's
+            // start before its parent, exactly as parse_tree_columns' size publication does on the vector path.
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t first = reader.first_child[token];
+                starts[token] = first < token ? starts[first] : token;
+                sizes[reader.postorder_positions[token]] = reader.ends[token] - starts[token] + 1;
+            }
+        }
+        if (sizes != 0)
+        {
+            sizes[count] = 0;
         }
         arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
@@ -5632,6 +5698,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 // after the walk run on the merge's table, which source order's walk would have made.
                 check_deferred_bodies(deferred, &reader);
                 types = reader.types;
+                // Lanes may have appended warnings after a top-level range last summarized their shared columns.
+                reader.warning_index_ready = false;
             }
             if (input->report_count == 0 && !input->resource)
             {
