@@ -3959,7 +3959,6 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
-    const TypeTable* types = program->types;
     uint32_t low = 0;
     uint32_t high = stream->x86_count;
     while (low < high)
@@ -3989,7 +3988,7 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
-        const uint8_t class = check_lower_value_class(types, stream->argument_conversions[first + a].type);
+        const uint8_t class = check_lower_value_class(writer, stream->argument_conversions[first + a].type);
         if (a != skipped && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
         {
             row.operand_classes[operand] = class;
