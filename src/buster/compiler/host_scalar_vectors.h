@@ -266,6 +266,12 @@ BUSTER_HOST_EMULATED __m256i host_mm256_cvtepu8_epi32(__m128i a)
     return r.value;
 }
 
+BUSTER_HOST_EMULATED int host_mm256_extract_epi16(__m256i a, int index)
+{
+    HostV256 a_ = { .value = a };
+    return (int)a_.u16[(unsigned)index & 15];
+}
+
 BUSTER_HOST_EMULATED int64_t host_mm256_extract_epi64(__m256i a, int index)
 {
     HostV256 a_ __attribute__((unused)) = { .value = a };
@@ -1603,6 +1609,21 @@ BUSTER_HOST_EMULATED __m512i host_mm512_maddubs_epi16(__m512i a, __m512i b)
     return r.value;
 }
 
+BUSTER_HOST_EMULATED __m512i host_mm512_mask_add_epi16(__m512i src, __mmask32 k, __m512i a, __m512i b)
+{
+    HostV512 a_ = { .value = a };
+    HostV512 b_ = { .value = b };
+    HostV512 r = { .value = src };
+    for (unsigned i = 0; i < 32; i += 1)
+    {
+        if ((k >> i & 1) != 0)
+        {
+            r.u16[i] = (uint16_t)((uint32_t)a_.u16[i] + b_.u16[i]);
+        }
+    }
+    return r.value;
+}
+
 BUSTER_HOST_EMULATED __m512i host_mm512_mask_add_epi32(__m512i src, __mmask16 k, __m512i a, __m512i b)
 {
     HostV512 result = { .value = host_mm512_add_epi32(a, b) };
@@ -1910,6 +1931,45 @@ BUSTER_HOST_EMULATED void host_mm512_mask_compressstoreu_epi8(void* memory, __mm
     for (unsigned i = 0; i < 64; i += 1)
     {
         if (((uint64_t)k >> i & 1) != 0) { memcpy((uint8_t*)memory + at++ * 1, &a_.u8[i], 1); }
+    }
+}
+
+BUSTER_HOST_EMULATED void host_mm512_mask_cvtepi64_storeu_epi8(void* memory, __mmask8 k, __m512i a)
+{
+    HostV512 a_ = { .value = a };
+    for (unsigned i = 0; i < 8; i += 1)
+    {
+        if ((k >> i & 1) != 0)
+        {
+            const uint8_t value = (uint8_t)a_.u64[i];
+            memcpy((uint8_t*)memory + i, &value, sizeof(value));
+        }
+    }
+}
+
+BUSTER_HOST_EMULATED void host_mm512_mask_cvtepi64_storeu_epi16(void* memory, __mmask8 k, __m512i a)
+{
+    HostV512 a_ = { .value = a };
+    for (unsigned i = 0; i < 8; i += 1)
+    {
+        if ((k >> i & 1) != 0)
+        {
+            const uint16_t value = (uint16_t)a_.u64[i];
+            memcpy((uint8_t*)memory + i * 2, &value, sizeof(value));
+        }
+    }
+}
+
+BUSTER_HOST_EMULATED void host_mm512_mask_cvtepi64_storeu_epi32(void* memory, __mmask8 k, __m512i a)
+{
+    HostV512 a_ = { .value = a };
+    for (unsigned i = 0; i < 8; i += 1)
+    {
+        if ((k >> i & 1) != 0)
+        {
+            const uint32_t value = (uint32_t)a_.u64[i];
+            memcpy((uint8_t*)memory + i * 4, &value, sizeof(value));
+        }
     }
 }
 
@@ -4542,6 +4602,9 @@ BUSTER_HOST_EMULATED __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 #undef _mm256_cvtepu8_epi32
 #define _mm256_cvtepu8_epi32 host_mm256_cvtepu8_epi32
 
+#undef _mm256_extract_epi16
+#define _mm256_extract_epi16 host_mm256_extract_epi16
+
 #undef _mm256_extract_epi64
 #define _mm256_extract_epi64 host_mm256_extract_epi64
 
@@ -4914,6 +4977,9 @@ BUSTER_HOST_EMULATED __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 #undef _mm512_maddubs_epi16
 #define _mm512_maddubs_epi16 host_mm512_maddubs_epi16
 
+#undef _mm512_mask_add_epi16
+#define _mm512_mask_add_epi16 host_mm512_mask_add_epi16
+
 #undef _mm512_mask_add_epi32
 #define _mm512_mask_add_epi32 host_mm512_mask_add_epi32
 
@@ -5033,6 +5099,15 @@ BUSTER_HOST_EMULATED __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 
 #undef _mm512_mask_compressstoreu_epi8
 #define _mm512_mask_compressstoreu_epi8 host_mm512_mask_compressstoreu_epi8
+
+#undef _mm512_mask_cvtepi64_storeu_epi8
+#define _mm512_mask_cvtepi64_storeu_epi8 host_mm512_mask_cvtepi64_storeu_epi8
+
+#undef _mm512_mask_cvtepi64_storeu_epi16
+#define _mm512_mask_cvtepi64_storeu_epi16 host_mm512_mask_cvtepi64_storeu_epi16
+
+#undef _mm512_mask_cvtepi64_storeu_epi32
+#define _mm512_mask_cvtepi64_storeu_epi32 host_mm512_mask_cvtepi64_storeu_epi32
 
 #undef _mm512_mask_expand_epi16
 #define _mm512_mask_expand_epi16 host_mm512_mask_expand_epi16

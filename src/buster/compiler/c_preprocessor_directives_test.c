@@ -1268,7 +1268,9 @@ static bool pp_directive_test_location_space(const char* directory)
 // this executable: test-preprocessor's files mode and benchmark-preprocessor must take the option and its value as one
 // option of ours, and with --clang give clang neither, nor may --compare-clang. In a space the file fits in (it needs
 // about 80 KB: a chunk of scratch spellings and the predefines), each must succeed and give its report, with no error
-// from clang; in a space of one byte, each must run out of it, reporting that space.
+// from clang; in a space of one byte, each must run out of it, reporting that space. Scalar hosts deliberately
+// exclude benchmark commands: those rows instead check the explicit refusal, while the ordinary command still tests
+// both location-space limits and Clang's filtered arguments.
 static bool pp_directive_test_location_option(const char* directory, bool with_clang)
 {
     // Each run: the command, its mode (with clang alone: --clang, which the run leaves out without it, or
@@ -1313,14 +1315,17 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             char* output = 0;
             char* errors = 0;
             const int status = pp_directive_test_command(argv, &output, &errors);
-            const char* text = runs[r].status == 0 ? output : errors;
+            const bool unavailable = !BUSTER_HOST_VECTOR && strcmp(runs[r].command, "benchmark-preprocessor") == 0;
+            const int expected_status = unavailable ? 1 : runs[r].status;
+            const char* expected_says = unavailable ? "benchmarks require an AVX-512 host build" : runs[r].says;
+            const char* text = expected_status == 0 ? output : errors;
             // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.
-            const bool same = status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
-                              (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
+            const bool same = status == expected_status && text != 0 && strstr(text, expected_says) != 0 &&
+                              (expected_status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
             if (!same)
             {
                 printf("location option: %s %s--location-limit %s exits with %d, wanted %d with \"%s\"; its output:\n%s%s", runs[r].command,
-                       with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status, runs[r].status, runs[r].says,
+                       with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status, expected_status, expected_says,
                        output != 0 ? output : "", errors != 0 ? errors : "");
             }
             failures += !same;
@@ -1330,7 +1335,7 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
         }
     }
     unlink(path);
-    printf("location option: %u of %u runs of the commands take --location-limit and its value as ours%s%s\n", count - failures, count,
+    printf("location option: %u of %u command availability and --location-limit contracts match%s%s\n", count - failures, count,
            with_clang ? ", clang without them" : "", failures == 0 ? "" : " (DIFFERS)");
     return written && failures == 0;
 }
