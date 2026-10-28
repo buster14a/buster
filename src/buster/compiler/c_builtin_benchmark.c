@@ -4,6 +4,8 @@
 // Complete integer-action batches, including all result stores. Synthetic inputs are generated once per process;
 // 21 samples alternate the paths. --only isolates a path; --after-scalar MS conditions each vector sample with its
 // scalar twin. Run separately locked processes on 9700X CPU 2. These are kernel timings, not C compile timings.
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -175,3 +177,12 @@ int run_builtin_benchmark(int argc, char** argv)
     free(memory);
     return passed ? 0 : 1;
 }
+
+#else
+int run_builtin_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

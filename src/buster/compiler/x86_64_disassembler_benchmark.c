@@ -7,6 +7,8 @@
 // raw-byte decoding, prefix classification, and decoding plus Intel formatting. Each retained batch lasts >= 2 ms.
 // The synthetic compiler and vector streams are separate; --file accepts real raw .text bytes with coverage errors.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -345,3 +347,12 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
     free(bytes);
     return valid ? 0 : 1;
 }
+
+#else
+int run_x86_disassembler_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

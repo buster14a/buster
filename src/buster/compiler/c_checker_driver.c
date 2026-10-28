@@ -618,6 +618,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
                                  CheckClock* stage_clock)
 {
+    (void)scalar;
+
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const uint64_t mark = scratch->length;
@@ -627,7 +629,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckDebug dwarf = { 0 };
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL,
+                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, debug ? &rows : NULL,
                                           unwind, verify, lanes, stage_clock);
     check_driver_lower_report(&code, stage_clock);
     if (!valid)
@@ -636,7 +638,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     if (valid && debug)
     {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
         if (!valid)
         {
             fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -854,6 +856,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
                                      bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock)
 {
+    (void)scalar;
+
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
     bool valid = false;
@@ -876,7 +880,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         CheckProgramBinding binding = {
             .runtime = &runtime,
             .bind = &bind,
-            .path = scalar ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
+            .path = BUSTER_SCALAR_PATH(scalar) ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
             .arena = &arena,
             .data_objects = data->objects,
             .data_count = data->count,
@@ -900,7 +904,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
         check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
-        if (valid && !check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding,
+        if (valid && !check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, &binding,
                                                debug ? &rows : NULL, unwind, verify, lanes, stage_clock))
         {
             valid = false;
@@ -917,7 +921,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         check_driver_lower_report(&code, stage_clock);
         if (valid && debug)
         {
-            valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
             if (!valid)
             {
                 fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -1025,7 +1029,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .entry = dynamic_global(&runtime, &bind, "_start"),
                     .dynamic = &dynamic,
                     .debug = debug ? &dwarf.attach : NULL,
-                    .exact = scalar,
+                    .exact = BUSTER_SCALAR_PATH(scalar),
                 },
             };
             valid = lane_run(1, check_driver_write_main, &write, 0) && write.succeeded;
