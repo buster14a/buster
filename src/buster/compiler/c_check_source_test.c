@@ -3,6 +3,110 @@
 // Original declaration/statement fixtures run through both production parser/checker schedules and external Clang.
 // Include after check_test_source; no Clang implementation or external fixture is incorporated.
 
+static void check_test_source_region_transfers(CheckTest* test)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source = "int f(int x){outer:;{({inner:;if(x)goto inner;({deep:;x++;});x;});}"
+                         "({sibling:;x;});return x;}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    CheckTestTypes types = { 0 };
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && check_test_types_open(&types);
+    ready = ready && arena.base != 0 && scratch.base != 0 && pp_run_source(&pp, "region-transfers.c", (const uint8_t*)source, strlen(source));
+    const ParseOptions parse_options = { 0 };
+    ready = ready && parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+    CheckInput input = { 0 };
+    ready = ready && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+    check_test_expect(test, ready && input.region_count == 3, "region-transfer fixture adapts nested and sibling statement expressions");
+    uint32_t* positions = ready ? arena_push_array(&scratch, parser.tokens.count, sizeof(uint32_t), 4) : 0;
+    if (positions != 0)
+    {
+        for (uint32_t position = 0; position < parser.tokens.count; position += 1)
+        {
+            positions[parser.postorder[position]] = position;
+        }
+        for (uint32_t token = 0; token < parser.tokens.count; token += 1)
+        {
+            const uint32_t position = positions[token];
+            check_test_expect(test, position < parser.tokens.count && parser.postorder[position] == token &&
+                              parser.sizes[position] != 0 && parser.sizes[position] <= position + 1,
+                              "every token, including control punctuation, has a bounded postorder subtree");
+        }
+        const CheckInputReader reader = { .parser = &parser, .output = &input, .postorder_positions = positions };
+        // Every token pair includes region boundaries, descendants, siblings, both jump directions and an absent token.
+        for (uint32_t from = 0; from <= parser.tokens.count; from += 1)
+        {
+            for (uint32_t to = 0; to <= parser.tokens.count; to += 1)
+            {
+                const uint32_t source_token = from == parser.tokens.count ? BUSTER_CHECK_NONE : from;
+                const uint32_t target_token = to == parser.tokens.count ? BUSTER_CHECK_NONE : to;
+                parser.options.scalar = true;
+                const bool expected = check_input_region_transfer(&reader, source_token, target_token);
+                parser.options.scalar = false;
+                check_test_expect(test, check_input_region_transfer(&reader, source_token, target_token) == expected,
+                                  "bounded region transfer equals the full ancestor walk for every token pair");
+            }
+        }
+    }
+    else
+    {
+        check_test_expect(test, false, "region-transfer postorder fixture allocation");
+    }
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+    check_test_types_close(&types);
+    arena_release(&scratch);
+    arena_release(&arena);
+
+    // A chain's postorder is its token order. Every source is its target's immediate parent, and the one region holds
+    // the whole chain. A full walk costs two billion dependent loads; stopping at the shared subtree costs two each.
+    enum { COUNT = 65536 };
+    uint32_t* parents = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* order = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* sizes = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* selected = calloc(COUNT, sizeof(uint32_t));
+    ready = parents != 0 && order != 0 && sizes != 0 && selected != 0;
+    check_test_expect(test, ready, "deep region-transfer fixture allocation");
+    if (ready)
+    {
+        for (uint32_t token = 0; token < COUNT; token += 1)
+        {
+            parents[token] = token + 1;
+            order[token] = token;
+            sizes[token] = token + 1;
+        }
+        CheckInputRegion region = { .opening = 0, .closing = COUNT - 1 };
+        Parser chain = { .tokens = { .count = COUNT }, .tree = { .parents = parents }, .sizes = sizes };
+        CheckInput output = { .expression_regions = selected, .regions = &region };
+        const CheckInputReader reader = { .parser = &chain, .output = &output, .postorder_positions = order };
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            output.region_count = variant;
+            selected[COUNT - 1] = variant;
+            struct timespec start = { 0 };
+            struct timespec end = { 0 };
+            const bool started = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start) == 0;
+            uint32_t accepted = 0;
+            for (uint32_t target = 1; target + 2 < COUNT; target += 1)
+            {
+                accepted += check_input_region_transfer(&reader, target + 1, target);
+            }
+            const bool finished = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end) == 0;
+            const int64_t elapsed = ((int64_t)end.tv_sec - start.tv_sec) * INT64_C(1000000000) + end.tv_nsec - start.tv_nsec;
+            check_test_expect(test, accepted == COUNT - 3 && started && finished && elapsed < INT64_C(1000000000),
+                              "65533 deep transfers with no region or one enclosing region finish within one CPU second");
+        }
+    }
+    free(selected);
+    free(sizes);
+    free(order);
+    free(parents);
+}
+
 static void check_test_source_fp_history(CheckTest* test, bool complex)
 {
     static InternTable identifiers;
@@ -778,6 +882,30 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             false
         },
         {
+            "goto within and out of nested statement expressions",
+            "int f(int n){top:;n=({inside:;if(n==1)goto inside;({if(n==2)goto inside;n;});if(n==3)goto top;n;});return n;}\n",
+            false,
+            false
+        },
+        {
+            "goto cannot enter sibling statement expression",
+            "int f(int n){({if(n)goto sibling;n;});return ({sibling:3;});}\n",
+            true,
+            false
+        },
+        {
+            "switch inside statement expression owns its own cases",
+            "int f(int n){return ({switch(n){case 0:n++;break;default:n--;}n;});}\n",
+            false,
+            false
+        },
+        {
+            "switch cannot enter a nested statement expression",
+            "int f(int n){return ({switch(n){return ({default:3;});}n;});}\n",
+            true,
+            false
+        },
+        {
             "statement expression pure folded assertion",
             "int f(void){_Static_assert(({1;}),\"fold\");return ({3;});}\n",
             false,
@@ -1529,4 +1657,5 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     check_test_source_builtin_effects(test);
     check_test_source_transparent_history(test);
     check_test_source_intrinsic_range(test);
+    check_test_source_region_transfers(test);
 }

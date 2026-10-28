@@ -1687,3 +1687,22 @@ fixtures. Existing synthetic checker rates exclude source adaptation and are
 not end-to-end evidence. [#133](https://github.com/buster14a/buster/issues/133) owns supported-source/corpus completion and the
 whole source/check/data costs, allocations, memory and occupancy; [#145](https://github.com/buster14a/buster/issues/145)/[#138](https://github.com/buster14a/buster/issues/138)
 own the eventual complete compiler/program-quality evidence.
+
+### Statement-expression jump-region checks (#657)
+
+The control reader uses the parser's existing postorder intervals when checking
+whether a case, goto or asm-goto enters a GNU statement expression. A unit with
+no statement-expression regions needs no region walk. Otherwise the target's
+ancestors are checked only up to the first subtree containing the source: every
+region above that ancestor also contains the source. A case therefore stops at
+its switch instead of revisiting every enclosing switch. The subtree test uses
+`postorder_positions` and the parser's `sizes`; it allocates no new token column.
+The scalar reader keeps the full ancestor walk as an independent diagnostic
+oracle. Both use the same strict region-boundary rules, including jumps out of
+nested regions and refusals when entering sibling regions.
+
+`test-checker` compares both walks for every pair of tokens in nested and sibling
+regions, including boundaries and absent tokens. It also checks 65,533 transfers
+in a depth-65,536 chain, with and without an enclosing region, within one CPU
+second, and runs the source-level legality fixtures against Clang. This bound
+checks the repeated-walk regression; it is not a throughput measurement.
