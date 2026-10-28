@@ -4253,31 +4253,44 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t count = graph->argument_counts[node];
     const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
-    const uint32_t skipped = info != NULL ? check_x86_lower_immediate(info->name, info->name_length) : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    CheckValue immediate = { 0 };
-    if (skipped < count)
+    const CheckX86LowerRule* rule = info != NULL ? check_x86_lower_rule(info->name, info->name_length) : NULL;
+    // The immediate the rule's records take, and its rounding control, its last argument where it has one.
+    const uint32_t skipped = rule != NULL ? rule->immediate : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    const uint32_t rounded = rule != NULL && rule->rounding != CHECK_X86_ROUND_NONE && count != 0 ? count - 1 : BUSTER_CHECK_X86_NO_IMMEDIATE;
+    CheckValue immediates[2] = { 0 };
+    bool constants = true;
+    for (uint32_t i = 0; i < 2; i += 1)
     {
-        // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
-        // integer converted to the scale's int may be 1, 2, 4 or 8 even when its original payload is not.
-        immediate = stream->values[graph->argument_nodes[first + skipped]];
-        check_action_convert_value(program->types, &immediate, stream->argument_conversions[first + skipped].type, node);
+        const uint32_t a = i == 0 ? skipped : rounded;
+        if (a < count)
+        {
+            // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
+            // integer converted to the scale's int may be 1, 2, 4 or 8 even when its original payload is not.
+            immediates[i] = stream->values[graph->argument_nodes[first + a]];
+            check_action_convert_value(program->types, &immediates[i], stream->argument_conversions[first + a].type, node);
+            constants &= immediates[i].constant_kind == CHECK_CONSTANT_INTEGER;
+        }
+        else
+        {
+            constants &= a == BUSTER_CHECK_X86_NO_IMMEDIATE;
+        }
     }
-    const CheckValue* constant = skipped < count ? &immediate : NULL;
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
-                         skipped != BUSTER_CHECK_X86_NO_IMMEDIATE && (constant == NULL || constant->constant_kind != CHECK_CONSTANT_INTEGER) ?
-                         "x86 builtins of an immediate that isn't a constant" :
-                         check_x86_lower_row(program->target_features, info->name, info->name_length, constant != NULL ? (uint64_t)constant->integer : 0, &row);
-    // The row's operands, the arguments but the immediate, each integer one of its argument's class, widened.
+                         !constants ? "x86 builtins of an immediate that isn't a constant" :
+                         check_x86_lower_row_of(program->target_features, rule, (uint64_t)immediates[0].integer,
+                                                rounded != BUSTER_CHECK_X86_NO_IMMEDIATE ? (uint64_t)immediates[1].integer : 4, &row);
+    // The row's operands, the arguments but the immediates, each integer one of its argument's class, widened.
     uint32_t operand = 0;
     for (uint32_t a = 0; reason == NULL && a < count; a += 1)
     {
         const uint8_t class = check_lower_value_class(writer, stream->argument_conversions[first + a].type);
-        if (a != skipped && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
+        const bool taken = a != skipped && a != rounded;
+        if (taken && operand < row.operand_count && row.operand_classes[operand] != BUSTER_TYPED_CLASS_VECTOR)
         {
             row.operand_classes[operand] = check_lower_x86_operand_class(class);
         }
-        operand += a != skipped;
+        operand += taken;
     }
     if (reason == NULL && operand != row.operand_count)
     {
@@ -4292,7 +4305,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         const uint32_t index = check_lower_operation_index(writer, &row);
         const TypeId result = stream->values[node].type;
         // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
-        const bool zero_test = check_x86_lower_zero_test(info->name, info->name_length);
+        const bool zero_test = rule->zero_test;
         if (row.result_class != BUSTER_TYPED_CLASS_VOID && row.result_class != BUSTER_TYPED_CLASS_VECTOR)
         {
             check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(row.result_class), result);
@@ -4306,7 +4319,7 @@ static void check_lower_x86_row_builtin(CheckLowerWriter* writer, uint32_t node)
         writer->vectors = true;
         for (uint32_t a = count; a-- > 0;)
         {
-            if (a != skipped)
+            if (a != skipped && a != rounded)
             {
                 // The argument at its prototype's type, then widened (the tasks run in the reverse of their pushes).
                 const TypeId type = stream->argument_conversions[first + a].type;
