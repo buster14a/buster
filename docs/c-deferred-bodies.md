@@ -720,6 +720,39 @@ they came within 0.9% of each other on the 62 programs of 1,000 tokens or
 more, and within the noise of readings of tens of microseconds on the others
 (a standard deviation of 2.9% under 100 tokens).
 
+### The merge's serial work (#697)
+
+On eight lanes on `sqlite3.c`, the merge took 7.3 of the reading's 73.5
+ns/token. That is more than the 4.7 by which the reader trailed source order;
+its pass over every token's columns took 5.1 of them. The pass now finds the
+columns' entries 64 tokens at a time, and it runs on the bodies' lanes with the
+binding events' copies (step 5 of "The reader"). On the 9700X, on the frozen
+`sqlite3.c`, these are the medians of six processes of 24 passes each, in
+nanoseconds per token ([the
+record](https://github.com/buster14a/buster-performance/tree/5ee80035f62e5f8826407a5801cb4770a9f0ae81/docs/measurements/deferred-merge-697-2026-10-28)
+has the method, the logs and the traces):
+
+| | Before | With the scan | With the pass on the lanes |
+| --- | ---: | ---: | ---: |
+| source order's reader | 68.78 | 69.02 | 69.04 |
+| the deferred reader, one lane | 86.36 | 84.49 | 84.73 |
+| its merge | 7.02 | 5.16 | 5.04 |
+| the deferred reader, eight lanes | 73.48 | 71.29 | 69.34 |
+| its merge | 7.27 | 5.39 | 2.62 |
+| its pass (before it, the token columns alone) | 5.14 | 3.26 | 1.65 |
+| eight lanes against source order, each process's | +6.8% (+6.7 to +7.1) | +3.3% (+3.1 to +3.7) | −0.0% (−0.4 to +0.5) |
+
+On eight lanes, three parts of the merge stay on the calling thread: its replay
+(0.56 ns/token), its appended tables and tags' completions (0.28), and the
+events' layout (0.06). One lane's pass, with the events' copies in it, takes
+4.20 ns/token, against 3.13 for the columns and 1.26 for the events before.
+
+The traces show what limits the pass. Each of eight lanes takes its 88,000 to
+102,000 tokens in 0.9 to 1.1 ms, where one lane takes all 706,237 in about 2.1
+ms, so the lanes share the memory's bandwidth ("What is left"). A cursor over
+the bodies' parameters, in place of the owner lookup's walk, saved one lane 4%
+of its token columns and eight lanes nothing. It was left out.
+
 ## One-lane pinning removed (#450)
 
 The exact `35f26f68` baseline and `1d2b12c6` candidate were compared on the
