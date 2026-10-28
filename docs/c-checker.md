@@ -450,6 +450,24 @@ order, ownership, slice coverage and branch targets before interpreting a
 region. Body extraction includes these dependencies and remaps every retained
 node reference while preserving branch targets within each compacted slice.
 
+Overload declaration lookup uses transient signature buckets keyed separately
+by name and lexical scope, and by name and translation-unit linkage. Each
+fingerprint preserves canonical parameter identity, including nominal tags and
+nested function ABIs, while ignoring alignment sugar and the outer function's
+return type and ABI. Append-only type-DAG fingerprints are computed once per
+type. Eight contiguous bucket keys are compared together, with an exact scalar
+twin; collisions still undergo the original signature and compatibility checks.
+
+Validated redeclarations carry accumulated attributes, definition state and
+canonical object identity. Identical type representatives can then be replaced
+in the transient index. Ordinary declarations recorded before a name becomes
+overloaded must first have their complete history checked. Merely compatible
+return types cannot end that history walk: compatibility of old-style function
+pointers is not transitive. The immutable source candidate chains and captured
+call heads remain intact, so declarations in later or sibling scopes cannot
+change an earlier call. Declaration-only scaling is measured separately from
+call-site overload resolution (#612).
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens

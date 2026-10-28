@@ -328,8 +328,7 @@ struct CheckInputReader
     uint32_t* intrinsic_names;
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
-    uint32_t* overload_linked_heads;
-    uint32_t* overload_linked_next;
+    CheckOverloadIndex overload_index;
     bool declarator_overloadable;
     uint16_t* builtins;
     uint32_t* builtin_type_ends;
@@ -2906,9 +2905,14 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         TypeId previous = 0;
         if (overload)
         {
-            for (uint32_t linked = reader->overload_linked_heads[name]; previous == 0 && linked != 0; linked = reader->overload_linked_next[linked - 1])
+            uint64_t signature_hash = 0;
+            const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
+            reader->output->resource |= !hashed;
+            const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
+            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+            for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
             {
-                const TypeId candidate = reader->overload_candidates[linked - 1].type;
+                const TypeId candidate = reader->overload_candidates[linked].type;
                 const TypeAnswer signature = check_overload_signature(reader->types, candidate, type);
                 reader->output->resource |= signature == TYPE_ANSWER_FULL;
                 previous = signature == TYPE_ANSWER_YES ? candidate : 0;
