@@ -3405,6 +3405,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             .warnings = 2,
         },
         {
+            .name = "K&R source-only grouped and addressed calls retain arity warnings",
+            .source = "int f(a)int a;{return a;}int g(void){return sizeof((f)(1,2))+sizeof((&f)(1,2));}\n",
+            .warnings = 3,
+        },
+        {
             .name = "K&R source-only addressed call retains known argument constraints",
             .source = "int f(a)int a;{return a;}int g(void){return sizeof((&f)((int*)0));}\n",
             .rejected = true,
@@ -3774,7 +3779,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             snprintf(description, sizeof(description), "%s, %s %s%s: error line %u, Clang %u", fixtures[i].name,
                      external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", checked.line, oracle.line);
             check_test_expect(&test, ready && checked.rejected == oracle.rejected && checked.line == oracle.line, description);
-            check_test_expect(&test, warnings == fixtures[i].warnings, "driver renders each semantic warning once");
+            snprintf(description, sizeof(description), "%s, %s %s%s: warnings %u, expected %u", fixtures[i].name,
+                     external ? "default CLI" : "direct", (route & 1) != 0 ? "scalar" : "vector", dump_static ? " with static dump" : "", warnings, fixtures[i].warnings);
+            check_test_expect(&test, warnings == fixtures[i].warnings, description);
             FILE* emitted = fopen(object, "rb");
             unsigned char magic[4] = { 0 };
             const bool elf = emitted != NULL && fread(magic, 1, sizeof(magic), emitted) == sizeof(magic) &&

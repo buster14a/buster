@@ -1799,8 +1799,15 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             {
                 break;
             }
-            const uint32_t child = input->first_value[use - input->first];
-            use = child != BUSTER_CHECK_NONE && input->next_value[child - input->first] == BUSTER_CHECK_NONE ? child : BUSTER_CHECK_NONE;
+            // A completed value's first_value points to itself. Follow its syntactic children instead: the
+            // opening punctuation contributes no value, and a valid group/address has one operand value.
+            uint32_t child = reader->first_child[use];
+            while (child != BUSTER_CHECK_NONE && (child < input->first || child >= input->end || input->first_value[child - input->first] == BUSTER_CHECK_NONE))
+            {
+                child = reader->next_child[child];
+            }
+            const uint32_t value = child != BUSTER_CHECK_NONE ? input->first_value[child - input->first] : BUSTER_CHECK_NONE;
+            use = value != use ? value : BUSTER_CHECK_NONE;
         }
         const uint32_t declaration = use < reader->parser->tokens.count ? reader->output->declarations[use] : BUSTER_CHECK_NONE;
         if (declaration < reader->parser->tokens.count && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)

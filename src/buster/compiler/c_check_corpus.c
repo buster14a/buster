@@ -1596,6 +1596,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                  a->initializer_warnings.count == b->initializer_warnings.count &&
                  a->program_diagnostic.status == b->program_diagnostic.status && a->program_diagnostic.token == b->program_diagnostic.token &&
                  a->program_diagnostic.position == b->program_diagnostic.position;
+    equal &= a->input.kr_parameter_count == b->input.kr_parameter_count && a->input.kr_diagnostic_count == b->input.kr_diagnostic_count;
+    for (uint32_t i = 0; equal && i < a->input.kr_diagnostic_count; i += 1)
+    {
+        equal = a->input.kr_diagnostics[i].token == b->input.kr_diagnostics[i].token &&
+                a->input.kr_diagnostics[i].warning == b->input.kr_diagnostics[i].warning;
+    }
     equal &= a->input.packed_member_count == b->input.packed_member_count;
     for (uint32_t i = 0; equal && i < a->input.packed_member_count; i += 1)
     {

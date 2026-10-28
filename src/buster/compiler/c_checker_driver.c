@@ -396,14 +396,22 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
             }
         }
-        // The call diagnostics don't fit the arithmetic warnings' packed 16-bit keys. Gather only their nodes,
-        // through the existing warning mask scan, and sort them with the sparse source reports instead.
+        // Gather both warning families in one mask scan. Call diagnostics don't fit the arithmetic warnings'
+        // packed 16-bit keys; sort those with the sparse source reports, without an extra pass over the nodes.
+        uint32_t warning_total = 0;
         for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
         {
             const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
+                const uint32_t source = input->graph.tokens[node];
+                const uint32_t packed = stream->warnings[node] & 0xffffu;
+                if (source < count && packed != 0)
+                {
+                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    warning_keys[warning_total++] = check_driver_warning_key(source, packed, packed & ~ignored);
+                }
                 const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
                 if (flags != 0)
                 {
@@ -441,7 +449,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         {
             firsts[first_count] = UINT64_MAX;
         }
-        uint32_t warning_total = 0;
         for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
             const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
@@ -465,21 +472,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t ignored = input->constant_warning_ignored != NULL ? input->constant_warning_ignored[token] : 0;
                 if (flags != 0)
                 {
-                    warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
-                }
-            }
-        }
-        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
-        {
-            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
-            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
-            {
-                const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
-                const uint32_t token = input->graph.tokens[node];
-                const uint32_t flags = stream->warnings[node];
-                if (token < count && flags != 0)
-                {
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
                 }
             }
