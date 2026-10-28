@@ -3757,7 +3757,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
                 if (!loop)
                 {
+                    const uint32_t first = reader->output->report_count;
                     check_input_report(reader, i, CHECK_INPUT_DECLARATION);
+                    if (!reader->output->resource && reader->output->report_count > first)
+                    {
+                        reader->output->reports[first].completion = i + 1u;
+                    }
                 }
                 reader->ignored[i] = true;
             }

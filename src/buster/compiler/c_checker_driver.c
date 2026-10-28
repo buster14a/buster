@@ -1643,18 +1643,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         {
                             const char* message = program.status == CHECK_PROGRAM_RESOURCE ? "checker program capacity exhausted" :
                                                   program.status == CHECK_PROGRAM_UNSUPPORTED ? "unsupported C statement" : "invalid C statement or control flow";
-                            const uint32_t kind = program.token < tokens ? checking->tokens.kinds[program.token] : PARSE_KIND_COUNT;
-                            if (program.status == CHECK_PROGRAM_UNSUPPORTED && (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE))
-                            {
-                                // These keyword constraints complete at the semicolon lookahead, before it is
-                                // consumed; directives between the keyword and semicolon have already run.
-                                pp_diagnose_output_at(&pp, PP_SEVERITY_ERROR, checking->tokens.sources[program.token],
-                                                      check_driver_publication_position(checking, &pp, program.token + 1u), "%s", message);
-                            }
-                            else
-                            {
-                                check_driver_diagnose(checking, &pp, program.token, message);
-                            }
+                            check_driver_diagnose(checking, &pp, program.token, message);
                             result = 1;
                         }
                         check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
