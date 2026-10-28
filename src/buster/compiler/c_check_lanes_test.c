@@ -566,7 +566,7 @@ static bool check_lanes_test_order_setup(void)
 // for the real compile to report: the names preceding it still prime the requested order.
 static bool check_lanes_test_order_cache(const char* directory)
 {
-    static const char source[] = "int id_order_cached_name;\n#error expected\n";
+    static const char source[] = "int id_order_cached_name0;int id_order_cached_name1;\n#error expected\n";
     char path[PATH_MAX];
     const int length = snprintf(path, sizeof(path), "%s/id-order.c", directory);
     FILE* file = length > 0 && length < (int)sizeof(path) ? fopen(path, "wb") : NULL;
@@ -583,7 +583,8 @@ static bool check_lanes_test_order_cache(const char* directory)
     const FileCache before = cache;
     options.files = &cache;
     const bool result = initialized && check_driver_id_order(&identifiers, &options, path, 153) &&
-                        intern_find(&identifiers, (const uint8_t*)"id_order_cached_name", sizeof("id_order_cached_name") - 1) != 0 &&
+                        (intern_find(&identifiers, (const uint8_t*)"id_order_cached_name0", sizeof("id_order_cached_name0") - 1) != 0 ||
+                         intern_find(&identifiers, (const uint8_t*)"id_order_cached_name1", sizeof("id_order_cached_name1") - 1) != 0) &&
                         memcmp(&cache, &before, sizeof(cache)) == 0;
     file_cache_release(&cache);
     intern_release(&identifiers);
