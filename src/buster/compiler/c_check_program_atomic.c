@@ -171,6 +171,8 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
     }
     const bool complex = check_lower_complex(writer, computed);
     const bool min_max = plan->id == CBUILTIN_C11_ATOMIC_FETCH_MIN || plan->id == CBUILTIN_C11_ATOMIC_FETCH_MAX;
+    const bool strict_min_max = min_max && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) &&
+                                graph->fp_environments != NULL && (graph->fp_environments[plan->node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
     const bool wide_division = check_lower_wide_class(class) && (operation == BUSTER_TYPED_DIV || operation == BUSTER_TYPED_MOD);
     if (complex)
     {
@@ -209,6 +211,21 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
         {
             check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, plan->value_type), plan->desired);
         }
+    }
+    else if (strict_min_max)
+    {
+        // Clang's strict atomic min/max calls the target fmin/fmax inside the retry. Selecting raw operand bits
+        // after a comparison loses native DAZ semantics: a subnormal can compare as zero but be stored nonzero.
+        const bool maximum = plan->id == CBUILTIN_C11_ATOMIC_FETCH_MAX;
+        const bool narrow = class == BUSTER_TYPED_CLASS_F32;
+        const CheckLowerRuntime runtime = maximum ? narrow ? CHECK_LOWER_RUNTIME_FMAXF : CHECK_LOWER_RUNTIME_FMAX
+                                                 : narrow ? CHECK_LOWER_RUNTIME_FMINF : CHECK_LOWER_RUNTIME_FMIN;
+        const TypeId arguments[2] = { plan->value_type, plan->value_type };
+        const uint32_t call = check_lower_runtime_call(writer, runtime, plan->value_type, arguments, 2, BUSTER_CHECK_NONE);
+        check_lower_atomic_buffer_value(writer, plan, plan->expected);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, plan->arguments[1]);
+        check_lower_emit(writer, BUSTER_TYPED_CALL, class, call);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, plan->desired);
     }
     else if (min_max)
     {

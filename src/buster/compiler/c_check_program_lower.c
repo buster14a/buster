@@ -43,6 +43,10 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_ATOMIC_EXCHANGE,
     CHECK_LOWER_RUNTIME_ATOMIC_COMPARE_EXCHANGE,
     CHECK_LOWER_RUNTIME_ATOMIC_IS_LOCK_FREE,
+    CHECK_LOWER_RUNTIME_FMINF,
+    CHECK_LOWER_RUNTIME_FMIN,
+    CHECK_LOWER_RUNTIME_FMAXF,
+    CHECK_LOWER_RUNTIME_FMAX,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
@@ -51,6 +55,7 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__floatuntidf",    "__floatuntixf", "__fixsfti", "__fixdfti",   "__fixxfti",  "__fixunssfti", "__fixunsdfti", "__fixunsxfti", "__mulsc3",
     "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove", "memcpy",
     "__atomic_load", "__atomic_store", "__atomic_exchange", "__atomic_compare_exchange", "__atomic_is_lock_free",
+    "fminf", "fmin", "fmaxf", "fmax",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -436,12 +441,12 @@ struct CheckLowerWriter
     // which check_lower_finish numbers in source order's order (#151).
     const SymbolId* declared_runtimes;
     SymbolId provisional_runtimes;
-    uint32_t runtime_mask;
+    uint64_t runtime_mask;
     uint32_t runtime_count;
     uint8_t runtimes[CHECK_LOWER_RUNTIMES];
 };
 
-_Static_assert(CHECK_LOWER_RUNTIMES <= 32, "a part's runtime functions are a 32-bit mask");
+_Static_assert(CHECK_LOWER_RUNTIMES <= 64, "a part's runtime functions are a 64-bit mask");
 
 // A local's role as a variable-length array's address (CheckLowerWriter.indirect): none; its array's, declared, which
 // its object's references read where an array's take LOCAL_ADDRESS; and allocated, once its CHECK_CONTROL_ALLOCATE
@@ -2708,9 +2713,9 @@ static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime 
     if (symbol == 0)
     {
         symbol = writer->provisional_runtimes + (SymbolId)runtime;
-        if ((writer->runtime_mask & (UINT32_C(1) << runtime)) == 0)
+        if ((writer->runtime_mask & (UINT64_C(1) << runtime)) == 0)
         {
-            writer->runtime_mask |= UINT32_C(1) << runtime;
+            writer->runtime_mask |= UINT64_C(1) << runtime;
             writer->runtimes[writer->runtime_count++] = (uint8_t)runtime;
         }
     }
@@ -6534,7 +6539,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
     }
     bool valid = lowered->status == CHECK_PROGRAM_OK;
     uint32_t written = 0;
-    uint32_t runtimes = 0;
+    uint64_t runtimes = 0;
     for (uint32_t p = 0; valid && p < count; p += 1)
     {
         if (parts[p].label_symbol_count != 0)
@@ -6554,7 +6559,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
                 lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
                 lowered->runtime_order[lowered->runtime_symbol_count++] = (uint8_t)runtime;
             }
-            runtimes |= UINT32_C(1) << runtime;
+            runtimes |= UINT64_C(1) << runtime;
         }
     }
     lowered->label_symbol_count = valid ? written : 0;
