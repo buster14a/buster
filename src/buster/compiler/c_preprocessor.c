@@ -317,6 +317,8 @@ struct PPOptions
     // Count the diagnostics without printing them: test-preprocessor's fuzz runs compare acceptance, and print a
     // difference's diagnostics when they run its case again.
     bool quiet;
+    // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
+    bool system_header_warnings;
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
     // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
     uint32_t error_limit;
@@ -1207,6 +1209,7 @@ typedef enum PPGeneratedKind
 {
     PP_GENERATED_PASTE,
     PP_GENERATED_STRING,
+    PP_GENERATED_PRAGMA,
 } PPGeneratedKind;
 
 typedef struct PPGenerated PPGenerated;
@@ -1366,6 +1369,8 @@ struct Preprocessor
     bool history_fatal;
     uint32_t history_errors;
     uint32_t history_warnings;
+    // A warning while system-level runs were inexact needs the history replay's canonical visibility/count.
+    bool history_warning_filter_deferred;
     Preprocessor* history_replay;
     Arena history_replay_arena;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
@@ -1525,6 +1530,8 @@ typedef enum PPSeverity
     PP_SEVERITY_WARNING,
     PP_SEVERITY_ERROR,
     PP_SEVERITY_FATAL,
+    // #warning's diagnostic is explicitly visible in system headers, unlike ordinary preprocessing warnings.
+    PP_SEVERITY_WARNING_ALWAYS,
 } PPSeverity;
 
 typedef struct PPDiagnosticNote PPDiagnosticNote;
@@ -1540,6 +1547,7 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
+static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
 
 // Both source and output-token diagnostics pass this gate before rendering their complete group, including notes.
@@ -1585,8 +1593,11 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(con
 // gives them, and the column. PPOptions.quiet only counts it.
 BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
-    bool limited;
-    const bool accepted = pp_diagnostic_begin(pp, &severity, &limited);
+    const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+    severity = always ? PP_SEVERITY_WARNING : severity;
+    const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    bool limited = false;
+    const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
     if (accepted && !pp->options.quiet && limited)
     {
         pp_diagnostic_limit(pp);
@@ -13940,7 +13951,26 @@ static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPToken
     uint8_t* written = length != BUSTER_PP_NONE ? arena_push(scratch.arena, 4 * (uint64_t)length + 2, 1) : 0;
     if (written != 0)
     {
-        pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text + 1);
+        const uint32_t name = names_begin + (kind != PP_PRAGMA_MESSAGE);
+        const uint32_t diagnostic_location = names->locations[name];
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        if (from_operator)
+        {
+            // The destringized pragma has its own scratch spelling. Retain that step before the operator's parent
+            // expansion, so its note and relative column remain distinct from the macro that contained _Pragma.
+            const PPSource source = { .location = names->locations[names_begin] };
+            const uint32_t origin = pp_history_generated(pp, PP_GENERATED_PRAGMA, diagnostic_location, location, &source, 1);
+            if (origin != 0)
+            {
+                pp->generated[(origin & BUSTER_PP_ORIGIN_INDEX) - 1].expansion = saved_origin;
+                pp->diagnostic_origin = origin;
+            }
+        }
+        if (!pp->fatal)
+        {
+            pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+        }
+        pp->diagnostic_origin = saved_origin;
         uint32_t n = 0;
         written[n] = '"';
         n += 1;
@@ -14036,7 +14066,16 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
     }
     else
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, location, pop ? "pragma diagnostic pop could not pop, no matching push"
+        uint32_t diagnostic_location = begin < end ? tokens->locations[begin] : location;
+        const uint32_t range = pop && begin < end ? pp_find_range(pp, diagnostic_location) : BUSTER_PP_NONE;
+        if (range != BUSTER_PP_NONE)
+        {
+            const PPRange* source = pp->ranges + range;
+            const uint32_t after = pp_identifier_end(pp, source->bytes, source->length, diagnostic_location - source->base);
+            const ScalarLexer lexer = { .source = source->bytes, .length = source->length, .trigraphs = pp->options.trigraphs };
+            diagnostic_location = source->base + (uint32_t)pp_skip_blanks(&lexer, after);
+        }
+        pp_diagnose(pp, PP_SEVERITY_WARNING, diagnostic_location, pop ? "pragma diagnostic pop could not pop, no matching push"
                                                            : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
     }
     if (printed)
@@ -14549,7 +14588,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_WARNING:
         {
             pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
-                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING);
+                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
@@ -17913,10 +17952,17 @@ static void pp_history_record(Preprocessor* pp, bool report)
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               replay->warnings == pp->history_warnings && pp_tokens_same(&replay->output, &pp->output);
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output);
     }
     if (same)
     {
+        // An inexact run cannot classify a warning from an expansion that spans a system-level transition. The
+        // first pass counted it provisionally; the replay has exact expansion locations and supplies its count.
+        if (pp->history_warning_filter_deferred)
+        {
+            pp->warnings = pp->warnings - pp->history_warnings + replay->warnings;
+            pp->history_warnings = replay->warnings;
+        }
         pp->history = replay->history;
         pp->history_count = replay->history_count;
         pp->history_capacity = replay->history_capacity;
@@ -17973,9 +18019,9 @@ static void pp_history_report(Preprocessor* pp, bool result)
     if (pp->history_deferred)
     {
         pp->options.quiet = pp->history_quiet;
-        if (!pp->history_quiet && (pp->errors != 0 || pp->warnings != 0))
+        if ((!pp->history_quiet && (pp->errors != 0 || pp->warnings != 0)) || pp->history_warning_filter_deferred)
         {
-            pp_history_record(pp, true);
+            pp_history_record(pp, !pp->history_quiet);
         }
     }
 }
@@ -18074,10 +18120,9 @@ static uint8_t pp_system_level_at(const Preprocessor* pp, uint32_t location)
 // `token`'s (pp_history_at's): the place is the begin of the outermost expansion it came from, or the anchor of a paste
 // or stringification, or for an argument read from a file, the token's own location. Returns 0 when its history doesn't
 // lead to a location.
-static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+static uint32_t pp_expansion_place(const Preprocessor* pp, uint32_t location, uint32_t origin)
 {
-    bool valid = token < pp->output.count && pp->output.locations != 0;
-    uint32_t location = valid ? pp->output.locations[token] : 0;
+    bool valid = true;
     const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
     for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
     {
@@ -18103,6 +18148,29 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     }
     valid &= origin == 0;
     return valid ? location : 0;
+}
+
+static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    const bool valid = token < pp->output.count && pp->output.locations != 0;
+    return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
+}
+
+// The deferred first run has no expansion graph. Its exact source-level runs already record where its current
+// expansion was read; an inexact run instead requests canonical warning classification during the usual replay.
+static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin)
+{
+    bool visible = pp->options.system_header_warnings;
+    if (!visible && pp->history_deferred)
+    {
+        pp->history_warning_filter_deferred |= pp->system_runs_inexact;
+        visible = pp->system_runs_inexact || pp->system_run_count == 0 || pp->system_runs[pp->system_run_count - 1].level == BUSTER_PP_USER_FILE;
+    }
+    else if (!visible)
+    {
+        visible = pp_system_level_at(pp, pp_expansion_place(pp, location, origin)) == BUSTER_PP_USER_FILE;
+    }
+    return visible;
 }
 
 // Every output token's system level, in `levels` (room for pp->output.count), by the expansion history: its expansion
@@ -19885,6 +19953,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-P") == 0)
         {
             *markers = false;
+        }
+        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        {
+            options->system_header_warnings = strcmp(argument, "-Wsystem-headers") == 0;
         }
         else if (strcmp(argument, "-dM") == 0)
         {

@@ -58,6 +58,40 @@ struct CheckDiagnosticPush
     uint32_t record;
 };
 
+// These canonical records have already been validated and acted on by preprocessing. They carry no checker state;
+// retaining them for -E must not turn a completed message into an unsupported C construct. #sccs is canonical #ident.
+static bool check_input_completed_pragma(const CheckInputReader* reader, uint32_t pragma)
+{
+    const ParseTokens* tokens = &reader->parser->tokens;
+    const PPTokens* output = &reader->pp->output;
+    const bool present = pragma < tokens->pragma_count;
+    const uint32_t source = present ? tokens->pragma_sources[pragma] : 0;
+    uint32_t end = source;
+    bool valid = present && source < output->count && tokens->pragma_positions[pragma] <= tokens->count &&
+                 output->kinds[source] == C_TOKEN_HASH && (output->flags[source] & BUSTER_PP_START_OF_LINE) != 0;
+    valid = valid && parse_pragma_at(output, source, &end);
+    bool completed = false;
+    if (valid)
+    {
+        if (end - source == 3 && pp_token_is_name(reader->pp, output, source + 1, end, "ident"))
+        {
+            completed = output->kinds[source + 2] == C_TOKEN_STRING_LITERAL || output->kinds[source + 2] == C_TOKEN_WIDE_STRING_LITERAL;
+        }
+        else if (end - source == 6 && pp_token_is_name(reader->pp, output, source + 1, end, "pragma") &&
+                 pp_token_is_name(reader->pp, output, source + 2, end, "message"))
+        {
+            completed = output->kinds[source + 3] == C_TOKEN_L_PAREN && output->kinds[source + 4] == C_TOKEN_STRING_LITERAL && output->kinds[source + 5] == C_TOKEN_R_PAREN;
+        }
+        else if (end - source == 5 && pp_token_is_name(reader->pp, output, source + 1, end, "pragma") &&
+                 pp_token_is_name(reader->pp, output, source + 2, end, "GCC"))
+        {
+            completed = (pp_token_is_name(reader->pp, output, source + 3, end, "warning") || pp_token_is_name(reader->pp, output, source + 3, end, "error")) &&
+                        output->kinds[source + 4] == C_TOKEN_STRING_LITERAL;
+        }
+    }
+    return completed;
+}
+
 static bool check_input_retained_pragma(const CheckInputReader* reader, uint32_t pragma, uint32_t* previous_end,
                                          uint32_t* previous_token, uint32_t* source, uint32_t* end, uint32_t* token)
 {

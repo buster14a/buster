@@ -34,6 +34,14 @@ in `c_check_program.c`, `c_check_program_test.c` and
 an external behavior oracle. The dr_wav header used for compile qualification
 remains an external input; no upstream implementation or fixtures are imported.
 
+The system-header warning policy, retained pragma completion and `_Pragma`
+diagnostic-source changes (#666/#662), including their original fixtures in
+`c_preprocessor_system_warning_test.c` and `c_check_pragma_test.c`, use the
+project default terms. LLVM/Clang 23.1.4 diagnostic metadata and engine sources
+provide behavior facts, and Clang runs externally as an oracle. Miniz 3.0.2 is an
+external compile/runtime corpus with its original license retained outside the
+source tree; no implementation or corpus fixtures are copied into this project.
+
 The diagnostic publication gate, command-line limit parsing and summary changes
 in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
 `c_checker_driver_limit_test.c` (#669), are original project material under the
