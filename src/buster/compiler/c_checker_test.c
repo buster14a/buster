@@ -1498,18 +1498,18 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     check_test_expect(test, scalar_valid && scalar.status == CHECK_STATUS_OK && scalar.count == graph->count, "scalar graph run failed");
     check_test_expect(test, scratch->length == scratch_mark, "scalar graph retained scratch storage");
     const uint64_t scalar_end = output->length;
-    // Each batch size by both of the vector path's orders, by level and in postorder (CheckOptions.postorder).
+    // Each batch size by both of the vector path's orders, in postorder and by level (CheckOptions.level_order).
     for (uint32_t run = partitions ? 2 : 2 * BUSTER_CHECK_BATCH; scalar_valid && run < 2 * (BUSTER_CHECK_BATCH + 1); run += 1)
     {
         const uint32_t batch = run / 2;
         const CheckOptions vector_options = {
             .batch_size = batch,
-            .postorder = (run & 1) != 0,
+            .level_order = (run & 1) != 0,
         };
         CheckStream vector;
         const bool vector_valid = check_graph_run(table, graph, output, scratch, &vector_options, &vector);
         check_test_expect(test, vector_valid && check_test_stream_equal(&scalar, &vector, graph->argument_count),
-                          (run & 1) != 0 ? "graph paths or postorder batch partitions differ" : "graph paths or batch partitions differ");
+                          (run & 1) != 0 ? "graph paths or level-order batch partitions differ" : "graph paths or batch partitions differ");
         check_test_expect(test, scratch->length == scratch_mark, "vector graph retained scratch storage");
         if (vector_valid)
         {

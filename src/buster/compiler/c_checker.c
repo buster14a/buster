@@ -492,9 +492,10 @@ struct CheckOptions
     bool scalar;
     // 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
-    // The vector path's regions batched in postorder (check_graph_region_postorder) rather than by level: the schedule the
-    // benchmark compares level order with, on the same actions (#133's open question). The typed stream is the same.
-    bool postorder;
+    // The vector path's regions by dependency level (check_graph_region) rather than in postorder batches
+    // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
+    // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
+    bool level_order;
 };
 
 // A VALUE node's leaf (CheckGraph.leaves).
@@ -2047,9 +2048,10 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     stream->statistics.scalar_nodes += 1;
 }
 
-// Count/place/fill a stable level order inside one mutation-free postorder region. Dependencies before begin are
-// already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them out of
-// the schedule. Relative heights keep all histogram clears together linear even for many tiny regions.
+// Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+// default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+// are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+// out of the schedule. Relative heights keep all histogram clears together linear even for many tiny regions.
 static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end, uint32_t batch_size,
                                uint32_t* levels, uint32_t* counts, uint32_t* order)
 {
@@ -2140,8 +2142,9 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
     stream->statistics.levels += scheduled != 0 ? maximum + 1 : 0;
 }
 
-// A mutation-free region in postorder, the alternative to its level order (check_graph_region): its leaves complete first,
-// as there; then, from the first node not yet done, a batch of up to `batch_size` consecutive nodes that read none of
+// A mutation-free region in postorder, the vector path's default, and its level order's alternative (check_graph_region,
+// CheckOptions.level_order), which the benchmark measured slower on sqlite3.c's bodies: its leaves complete first, as
+// there; then, from the first node not yet done, a batch of up to `batch_size` consecutive nodes that read none of
 // each other (an operand in the region not done is the batch's, an earlier member's), checked as one of level order's
 // batches is, through the same actions. A batch ends at the first node that reads a member, which in a tree's postorder
 // is most often the next one: a parent follows its last child.
@@ -2599,13 +2602,13 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 {
                     node += 1;
                 }
-                if (options->postorder)
+                if (options->level_order)
                 {
-                    check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
+                    check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
                 }
                 else
                 {
-                    check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
+                    check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
                 }
             }
         }

@@ -559,19 +559,19 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
     return equal;
 }
 
-// The paths a sample takes: the scalar schedule (postorder, a node at a time), the vector path's level order, and the
-// vector path with its regions batched in postorder instead (CheckOptions.postorder), on the same actions: #133's
-// question of which order wins.
+// The paths a sample takes: the scalar schedule (postorder, a node at a time), the vector path (its regions in postorder
+// batches), and the vector path with its regions by dependency level instead (CheckOptions.level_order), on the same
+// actions: #133's question of which order wins, which these decided.
 #define BUSTER_CHECK_SOURCE_PATHS 3u
 
-static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "postorder" };
+static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "levels" };
 
 static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, uint32_t path, CheckStream* stream)
 {
     arena_pop_to(output, 0);
     const CheckOptions options = {
         .scalar = path == 0,
-        .postorder = path == 2,
+        .level_order = path == 2,
     };
     return check_graph_run(types, graph, output, scratch, &options, stream) && stream->report_count == 0;
 }
@@ -663,7 +663,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     CheckStream streams[BUSTER_CHECK_SOURCE_PATHS] = { 0 };
     valid = valid && check_source_graph_run(&paths[0].types, &graph, &oracle_arena, &scratch, 0, &reference);
     valid = valid && check_source_body_equal(&paths[0].input.graph, &paths[0].stream, &graph, &reference, mapping);
-    // The postorder batches run on the vector path's table, as its level order does.
+    // The level order runs on the vector path's table, as its postorder batches do.
     TypeTable* tables[BUSTER_CHECK_SOURCE_PATHS] = { &paths[0].types, &paths[1].types, &paths[1].types };
     for (uint32_t path = 0; valid && path < BUSTER_CHECK_SOURCE_PATHS; path += 1)
     {
