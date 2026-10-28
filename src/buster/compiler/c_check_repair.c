@@ -250,7 +250,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
     if (repair->status == CHECK_REPAIR_READY)
     {
         repair->preprocessor = do_count != 0 ? check_repair_preprocessor(pp, output) : pp;
-        *view = (Parser){ .options = original->options, .language = original->language };
+        *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = repair->preprocessor };
         memcpy(view->predeclared, original->predeclared, sizeof(view->predeclared));
         view->tokens.count = total;
         view->tokens.capacity = total;

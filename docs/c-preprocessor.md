@@ -1048,10 +1048,23 @@ each set, clang preprocesses the header with its own set and with ours
 
 Then our preprocessor with `--buster-headers` must give clang's tokens on all
 the headers and their macros in each mode, and warn no more than clang does in
-the unit itself: it reports warnings in system headers too, which clang hides
-without `-Wsystem-headers`, and the headers must give none. In strict C89,
+the unit itself. Ordinary preprocessing warnings in system headers are hidden
+and not counted unless `-Wsystem-headers` enables them; `-Wno-system-headers`
+restores suppression. System directories and `#pragma GCC system_header` use
+the same expansion-location judgment as the checker. `#warning` remains visible
+there, and errors are never hidden. Macro-redefinition notes follow their primary
+warning's visibility. In strict C89,
 clang's own `<stdint.h>` and `<stdckdint.h>` put their `//` comments in the
 output as tokens; the check drops those lines from clang's side.
+
+For deferred history, exact source-level runs classify the preprocessing
+warnings without constructing expansion history. A warning whose run crosses a
+system-level boundary requests the existing replay, which supplies its canonical
+visibility and count, including for quiet clients. The system-warning tests cover
+both kernels, immediate/deferred history, quiet counting, both option states,
+macro uses in both directions, nested headers, predefined-macro whitespace and
+invocations spanning header exits. Destringized `_Pragma` messages retain their
+scratch-spelling step and column as a generated diagnostic source.
 
 Then the headers among others (#255's review), in each mode, hosted and
 freestanding: two units include buster's 11, the C library's headers that
@@ -1110,6 +1123,24 @@ for token as clang does, and compile with clang.
 ### `#embed`
 
 `#embed` (C23 6.10.3) works as clang 23's does (#117).
+
+The checker accepts a resource as a complete initializer-list item in ordinary
+`char`, `signed char` and `unsigned char` arrays, for static and automatic
+storage (#621). The parser retains one operand and the initializer planner
+borrows the immutable byte span. Inferred bounds count every resource byte;
+explicit bounds retain the fitting prefix and diagnose excess elements as for
+an ordinary list. Designated starting indices and brace elision use the same
+subobject cursor. `prefix` and `suffix` retain their ordinary tokens and must
+supply any separators; a resource adds neither a separator nor a terminating
+zero. An empty resource or `limit(0)` retains only `if_empty`'s tokens.
+
+Multi-byte resources currently require character subobjects without volatile
+or bit-field access, and cannot be the value of a GNU range designator. A
+resource inside a call or expression, including a `prefix` or `suffix` operator
+that binds to its first or last byte, is refused instead of being treated as
+one scalar. A one-byte resource is an ordinary `int` constant and follows the
+normal expression and conversion rules. Wider arrays and general expression
+sequences need a separate compact conversion representation.
 
 - **The header name** is read as an `#include`'s (`pp_read_header_name`, which
   `pp_include` shares): `<...>` or a string literal as written, or a computed

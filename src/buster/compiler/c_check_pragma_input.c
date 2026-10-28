@@ -58,6 +58,40 @@ struct CheckDiagnosticPush
     uint32_t record;
 };
 
+// These canonical records have already been validated and acted on by preprocessing. They carry no checker state;
+// retaining them for -E must not turn a completed message into an unsupported C construct. #sccs is canonical #ident.
+static bool check_input_completed_pragma(const CheckInputReader* reader, uint32_t pragma)
+{
+    const ParseTokens* tokens = &reader->parser->tokens;
+    const PPTokens* output = &reader->pp->output;
+    const bool present = pragma < tokens->pragma_count;
+    const uint32_t source = present ? tokens->pragma_sources[pragma] : 0;
+    uint32_t end = source;
+    bool valid = present && source < output->count && tokens->pragma_positions[pragma] <= tokens->count &&
+                 output->kinds[source] == C_TOKEN_HASH && (output->flags[source] & BUSTER_PP_START_OF_LINE) != 0;
+    valid = valid && parse_pragma_at(output, source, &end);
+    bool completed = false;
+    if (valid)
+    {
+        if (end - source == 3 && pp_token_is_name(reader->pp, output, source + 1, end, "ident"))
+        {
+            completed = output->kinds[source + 2] == C_TOKEN_STRING_LITERAL || output->kinds[source + 2] == C_TOKEN_WIDE_STRING_LITERAL;
+        }
+        else if (end - source == 6 && pp_token_is_name(reader->pp, output, source + 1, end, "pragma") &&
+                 pp_token_is_name(reader->pp, output, source + 2, end, "message"))
+        {
+            completed = output->kinds[source + 3] == C_TOKEN_L_PAREN && output->kinds[source + 4] == C_TOKEN_STRING_LITERAL && output->kinds[source + 5] == C_TOKEN_R_PAREN;
+        }
+        else if (end - source == 5 && pp_token_is_name(reader->pp, output, source + 1, end, "pragma") &&
+                 pp_token_is_name(reader->pp, output, source + 2, end, "GCC"))
+        {
+            completed = (pp_token_is_name(reader->pp, output, source + 3, end, "warning") || pp_token_is_name(reader->pp, output, source + 3, end, "error")) &&
+                        output->kinds[source + 4] == C_TOKEN_STRING_LITERAL;
+        }
+    }
+    return completed;
+}
+
 static bool check_input_retained_pragma(const CheckInputReader* reader, uint32_t pragma, uint32_t* previous_end,
                                          uint32_t* previous_token, uint32_t* source, uint32_t* end, uint32_t* token)
 {
@@ -76,6 +110,39 @@ static bool check_input_retained_pragma(const CheckInputReader* reader, uint32_t
     }
     valid = valid && pp_token_is_name(reader->pp, output, *source + 1, *end, "pragma");
     return valid;
+}
+
+// The name of an identifier or a keyword at output token `source`, or 0 for another token.
+static IdentId check_input_pragma_name(const CheckInputReader* reader, uint32_t source)
+{
+    const PPTokens* output = &reader->pp->output;
+    const uint8_t kind = output->kinds[source];
+    const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+    return named ? output->values[source] : 0;
+}
+
+// Whether `name` was a macro's anywhere in the unit (its record stays after an #undef), from a bitset of the unit's
+// macros' names made the first time a line asks (`*names`, in scratch): a retained line keeps its tokens as written,
+// so a pragma whose handler clang reads macro-expanded can't be read where such a name is (#619).
+static bool check_input_pragma_macro(CheckInputReader* reader, uint64_t** names, IdentId name)
+{
+    const Preprocessor* pp = reader->pp;
+    const uint32_t words = (pp->table->count + 63) / 64;
+    if (*names == 0)
+    {
+        *names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)words + 1);
+        reader->output->resource |= *names == 0;
+        if (*names != 0)
+        {
+            memset(*names, 0, ((uint64_t)words + 1) * sizeof(uint64_t));
+            for (uint32_t macro = 1; macro < pp->macro_count; macro += 1)
+            {
+                const IdentId macro_name = pp->macros[macro].name;
+                (*names)[macro_name / 64] |= macro_name / 64 < words ? UINT64_C(1) << (macro_name % 64) : 0;
+            }
+        }
+    }
+    return *names == 0 || (name / 64 < words && (((*names)[name / 64] >> (name % 64)) & 1) != 0);
 }
 
 // The retained source range includes '#', 'pragma' and PRAGMA_END. All coordinates remain in the original PP and

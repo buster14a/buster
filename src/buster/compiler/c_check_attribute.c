@@ -835,6 +835,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 }
             }
             attributes->packed |= attribute.kind == CHECK_ATTRIBUTE_PACKED;
+            // The walk's section events start at the first section attribute (CheckInputReader.section_record_from).
+            reader->section_record_from = attribute.kind == CHECK_ATTRIBUTE_SECTION && attribute.first < reader->section_record_from ? attribute.first :
+                                          reader->section_record_from;
             const uint32_t index = attributes->count;
             valid = valid && check_input_attribute_append(reader, attributes, attribute);
             if (valid && attribute.kind == CHECK_ATTRIBUTE_ALIGNED && attribute.argument_count == 0)

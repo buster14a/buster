@@ -265,6 +265,14 @@ struct CheckLowerCaseRange
 
 _Static_assert(BUSTER_CHECK_LOWER_BATCH == 16, "the classification window is one vector of 32-bit node indices");
 
+// At one active integer-builtin depth, each argument position keeps a slot for every value class it has used. Separate
+// positions preserve equal-class operands; separate depths preserve outer arguments while a nested call is lowered.
+typedef struct CheckLowerBuiltinOperands CheckLowerBuiltinOperands;
+struct CheckLowerBuiltinOperands
+{
+    uint32_t locals[3][BUSTER_TYPED_CLASSES];
+};
+
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
@@ -324,6 +332,10 @@ struct CheckLowerWriter
     uint32_t* argument_sizes;
     uint32_t* call_result_objects;
     CBuiltinLowerCall* builtins;
+    CheckLowerBuiltinOperands* builtin_operands;
+    CBuiltinLowerScratch builtin_scratch;
+    uint32_t builtin_depth;
+    uint32_t builtin_levels;
     CBuiltinMiscLowerCall* miscellaneous;
     CBuiltinFloatLowerCall* floating;
     uint32_t count;
@@ -3354,6 +3366,12 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
     const CheckGraph* graph = &program->input->graph;
     const CheckNodeConversions* conversions = program->stream->conversions + node;
     const bool overflow = graph->ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
+    const uint32_t depth = writer->builtin_depth++;
+    if (depth == writer->builtin_levels)
+    {
+        memset(writer->builtin_operands + depth, 0xff, sizeof(CheckLowerBuiltinOperands));
+        writer->builtin_levels += 1;
+    }
     const uint32_t index = writer->builtin_count++;
     CBuiltinLowerCall* call = writer->builtins + index;
     *call = (CBuiltinLowerCall){ .id = (CBuiltinId)graph->members[node] };
@@ -3385,7 +3403,20 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_unsupported(writer, "builtins of long double and __int128 operands");
         }
-        locals[i] = check_lower_temporary(writer, check_lower_class(writer, type));
+        const uint8_t class = check_lower_class(writer, type);
+        if (class < BUSTER_TYPED_CLASSES && class != BUSTER_TYPED_CLASS_VOID)
+        {
+            uint32_t* local = &writer->builtin_operands[depth].locals[i][class];
+            if (*local == BUSTER_CHECK_NONE)
+            {
+                *local = check_lower_temporary(writer, class);
+            }
+            locals[i] = *local;
+        }
+        else
+        {
+            check_lower_unsupported(writer, "builtins of this operand type");
+        }
     }
     call->a = locals[0];
     call->b = locals[1];
@@ -3410,7 +3441,18 @@ static void check_lower_builtin_finish(CheckLowerWriter* writer, const CBuiltinL
     }
     else if (result.error != CBUILTIN_LOWER_OK)
     {
-        check_lower_fail(writer, result.error == CBUILTIN_LOWER_CAPACITY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID);
+        if (result.error == CBUILTIN_LOWER_CAPACITY && result.limit != CBUILTIN_LOWER_LIMIT_NONE)
+        {
+            const char* reason = result.limit == CBUILTIN_LOWER_LIMIT_RECIPE ? "builtin recipe limit" :
+                                 result.limit == CBUILTIN_LOWER_LIMIT_ENTRIES ?
+                                     (buffer->capacity == BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage") :
+                                     (buffer->local_capacity == BUSTER_TIER0_MAX_LOCALS ? "Tier 0 per-function local limit" : "lowering local storage");
+            check_lower_resource(writer, reason);
+        }
+        else
+        {
+            check_lower_fail(writer, result.error == CBUILTIN_LOWER_CAPACITY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID);
+        }
     }
     else
     {
@@ -3477,9 +3519,11 @@ static void check_lower_builtin_emit(CheckLowerWriter* writer, CheckLowerTask ta
         .count = writer->count, .capacity = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES,
         .local_classes = writer->local_classes, .local_flags = writer->local_flags, .local_count = writer->local_count,
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
+        .scratch = &writer->builtin_scratch,
     };
     const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_lower_scalar(&buffer, writer->builtins + task.node) : cbuiltin_lower(&buffer, writer->builtins + task.node);
     check_lower_builtin_finish(writer, &buffer, result, task.type);
+    writer->builtin_depth -= 1;
 }
 
 // A variadic definition's incoming frame anchors, made at its first va_start: address-only locals whose addresses are
@@ -5847,6 +5891,7 @@ struct CheckLowerShared
     uint32_t x87_constant_capacity;
     uint32_t label_symbol_capacity;
     uint32_t builtin_count;
+    uint32_t integer_builtin_count;
     bool terminal;
     bool scalar;
     // The runtime's functions: each one's symbol where the unit declares it (check_lower_runtime), 0 for none, and the
@@ -5924,8 +5969,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint32_t count = input != 0 ? input->token_count : 0;
     const uint32_t nodes = input != 0 ? input->graph.count : 0;
     uint32_t builtin_count = 0;
+    uint32_t integer_builtin_count = 0;
     for (uint32_t node = 0; node < nodes; node += 1)
     {
+        integer_builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW;
         builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW ||
                          input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
     }
@@ -5948,7 +5995,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
     // conversion's or an argument's object, and a call's result object. The bounds are address space: an arena's push
     // touches none of it.
-    const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
+    // Each lane's writer resets its integer pool per body and copies completed local columns to output, so one pool
+    // bounds the writer's reusable local room regardless of the number of bodies.
+    const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
+    const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
                                       varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
@@ -5996,20 +6046,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         shared->terminal |= lowered->helpers.items[i].terminates;
     }
-    for (uint32_t i = 0; valid && i < input->asm_count; i += 1)
-    {
-        if (input->asm_statements[i].body == BUSTER_CHECK_NONE)
-        {
-            lowered->status = CHECK_PROGRAM_UNSUPPORTED;
-            lowered->reason = "file-scope assembly";
-            lowered->token = input->asm_statements[i].token;
-            valid = false;
-        }
-    }
+    // File-scope assembly is the emission's (check_program_emit_file_asm, #619): it lowers no code.
     shared->capacity = valid ? (uint32_t)capacity64 : 0;
     shared->local_capacity = valid ? (uint32_t)local_capacity64 : 0;
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;
     shared->builtin_count = builtin_count;
+    shared->integer_builtin_count = integer_builtin_count;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
     // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
     // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
@@ -6254,6 +6296,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(call_result_objects, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_COLUMN(varargs, CBuiltinVaLowerCall, (uint64_t)program->stream->varargs_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(builtins, CBuiltinLowerCall, (uint64_t)shared->builtin_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(builtin_operands, CheckLowerBuiltinOperands, (uint64_t)shared->integer_builtin_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * (uint64_t)shared->x87_constant_capacity);
@@ -6376,6 +6419,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->call_count = 0;
         writer->argument_count = 0;
         writer->builtin_count = 0;
+        writer->builtin_depth = 0;
+        writer->builtin_levels = 0;
+        writer->builtin_scratch.count = 0;
         writer->miscellaneous_count = 0;
         writer->floating_count = 0;
         writer->label_count = body.count + 1;
@@ -6603,8 +6649,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
-        const bool falls = writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
-                                           writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN;
+        const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
+                                                                            writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN);
         check_lower_place(writer, body.count);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.
