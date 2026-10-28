@@ -408,6 +408,195 @@ static bool pp_test_history_growth(const char* directory, bool with_clang)
     return result;
 }
 
+// The old piecewise fprintf path is an independent byte oracle. Exercise every small-buffer edge, multiple grows,
+// and unavailable scratch: the latter may stream, but must retain every prefix and the complete oversized message.
+static bool pp_test_diagnostic_buffer(void)
+{
+    const uint32_t capacities[] =
+    {
+        1,
+        2,
+        7,
+        64,
+        BUSTER_PP_DIAGNOSTIC_BYTES,
+    };
+    const uint32_t lengths[] =
+    {
+        0,
+        1,
+        7,
+        8,
+        63,
+        64,
+        BUSTER_PP_DIAGNOSTIC_BYTES - 1,
+        BUSTER_PP_DIAGNOSTIC_BYTES,
+        8192,
+    };
+    char message[8193];
+    for (uint32_t i = 0; i < sizeof(message) - 1; i += 1)
+    {
+        message[i] = (char)('a' + i % 26);
+    }
+    message[sizeof(message) - 1] = 0;
+    bool result = true;
+    uint32_t checked = 0;
+    // A finite arena permits an early growth and then forces fallback on a later append.
+    for (uint32_t mode = 0; result && mode < 3; mode += 1)
+    {
+        Arena arena = mode == 0 ? arena_reserve_small(1 << 20, 1 << 20) : mode == 1 ? (Arena){ 0 } : arena_reserve_small(4096, 4096);
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
+        {
+            for (uint32_t l = 0; result && l < BUSTER_ARRAY_LENGTH(lengths); l += 1)
+            {
+                FILE* actual = tmpfile();
+                FILE* expected = tmpfile();
+                char bytes[BUSTER_PP_DIAGNOSTIC_BYTES];
+                PPDiagnostic diagnostic =
+                {
+                    .stream = actual,
+                    .arena = &arena,
+                    .bytes = bytes,
+                    .capacity = capacities[c],
+                };
+                result = actual != 0 && expected != 0 && (mode == 1 || arena.base != 0);
+                if (result)
+                {
+                    fputs("before\n", actual);
+                    fputs("before\n", expected);
+                    const long before = ftell(actual);
+                    pp_diagnostic_append(&diagnostic, "prefix %u: ", UINT32_MAX);
+                    pp_diagnostic_append(&diagnostic, "%.*s", (int)lengths[l], message);
+                    pp_diagnostic_append(&diagnostic, "\n%s %d %%\n", "note", INT32_MIN);
+                    result = (mode != 0 || (!diagnostic.direct && ftell(actual) == before));
+                    pp_diagnostic_flush(&diagnostic);
+                    fputs("after\n", actual);
+                    fprintf(expected, "prefix %u: %.*s\n%s %d %%\n", UINT32_MAX, (int)lengths[l], message, "note", INT32_MIN);
+                    fputs("after\n", expected);
+                    result = result && fseek(actual, 0, SEEK_SET) == 0 && fseek(expected, 0, SEEK_SET) == 0;
+                    uint8_t a[4096];
+                    uint8_t b[4096];
+                    size_t read = 0;
+                    do
+                    {
+                        read = fread(a, 1, sizeof(a), actual);
+                        const size_t reference = fread(b, 1, sizeof(b), expected);
+                        result = result && read == reference && memcmp(a, b, read) == 0;
+                    } while (result && read == sizeof(a));
+                    result = result && !ferror(actual) && !ferror(expected);
+                    arena.length = 0;
+                    checked += 1;
+                }
+                if (actual != 0)
+                {
+                    fclose(actual);
+                }
+                if (expected != 0)
+                {
+                    fclose(expected);
+                }
+            }
+        }
+        arena_release(&arena);
+    }
+    // A caller's unbuffered FILE receives the full diagnostic before the entry point returns. Quiet mode only
+    // counts, and a separately supplied note follows the primary line without changing the severity counts.
+    FILE* stream = tmpfile();
+    result = result && stream != 0 && setvbuf(stream, 0, _IONBF, 0) == 0;
+    if (result)
+    {
+        static Preprocessor pp;
+        pp = (Preprocessor){ 0 };
+        pp.options.diagnostics = stream;
+        const PPDiagnosticNote note =
+        {
+            .message = "follow-up",
+        };
+        pp_diagnose(&pp, PP_SEVERITY_WARNING, 0, "value %u", 17u);
+        pp_diagnose_note(&pp, PP_SEVERITY_ERROR, 0, &note, "bad %s", "input");
+        pp.options.quiet = true;
+        pp_diagnose(&pp, PP_SEVERITY_FATAL, 0, "silent");
+        const char expected[] = "warning: value 17\nerror: bad input\nnote: follow-up\n";
+        char actual[sizeof(expected)];
+        const ssize_t read = pread(fileno(stream), actual, sizeof(actual), 0);
+        result = read == sizeof(expected) - 1 && memcmp(actual, expected, sizeof(expected) - 1) == 0 && pp.warnings == 1 && pp.errors == 2 && pp.fatal;
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    printf("diagnostic buffers: %u cases, %s (exact bytes, growth, unavailable scratch and ordering)\n", checked, result ? "pass" : "FAIL");
+    return result;
+}
+
+// A failed reporting replay replaces silent diagnostics, but must not follow a fatal it already published with a
+// second fatal. Deliberately invalidate the recorded result, or remove its input, to exercise both failure branches
+// without a global allocator fault: ordinary and requested-scalar histories must preserve the same publication state.
+static bool pp_test_history_publication(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        for (uint32_t missing = 0; missing < 2; missing += 1)
+        {
+            FILE* diagnostics = tmpfile();
+            const PPOptions options =
+            {
+                .language = { .standard = 2017, .gnu = true },
+                .scalar = scalar != 0,
+                .defer_history = true,
+                .quiet = true,
+                .error_limit = 1,
+                .diagnostics = diagnostics,
+                .no_standard_includes = true,
+            };
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static const char source[] = "#error first\n#error second\n";
+            identifiers = (InternTable){ 0 };
+            pp = (Preprocessor){ 0 };
+            bool ready = diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+            ready = ready && !pp_run_source(&pp, "fatal-first.c", (const uint8_t*)source, sizeof(source) - 1) &&
+                    pp.fatal && pp.errors == 2 && pp.warnings == 0 && pp.history_deferred;
+            if (ready)
+            {
+                // The first pass was quiet. A reporting replay may publish its own cutoff; a missing replay instead
+                // needs one replacement fatal, independent of that first pass's already-set silent fatal flag.
+                pp.options.quiet = false;
+                pp.history_result = !pp.history_result;
+                if (missing != 0)
+                {
+                    pp.history_name = NULL;
+                }
+                pp_history_record(&pp, true);
+                pp_diagnostic_summary(&pp);
+            }
+            char* text = NULL;
+            size_t length = 0;
+            ready = ready && pp_test_read_output(diagnostics, &text, &length);
+            const char* fatal = text != NULL ? strstr(text, "fatal error: ") : NULL;
+            const bool one = fatal != NULL && strstr(fatal + 1, "fatal error: ") == NULL;
+            const bool exact = ready && one && pp.fatal && pp.errors == (missing != 0 ? 1u : 2u) && pp.warnings == 0 &&
+                               pp.history_replay == NULL && !pp.history_deferred &&
+                               (missing != 0 ? strcmp(text, "fatal error: no expansion history: the translation unit wasn't run by pp_run or pp_run_source\n1 error generated.\n") == 0 :
+                                               strcmp(text, "fatal-first.c:1:2: error: first\nfatal error: too many errors emitted, stopping now [-ferror-limit=]\n2 errors generated.\n") == 0);
+            if (!exact)
+            {
+                printf("history publication scalar=%u missing=%u: errors=%u fatal=%u, text=%s\n", scalar, missing, pp.errors, pp.fatal, text != NULL ? text : "unavailable");
+            }
+            failures += !exact;
+            free(text);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            if (diagnostics != NULL)
+            {
+                fclose(diagnostics);
+            }
+        }
+    }
+    printf("history publication: %u of 4 fail (silent replacement and an already-published fatal)\n", failures);
+    return failures == 0;
+}
+
 static bool pp_test_history(const char* directory, bool with_clang)
 {
     static const PPHistoryCase cases[] = {
@@ -595,5 +784,7 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool copies = pp_test_history_copies();
     const bool lifetimes = pp_test_history_lifetimes(directory);
     const bool growth = pp_test_history_growth(directory, with_clang);
-    return runs && copies && lifetimes && growth && failures == 0;
+    const bool diagnostic_buffer = pp_test_diagnostic_buffer();
+    const bool publication = pp_test_history_publication();
+    return runs && copies && lifetimes && growth && diagnostic_buffer && publication && failures == 0;
 }

@@ -12,6 +12,8 @@
 // and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with `verify`,
 // each the analyzer's proof from the records too, where the analyzer takes the function (unwind_tier0).
 
+#include "worker_budget.c"
+
 // What an executable's link binds against (the direct path, #157): the C runtime, which bind_begin joins between the
 // program's symbols and its atoms, its arrays from `arena` and its atoms' bytes copied into the emission's byte arena.
 // check_program_emit makes room for it in the link and calls bind_begin; its caller adds the static data and calls
@@ -208,6 +210,8 @@ struct CheckProgramLanes
     uint32_t lanes;
     bool every_lane;
     const uint32_t* cpus;
+    // Optional external ownership for the extra workers. The C driver supplies it; isolated callers/tests may omit it.
+    WorkerBudget* budget;
     // A test's lane that sleeps `slow_microseconds` after each part it takes, its index plus one (0 for none), so that the
     // other lanes take the parts it would have and finish theirs first.
     uint32_t slow_lane;
@@ -966,6 +970,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint32_t bodies = count != 0 ? count : 1;
     uint32_t active = most < bodies ? most : bodies;
     active = paid < active ? (uint32_t)paid : active;
+    WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+    if (valid && count != 0 && lanes != NULL && lanes->budget != NULL)
+    {
+        active = worker_budget_acquire(lanes->budget, active, &lease);
+    }
     const uint64_t part_room = active > 1 ? (uint64_t)BUSTER_LANE_PARTS_PER_LANE * active : 1;
     run.parts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitPart, part_room) : 0;
     run.lane_states = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEmitLane, active) : 0;
@@ -996,6 +1005,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         if (active > 1)
         {
             again = lane_run(active, check_program_emit_lane, &run, lanes->cpus) ? CHECK_PROGRAM_AGAIN_NONE : CHECK_PROGRAM_AGAIN_START;
+            valid = worker_budget_release(&lease);
             for (uint32_t p = 0; again == CHECK_PROGRAM_AGAIN_NONE && p < run.part_count; p += 1)
             {
                 const CheckEmitPart* part = run.parts + p;
@@ -1008,7 +1018,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
         }
-        if (active == 1 || again != CHECK_PROGRAM_AGAIN_NONE)
+        else
+        {
+            valid = worker_budget_release(&lease);
+        }
+        if (valid && (active == 1 || again != CHECK_PROGRAM_AGAIN_NONE))
         {
             arena_pop_to(output, output_before);
             arena_pop_to(bytes, bytes_before);
@@ -1018,6 +1032,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             run.stage_clock = stage_clock;
             check_program_emit_alone(&run);
         }
+    }
+    // Also return a lease when an active-lane allocation failed before dispatch. A returned lease is a no-op.
+    valid = worker_budget_release(&lease) && valid;
+    if (lanes != NULL && lanes->budget != NULL && lanes->budget->return_failed)
+    {
+        result->status = CHECK_PROGRAM_BACKEND;
+        result->reason = "could not return GNU make worker slots";
     }
     const uint64_t lanes_end = timing ? check_program_lanes_now() : 0;
     if (lanes != NULL)

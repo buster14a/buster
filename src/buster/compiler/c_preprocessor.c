@@ -103,6 +103,8 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // API
 
+#define BUSTER_PP_DEFAULT_ERROR_LIMIT 19
+
 // Token flags, in a buffer or the output.
 #define BUSTER_PP_SPACE 0x01 // Whitespace or a comment before it.
 #define BUSTER_PP_START_OF_LINE 0x02 // It starts a line of the output (for -E).
@@ -314,6 +316,11 @@ struct PPOptions
     bool quiet;
     // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
     bool system_header_warnings;
+    // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
+    // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
+    uint32_t error_limit;
+    bool suppress_warnings;
+    bool no_diagnostic_summary;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
     // --clang-features: the feature queries (__has_builtin, __has_attribute, __has_feature, __has_extension,
@@ -1524,13 +1531,60 @@ typedef enum PPSeverity
     PP_SEVERITY_WARNING_ALWAYS,
 } PPSeverity;
 
+typedef struct PPDiagnosticNote PPDiagnosticNote;
+struct PPDiagnosticNote
+{
+    uint32_t location;
+    const char* message;
+    IdentId macro;
+};
+
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
-static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const char* format, va_list arguments);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
+static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+
+// Both source and output-token diagnostics pass this gate before rendering their complete group, including notes.
+// The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
+static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
+{
+    const bool accepted = !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
+    *limited = accepted && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
+    if (accepted)
+    {
+        *severity = *limited ? PP_SEVERITY_FATAL : *severity;
+        pp->warnings += *severity == PP_SEVERITY_WARNING;
+        pp->errors += *severity != PP_SEVERITY_WARNING;
+        pp->fatal |= *severity == PP_SEVERITY_FATAL;
+    }
+    return accepted;
+}
+
+static void pp_diagnostic_limit(Preprocessor* pp)
+{
+    FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+    fputs("fatal error: too many errors emitted, stopping now [-ferror-limit=]\n", stream);
+}
+
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(const Preprocessor* pp)
+{
+    if (!pp->options.quiet && !pp->options.no_diagnostic_summary && (pp->warnings != 0 || pp->errors != 0))
+    {
+        FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
+        if (pp->warnings != 0)
+        {
+            fprintf(stream, "%u warning%s%s", pp->warnings, pp->warnings == 1 ? "" : "s", pp->errors != 0 ? " and " : "");
+        }
+        if (pp->errors != 0)
+        {
+            fprintf(stream, "%u error%s", pp->errors, pp->errors == 1 ? "" : "s");
+        }
+        fputs(" generated.\n", stream);
+    }
+}
 
 // Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
 // gives them, and the column. PPOptions.quiet only counts it.
@@ -1538,17 +1592,20 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 {
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
-    const bool accepted = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
-    if (accepted && !pp->options.quiet)
+    const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    bool limited = false;
+    const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
+    if (accepted && !pp->options.quiet && limited)
+    {
+        pp_diagnostic_limit(pp);
+    }
+    else if (accepted && !pp->options.quiet)
     {
         va_list arguments;
         va_start(arguments, format);
-        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, format, arguments);
+        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, 0, format, arguments);
         va_end(arguments);
     }
-    pp->warnings += accepted && severity == PP_SEVERITY_WARNING;
-    pp->errors += accepted && severity != PP_SEVERITY_WARNING;
-    pp->fatal |= accepted && severity == PP_SEVERITY_FATAL;
 }
 
 static void* pp_array(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size);
@@ -5332,13 +5389,12 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
         // that '(' with it), with a note at the '('.
         char name[64];
         pp_token_name(pp, data, end - 1 == va_opt_open ? va_opt_open - 1 : end - 1, name, sizeof(name));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, macro->base, end - 1), "missing ')' after %s", name);
-        if (!pp->fatal && !pp->options.quiet)
+        const PPDiagnosticNote note =
         {
-            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-            pp_diagnostic_place(pp, stream, pp_define_location(pp, data, macro->base, va_opt_open, end));
-            fprintf(stream, "note: to match this '('\n");
-        }
+            .location = pp_define_location(pp, data, macro->base, va_opt_open, end),
+            .message = "to match this '('",
+        };
+        pp_diagnose_note(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, macro->base, end - 1), &note, "missing ')' after %s", name);
         result = false;
     }
     return result;
@@ -5628,13 +5684,12 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             }
             else if (previous != 0 && !(pp->macros[previous].flags & BUSTER_PP_MACRO_REDEFINABLE) && !pp_same_definition(pp, &pp->macros[previous], &macro))
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                if (!pp->fatal && !pp->options.quiet && pp_diagnostic_warning_visible(pp, location, pp->diagnostic_origin))
+                const PPDiagnosticNote note =
                 {
-                    FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-                    pp_diagnostic_place(pp, stream, pp->macros[previous].location);
-                    fprintf(stream, "note: previous definition is here\n");
-                }
+                    .location = pp->macros[previous].location,
+                    .message = "previous definition is here",
+                };
+                pp_diagnose_note(pp, PP_SEVERITY_WARNING, location, &note, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
             }
             const PPMacroId id = pp_new_macro(pp, name);
             if (id != 0)
@@ -8168,6 +8223,11 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
     {
         pp->in_macro_arguments = false;
         const PPMacro* macro = &pp->macros[invocation->macro];
+        const PPDiagnosticNote note =
+        {
+            .location = macro->location,
+            .macro = macro->name,
+        };
         const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
         const uint32_t parameter_count = macro->parameter_count;
         uint32_t count = pp->argument_record_count - invocation->arguments;
@@ -8175,7 +8235,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
         pp->unterminated += !closed;
         if (!closed && !pp->fatal)
         {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, invocation->name_location, "unterminated function-like macro invocation");
+            pp_diagnose_note(pp, PP_SEVERITY_ERROR, invocation->name_location, &note, "unterminated function-like macro invocation");
         }
         if (valid)
         {
@@ -8215,16 +8275,10 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
                         pp->diagnostic_origin = pp->arguments.origins != 0 ? pp->arguments.origins[first] : 0;
                     }
                 }
-                pp_diagnose(pp, PP_SEVERITY_ERROR, where, "too %s arguments provided to function-like macro invocation",
+                pp_diagnose_note(pp, PP_SEVERITY_ERROR, where, &note, "too %s arguments provided to function-like macro invocation",
                             count > parameter_count ? "many" : "few");
                 valid = false;
             }
-        }
-        if (!valid && !pp->fatal && !pp->options.quiet)
-        {
-            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-            pp_diagnostic_place(pp, stream, macro->location);
-            fprintf(stream, "note: macro '%.*s' defined here\n", (int)intern_length(pp->table, macro->name), intern_bytes(pp->table, macro->name));
         }
         pp->diagnostic_origin = saved_origin;
         invocation->argument_count = count;
@@ -17916,11 +17970,21 @@ static void pp_history_record(Preprocessor* pp, bool report)
     }
     else
     {
+        // A reporting replay replaces the first pass's silent diagnostics. Keep only the groups it actually
+        // published. Its own fatal is already final; otherwise allow the replacement fatal even when the first
+        // pass had already stopped silently.
+        const bool published_fatal = report && replay != 0 && replay->fatal;
+        if (report)
+        {
+            pp->errors = replay != 0 ? replay->errors : 0;
+            pp->warnings = replay != 0 ? replay->warnings : 0;
+        }
         if (replay != 0)
         {
             pp_release_unit(replay);
         }
         arena_release(&pp->history_replay_arena);
+        pp->fatal = published_fatal;
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
                                               !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
                                                              "the translation unit gave another result when preprocessed again for its expansion history");
@@ -19722,6 +19786,35 @@ static bool pp_own_option_with_value(const char* argument)
     return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0 || strcmp(argument, "--window-bytes") == 0;
 }
 
+// Clang's unsigned integral option grammar accepts decimal, leading-zero octal and 0x/0b/0o prefixes, but no sign.
+// Only the final command-line occurrence is passed here, including when an earlier value was malformed.
+static bool pp_parse_error_limit(const char* argument, uint32_t* output)
+{
+    const char* value = argument + 14;
+    const char* first = value;
+    uint32_t base = *first == '0' ? 8 : 10;
+    if (first[0] == '0' && (first[1] == 'x' || first[1] == 'X' || first[1] == 'b' || first[1] == 'B' || first[1] == 'o' || first[1] == 'O'))
+    {
+        base = first[1] == 'x' || first[1] == 'X' ? 16 : first[1] == 'b' || first[1] == 'B' ? 2 : 8;
+        first += 2;
+    }
+    uint32_t limit = 0;
+    bool valid = *first != 0;
+    for (const char* at = first; valid && *at != 0; at += 1)
+    {
+        const uint32_t letter = (uint32_t)(*at | 0x20);
+        const uint32_t digit = *at >= '0' && *at <= '9' ? (uint32_t)(*at - '0') : letter >= 'a' && letter <= 'f' ? letter - 'a' + 10 : UINT32_MAX;
+        valid = digit < base && limit <= (UINT32_MAX - digit) / base;
+        limit = valid ? limit * base + digit : limit;
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "error: invalid integral value '%s' in '-ferror-limit %s'\n", value, value);
+    }
+    *output = limit;
+    return valid;
+}
+
 // The preprocessor's options from clang-style arguments (the ones -E needs). `input` gets the source file, `output`
 // the -o file (or null), `markers` false for -P. Returns false for an argument it doesn't know.
 BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
@@ -19734,7 +19827,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     const char** macros = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** includes = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
     const char** embeds = BUSTER_ARENA_PUSH_ARRAY(arena, const char*, (uint64_t)count + 1);
-    *options = (PPOptions){ .language = { .standard = 2017, .gnu = true } };
+    *options = (PPOptions){ .language = { .standard = 2017, .gnu = true }, .error_limit = BUSTER_PP_DEFAULT_ERROR_LIMIT };
     *input = 0;
     *output = 0;
     *markers = true;
@@ -19742,6 +19835,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     int trigraphs = -1;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
+    const char* error_limit = 0;
     // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
     PPFamilies families = { .charsets = { 0, 0 } };
     memset(families.last, -1, sizeof(families.last));
@@ -19763,6 +19857,20 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0)
         {
             options->freestanding &= strcmp(argument, "-fhosted") != 0;
+            options->suppress_warnings |= strcmp(argument, "-w") == 0;
+        }
+        else if (strncmp(argument, "-ferror-limit=", 14) == 0)
+        {
+            error_limit = argument;
+        }
+        else if (strcmp(argument, "-ferror-limit") == 0)
+        {
+            fprintf(stderr, "error: unknown argument '-ferror-limit'; use '-ferror-limit=N'\n");
+            result = false;
+        }
+        else if (strcmp(argument, "-fno-caret-diagnostics") == 0 || strcmp(argument, "-fcaret-diagnostics") == 0)
+        {
+            options->no_diagnostic_summary = strcmp(argument, "-fno-caret-diagnostics") == 0;
         }
         else if (strcmp(argument, "-P") == 0)
         {
@@ -19925,6 +20033,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             result = false;
         }
     }
+    result = result && (error_limit == 0 || pp_parse_error_limit(error_limit, &options->error_limit));
     // -ansi is -std=c89 in C.
     const char* mode = standard == 0 ? 0 : standard[1] == 'a' ? "c89" : standard + 5;
     if (result && mode != 0 && !pp_parse_standard(mode, &options->language))
@@ -19951,7 +20060,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 }
 
 // `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
-static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
@@ -19999,13 +20108,27 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
                 fprintf(stderr, "can't write %s\n", output);
             }
             result = preprocessed && printed ? 0 : 1;
+            pp_diagnostic_summary(&pp);
         }
         // What a failed reservation left reserved too.
-        pp_release(&pp);
-        intern_release(&table);
+        if (release)
+        {
+            pp_release(&pp);
+            intern_release(&table);
+        }
     }
-    arena_release(&arena);
+    if (release)
+    {
+        arena_release(&arena);
+    }
     return result;
+}
+
+// Reusable command callers release all mappings. Main's terminal -E route instead lets process exit tear them down;
+// the output file has already been closed, or stdout remains open for libc to flush at exit, in either mode.
+static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

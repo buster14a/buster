@@ -25,6 +25,13 @@ provide behavior facts, and Clang runs externally as an oracle. Miniz 3.0.2 is a
 external compile/runtime corpus with its original license retained outside the
 source tree; no implementation or corpus fixtures are copied into this project.
 
+The diagnostic publication gate, command-line limit parsing and summary changes
+in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
+`c_checker_driver_limit_test.c` (#669), are original project material under the
+default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
+and Clang runs externally as an independent oracle. No external implementation
+or fixture is copied.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

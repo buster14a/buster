@@ -4606,7 +4606,9 @@ static bool pp_test_named_ucn_scaling(const char* directory)
     }
     free(source);
     char standard[] = "-std=gnu17";
-    char* arguments[] = { standard, path, 0 };
+    // This checks every rejected UCN, independently of the command-line diagnostic publication budget.
+    char limit[] = "-ferror-limit=0";
+    char* arguments[] = { standard, limit, path, 0 };
     for (uint32_t k = 0; result && k < 2; k += 1)
     {
         Arena arena = arena_reserve(1ull << 20);
@@ -4614,7 +4616,7 @@ static bool pp_test_named_ucn_scaling(const char* directory)
         const char* input;
         const char* output;
         bool markers;
-        result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        result = pp_parse_options(3, arguments, &options, &arena, &input, &output, &markers);
         options.scalar = k == 1;
         options.quiet = true;
         static InternTable table;
