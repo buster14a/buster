@@ -619,12 +619,14 @@ static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* 
 {
     const uint32_t count = reader->parser->tokens.count;
     bool valid = event != NULL && event->token < count &&
+                 (event->payload.token == BUSTER_CHECK_WARNING_NO_SOURCE || event->payload.token < count) &&
                  (event->source == BUSTER_CHECK_WARNING_NO_SOURCE || event->source < reader->pp->output.count) &&
                  (event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ||
                   (event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN ? event->completion <= count : event->completion < count));
     for (uint32_t i = 0; valid && i < note_count; i += 1)
     {
         valid = notes != NULL && notes[i].token < count &&
+                (notes[i].payload.token == BUSTER_CHECK_WARNING_NO_SOURCE || notes[i].payload.token < count) &&
                 (notes[i].source == BUSTER_CHECK_WARNING_NO_SOURCE || notes[i].source < reader->pp->output.count);
     }
     valid = valid && check_warning_append(&reader->warning_events, event, notes, note_count);
