@@ -20,25 +20,49 @@ static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
     {
         values_edge = (ForeignTestEdge){ .mapping = mapping, .mapping_size = span + 2 * page, .end = mapping + page + span };
         mapped = mprotect(mapping + page, page, PROT_READ | PROT_WRITE) == 0 &&
-                 mprotect(mapping + page + (1ull << 31) * 4, page, PROT_READ | PROT_WRITE) == 0 &&
+                 mprotect(mapping + (1ull << 31) * 4, 2 * page, PROT_READ | PROT_WRITE) == 0 &&
                  mprotect(mapping + span, page, PROT_READ | PROT_WRITE) == 0;
     }
     foreign_test_expect(tally, mapped, "reserve sparse value map for unsigned high-ID addressing", 0);
     if (mapped)
     {
         uint32_t* values = (uint32_t*)(mapping + page);
-        values[0] = 11;
-        values[0x80000000u] = 23;
-        values[UINT32_MAX - 2] = 37;
-        const uint64_t keys[] = { 0x1234567800000000ull, 0x1234567880000000ull, 0x12345678fffffffdull };
-        uint32_t gathered[16];
-        _mm512_storeu_si512(gathered, foreign_order_values(keys, BUSTER_ARRAY_LENGTH(keys), values));
-        bool correct = gathered[0] == 11 && gathered[1] == 23 && gathered[2] == 37;
-        for (uint32_t i = BUSTER_ARRAY_LENGTH(keys); i < BUSTER_ARRAY_LENGTH(gathered); i += 1)
+        const uint32_t ids[] = {
+            0,
+            1,
+            0x7ffffffeu,
+            0x7fffffffu,
+            0x80000000u,
+            0x80000001u,
+            UINT32_MAX - 3,
+            UINT32_MAX - 2,
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ids); i += 1)
         {
-            correct = correct && gathered[i] == 0;
+            values[ids[i]] = 11 + i * 17;
         }
-        foreign_test_expect(tally, correct, "gather zero-extends IDs at bit 31 and UINT32_MAX, with inactive tails", 0);
+        for (uint32_t count = 0; count <= 16; count += 1)
+        {
+            ForeignTestEdge keys_edge = { 0 };
+            const bool guarded = foreign_test_edge(&keys_edge, (uint64_t)count * 8);
+            foreign_test_expect(tally, guarded, "guard value-gather keys at every tail length", 0);
+            for (uint32_t shape = 0; guarded && shape < 3; shape += 1)
+            {
+                uint64_t* keys = (uint64_t*)keys_edge.end - count;
+                uint32_t expected[16] = { 0 };
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const uint32_t row = shape == 0 ? i % 4 : shape == 1 ? 4 + i % 4 : i % 8;
+                    keys[i] = (0x1234567800000000ull + ((uint64_t)i << 32)) | ids[row];
+                    expected[i] = 11 + row * 17;
+                }
+                uint32_t gathered[16];
+                _mm512_storeu_si512(gathered, foreign_order_values(keys, count, values));
+                foreign_test_expect(tally, memcmp(gathered, expected, sizeof(expected)) == 0,
+                                    "unsigned value-gather halves and mixed IDs preserve guarded inactive tails", 0);
+            }
+            foreign_test_edge_release(&keys_edge);
+        }
     }
     foreign_test_edge_release(&values_edge);
     for (uint32_t test = 0; test < 69; test += 1)

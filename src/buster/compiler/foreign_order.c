@@ -19,23 +19,24 @@ static __m512i foreign_order_digits(const uint64_t* keys, uint32_t count, uint32
     return _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
 }
 
-// Values at opaque u32 name IDs: i32 gather indices would sign-extend IDs with bit 31 set. Keep the zero-extended
-// low half of each packed key in an i64 index, including the full legal ID range and masked tails.
+// Values at opaque u32 name IDs: a signed i32 gather cannot address IDs with bit 31 set from the original base.
+// Split the mask at that bit and use nonnegative offsets from each half's base. Form the upper base only when a
+// live ID proves that half belongs to the map; ordinary small maps never form an out-of-range pointer.
 // The standalone resolver benchmark includes this module without the conversion consumer.
 static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const uint32_t* values)
 {
     __m512i result;
 #if BUSTER_HOST_VECTOR
-    const uint32_t first = count < 8 ? count : 8;
-    const uint32_t second = count > 8 ? count - 8 : 0;
-    const __mmask8 a_mask = (__mmask8)_bzhi_u32(0xff, first);
-    const __mmask8 b_mask = (__mmask8)_bzhi_u32(0xff, second);
-    const __m512i ids = _mm512_set1_epi64(UINT32_MAX);
-    const __m512i low = _mm512_and_si512(_mm512_maskz_loadu_epi64(a_mask, keys), ids);
-    const __m512i high = _mm512_and_si512(_mm512_maskz_loadu_epi64(b_mask, keys + first), ids);
-    const __m256i a = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), a_mask, low, values, 4);
-    const __m256i b = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), b_mask, high, values, 4);
-    result = _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
+    const __mmask16 mask = (__mmask16)_bzhi_u32(0xffff, count);
+    const __m512i ids = foreign_order_digits(keys, count, 0);
+    const __m512i half = _mm512_set1_epi32(INT32_MAX);
+    const __mmask16 upper = mask & _mm512_cmp_epu32_mask(ids, half, _MM_CMPINT_GT);
+    const __m512i offsets = _mm512_and_si512(ids, half);
+    result = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), mask ^ upper, offsets, values, 4);
+    if (upper != 0)
+    {
+        result = _mm512_mask_i32gather_epi32(result, upper, offsets, values + (1ull << 31), 4);
+    }
 #else
     uint32_t rows[16] = { 0 };
     for (uint32_t i = 0; i < count; i += 1)
