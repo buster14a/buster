@@ -1319,7 +1319,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
 static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_seen, uint32_t* node_stack, uint64_t* work)
 {
-    const CheckProgram* program = writer->program;
+    CheckProgram* program = writer->program;
     const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
     const uint32_t kind = type_kind(program->types, result);
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
@@ -1419,8 +1419,8 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
                 }
-                // Calls may be declared noreturn. Until that contract is carried by controls, avoid diagnosing a
-                // conservative fall-off after an expression containing a call or a terminal builtin.
+                // Calls may be declared noreturn. Query operands also affect Clang's source-flow warning even
+                // when unevaluated. Until these contracts reach controls, keep their warnings conservative.
                 if (pass != 0 && warning_safe && entry->node < graph->count && node_seen[entry->node] != epoch)
                 {
                     uint32_t depth = 1;
@@ -1434,7 +1434,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                             *work += 1;
                         }
                         const CheckOp op = graph->ops[node];
-                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC;
+                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
                         if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
                         {
                             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
