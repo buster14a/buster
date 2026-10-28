@@ -3040,6 +3040,8 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a cleared setting keeps its name's flags", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\n#pragma clang section data = \".x\"\n" },
         { "a _Pragma's setting", "_Pragma(\"clang section text = \\\".x\\\"\")\nint f(void) { return 1; }\n#pragma clang section data = \".x\"\n" },
         { "two attributes", "__attribute__((section(\".x\"))) int g = 1;\n__attribute__((section(\".x\"))) int f(void) { return 1; }\n" },
+        { "the first section in one declaration determines conflicts", "int f(void) __attribute__((section(\".a\"), section(\".b\")));\n"
+                                                                      "int x __attribute__((section(\".a\"))) = 1;\n" },
         { "an attribute after a setting", "#pragma clang section data = \".x\"\n__attribute__((section(\".x\"))) int f(void) { return 1; }\n" },
         { "a variable's attribute after text", "#pragma clang section text = \".x\"\nint g __attribute__((section(\".x\"))) = 1;\n" },
         { "a setting after an attribute", "__attribute__((section(\".x\"))) int g = 1;\n#pragma clang section text = \".x\"\n" },
