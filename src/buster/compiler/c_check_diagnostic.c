@@ -57,11 +57,15 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wignored-pragmas", "-Wpragmas", "ignored pragma visibility directive" },
 };
 
+_Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
+
 static bool check_diagnostic_option(String8 option, const char* expected)
 {
     const bool result = expected != NULL && option.length == strlen(expected) && memcmp(option.pointer, expected, option.length) == 0;
     return result;
 }
+
+#include "c_check_warning_policy.c"
 
 static uint32_t check_diagnostic_warning_index(uint32_t warning)
 {
@@ -76,9 +80,8 @@ static const char* check_diagnostic_message(uint32_t warning)
     return result;
 }
 
-static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, CheckWarningSeverity severity)
+static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t index, CheckWarningSeverity severity)
 {
-    const uint32_t index = check_diagnostic_warning_index(warning);
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     if (history != NULL && index < BUSTER_ARRAY_LENGTH(check_warning_descriptions))
     {
@@ -102,10 +105,7 @@ static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* inp
         for (uint32_t visited = 0; !matched && state < history->count && visited < history->count; visited += 1)
         {
             const CheckInputDiagnosticPragma* record = history->records + state;
-            const CheckWarningDescription* description = check_warning_descriptions + index;
-            matched = check_diagnostic_option(record->option, description->option) || check_diagnostic_option(record->option, description->parent) ||
-                      check_diagnostic_option(record->option, "-Weverything") || (index == 1 && check_diagnostic_option(record->option, "-Wpedantic")) ||
-                      (warning == CHECK_WARNING_IMPLICIT_FUNCTION_DECLARATION && check_diagnostic_option(record->option, "-Wall"));
+            matched = check_warning_option(index, record->option);
             if (matched)
             {
                 severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :
@@ -122,7 +122,8 @@ static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input
 {
     const CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
                                           warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
-    return check_diagnostic_severity_from(input, token, source, warning, severity);
+    const uint32_t index = check_diagnostic_warning_index(warning);
+    return check_diagnostic_severity_id_from(input, token, source, index, severity);
 }
 
 static CheckWarningSeverity check_diagnostic_implicit_function(const CheckInput* input, uint32_t token)
