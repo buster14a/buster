@@ -842,14 +842,18 @@ designs and the compilers already built this way.
   `--startup-applies-irelative` says the program's own does. It keeps the
   inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
-  With `--lanes N` past 1 on the vector path, the conversion
+  It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
+  and one more per 3 MB of its objects, at most 8 and one per CPU it may run
+  on, which the calling thread decides by opening the command line's first
+  inputs (`foreign_open_first`), so that a link of a few objects runs on one
+  lane and starts no thread; or with `--lanes N` on N, at most one per CPU.
+  On more than one lane on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
-  #87), into the exact path's link; the command runs at most a lane per CPU it
-  may run on, on one team of threads it starts once its options are valid
-  and its resolution, conversion and write share (#501), and `--time` reports
-  the lanes, the team's start and the resolution's, the conversion's and the
-  writer's phases.
+  #87), into the exact path's link; the command runs on one team of threads
+  its resolution, conversion and write share (#501), and `--time` reports
+  the lanes, the first inputs' opening with their objects' bytes, the team's
+  start and the resolution's, the conversion's and the writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`
@@ -3740,8 +3744,12 @@ by the direct path and by each linker, and reports medians:
   was higher, which Linux carries over at `exec`. The helper's own floor, a
   program that does nothing, is printed first;
 - `link-foreign` (#86, #394), this executable's linker of other compilers'
-  objects, given the same command line as a process of its own, with
-  `--lanes=8` for its threads and `--lanes=1` for one, for every kind.
+  objects, given the same command line as a process of its own, for every
+  kind: by default for its threads (the lanes its objects pay for, #594),
+  with `--lanes=8`, the most its default takes, and with `--lanes=1` for one,
+  on every CPU as its threads run and pinned as one thread runs: a default
+  link of one lane runs where the scheduler puts it, on the 9700X up to 60%
+  slower than on CPU 2.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
