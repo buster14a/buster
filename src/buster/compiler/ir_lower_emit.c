@@ -16,16 +16,22 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
 #else
     __builtin_assume(output != 0);
 #endif
+    // A function with indirect jumps has one dispatch block, after the source blocks, which loads the address each jump
+    // stored in the dispatch slot, after the depth slots, and is the function's one br_indirect (as clang's indirectgoto
+    // block): the CFG's edges are then the jumps' and the labels', not every jump's to every label.
+    const bool dispatch = plan->indirect != 0;
+    const uint32_t dispatch_slot = input->local_count + plan->maximum_spill_depth;
+    const uint32_t dispatch_block = plan->block_count + 1;
     IrTypedSink sink = {
         .output = output,
         .sizes = {
-            .block_count = (uint64_t)plan->block_count + 1,
-            .slot_count = (uint64_t)input->local_count + plan->maximum_spill_depth,
+            .block_count = (uint64_t)plan->block_count + 1 + dispatch,
+            .slot_count = (uint64_t)dispatch_slot + dispatch,
             .parameter_count = input->parameter_count,
             .label_count = input->label_count,
         },
     };
-    const uint32_t slots = input->local_count + plan->maximum_spill_depth;
+    const uint32_t slots = dispatch_slot + dispatch;
     // A function that takes or returns an aggregate by value has its own ABI records (IrFunction.parameter_passed):
     // each parameter's location and size (an object's, its bytes'), and its result's. Its result in registers is the
     // address of its bytes, a ptr.
@@ -68,6 +74,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         ir_typed_emit(&sink, IR_STACK_ADDR, IR_PTR, s, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
         if (output != 0)
         {
+            // The depth slots are expression slots, untyped; the dispatch slot holds an address (i64), which promotion
+            // makes a phi of the jumps' addresses.
             const bool local = s < input->local_count;
             const uint8_t class = local ? input->local_classes[s] : BUSTER_TYPED_CLASS_U64;
             // tier0_validate established that an object is an address-taken VOID local aligned to at most 16, and that a
@@ -76,9 +84,9 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             const uint32_t role = local ? input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY : 0;
             const bool flags = local && (input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
             IrSlot slot = {
-                .size = object ? input->local_sizes[s] : local ? tier0_class_bytes(class) : plan->spill_bytes,
-                .alignment = object ? 1u << input->local_alignments[s] : local ? 1u << ir_typed_alignment(class) : plan->spill_bytes,
-                .type = local && !object ? ir_typed_types[class] : IR_VOID,
+                .size = object ? input->local_sizes[s] : local ? tier0_class_bytes(class) : s == dispatch_slot ? 8 : plan->spill_bytes,
+                .alignment = object ? 1u << input->local_alignments[s] : local ? 1u << ir_typed_alignment(class) : s == dispatch_slot ? 8 : plan->spill_bytes,
+                .type = local && !object ? ir_typed_types[class] : s == dispatch_slot ? IR_I64 : IR_VOID,
                 .flags = local ? (flags ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
             };
             if (role == BUSTER_TYPED_LOCAL_VA_LIST)
@@ -307,15 +315,12 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             }
             case BUSTER_TYPED_JUMP_INDIRECT:
-            {
-                // A label's address (U64), at statement level: nothing else on the stack to spill.
+                // A label's address (U64), at statement level (nothing else on the stack to spill), to the dispatch block.
                 depth -= 1;
-                const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-                ir_typed_spill(&sink, stack, classes, depth, input->local_count);
-                ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                ir_typed_emit(&sink, IR_STORE, IR_VOID, dispatch_slot, stack[depth], BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+                ir_typed_emit(&sink, IR_BR, IR_VOID, dispatch_block, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 terminated = true;
                 break;
-            }
             default:
             {
                 const uint32_t right = stack[depth - 1];
@@ -362,9 +367,19 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             }
         }
     }
+    if (dispatch)
+    {
+        if (output != 0)
+        {
+            output->block_offsets[dispatch_block] = (uint32_t)sink.sizes.instruction_count;
+        }
+        const uint32_t loaded = ir_typed_emit(&sink, IR_LOAD, IR_I64, dispatch_slot, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+        const uint32_t address = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, loaded, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_typed_emit(&sink, IR_BR_INDIRECT, IR_VOID, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
     if (output != 0)
     {
-        output->block_offsets[plan->block_count + 1] = (uint32_t)sink.sizes.instruction_count;
+        output->block_offsets[plan->block_count + 1 + dispatch] = (uint32_t)sink.sizes.instruction_count;
     }
     return sink.sizes;
 }

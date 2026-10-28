@@ -26,6 +26,8 @@ struct IrTypedPlan
     uint32_t maximum_spill_depth;
     // The depth slots' bytes and alignment: 16 for a function with values of the memory classes, else 8.
     uint32_t spill_bytes;
+    // The JUMP_INDIRECT entries, which all go through the function's one dispatch block (the emitter's last).
+    uint32_t indirect;
     uint32_t error_entry;
     const char* error;
     IrError error_code;
@@ -224,12 +226,14 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     reachable = false;
                     break;
                 case BUSTER_TYPED_JUMP_INDIRECT:
-                    // At statement level: the address popped, every label arrived at with the stacks empty.
+                    // At statement level: the address popped. Every indirect jump goes to the dispatch block, which
+                    // arrives at every label with the stacks empty, once.
                     depth -= 1;
-                    for (uint32_t k = 0; ok && k < input->label_count; k += 1)
+                    for (uint32_t k = 0; ok && plan.indirect == 0 && k < input->label_count; k += 1)
                     {
                         ok = ir_typed_plan_arrive(&plan, scratch, plan.entry_blocks[input->label_entries[k]], stack, depth, i);
                     }
+                    plan.indirect += 1;
                     reachable = false;
                     break;
                 default:
@@ -272,7 +276,10 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
 //    fallthrough must either emit an explicit undef return under an agreed
 //    contract or diagnose unsupported; never silently map void fallthrough to
 //    UNREACHABLE.
-// 6. Verify the IR and build compact CFG arrays after construction. #134 can
+// 6. An indirect jump stores its address in the dispatch slot and branches to
+//    the dispatch block, the last, which loads it and is the function's one
+//    br_indirect, so that its CFG has an edge per jump and per label.
+// 7. Verify the IR and build compact CFG arrays after construction. #134 can
 //    promote both ordinary local slots and the expression-depth slots later.
 
 // ---------------------------------------------------------------------------------------------------------------------

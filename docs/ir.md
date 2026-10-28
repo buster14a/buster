@@ -19,8 +19,9 @@ The IR lowered from every function of the corpora verifies (#131): `test-ir-sour
 lowers every function `-c` compiles of a set of C files by both paths, which must
 agree column for column and verify, and promotes each by both of `ssa_ir.c`'s
 paths, whose results verify with dominance checked ("Tests and measurements"
-below). Every function of the frozen `sqlite3.c` (2,602), c-testsuite's subset
-(430 of its 220 programs) and the 12 Lua 5.4.8 files `-c` compiles (368) passes.
+below). Every function of the frozen `sqlite3.c` (2,602 of them), of c-testsuite's
+subset (430, in its 220 programs) and of Lua 5.4.8's 32 files but `lua.c` and
+`luac.c` (1,052) passes.
 `benchmark-ir-source` measures the IR's bytes per source token on `sqlite3.c`
 ("Bytes per source token" below).
 
@@ -147,7 +148,11 @@ reaches it, and a backend defines its symbol anywhere in the function. A pass th
 removes a label's block (SSA promotion's unreachable blocks, the optimizer's dead
 ones) leaves the label none; one that threads a block's jump moves the label to
 its target. A jump table's dispatch can only reach its own table's labels, but the
-IR takes the conservative edges of GNU C's rule: any label of the function.
+IR takes the conservative edges of GNU C's rule: any label of the function. A
+function may have several `br_indirect`s, each with every label for successors;
+the typed-stream adapter gives it one, which every indirect jump branches to
+(below), so that its CFG has an edge per jump and per label rather than every
+jump's to every label.
 
 ### By-value aggregates' ABI records
 
@@ -325,9 +330,21 @@ through branches and loops without moving their effects. This adds no planning
 arrays, instruction columns or input traversals for ordinary functions.
 
 #133's labels (`label_entries`) each start a block, and the IR's labels are
-those blocks. `JUMP_INDIRECT` pops a label's address at statement level: the plan
-arrives at every label with the stacks empty, and the emitter lowers it to
-`inttoptr` and `br_indirect`. `VECTOR` values and `X86` rows are refused with
+those blocks. `JUMP_INDIRECT` pops a label's address at statement level, stores it
+in the dispatch slot (an `i64` expression slot after the depth slots) and branches
+to the dispatch block, the function's last, which loads it and is the function's
+one `br_indirect`; the plan arrives at every label once, with the stacks empty.
+This is clang's `indirectgoto` block. With a `br_indirect` per jump, each of a
+function's jumps would be a predecessor of each of its labels, and promotion would
+give a label a phi of a pair per jump for each value live there: Lua 5.4.8's
+`luaV_execute`, whose 78 computed gotos (`vmdispatch`) can each go to any of its 83
+labels, promoted into 213,368 phi pairs (1.7 MB, 4.2 times `lvm.c`'s lowered IR),
+and `sqlite3VdbeExec`'s five jump tables into 20,000. Through the dispatch block,
+whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
+`lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
+that wants a jump per site again, for the branch predictor, duplicates the
+dispatch block into its predecessors, as LLVM's tail duplication does.
+`VECTOR` values and `X86` rows are refused with
 `IR_ERROR_TYPE` and `IR_ERROR_OPCODE` at their entry, after validation and before
 anything is allocated. `BUSTER_TYPED_X86` is the last typed kind; a static
 assertion makes a later kind fail to build until this adapter lowers or refuses
@@ -545,8 +562,10 @@ compares and conversions. Fixtures check a computed goto through a `?:` of two
 labels' addresses (executed, and promoted with both labels kept), a variadic
 definition whose result is its register save area's first unnamed argument (its
 anchors' sizes, alignments and flags, its frame, five breaks of the roles' rules
-refused), and a function that takes, passes and returns a struct by value (its
-own and its call's records, exactly the stream's). Each of these was checked by
+refused), a function that takes, passes and returns a struct by value (its
+own and its call's records, exactly the stream's), and two computed gotos, which
+must branch to the one dispatch block, whose promoted address is a phi of their
+two (the promoted function run by the shared IR's interpreter, which has phis). Each of these was checked by
 mutation when added: an `__int128` constant's lost sign extension, `I128` taken
 as unsigned, a long double constant's halves swapped, a parameter's copy a byte
 short, a call's result room a byte short, the labels in the wrong order, an
@@ -588,19 +607,19 @@ column and side table, each aligned to 64 bytes, with the gaps), against the
 
 | IR | Instructions | Bytes | Per token | Per typed entry |
 | --- | ---: | ---: | ---: | ---: |
-| Lowered (all in memory) | 598,388 | 13,981,835 | 19.81 | 35.23 |
-| Promoted (`ssa_ir_promote`) | 496,807 | 12,390,063 | 17.56 | 31.22 |
+| Lowered (all in memory) | 598,568 | 13,986,379 | 19.82 | 35.24 |
+| Promoted (`ssa_ir_promote`) | 493,934 | 12,227,119 | 17.33 | 30.81 |
 
-The lowered IR's 19.81 bytes per token are 13.57 of instruction columns (16 bytes
+The lowered IR's 19.82 bytes per token are 13.57 of instruction columns (16 bytes
 per instruction), 4.64 of block offsets and side tables (constants, slots,
 addresses, calls, their extra words and types, labels and the ABI records) and
 1.60 of the columns' 64-byte alignment gaps, which small functions pay for most.
 Each constant takes an instruction and a 16-byte `IrConstant` of its own: the
 adapter shares none.
 
-`sqlite3VdbeExec` is the largest function: 571,536 bytes, 4.09% of the IR's
-(26,798 instructions, 4.48% of them), from 18,937 typed entries. The ten largest
-are 14.00% (#15: 16.8% of the `-O0` code), the next being `yy_reduce` (2.69%) and
+`sqlite3VdbeExec` is the largest function: 571,792 bytes, 4.09% of the IR's
+(26,802 instructions, 4.48% of them), from 18,937 typed entries. The ten largest
+are 14.00% (#15: 16.8% of the `-O0` code), the next being `yy_reduce` (2.68%) and
 `sqlite3Pragma` (1.65%). One function's IR is thus at most about 0.6 MB of a
 lane's arena at a time (#151). c-testsuite's subset comes to 2.63 bytes per token,
 its tokens mostly its headers'.

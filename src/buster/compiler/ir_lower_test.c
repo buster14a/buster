@@ -2077,9 +2077,10 @@ static void ir_lower_test_copies(IrLowerTestTally* tally)
 }
 
 // #133's labels and indirect jumps: GNU C's labels as values and the switches' jump tables. Each label is a block, and
-// JUMP_INDIRECT a br_indirect whose successors are the labels: a stream whose jump goes to an address the labels don't
-// have still lowers (its jump has no meaning), and a computed goto through a ?: of two labels' addresses executes as it
-// should, by both paths and promoted.
+// every JUMP_INDIRECT a branch to the function's dispatch block, whose br_indirect's successors are the labels: a stream
+// whose jump goes to an address the labels don't have still lowers (its jump has no meaning), a computed goto through a
+// ?: of two labels' addresses executes as it should, by both paths and promoted, and so do two computed gotos, which
+// share the one dispatch block, whose address promotion makes a phi of the two.
 static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
 {
     static const uint8_t kinds[3] =
@@ -2151,6 +2152,46 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         6,
         8
     };
+    // if (p) goto *&&a; else goto *&&b; a: return 10; b: return 20; the same symbols.
+    static const uint8_t twice_kinds[] =
+    {
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_BRANCH_FALSE,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_GLOBAL_ADDRESS,
+        BUSTER_TYPED_JUMP_INDIRECT,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t twice_classes[] =
+    {
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32,
+        BUSTER_TYPED_CLASS_I32
+    };
+    static const uint64_t twice_values[] =
+    {
+        0,
+        4,
+        2,
+        0,
+        3,
+        0,
+        10,
+        0,
+        20,
+        0
+    };
     static const uint8_t local_classes[1] =
     {
         BUSTER_TYPED_CLASS_I32
@@ -2172,7 +2213,8 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     Arena promoted = arena_reserve(1ull << 20);
     Arena twin_promoted = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    Arena execution = arena_reserve(1ull << 20);
+    // Both executors' frames, the shared IR interpreter's as the wide programs' check reserves them.
+    Arena execution = arena_reserve(1ull << 26);
     const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "indirect jump arenas", 0, 0);
     const Tier0Function source =
@@ -2198,6 +2240,28 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         .label_entries = goto_labels,
         .label_count = 2,
     };
+    const Tier0Function twice =
+    {
+        .kinds = twice_kinds,
+        .classes = twice_classes,
+        .values = twice_values,
+        .count = BUSTER_ARRAY_LENGTH(twice_kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 1,
+        .parameter_count = 1,
+        .parameters = &parameter,
+        .label_entries = goto_labels,
+        .label_count = 2,
+    };
+    const Tier0TestData data =
+    {
+        0
+    };
+    uint8_t globals[1] =
+    {
+        0
+    };
     IrFunction function =
     {
         0
@@ -2217,14 +2281,6 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_pop_to(&twin_output, 0);
     if (ready && ir_lower_test_lower(tally, &computed, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 1))
     {
-        const Tier0TestData data =
-        {
-            0
-        };
-        uint8_t globals[1] =
-        {
-            0
-        };
         for (uint64_t p = 0; p < 2; p += 1)
         {
             bool fault = false;
@@ -2244,6 +2300,61 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             bool fault = false;
             const uint64_t actual = ir_lower_test_interpret(&promoted_function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "the promoted computed goto goes to the same labels", 0, (uint32_t)p);
+        }
+    }
+    arena_pop_to(&output, 0);
+    arena_pop_to(&twin_output, 0);
+    arena_pop_to(&promoted, 0);
+    arena_pop_to(&twin_promoted, 0);
+    if (ready && ir_lower_test_lower(tally, &twice, IR_I32, 4, &output, &twin_output, &scratch, &function, 0, 2))
+    {
+        // The dispatch block is the last: each jump's block branches to it, and its br_indirect goes to the two labels.
+        const uint32_t last = function.block_count - 1;
+        const uint32_t end = function.block_offsets[function.block_count] - 1;
+        uint32_t jumps = 0;
+        uint32_t dispatches = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            jumps += function.op[i] == IR_BR_INDIRECT;
+            dispatches += function.op[i] == IR_BR && function.a[i] == last;
+        }
+        ir_lower_test_expect(tally, jumps == 1 && dispatches == 2 && function.op[end] == IR_BR_INDIRECT && ir_successor(&function, end, 0) == function.labels[0] &&
+                                        ir_successor(&function, end, 1) == function.labels[1] && function.labels[0] != function.labels[1],
+                             "two indirect jumps branch to the one dispatch block, whose br_indirect goes to the labels", 0, 2);
+        for (uint64_t p = 0; p < 2; p += 1)
+        {
+            bool fault = false;
+            const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
+            ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "two computed gotos go to the labels whose addresses they take", 0, (uint32_t)p);
+        }
+        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 2);
+        IrFunction promoted_function =
+        {
+            0
+        };
+        const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promoted_function);
+        // Promoted, the dispatch block's address is a phi of the two jumps' (the block that ends in the br_indirect).
+        uint32_t phi = BUSTER_IR_NONE;
+        for (uint32_t b = 0; check.error == IR_OK && b < promoted_function.block_count; b += 1)
+        {
+            const uint32_t terminator = promoted_function.block_offsets[b + 1] - 1;
+            phi = promoted_function.op[terminator] == IR_BR_INDIRECT ? promoted_function.block_offsets[b] : phi;
+        }
+        ir_lower_test_expect(tally, check.error == IR_OK && phi != BUSTER_IR_NONE && promoted_function.op[phi] == IR_PHI && promoted_function.b[phi] == 2,
+                             "promotion makes the dispatch block's address a phi of the two jumps'", 0, 2);
+        // This executor has no phis: the shared IR's interpreter runs the promoted function, its labels symbols 2 and 3.
+        static const SymbolId label_symbols[2] =
+        {
+            2,
+            3
+        };
+        const IrInterpreterFunction code = { .symbol = 1, .function = &promoted_function, .labels = label_symbols };
+        const IrInterpreterProgram program = { .functions = &code, .function_count = 1 };
+        for (uint64_t p = 0; check.error == IR_OK && p < 2; p += 1)
+        {
+            const InterpreterValue argument = { .low = p };
+            const InterpreterResult result = ir_interpret(&program, 1, &argument, 1, 0, &execution);
+            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == (p != 0 ? 10 : 20), "the promoted computed gotos go to the same labels", 0, (uint32_t)p);
         }
     }
     arena_release(&output);

@@ -1049,8 +1049,10 @@ designs and the compilers already built this way.
   definition's frame and anchors. `ir_lower.c` lowers the `Tier0Function` stream
   into the all-in-memory form for SSA promotion: frame objects as address-taken
   slots of their size and alignment, `COPY` as integer load/store pieces, the
-  dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT`,
-  aggregates by value, variadic frames, long double and `__int128`; it refuses
+  dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT` (every
+  jump through the function's one dispatch block, as clang's indirect gotos go,
+  which keeps an interpreter's CFG linear), aggregates by value, variadic frames,
+  long double and `__int128`; it refuses
   vectors and `X86` rows, which no corpus function has. `test-ir` checks
   independent fixtures, guarded columns, malformed inputs and allocation
   rollback; `test-ir-lowering` also executes generated IR (values, objects,
@@ -5691,8 +5693,8 @@ programs of values and as many each with frame objects and copies, with calls
 through pointers to functions and with records passed and returned by value,
 whose IR the executor runs as its ABI records say. Targeted fixtures exercise
 conditional joins, entry-zero backedges, narrow shifts, wide pointer scales,
-objects' slots, `COPY` of every size from 1 to 256, labels and a computed goto,
-a variadic definition's frame, a struct by value's records, guarded source tails
+objects' slots, `COPY` of every size from 1 to 256, labels and computed gotos
+(one, and two through the dispatch block), a variadic definition's frame, a struct by value's records, guarded source tails
 and transactional failures. Every lowered function is also promoted by both SSA
 paths, verified, and must keep its objects' slots. Tier 0's random long double
 and `__int128` programs (four times the count) run through the shared IR's
