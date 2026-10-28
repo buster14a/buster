@@ -448,6 +448,33 @@ static void interpreter_test_limits(InterpreterTestTally* tally, Arena* scratch)
         result = interpreter_test_run(&indirect, scratch, 0);
         interpreter_test_expect(tally, tier0_validate(&indirect).error == TIER0_OK && result.status == INTERPRETER_INVALID, "indirect jump refused");
     }
+    {
+        // A frame's address (#148), whose return address and caller's frame an interpreted function hasn't: a valid
+        // stream, refused.
+        const uint8_t frame_kinds[] = {
+            BUSTER_TYPED_FRAME_ADDRESS,
+            BUSTER_TYPED_DISCARD,
+            BUSTER_TYPED_RETURN,
+        };
+        const uint8_t frame_classes[] = {
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_U64,
+            BUSTER_TYPED_CLASS_VOID,
+        };
+        const uint64_t frame_values[] = {
+            0,
+            0,
+            0,
+        };
+        const Tier0Function frame = {
+            .kinds = frame_kinds,
+            .classes = frame_classes,
+            .values = frame_values,
+            .count = 3,
+        };
+        result = interpreter_test_run(&frame, scratch, 0);
+        interpreter_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && result.status == INTERPRETER_INVALID, "frame address refused");
+    }
     function.count = 0;
     result = interpreter_test_run(&function, scratch, 0);
     interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 0, "empty void function");

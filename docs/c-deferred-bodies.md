@@ -115,20 +115,31 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
    it made. Then the lane takes its names' heads, its view and the top level's
    tags it changed back (`type_tag_restore`).
 5. **The merge** (`check_deferred_merge`), in source order, on the caller's
-   thread:
+   thread but for its pass, which runs on the lanes the bodies ran on:
    - `type_replay` makes the top level's changes and each body's again in the
      caller's table, merged by key (position, then order at the position), the
      top level's first at a position both have. Each change's types are mapped
      to the replay's, and `last_error` is the last write's by key;
    - each appended table is laid out with each body's entries at its cut, where
      source order appends them, and every id into it mapped;
-   - each body's events go at its cut, their handles mapped, a restore's mark
-     past the top level's active declarations at the cut;
-   - every column the walk wrote with a `TypeId` or a table id is mapped
-     through its owner's part: a body's tokens and its parameters' through the
-     body's, the rest through the top level's. The tags' completion positions,
-     linked types, predefined types (the earliest maker's by position) and
-     `__func__` strings follow;
+   - the events are laid out the same way, each body's at its cut, and the
+     indices into them that the walk keeps (each name's head and the top
+     level's active declarations) mapped;
+   - the pass (`check_deferred_pass_items`) shares the unit among the lanes by
+     whole items, each the top level's tokens and events after one body and
+     then the next body's own, by their tokens (`lane_range_by_cost`). Each
+     item's events go to their places in the merged stream, the fields without
+     an index copied whole and the handles mapped, a restore's mark past the
+     top level's active declarations at the cut; and every column the walk
+     wrote with a `TypeId` or a table id is mapped at the item's tokens that
+     have an entry (`check_deferred_entries`, 64 tokens a test, with its
+     scalar twin) through its owner's part: a body's tokens and its
+     parameters' through the body's, the rest through the top level's. Every
+     item writes places of its own, so the lanes need no sync until the pass
+     ends, and one lane runs it on the caller's thread;
+   - the tags' completion positions, before the pass, and linked types,
+     predefined types (the earliest maker's by position) and `__func__`
+     strings, after it, are mapped too;
    - the intrinsic declarations go in the order source order decodes them,
      each catalogue entry once, at its first maker's place: for each body, the
      top level's made before its cut, then the body's own, and last the top
@@ -238,7 +249,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 101 fixtures, 86 of the
+- `./build/compiler test-checker-deferred [--id-order N] [--keep]`: 101 fixtures, 86 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -246,7 +257,12 @@ passes every checker test.
   on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct binding
   resolution, the issue's cases on every lane their bodies can take
   (`CheckDeferred.every_lane`). The deferred result must be the vector path's
-  column for column, and each fixture says whether the reader merges it. A
+  column for column, and each fixture says whether the reader merges it. Each
+  fixture runs again with its identifiers' IDs in another order
+  ([#153](https://github.com/buster14a/buster/issues/153): the driver's
+  `--id-order` table, `check_driver_id_order`, from `--id-order N` on, 153 by
+  default), on 8 lanes through each resolution: the three paths must still
+  be alike, and the reader must merge it as before. A
   merged unit's bodies must run on the rule's lanes (`CheckDeferred.active`),
   in as many parts as a group of them cuts (`CheckDeferred.parts`), its reader
   be copied by one of them at least and by no more (`CheckDeferred.copies`),
@@ -363,7 +379,8 @@ passes every checker test.
   bodies, the differences, and the units left to source order by reason.
 
 The 9700X job runs `test-checker-deferred`, c-testsuite's programs with
-`--deferred 8`, and the frozen SQLite source's check with `--deferred 8`.
+`--deferred 8` and the IDs in another order (`test-checker-corpus --id-order
+153`), and the frozen SQLite source's check with `--deferred 8`.
 
 On the 9700X, with #697's item 4 (the bodies above merged) and `--deferred 8`,
 each against clang 23.1.1: c-testsuite on the system's headers, as the 9700X
@@ -413,7 +430,9 @@ level's tokens and the bodies' tokens that pay for a lane by the rule
 in nanoseconds per token: the parse; source order's reading; and each deferred
 reading's whole, its top level, the history's index, the bodies' walks and
 their position checks (summed over the lanes), the lanes' span, the merge and
-the rest (the phases after the merge); the position checks per body too, the
+the rest (the phases after the merge); the merge's parts (its replay, the
+appended tables, the events' layout, the tags' completions, its pass and the
+rest); the position checks per body too, the
 lanes the bodies ran on (`active`: as many as the rule gives them, or with
 `--every-lane` every lane they can take) and those that copied the reader
 (`copies`); and what a lane costs, in nanoseconds: a copy of the reader
@@ -752,8 +771,17 @@ is retained.
 
 ## What is left
 
-The top level, the merge and the phases after it are sequential, so the lanes
-shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading. Bodies that do what the merge doesn't take
+The top level, the merge's replay and layouts, and the phases after it are
+sequential, so the lanes shorten only the bodies' walks and the merge's pass,
+which on `sqlite3.c` are about a quarter of one lane's reading. On eight lanes
+the pass shares the memory's bandwidth: it reads each of its columns at every
+token, mostly zeros, and the lanes' scans of their shares run at about a third
+of one lane's speed per token (on `sqlite3.c`, 0.8 ms a lane for 88,000
+tokens, against 2.1 ms for all 706,237 on one lane). A record of where the
+walk writes each column's entries, such as a bitmap of 64-token blocks for the
+sparser columns, would let the pass read those blocks alone.
+
+Bodies that do what the merge doesn't take
 (above) send their unit to source order: on the corpora above, only bodies
 that report errors do since #697's item 4. Overloadable functions and a union
 of the top level's made transparent in a body are what the merge doesn't take

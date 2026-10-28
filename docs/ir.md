@@ -230,7 +230,8 @@ need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
 as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
-operations below. Typed validation still requires class U64 and `value == 0` for each, and a
+operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
+refused, as `JUMP_INDIRECT` and `X86` are (`IR_ERROR_OPCODE`). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -240,10 +241,10 @@ arrays, instruction columns or input traversals for ordinary functions.
 
 #133's computed gotos aren't lowered yet: `JUMP_INDIRECT` is refused with
 `IR_ERROR_OPCODE` at its entry, after validation and before anything is
-allocated. `BUSTER_TYPED_JUMP_INDIRECT` is the last typed kind; a static
-assertion makes a later kind fail to build until this adapter lowers or refuses
-it, since the plan and the emitter would take an unnamed kind for a binary
-operation.
+allocated, and so are `X86` and `FRAME_ADDRESS`. A static assertion pins the
+typed kinds' count, `X86` the last, so that a new kind fails to build until this
+adapter lowers or refuses it, since the plan and the emitter would take an
+unnamed kind for a binary operation.
 
 The ordered replay is written once in `ir_lower_emit.c` and instantiated for
 counting and filling. Counting fixes its output to null; filling receives the

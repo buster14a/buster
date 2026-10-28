@@ -4614,7 +4614,9 @@ static bool pp_test_named_ucn_scaling(const char* directory)
     }
     free(source);
     char standard[] = "-std=gnu17";
-    char* arguments[] = { standard, path, 0 };
+    // This checks every rejected UCN, independently of the command-line diagnostic publication budget.
+    char limit[] = "-ferror-limit=0";
+    char* arguments[] = { standard, limit, path, 0 };
     for (uint32_t k = 0; result && k < 2; k += 1)
     {
         Arena arena = arena_reserve(1ull << 20);
@@ -4622,7 +4624,7 @@ static bool pp_test_named_ucn_scaling(const char* directory)
         const char* input;
         const char* output;
         bool markers;
-        result = pp_parse_options(2, arguments, &options, &arena, &input, &output, &markers);
+        result = pp_parse_options(3, arguments, &options, &arena, &input, &output, &markers);
         options.scalar = k == 1;
         options.quiet = true;
         static InternTable table;
@@ -7212,6 +7214,23 @@ static bool pp_test_implemented_features(const char* directory)
         { CBUILTIN_ATOMIC_FETCH_MAX, "__atomic_fetch_max", false },
         { CBUILTIN_ATOMIC_MIN_FETCH, "__atomic_min_fetch", false },
         { CBUILTIN_ATOMIC_MAX_FETCH, "__atomic_max_fetch", false },
+        { CBUILTIN_C11_ATOMIC_INIT, "__c11_atomic_init", false },
+        { CBUILTIN_C11_ATOMIC_LOAD, "__c11_atomic_load", false },
+        { CBUILTIN_C11_ATOMIC_STORE, "__c11_atomic_store", false },
+        { CBUILTIN_C11_ATOMIC_EXCHANGE, "__c11_atomic_exchange", false },
+        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG, "__c11_atomic_compare_exchange_strong", false },
+        { CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK, "__c11_atomic_compare_exchange_weak", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_ADD, "__c11_atomic_fetch_add", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_SUB, "__c11_atomic_fetch_sub", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_AND, "__c11_atomic_fetch_and", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_OR, "__c11_atomic_fetch_or", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_XOR, "__c11_atomic_fetch_xor", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_NAND, "__c11_atomic_fetch_nand", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_MIN, "__c11_atomic_fetch_min", false },
+        { CBUILTIN_C11_ATOMIC_FETCH_MAX, "__c11_atomic_fetch_max", false },
+        { CBUILTIN_C11_ATOMIC_THREAD_FENCE, "__c11_atomic_thread_fence", false },
+        { CBUILTIN_C11_ATOMIC_SIGNAL_FENCE, "__c11_atomic_signal_fence", false },
+        { CBUILTIN_C11_ATOMIC_IS_LOCK_FREE, "__c11_atomic_is_lock_free", false },
         { CBUILTIN_SYNC_FETCH_AND_ADD, "__sync_fetch_and_add", false },
         { CBUILTIN_SYNC_FETCH_AND_SUB, "__sync_fetch_and_sub", false },
         { CBUILTIN_SYNC_FETCH_AND_OR, "__sync_fetch_and_or", false },
@@ -7383,6 +7402,7 @@ static bool predefines_test_refused(void);
 
 #include "c_preprocessor_history_test.c"
 #include "c_preprocessor_print_test.c"
+#include "c_preprocessor_system_warning_test.c"
 #include "c_preprocessor_directives_test.c"
 #include "c_preprocessor_order_test.c"
 #include "c_preprocessor_batch_test.c"
@@ -7680,6 +7700,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_history(directory, with_clang);
         passed_all &= pp_test_print_offsets();
         passed_all &= pp_test_print_batches(directory);
+        passed_all &= pp_test_system_warnings(directory, with_clang);
         passed_all &= pp_test_pragma_origins(directory, with_clang);
         passed_all &= pp_test_embed_text(fuzz.seed);
         passed_all &= pp_test_embed_lookups(directory, with_clang);

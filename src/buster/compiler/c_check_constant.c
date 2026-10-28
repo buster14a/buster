@@ -46,7 +46,7 @@ static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
         const bool present = (reader->output->constant_warnings[first] & CHECK_WARNING_GNU_CONSTANT) != 0;
-        check_input_warning_add(reader, first, CHECK_WARNING_GNU_CONSTANT);
+        check_input_warning_add_at(reader, first, CHECK_WARNING_GNU_CONSTANT, end);
         if (reader->output->constant_warning_ignored != 0)
         {
             if (ignored && !present)
@@ -1638,7 +1638,7 @@ static bool check_constant_builtin_type(CheckConstantInput* input, uint32_t toke
                 };
                 CheckActionResult checked;
                 check_action_scalar(reader->types, &action, &checked);
-                check_input_warning_add(reader, action.node, checked.warnings);
+                check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE && (checked.value.flags & BUSTER_CHECK_BIT_FIELD) == 0 && checked.value.offset >= 0;
                 valid &= (uint64_t)checked.value.offset <= UINT64_MAX - number;
@@ -1895,7 +1895,7 @@ static bool check_constant_speculate(CheckConstantInput* input, const CheckActio
     input->reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
     if (checked.diagnostic == CHECK_DIAG_NONE)
     {
-        check_input_warning_add(input->reader, action->node, checked.warnings);
+        check_input_warning_add_at(input->reader, action->node, checked.warnings, action->source_position);
     }
     *value = checked.value;
     return checked.diagnostic == CHECK_DIAG_NONE;
@@ -2398,7 +2398,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, &checked);
-                check_input_warning_add(reader, action.node, checked.warnings);
+                check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
@@ -2607,7 +2607,7 @@ static bool check_constant_raw_reduce(CheckConstantInput* input, CheckConstantOp
                 }
                 arena_pop_to(reader->scratch, mark);
             }
-            check_input_warning_add(reader, action.node, checked.warnings);
+            check_input_warning_add_at(reader, action.node, checked.warnings, action.source_position);
             reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
             valid &= checked.diagnostic == CHECK_DIAG_NONE;
             ranges[*value_count] = range;

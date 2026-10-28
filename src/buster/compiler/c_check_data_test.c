@@ -344,6 +344,13 @@ static void check_data_test_objects(CheckTest* test, TypeTable* types, const cha
             },
             .class = BUSTER_LINK_CLASS_DATA,
         },
+        {
+            .name = "data_atomic",
+            .type = type_atomic(types, BUSTER_TYPE_INT),
+            .value = check_test_integer(BUSTER_TYPE_INT, 29),
+            .bytes = { 29 },
+            .class = BUSTER_LINK_CLASS_DATA,
+        },
     };
     enum
     {
@@ -457,7 +464,8 @@ static void check_data_test_objects(CheckTest* test, TypeTable* types, const cha
         "int *data_absolute = (int *)0xffff800000001000ull; int *data_null = 0;\n"
         "const volatile int data_volatile = 17; int data_aligned __attribute__((aligned(32))) = 11;\n"
         "long double data_tiny = 0x1p-16445L; long double data_large = 0x1.fffffffffffffffep16383L;\n"
-        "_Bool data_bool = 1; _BitInt(9) data_bit9 = -1; unsigned _BitInt(65) data_bit65 = ((unsigned _BitInt(65))1 << 64) | 3;\n";
+        "_Bool data_bool = 1; _BitInt(9) data_bit9 = -1; unsigned _BitInt(65) data_bit65 = ((unsigned _BitInt(65))1 << 64) | 3;\n"
+        "_Atomic int data_atomic = 29;\n";
     char directory[] = "/tmp/buster-checker-data-XXXXXX";
     const bool directory_ready = mkdtemp(directory) != 0;
     char source_path[160];
@@ -622,7 +630,7 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     break;
                 case 16:
                     objects[1].type = type_atomic(types, BUSTER_TYPE_INT);
-                    expected = CHECK_DATA_UNSUPPORTED;
+                    expected = CHECK_DATA_INVALID;
                     break;
                 case 17:
                     objects[1].type = BUSTER_TYPE_FLOAT128;
