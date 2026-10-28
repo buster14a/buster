@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/memfd.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -16,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -385,7 +387,7 @@ static void worker_budget_test_limits(WorkerBudgetTest* test)
             _exit(valid ? 0 : 1);
         }
         worker_budget_test_expect(test, child > 0 && worker_budget_test_wait(child, 0) && worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
-                                  "descriptor or guardian-fork failure leaves every worker credit in the server");
+                                  "descriptor or guardian-start failure leaves every worker credit in the server");
         if (fds[0] >= 0)
         {
             close(fds[0]);
@@ -596,6 +598,73 @@ static void worker_budget_test_dry_run(WorkerBudgetTest* test)
     }
 }
 
+// A guardian must not retain even an untouched front-end mapping: that would force later parent writes through
+// copy-on-write faults. A named private mapping is an independent /proc oracle without allocating a large fixture.
+static void worker_budget_test_clean_spawn(WorkerBudgetTest* test)
+{
+    static const char name[] = "buster-worker-budget-parent";
+    const int memory_fd = (int)syscall(SYS_memfd_create, name, MFD_CLOEXEC);
+    const bool sized = memory_fd >= 0 && ftruncate(memory_fd, 4096) == 0;
+    void* mapping = sized ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE, memory_fd, 0) : MAP_FAILED;
+    int fds[2] = { -1, -1 };
+    const uint8_t credit = 0x85;
+    const bool ready = mapping != MAP_FAILED && worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 &&
+                       write(fds[1], &credit, 1) == 1;
+    worker_budget_test_expect(test, ready, "a named parent mapping and one credit are available");
+    if (ready)
+    {
+        char flags[128];
+        snprintf(flags, sizeof(flags), " --jobserver-auth=%d,%d", fds[0], fds[1]);
+        WorkerBudget budget;
+        worker_budget_initialize(&budget, flags, 2);
+        const int read_flags = fcntl(budget.read_fd, F_GETFD);
+        const int write_flags = fcntl(budget.write_fd, F_GETFD);
+        WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+        const uint32_t granted = worker_budget_acquire(&budget, 2, &lease);
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%ld/maps", (long)lease.child);
+        FILE* stream = granted == 2 && lease.child > 0 ? fopen(path, "r") : NULL;
+        bool clean = stream != NULL;
+        char line[512];
+        while (stream != NULL && fgets(line, sizeof(line), stream) != NULL)
+        {
+            clean = strstr(line, name) == NULL && clean;
+        }
+        if (stream != NULL)
+        {
+            clean = !ferror(stream) && fclose(stream) == 0 && clean;
+        }
+        worker_budget_test_expect(test, clean, "the guardian address space retains no private parent mapping");
+        worker_budget_test_expect(test, read_flags == FD_CLOEXEC && write_flags == FD_CLOEXEC &&
+                                       fcntl(budget.read_fd, F_GETFD) == read_flags && fcntl(budget.write_fd, F_GETFD) == write_flags,
+                                  "spawn inheritance never clears CLOEXEC on the parent's private handles");
+        worker_budget_test_expect(test, worker_budget_release(&lease) && worker_budget_test_tokens(fds[0], &credit, 1),
+                                  "the clean guardian returns its exact credit");
+        worker_budget_close(&budget);
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 4096);
+    }
+    if (memory_fd >= 0)
+    {
+        close(memory_fd);
+    }
+    for (uint32_t end = 0; end < 2; end += 1)
+    {
+        if (fds[end] >= 0)
+        {
+            close(fds[end]);
+        }
+    }
+    char* ordinary[] = { "compiler", "-c", "file.c" };
+    char* malformed[] = { "compiler", "--buster-worker-budget-guardian", "invalid", "0", "1", "2", "64" };
+    worker_budget_test_expect(test, worker_budget_guardian_command(3, ordinary) == -1 &&
+                                   worker_budget_guardian_command(2, malformed) == 1 &&
+                                   worker_budget_guardian_command(7, malformed) == 1,
+                              "internal dispatch recognizes ordinary commands and refuses malformed guardians");
+}
+
 static bool worker_budget_test(void)
 {
     WorkerBudgetTest test = { 0 };
@@ -620,6 +689,7 @@ static bool worker_budget_test(void)
     worker_budget_test_child_modes(&test);
     worker_budget_test_reused_descriptors(&test);
     worker_budget_test_dry_run(&test);
+    worker_budget_test_clean_spawn(&test);
     sigaction(SIGTERM, NULL, &after);
     sigprocmask(SIG_SETMASK, NULL, &after_mask);
     bool same_mask = true;

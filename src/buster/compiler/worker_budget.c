@@ -2,12 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The C driver's external worker ownership (#673). A command owns its implicit calling-thread slot; each additional
-// emission lane needs one GNU make jobserver byte, taken without waiting. MAKEFLAGS is inspected only when useful
-// work would start extra lanes. A private descriptor, never an inherited descriptor's flags, supplies nonblocking IO.
+// emission lane needs one GNU make jobserver byte, taken without waiting. Authentication is captured at command
+// entry; bytes are taken only when useful work would start extra lanes. A private descriptor supplies nonblocking IO.
 // A guardian owns the bytes until the parent closes its control pipe, also on signal-driven process exit. The child
-// starts its own session before taking any token, inherits blocked catchable signals, performs only safe syscalls
-// after fork, returns the exact bytes and sends
-// an acknowledgement before exiting. The driver has one lease at a time, covering only the joined worker phase.
+// starts from a clean exec in its own session before taking any token, inherits blocked catchable signals, returns
+// the exact bytes and sends an acknowledgement before exiting. The driver has one lease at a time, covering only the
+// joined worker phase. posix_spawn avoids retaining a copy-on-write snapshot of the live front end during emission.
 // GNU make's protocol: https://www.gnu.org/software/make/manual/html_node/POSIX-Jobserver.html
 
 #include <ctype.h>
@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,6 +29,8 @@
 #define BUSTER_WORKER_BUDGET_MAX 64u
 // Linux's O_DIRECT flag on a pipe selects packet mode (asm-generic/fcntl.h). The protocol requires byte-stream IO.
 #define BUSTER_WORKER_BUDGET_PACKET_FLAG 040000
+
+extern char** environ;
 
 typedef enum WorkerBudgetMode
 {
@@ -235,8 +238,8 @@ static __attribute__((unused)) void worker_budget_close(WorkerBudget* budget)
     budget->mode = budget->mode == WORKER_BUDGET_JOBSERVER ? WORKER_BUDGET_UNAVAILABLE : budget->mode;
 }
 
-// Close unrelated inherited descriptors without calling libc after fork. In particular another control pipe or a
-// caller's captured output must not stay alive through this guardian. Linux's close_range is available on the host.
+// Close unrelated inherited descriptors in the clean guardian. In particular another control pipe or a caller's
+// captured output must not stay alive through it. Linux's close_range is available on the host.
 static bool worker_budget_child_fds(int read_fd, int write_fd, int control, int reply)
 {
     uint32_t keep[] = { (uint32_t)read_fd, (uint32_t)write_fd, (uint32_t)control, (uint32_t)reply };
@@ -320,6 +323,79 @@ static void worker_budget_guardian(int read_fd, int write_fd, int control, int r
     _exit(acknowledged ? 0 : 1);
 }
 
+// Dispatch before any compiler allocation or MAKEFLAGS dry-run handling. Four private handles survive exec and
+// the guardian closes unrelated handles; ordinary commands return -1 without performing any guardian work.
+static __attribute__((unused)) int worker_budget_guardian_command(int argc, char** argv)
+{
+    const bool handled = argc >= 2 && strcmp(argv[1], "--buster-worker-budget-guardian") == 0;
+    bool valid = handled && argc == 7;
+    int values[5] = { -1, -1, -1, -1, -1 };
+    for (uint32_t i = 0; valid && i < 5; i += 1)
+    {
+        const char* cursor = argv[i + 2];
+        valid = worker_budget_fd(&cursor, values + i) && *cursor == 0;
+    }
+    valid = valid && values[4] > 0 && (uint32_t)values[4] < BUSTER_WORKER_BUDGET_MAX;
+    for (uint32_t i = 0; valid && i < 4; i += 1)
+    {
+        valid = fcntl(values[i], F_GETFD) >= 0;
+        for (uint32_t j = 0; valid && j < i; j += 1)
+        {
+            valid = values[i] != values[j];
+        }
+    }
+    if (valid)
+    {
+        sigset_t blocked;
+        sigfillset(&blocked);
+        valid = sigprocmask(SIG_BLOCK, &blocked, NULL) == 0;
+    }
+    if (valid)
+    {
+        worker_budget_guardian(values[0], values[1], values[2], values[3], (uint32_t)values[4]);
+    }
+    return handled ? 1 : -1;
+}
+
+static pid_t worker_budget_spawn(int read_fd, int write_fd, int control, int reply, uint32_t maximum)
+{
+    const int descriptors[] = { read_fd, write_fd, control, reply };
+    char numbers[5][16];
+    char* arguments[] = { "/proc/self/exe", "--buster-worker-budget-guardian", numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], NULL };
+    for (uint32_t i = 0; i < 5; i += 1)
+    {
+        snprintf(numbers[i], sizeof(numbers[i]), "%u", i < 4 ? (uint32_t)descriptors[i] : maximum);
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    const bool actions_ready = posix_spawn_file_actions_init(&actions) == 0;
+    const bool attributes_ready = posix_spawnattr_init(&attributes) == 0;
+    bool valid = actions_ready && attributes_ready;
+    sigset_t blocked;
+    sigfillset(&blocked);
+    valid = valid && posix_spawnattr_setsigmask(&attributes, &blocked) == 0 &&
+            posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSIGMASK) == 0;
+    for (uint32_t i = 0; valid && i < 4; i += 1)
+    {
+        // POSIX's same-descriptor dup action clears CLOEXEC in the child alone, unlike changing the parent's FD.
+        valid = posix_spawn_file_actions_adddup2(&actions, descriptors[i], descriptors[i]) == 0;
+    }
+    pid_t child = -1;
+    if (valid)
+    {
+        valid = posix_spawn(&child, arguments[0], &actions, &attributes, arguments, environ) == 0;
+    }
+    if (actions_ready)
+    {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    if (attributes_ready)
+    {
+        posix_spawnattr_destroy(&attributes);
+    }
+    return valid ? child : -1;
+}
+
 static __attribute__((unused)) bool worker_budget_release(WorkerBudgetLease* lease)
 {
     bool result = true;
@@ -379,22 +455,8 @@ static __attribute__((unused)) uint32_t worker_budget_acquire(WorkerBudget* budg
             const bool supplied = ioctl(read_fd, FIONREAD, &available) == 0 && available > 0;
             int control[2] = { -1, -1 };
             int reply[2] = { -1, -1 };
-            sigset_t blocked;
-            sigset_t previous;
-            sigfillset(&blocked);
             const bool pipes = supplied && syscall(SYS_pipe2, control, O_CLOEXEC) == 0 && syscall(SYS_pipe2, reply, O_CLOEXEC) == 0;
-            const bool masked = pipes && sigprocmask(SIG_BLOCK, &blocked, &previous) == 0;
-            const pid_t child = masked ? fork() : -1;
-            if (child == 0)
-            {
-                close(control[1]);
-                close(reply[0]);
-                worker_budget_guardian(read_fd, write_fd, control[0], reply[1], wanted);
-            }
-            if (masked)
-            {
-                sigprocmask(SIG_SETMASK, &previous, NULL);
-            }
+            const pid_t child = pipes ? worker_budget_spawn(read_fd, write_fd, control[0], reply[1], wanted) : -1;
             if (control[0] >= 0)
             {
                 close(control[0]);

@@ -50,8 +50,11 @@ reading any. It inherits blocked catchable signals and owns the exact bytes
 until the compiler closes its private control pipe. The guardian returns them
 and acknowledges completion after workers join, before a serial retry or merge.
 Compiler exit, including whole-process-group termination, closes that pipe too.
-The child uses safe syscalls after fork and closes unrelated inherited handles;
-the caller's signal handlers and masks are preserved. The implicit slot is
+It starts through `posix_spawn` and an immediate internal command, so its address
+space retains no front-end mappings during emission. The nonempty-token check
+still precedes process creation, and no credit is held during front-end work.
+The guardian closes unrelated inherited handles; the caller's signal handlers
+and masks are preserved. The implicit slot is
 never returned. Failed guardian setup, descriptor or process limits leave the
 compiler on one lane; failure to return owned slots refuses output.
 
