@@ -243,6 +243,7 @@ static void check_test_builtin_graph_guards(CheckTest* test, TypeTable* table, A
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
         graph.count = 0;
+        graph.leaf_count = 0;
         graph.capacity = count == 0 ? 0 : count + 3;
         graph.members = (uint32_t*)(mapping + page - graph.capacity * sizeof(uint32_t));
         if (count != 0)

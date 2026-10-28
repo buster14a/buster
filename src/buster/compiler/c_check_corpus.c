@@ -1288,7 +1288,8 @@ static bool check_corpus_check(CheckCorpusPath* path, Parser* parser, Preprocess
 static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
 {
     bool equal = x->types.count == y->types.count && x->parameters.count == y->parameters.count && x->tags.count == y->tags.count &&
-                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->last_error == y->last_error;
+                 x->tags.completions == y->tags.completions && x->members.count == y->members.count && x->lookup.count == y->lookup.count &&
+                 x->last_error == y->last_error;
     for (uint32_t i = 1; equal && i < x->types.count; i += 1)
     {
         equal = x->types.kind[i] == y->types.kind[i] && x->types.code[i] == y->types.code[i] && x->types.flags[i] == y->types.flags[i] &&
@@ -1303,7 +1304,8 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
     {
         equal = x->tags.type[i] == y->tags.type[i] && x->tags.name[i] == y->tags.name[i] && x->tags.member_begin[i] == y->tags.member_begin[i] &&
                 x->tags.member_count[i] == y->tags.member_count[i] && x->tags.completion[i] == y->tags.completion[i] &&
-                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i];
+                x->tags.packed[i] == y->tags.packed[i] && x->tags.pack_log2[i] == y->tags.pack_log2[i] && x->tags.alignment_log2[i] == y->tags.alignment_log2[i] &&
+                x->tags.lookup[i] == y->tags.lookup[i] && x->tags.lookup_log2[i] == y->tags.lookup_log2[i];
     }
     for (uint32_t i = 1; equal && i < x->members.count; i += 1)
     {
@@ -1311,6 +1313,7 @@ static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
                 x->members.bit_width[i] == y->members.bit_width[i] && x->members.alignment_log2[i] == y->members.alignment_log2[i] &&
                 x->members.flags[i] == y->members.flags[i] && x->members.offset[i] == y->members.offset[i];
     }
+    equal = equal && (x->lookup.count <= 1 || memcmp(x->lookup.buckets + 1, y->lookup.buckets + 1, (uint64_t)(x->lookup.count - 1) * sizeof(TypeLookupBucket)) == 0);
     return equal;
 }
 
@@ -1607,7 +1610,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
                 left_parser->tree.parents[token] == right_parser->tree.parents[token] && left_parser->tree.depths[token] == right_parser->tree.depths[token] &&
-                left_parser->postorder[token] == right_parser->postorder[token] && left_parser->sizes[token] == right_parser->sizes[token] &&
+                left_parser->postorder[token] == right_parser->postorder[token] && (left_parser->sizes != 0) == (right_parser->sizes != 0) &&
+                (left_parser->sizes == 0 || left_parser->sizes[token] == right_parser->sizes[token]) &&
+                (left_parser->positions != 0) == (right_parser->positions != 0) &&
+                (left_parser->positions == 0 || (left_parser->positions[token] == right_parser->positions[token] && left_parser->ends[token] == right_parser->ends[token] &&
+                                                 left_parser->first_children[token] == right_parser->first_children[token] &&
+                                                 left_parser->next_siblings[token] == right_parser->next_siblings[token])) &&
                 left_parser->tokens.kinds[token] == right_parser->tokens.kinds[token] && left_parser->tokens.names[token] == right_parser->tokens.names[token] &&
                 left_parser->tokens.sources[token] == right_parser->tokens.sources[token] && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
     }
@@ -1618,7 +1626,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     const CheckInput* left = &a->input;
     const CheckInput* right = &b->input;
-    equal = equal && left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
+    // The scalar path's walks act at no token the vector path's would skip (#529).
+    equal = equal && left->visit_misses == 0 && right->visit_misses == 0 &&
+            left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
@@ -1656,7 +1666,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
                 left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
                 left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
-                left->token_nodes[token] == right->token_nodes[token] && left->body_declarations[token] == right->body_declarations[token] &&
+                left->token_nodes[token] == right->token_nodes[token] && left->string_ids[token] == right->string_ids[token] &&
+                left->body_declarations[token] == right->body_declarations[token] &&
                 left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
                 left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
                 left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
@@ -1784,7 +1795,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         equal = equal && (graph->warning_suppressed == NULL || graph->warning_suppressed[node] == other->warning_suppressed[node]);
         if (equal && graph->ops[node] == CHECK_OP_VALUE)
         {
-            equal = check_test_value_equal(graph->leaves + node, other->leaves + node);
+            equal = check_test_value_equal(check_graph_leaf_of(graph, node), check_graph_leaf_of(other, node));
         }
     }
     equal = equal && graph->system_token_count == other->system_token_count && (graph->system_tokens == NULL) == (other->system_tokens == NULL) &&
@@ -1911,7 +1922,7 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  g->types[node] != h->types[node] ? "graph types" : g->members[node] != h->members[node] ? "graph members" :
                  g->contexts[node] != h->contexts[node] ? "graph contexts" : g->argument_offsets[node] != h->argument_offsets[node] ? "graph argument_offsets" :
                  g->argument_counts[node] != h->argument_counts[node] ? "graph argument_counts" :
-                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(g->leaves + node, h->leaves + node) ? "graph leaves" : 0;
+                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(check_graph_leaf_of(g, node), check_graph_leaf_of(h, node)) ? "graph leaves" : 0;
         index = node;
     }
     if (column == 0 && (g->argument_count != h->argument_count || g->varargs_count != h->varargs_count || g->builtin_count != h->builtin_count ||
@@ -1995,6 +2006,10 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     {
         snprintf(text, capacity, "types: tags, members, parameters or last_error (tags %u against %u, completions %u against %u, last_error %u against %u)",
                  s->tags.count, t->tags.count, s->tags.completions, t->tags.completions, s->last_error, t->last_error);
+    }
+    else if (x->visit_misses != 0 || y->visit_misses != 0)
+    {
+        snprintf(text, capacity, "the walks act at %u and %u tokens the vector path's would skip", x->visit_misses, y->visit_misses);
     }
     else if (x->binding_event_count != y->binding_event_count || x->string_count != y->string_count || x->vla_count != y->vla_count || x->asm_count != y->asm_count ||
              x->region_count != y->region_count || x->report_count != y->report_count || x->diagnostic_graph != y->diagnostic_graph ||

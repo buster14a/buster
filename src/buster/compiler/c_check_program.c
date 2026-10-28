@@ -123,6 +123,9 @@ struct CheckProgram
     const Parser* parser;
     const InternTable* identifiers;
     const CheckInitializers* initializers;
+    // Per initializer plan, whether an executable VALUE reaches this automatic compound literal. Null without any
+    // automatic compound literal; unevaluated operands retain their diagnostic plans without needing constant data.
+    uint8_t* compound_initializers;
     const CheckAsms* asms;
     CheckControl* controls;
     // The SWITCH controls followed by four CASE controls or more, which a jump table may dispatch
@@ -1388,7 +1391,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
         const CheckOp op = graph->ops[node];
         if (op == CHECK_OP_VALUE)
         {
-            const CheckValue value = graph->leaves[node];
+            const CheckValue value = *check_graph_leaf_of(graph, node);
             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || program->input->static_objects[value.object - 1]) && seen[value.object] != epoch)
             {
@@ -1407,6 +1410,10 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 else
                 {
                     const CheckInitializer* plan = program->initializers->plans + selected - 1;
+                    if (program->compound_initializers != NULL)
+                    {
+                        program->compound_initializers[selected - 1] = 1;
+                    }
                     reference_count = check_program_reference_initializer(program, plan, epoch, nodes, stack, &depth, seen, references, needed, reference_count);
                 }
             }
@@ -1824,6 +1831,11 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint32_t capacity = count * 8 + 16;
+    // The bodies' labels, the worklist of a body's controls and the unit's controls, with room for 8 a token: each body
+    // takes the labels and the worklist again from their start, and the controls follow each other. They are in an arena
+    // of their own, which check_program unmaps when it returns (#572). In the scratch, their starts and the columns pushed
+    // after them took pages past those the reader touches, which the scratch kept to the end of the compile.
+    Arena controls = valid ? arena_reserve(((uint64_t)capacity * (sizeof(uint32_t) + sizeof(CheckControl) + sizeof(CheckControlTask))) + 3 * 63) : (Arena){ 0 };
     uint32_t* first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* last = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1850,7 +1862,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t* region_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->region_count + 1) : 0;
     // Each body's opening brace, in token order: at most one per token, and only the bodies' entries are touched.
     uint32_t* openings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0;
+    uint32_t* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, uint32_t, capacity) : 0;
     uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1858,8 +1870,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + 1) : 0;
     uint8_t* needed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
-    CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, capacity) : 0;
-    CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControlTask, capacity) : 0;
+    CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
+    CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
     valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
@@ -1919,6 +1931,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             node_next[node] = token_first[token];
             token_first[token] = node;
         }
+        bool compound_initializers = false;
         for (uint32_t i = options.initializers != 0 ? options.initializers->count : 0; i-- > 0;)
         {
             const uint32_t declaration = options.initializers->declaration_tokens[i];
@@ -1935,6 +1948,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 // A compound literal's lifetime belongs to its enclosing scope, but its initialization belongs
                 // to evaluating its VALUE node. sizeof and unchosen branches must never initialize it.
                 plan_next[i] = BUSTER_CHECK_NONE;
+                compound_initializers |= !input->static_objects[declaration];
             }
             else if (token < count && steps < count)
             {
@@ -1944,6 +1958,18 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             else
             {
                 check_program_fail(program, CHECK_PROGRAM_INVALID, declaration);
+            }
+        }
+        if (compound_initializers && program->status == CHECK_PROGRAM_OK)
+        {
+            program->compound_initializers = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, options.initializers->count);
+            if (program->compound_initializers == NULL)
+            {
+                check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
+            }
+            else
+            {
+                memset(program->compound_initializers, 0, options.initializers->count);
             }
         }
         check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, options.scalar);
@@ -2166,6 +2192,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         program->output_bytes = output->length - mark;
     }
     arena_pop_to(scratch, temporary);
+    arena_release(&controls);
     return valid;
 }
 
