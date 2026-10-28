@@ -1460,6 +1460,20 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                                     node_stack[depth++] = operand;
                                 }
                             }
+                            if (warning_safe && check_graph_has_arguments(op))
+                            {
+                                const uint32_t mask = check_program_argument_mask(program, node);
+                                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+                                {
+                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+                                    const bool evaluated = op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
+                                    if (evaluated && argument < graph->count && node_seen[argument] != epoch)
+                                    {
+                                        node_seen[argument] = epoch;
+                                        node_stack[depth++] = argument;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
