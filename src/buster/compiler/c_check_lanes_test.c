@@ -412,6 +412,7 @@ static bool check_lanes_test_same(const CheckLanesTestEmission* a, const CheckLa
     return same && (a->size == 0 || memcmp(a->object, b->object, a->size) == 0);
 }
 
+#include "c_check_backend_startup_test.c"
 // The real emission consumes external slots and returns them before its normal, failed-start or resource retry
 // completes. Its independent object/failure oracle is the ordinary one-lane emission above; the pipe contents are
 // the ownership oracle, including the exact exceptional bytes and no implicit calling-thread token.
@@ -1452,6 +1453,7 @@ static int run_check_lanes_tests(int argc, char** argv)
     check_lanes_test_expect(&tally, made, "make the test's directory", directory);
     if (made)
     {
+        check_lanes_test_backend_startup(&tally, directory);
         check_lanes_test_expect(&tally, worker_budget_test(), "external worker ownership protocol", NULL);
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize();
         check_lanes_test_expect(&tally, initialized, "initialize the backend", 0);
