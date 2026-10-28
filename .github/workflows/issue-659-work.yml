@@ -18,21 +18,30 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
-      - name: Apply checked patch to clean source base
+      - name: Apply validation fixes and integrate current main
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .github/issue-659.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/issue-659.patch"
-          printf '9740f427347e4fd0d4f9ad327ecd778e5d9b9ffec992bc6f574d34c6425eb0bf  %s\n' "$RUNNER_TEMP/issue-659.patch" | sha256sum -c
-          git switch --detach 1282643d4b125113d7b658dbd1a4079f08056390
-          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659.patch"
-          git apply --unidiff-zero "$RUNNER_TEMP/issue-659.patch"
+          base64 -d .github/issue-659-follow.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/issue-659-follow.patch"
+          printf 'f0f22a797c4a8fb98c2c3161a5e5912e068b595ba184eb46911d546702cb6670  %s\n' "$RUNNER_TEMP/issue-659-follow.patch" | sha256sum -c
+          git switch -c chatgpt/issue-659-kr-completion origin/chatgpt/issue-659-kr-completion
+          test "$(git rev-parse HEAD)" = 7dc95a4326f03b6427bb2aa56ba8a38bb24ca92a
+          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659-follow.patch"
+          git apply --unidiff-zero "$RUNNER_TEMP/issue-659-follow.patch"
           git diff --check
-          git switch -c chatgpt/issue-659-kr-completion
-          git add src/buster/compiler
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(checker): support promoted K&R parameters and non-prototype calls (#659)'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/buster/compiler docs/c-checker.md
+          git commit -m 'fix(checker): match Clang bool entries and source-only call diagnostics'
           git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
-          git show --stat --oneline HEAD
+          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-main.tar.gz" origin/main
+          git rev-parse origin/main > "$RUNNER_TEMP/issue-659-main-sha.log"
+          status=0
+          git merge --no-edit origin/main 2>&1 | tee "$RUNNER_TEMP/issue-659-merge.log" || status=1
+          tar -czf "$RUNNER_TEMP/issue-659-worktree.tar.gz" src docs AGENTS.md build.sh
+          git status --short >> "$RUNNER_TEMP/issue-659-merge.log"
+          test "$status" = 0
+          git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
       - name: Build compiler
@@ -54,6 +63,7 @@ jobs:
           name: issue-659-validation
           path: |
             ${{ runner.temp }}/issue-659-*.log
-            ${{ runner.temp }}/issue-659.patch
+            ${{ runner.temp }}/issue-659-*.tar.gz
+            ${{ runner.temp }}/issue-659-follow.patch
             build/compiler
           retention-days: 7
