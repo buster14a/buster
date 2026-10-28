@@ -2131,6 +2131,22 @@ buffer, written with `fwrite` as it fills, in three steps:
    with branches only for line markers (which `-P` doesn't print), a run of
    blank lines, and spellings longer than 64 bytes.
 
+For `-P`, a batch whose spellings each have 1–64 bytes and which has no pragma
+end or streamed `#embed` computes all output offsets first (#649). Two
+32-word SIMD prefix sums include each spelling and its optional single gap
+byte. The resulting copy addresses are independent; a batch needs at most
+4,160 bytes and is flushed as a whole when necessary. Loads and stores remain
+masked to each spelling's logical length, including a final partial batch.
+Marker output and exceptional batches use the existing per-token route. No
+new output metadata is retained by the preprocessor, and the spelling and
+separation rules are unchanged.
+
+[The frozen #649 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-649/target)
+compares `123d22ae` with `bc1b4861` on the locked 9700X. Its printing and
+whole-process results measure `-E -P` on identical frozen input trees; they do
+not establish ordinary `-c` throughput or the timing of later ports. The
+retrospective interference audit excludes the extra reversed main phase pair.
+
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
 The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
@@ -2138,6 +2154,13 @@ The two give the same bytes on every test. A variant whose first step had no
 branch on the kind (it looked up both spellings and picked one) was 1–2%
 slower in an A/B: the location lookups it adds for identifiers cost more than
 the mispredictions it saves.
+
+`test-preprocessor` checks every 0–64-token prefix size with guarded input and
+output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
+printer fixtures move a pragma end through all 64 alignments, continue into
+ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
+bytes with the independent scalar printer. Long literals, line splices,
+trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
 
 ## The oracle
 
