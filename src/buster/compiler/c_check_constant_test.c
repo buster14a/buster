@@ -420,6 +420,43 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .source = "enum { N=_Generic(1,int:7,default:1/0) }; _Static_assert(N==7, \"generic\");\n",
         },
         {
+            .name = "generic aligned nominal duplicate",
+            .source = "struct S{int x;}; typedef struct S T __attribute__((aligned(16))); int f(struct S x){return _Generic(x,struct S:1,T:2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic enum underlying duplicate",
+            .source = "enum E{E0}; enum{N=_Generic(0,enum E:1,unsigned int:2,default:0)};\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic compatible record array pointers",
+            .source = "struct S{int x;}; int f(void){return _Generic(0,struct S(*)[]:1,struct S(*)[3]:2,default:0);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic compatible function pointers",
+            .source = "enum{N=_Generic(0,int(*)():1,int(*)(double):2,default:0)};\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic nominal qualifiers retain exact checks",
+            .source = "struct S; typedef struct S *P; enum{N=_Generic((P)0,const struct S*:1,P:7)}; _Static_assert(N==7,\"selected\"); int f(P x){return _Generic(x,const struct S*:1,P:7);}\n",
+        },
+        {
+            .name = "generic distinct pointer shapes share a nominal key",
+            .source = "struct S{int x;}; int f(struct S*x){return _Generic(x,struct S*:7,struct S**:2,struct S(*)[3]:3);}\n",
+        },
+        {
+            .name = "generic transparent function parameter duplicate",
+            .source = "struct S; union U{struct S*p;void*q;} __attribute__((transparent_union)); int f(void){return _Generic(0,int(*)(union U):1,int(*)(struct S*):2,default:0);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic later transparent attribute is inactive",
+            .source = "struct S; union U{struct S*p;void*q;}; enum{N=_Generic(0,int(*)(union U):1,int(*)(struct S*):2,default:7)}; typedef union U TU __attribute__((transparent_union)); _Static_assert(N==7,\"source time\");\n",
+        },
+        {
             .name = "declaration nested generic selection",
             .source = "typedef short T; enum { N=_Generic((T)0,T:_Generic(1.0,double:3,default:8),default:9) }; _Static_assert(N==3, \"nested generic\");\n",
         },

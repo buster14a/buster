@@ -157,6 +157,34 @@ static void dynamic_test_lane_main(void* argument)
 // The soname the tests give their shared libraries (DT_SONAME).
 #define BUSTER_DYNAMIC_TEST_SONAME "libbuster-test.so"
 
+// The writer's inputs must omit an unused GCC catalog. Decide from the bound symbols and forced named-library
+// dependencies, independently of Bind.gcc_s_needed and the production range classifier.
+static bool dynamic_test_gcc_s_inputs(const ExecutableDynamic* dynamic, const Link* link, const Bind* bind, const Runtime* runtime)
+{
+    bool needed = (bind->runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0;
+    for (uint32_t i = 0; i < bind->import_count; i += 1)
+    {
+        const SymbolId symbol = bind->imports[i];
+        const bool strong = (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
+        needed = needed || (strong && runtime_library_version(&runtime->gcc_s, link->symbols.version[symbol]));
+    }
+    const uint32_t named = bind->libraries != 0 ? bind->libraries->count : 0;
+    bool valid = dynamic->library_count == named + 2 + (needed ? 1 : 0);
+    uint32_t catalogs = 0;
+    for (uint32_t l = named; l < dynamic->library_count; l += 1)
+    {
+        const String8 name = dynamic->libraries[l].name;
+        const String8 gcc = runtime->gcc_s.soname;
+        catalogs += gcc.length != 0 && name.length == gcc.length && memcmp(name.pointer, gcc.pointer, gcc.length) == 0 ? 1 : 0;
+    }
+    valid = valid && catalogs == (needed ? 1 : 0);
+    for (uint32_t v = 0; !needed && v < dynamic->version_count; v += 1)
+    {
+        valid = valid && !runtime_library_version(&runtime->gcc_s, dynamic->versions[v].index);
+    }
+    return valid;
+}
+
 // Writes a bound link to `path` with a group of `lanes` lanes, its inputs from `bind` and `runtime`: as a dynamic PIE
 // from _start, or against a shared library's runtime (RUNTIME_KIND_SHARED) as a shared library without an entry point,
 // whose soname is BUSTER_DYNAMIC_TEST_SONAME: whether executable_write succeeded, and its result. `write` holds the
@@ -182,7 +210,8 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
         .exact = write->exact,
     };
     write->succeeded = false;
-    const bool ran = prepared && lane_run(lanes, dynamic_test_lane_main, write, 0);
+    const bool checked = prepared && dynamic_test_gcc_s_inputs(&dynamic, link, bind, runtime);
+    const bool ran = checked && lane_run(lanes, dynamic_test_lane_main, write, 0);
     *result = write->result;
     scratch_end(scratch);
     return ran && write->succeeded;
