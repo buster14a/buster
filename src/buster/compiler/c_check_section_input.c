@@ -361,7 +361,7 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
         const CheckInputAttribute* record = attributes->records + i;
         attribute = record->kind == CHECK_ATTRIBUTE_SECTION && !record->ignored ? record : attribute;
     }
-    const bool recording = reader->section_recording || position >= reader->section_record_from;
+    const bool recording = position >= reader->section_record_from;
     const bool event = attribute != NULL || (recording && (function ? body : static_storage));
     if (event && reader->lane)
     {
@@ -399,7 +399,7 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
             };
         }
     }
-    reader->section_recording |= attribute != NULL;
+    reader->section_record_from = attribute != NULL && position < reader->section_record_from ? position : reader->section_record_from;
 }
 
 // A section name's first use (check_input_section_conflicts): its flags, and the setting it was (`event`
