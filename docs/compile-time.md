@@ -229,6 +229,23 @@ together on the pinned SQLite input. Wall and system-time improvements were
 not established; the record's compiler, source, controls and remaining scope
 are explicit.
 
+The reader fills thirteen mandatory retained uint32 output columns whose
+empty value is `UINT32_MAX` with bounded all-one byte fills,
+including each column's sentinel. Requested scalar parsing keeps the original
+interleaved initialization loop as an independent oracle, and the six
+reader-internal NONE stores keep their existing ownership and initialization.
+Optional zero-default columns retain their existing NULL guards. Dirty and
+borrowed output storage is always explicitly cleared; no fresh-page or arena
+high-water assumption is made. The column layout and allocated byte count do
+not change.
+
+The [frozen native record](https://github.com/buster14a/buster-performance/blob/dfc33ffce07a0d04cdcbe9d435bd6ebb1fd7af8d/docs/measurements/retained-none-fill-2026-10-28/README.md)
+measures 6.7 to 7.0 percent higher whole-process throughput for its 800k-byte
+table in both role orders, with 6.18 percent fewer retired user instructions.
+Peak RSS is unchanged and system time does not improve. The small SQLite
+timing observation remains a cost screen without code-placement qualification;
+the broader #628 memory/system-time goal remains open.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:
