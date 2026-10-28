@@ -704,7 +704,7 @@ static void check_builtin_query_test_clang(CheckBuiltinQueryTest* test, const ch
         { "char a[4]; int i; _Static_assert(__builtin_object_size((i++,a),0)==4, \"known despite effects\");\n", false },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p); }\n", true },
         { "__SIZE_TYPE__ f(char* p) { return __builtin_object_size(p,0,1); }\n", true },
-        { "_Static_assert(__clang_major__==23 && __clang_minor__==1 && __clang_patchlevel__==1,\"exact Clang23.1.1\");\n"
+        { "_Static_assert(__clang_major__>23 || (__clang_major__==23 && (__clang_minor__>1 || (__clang_minor__==1 && __clang_patchlevel__>=1))),\"Clang 23.1.1 or newer required\");\n"
           "#pragma STDC FENV_ACCESS ON\n"
           "extern double call(void); extern double dynamic; extern int n;\n"
           "_Static_assert(__builtin_constant_p(1.0/2.0)==1,\"source exact\");\n"
