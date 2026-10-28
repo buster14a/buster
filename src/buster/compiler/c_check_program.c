@@ -442,7 +442,8 @@ static bool check_program_case_value(const CheckProgram* program, uint32_t node,
     bool valid = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
     if (valid)
     {
-        const CheckValue* value = program->stream->values + node;
+        const CheckValue converted = check_graph_context_value(program->types, &program->input->graph, program->stream, node);
+        const CheckValue* value = &converted;
         valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
                 (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(program->types, value->type, &source_width, &source_sign);
         if (valid)

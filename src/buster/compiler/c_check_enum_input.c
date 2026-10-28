@@ -181,7 +181,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             failed_token = job->failure != BUSTER_CHECK_NONE ? job->failure : job->first;
             if (*nested_tag == BUSTER_CHECK_NONE)
             {
-                valid = valid && check_input_integer_constant(reader, &value);
+                valid = valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
                 if (valid)
                 {
                     check_input_constant_warning(reader, job->first, i, &value, true);

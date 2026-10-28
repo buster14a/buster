@@ -83,6 +83,7 @@ static __attribute__((unused)) bool check_initializer_infer_array(TypeTable* typ
                                           uint32_t* failed_token, CheckInitStatus* status);
 
 static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const CheckInitPart* part, uint64_t* bits);
+static CheckInitStatus check_initializer_live_writes(const TypeTable* types, const CheckInitializer* initialized, Arena* scratch, uint8_t** selected);
 
 typedef struct CheckInitCopy CheckInitCopy;
 typedef struct CheckInitFrame CheckInitFrame;
@@ -148,6 +149,13 @@ struct CheckInitRepeat
 };
 
 typedef struct CheckInitWalker CheckInitWalker;
+typedef struct CheckInitExpression CheckInitExpression;
+struct CheckInitExpression
+{
+    uint32_t first;
+    uint32_t end;
+    uint32_t node;
+};
 typedef struct CheckInitConstants CheckInitConstants;
 typedef struct CheckInitObjects CheckInitObjects;
 typedef struct CheckInitWarningSink CheckInitWarningSink;
@@ -171,10 +179,16 @@ struct CheckInitWalker
     TypeTable* types;
     const Parser* parser;
     const uint32_t* token_nodes;
+    uint32_t token_nodes_first;
+    uint32_t token_nodes_count;
+    const CheckInitExpression* expressions;
+    uint32_t expression_count;
     const CheckStream* stream;
     const CheckGraph* graph;
     const CheckInitConstants* constants;
     const CheckInitObjects* objects;
+    const CheckConstValues* const_values;
+    uint32_t source_position;
     CheckInitWarningCollector* warnings;
     const CheckInitString* strings;
     uint32_t string_count;
@@ -200,6 +214,7 @@ struct CheckInitWalker
     uint64_t flexible_extent;
     bool infer;
     bool static_storage;
+    bool defer_constants;
     bool flexible_storage;
     bool ignore_excess;
     Arena* output;
@@ -603,11 +618,34 @@ static uint32_t check_init_excess_end(const Parser* parser, uint32_t begin, uint
 static uint32_t check_init_node(CheckInitWalker* walker, uint32_t begin, uint32_t end)
 {
     uint32_t result = BUSTER_CHECK_NONE;
-    if (walker->token_nodes != 0 && walker->stream != 0)
+    if (walker->expressions != NULL)
+    {
+        uint32_t first = 0;
+        uint32_t last = walker->expression_count;
+        while (first < last)
+        {
+            const uint32_t middle = first + (last - first) / 2;
+            if (walker->expressions[middle].first < end)
+            {
+                first = middle + 1;
+            }
+            else
+            {
+                last = middle;
+            }
+        }
+        if (first != 0 && walker->expressions[first - 1].end > begin)
+        {
+            result = walker->expressions[first - 1].node;
+        }
+    }
+    else if (walker->token_nodes != 0 && walker->stream != 0)
     {
         for (uint32_t token = begin; token < end; token += 1)
         {
-            const uint32_t node = walker->token_nodes[token];
+            const bool bounded = walker->token_nodes_count != 0;
+            const bool present = !bounded || (token >= walker->token_nodes_first && token - walker->token_nodes_first < walker->token_nodes_count);
+            const uint32_t node = present ? walker->token_nodes[token - walker->token_nodes_first] : BUSTER_CHECK_NONE;
             if (node < walker->stream->count && (result == BUSTER_CHECK_NONE || node > result))
             {
                 result = node;
@@ -620,7 +658,7 @@ static uint32_t check_init_node(CheckInitWalker* walker, uint32_t begin, uint32_
 static bool check_init_index(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint64_t* index)
 {
     bool valid = false;
-    if (walker->infer)
+    if (walker->infer || (walker->const_values != NULL && walker->indices != NULL))
     {
         valid = walker->indices != 0 && walker->index_valid != 0 && walker->index_valid[begin] != 0;
         if (valid)
@@ -1753,6 +1791,114 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
     return diagnostic;
 }
 
+// Aggregate copies retain typed writes and active union selections. Offsets alone cannot prove an inactive
+// union read, and a sparse CLEAR run must stay sparse even when the object is a very large array.
+static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t node)
+{
+    const CheckValue source = node < walker->stream->count ? walker->stream->values[node] : (CheckValue){ 0 };
+    const CheckConstValues* owner = NULL;
+    const CheckConstObject* object = walker->const_values != NULL ? check_const_find(walker->const_values, source.object, walker->source_position, &owner) : NULL;
+    bool valid = object != NULL && owner != NULL && source.category == CHECK_LVALUE && source.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                 source.offset >= 0 && source.object_bit_offset == 0 && source.fault == CHECK_FAULT_NONE &&
+                 (source.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                 (type_qualifiers(source.type) & BUSTER_TYPE_VOLATILE) == 0 && check_const_eligible(walker->types, object->type) &&
+                 type_unqualified(type_strip_aligned(walker->types, source.type)) == type_unqualified(type_strip_aligned(walker->types, selected->type));
+    const uint64_t size = type_size(walker->types, selected->type);
+    valid = valid && size <= UINT64_MAX / 8 && (uint64_t)source.offset <= object->byte_size && size <= object->byte_size - (uint64_t)source.offset;
+    const uint64_t first = valid ? (uint64_t)source.offset * 8 : 0;
+    const uint64_t bits = valid ? size * 8 : 0;
+    if (valid)
+    {
+        check_init_clear(walker, selected->type, selected->offset, token);
+    }
+    for (uint32_t p = 0; valid && p < object->part_count; p += 1)
+    {
+        const CheckConstPart* part = owner->parts + object->part_first + p;
+        const bool overlap = part->bit_offset < first + bits && first < part->bit_offset + part->bit_count;
+        if (overlap)
+        {
+            const uint64_t low = part->bit_offset > first ? part->bit_offset : first;
+            const uint64_t high = part->bit_offset + part->bit_count < first + bits ? part->bit_offset + part->bit_count : first + bits;
+            const bool exact = low == part->bit_offset && high - low == part->bit_count;
+            valid = exact || part->kind == CHECK_CONST_CLEAR || (part->kind == CHECK_CONST_BYTES && low % 8 == 0 && high % 8 == 0);
+            if (valid)
+            {
+                CheckInitPart copied = {
+                    .kind = part->kind == CHECK_CONST_VALUE ? CHECK_INIT_VALUE : part->kind == CHECK_CONST_BYTES ? CHECK_INIT_BYTES : CHECK_INIT_CLEAR,
+                    .type = part->type,
+                    .node = node,
+                    .token = token,
+                    .bit_offset = selected->offset + low - first,
+                    .value = part->value,
+                    .bytes = part->bytes,
+                    .byte_count = part->byte_count,
+                };
+                if (copied.kind == CHECK_INIT_BYTES)
+                {
+                    copied.bytes += (low - part->bit_offset) / 8;
+                    copied.byte_count = (high - low) / 8;
+                }
+                else if (copied.kind == CHECK_INIT_CLEAR && (high - low) % 8 == 0)
+                {
+                    copied.byte_count = (high - low) / 8;
+                }
+                else if (high - low != type_size(walker->types, part->type) * 8)
+                {
+                    valid = high - low <= UINT32_MAX;
+                    copied.bit_width = valid ? (uint32_t)(high - low) : 0;
+                }
+                if (valid)
+                {
+                    check_init_append(walker, &copied);
+                }
+            }
+        }
+    }
+    for (uint32_t u = 0; valid && u < object->union_count; u += 1)
+    {
+        const CheckConstUnion* source_union = owner->unions + object->union_first + u;
+        if (source_union->bit_offset >= first && source_union->bit_offset - first < bits)
+        {
+            if (walker->union_count == walker->union_capacity / 2)
+            {
+                const uint32_t capacity = walker->union_capacity == 0 ? 16 : walker->union_capacity <= UINT32_MAX / 2 ? walker->union_capacity * 2 : 0;
+                CheckInitUnion* entries = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitUnion, capacity) : NULL;
+                if (entries == NULL)
+                {
+                    check_init_fail(walker, CHECK_INIT_RESOURCE, token);
+                    valid = false;
+                }
+                else
+                {
+                    memset(entries, 0, (uint64_t)capacity * sizeof(*entries));
+                    for (uint32_t i = 0; i < walker->union_capacity; i += 1)
+                    {
+                        const CheckInitUnion* entry = walker->unions + i;
+                        if (entry->type != 0)
+                        {
+                            entries[check_init_union_slot(entries, capacity, entry->type, entry->offset)] = *entry;
+                        }
+                    }
+                    walker->unions = entries;
+                    walker->union_capacity = capacity;
+                }
+            }
+            if (valid)
+            {
+                const uint64_t offset = selected->offset + source_union->bit_offset - first;
+                const uint32_t slot = check_init_union_slot(walker->unions, walker->union_capacity, source_union->type, offset);
+                walker->union_count += walker->unions[slot].type == 0;
+                walker->unions[slot] = (CheckInitUnion){ .type = source_union->type, .offset = offset, .member = source_union->member - 1 };
+            }
+        }
+    }
+    if (!valid)
+    {
+        check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
+    }
+    return valid;
+}
+
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
@@ -1828,6 +1974,15 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         {
             check_init_fail(walker, CHECK_INIT_CHECK_FAILED, token);
         }
+        else if (walker->const_values != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
+                 walker->stream->values[node].category == CHECK_LVALUE && walker->stream->values[node].constant_kind == CHECK_CONSTANT_ADDRESS &&
+                 walker->stream->values[node].fault == CHECK_FAULT_NONE &&
+                 (walker->stream->values[node].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ)) == 0 &&
+                 (type_qualifiers(walker->stream->values[node].type) & BUSTER_TYPE_VOLATILE) == 0 &&
+                 check_const_find(walker->const_values, walker->stream->values[node].object, walker->source_position, NULL) != NULL)
+        {
+            check_init_const_copy(walker, selected, token, node);
+        }
         else if (check_vector_type(walker->types, type))
         {
             check_init_vector_value(walker, selected, destination, token, node);
@@ -1838,6 +1993,9 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .op = CHECK_OP_INITIALIZE,
                 .type = destination,
                 .node = node,
+                .const_values = walker->const_values,
+                .constant_evaluated = walker->const_values != NULL,
+                .source_position = walker->source_position,
                 .extensions = check_init_extensions(walker, token),
             };
             action.operands[0] = check_init_constant_value(walker, node);
@@ -1852,7 +2010,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             {
                 check_init_fail(walker, converted.diagnostic == CHECK_DIAG_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_INVALID, token);
             }
-            else if (walker->static_storage && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
+            else if (walker->static_storage && !walker->defer_constants && (converted.value.constant_kind == CHECK_CONSTANT_NONE ||
                      converted.value.fault != CHECK_FAULT_NONE || (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0 ||
                      (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS && converted.value.object != 0 &&
                      ((converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || selected->width != 0))))
@@ -2197,17 +2355,50 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .stream = stream,
             .graph = graph,
             .objects = objects,
+            .const_values = static_storage && graph != NULL ? graph->const_values : NULL,
+            .source_position = end,
             .warnings = warnings,
             .strings = strings,
             .string_count = string_count,
             .string_ids = string_ids,
             .static_storage = static_storage,
+            .defer_constants = ignore_excess,
             .ignore_excess = ignore_excess,
             .output = output,
             .scratch = scratch,
             .result = result,
         };
         valid = check_init_walk(&walker, type, begin, end);
+        if (valid && ignore_excess)
+        {
+            // Source override diagnostics belong here, with original checked writes, before emission discards
+            // fully overwritten values and their expression edges. Direct ordered-write clients retain theirs.
+            uint8_t* live = NULL;
+            result->status = check_initializer_live_writes(types, result, scratch, &live);
+            valid = result->status == CHECK_INIT_OK;
+            uint32_t kept = 0;
+            for (uint32_t p = 0; valid && p < result->count; p += 1)
+            {
+                if (live[p])
+                {
+                    result->parts[kept++] = result->parts[p];
+                }
+            }
+            result->count = valid ? kept : result->count;
+            for (uint32_t p = 0; valid && static_storage && p < result->count; p += 1)
+            {
+                const CheckInitPart* part = result->parts + p;
+                const CheckValue* value = &part->value;
+                if (part->kind == CHECK_INIT_VALUE && (value->constant_kind == CHECK_CONSTANT_NONE || value->fault != CHECK_FAULT_NONE ||
+                    (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 || (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0 &&
+                    ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0 || part->bit_width != 0))))
+                {
+                    result->status = CHECK_INIT_NON_CONSTANT;
+                    result->failed_token = part->token;
+                    valid = false;
+                }
+            }
+        }
     }
     if (scratch != 0)
     {
@@ -2368,6 +2559,8 @@ static CheckInitStatus check_initializer_part_bits(const TypeTable* types, const
     }
     return status;
 }
+
+#include "c_check_init_live.c"
 
 // Each candidate pointer start is a point. A later bit-range write covers the points whose eight-byte fields it
 // intersects. Walk writes backwards; a disjoint-set next-uncovered index visits every point at most once. Stable
