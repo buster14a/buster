@@ -2038,7 +2038,10 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                                                                 "a definition in a section whose name gives it another kind") :
                                                        reason;
             }
-            else if (atom != 0)
+            // An empty section attribute clears inherited placement and overrides pragma settings, but LLVM keeps
+            // the definition in its default class. Retain its reader event for Sema's conflicts without materializing
+            // a zero-filled BSS/TBSS atom as data for a descriptor that the object writer treats as absent.
+            else if (atom != 0 && name.length != 0)
             {
                 if (placed != class)
                 {

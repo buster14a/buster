@@ -3033,6 +3033,12 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "an attribute over a setting", "#pragma clang section text = \".t\"\n__attribute__((section(\".own\"))) int f(void) { return 1; }\nint g(void) { return f() + 1; }\n" },
         { "a function in another kind's section", "int f(void) __attribute__((section(\".data\")));\nint f(void) { return 1; }\nint g = 1;\nint main(void) { return f() + g - 2; }\n" },
         { "a variable's own section", "int g __attribute__((section(\".data.mine\"))) = 1;\nint main(void) { return g - 1; }\n" },
+        { "an empty section leaves tentative zero fill in bss", "int z __attribute__((section(\"\")));\nint main(void) { return z; }\n" },
+        { "an empty section leaves initialized zero fill in bss", "int z __attribute__((section(\"\"))) = 0;\nint main(void) { return z; }\n" },
+        { "an empty section leaves tls zero fill in tbss", "_Thread_local int z __attribute__((section(\"\")));\nint main(void) { return z; }\n" },
+        { "an empty section clears an inherited name", "extern int z __attribute__((section(\".data.x\")));\nint z __attribute__((section(\"\")));\nint main(void) { return z; }\n" },
+        { "an empty section overrides a text setting", "#pragma clang section text = \".text.x\"\nint f(void) __attribute__((section(\"\")));\nint f(void) { return 17; }\nint main(void) { return f() - 17; }\n" },
+        { "an empty section overrides an object setting", "#pragma clang section bss = \".bss.x\"\nint z __attribute__((section(\"\")));\nint main(void) { return z; }\n" },
         { "the first section in one attribute list", "int x __attribute__((section(\".a\"), section(\".b\"))) = 17;\nint main(void) { return x - 17; }\n" },
         { "the first section across a declaration's groups", "__attribute__((section(\".a\"))) int x __attribute__((section(\".b\"))) = 17;\n"
                                                                    "int main(void) { return x - 17; }\n" },
@@ -3073,6 +3079,7 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a cleared setting keeps its name's flags", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\n#pragma clang section data = \".x\"\n" },
         { "a _Pragma's setting", "_Pragma(\"clang section text = \\\".x\\\"\")\nint f(void) { return 1; }\n#pragma clang section data = \".x\"\n" },
         { "two attributes", "__attribute__((section(\".x\"))) int g = 1;\n__attribute__((section(\".x\"))) int f(void) { return 1; }\n" },
+        { "empty section attributes retain mandatory conflicts", "int f(void) __attribute__((section(\"\")));\nint x __attribute__((section(\"\"))) = 1;\n" },
         { "the first section in one declaration determines conflicts", "int f(void) __attribute__((section(\".a\"), section(\".b\")));\n"
                                                                       "int x __attribute__((section(\".a\"))) = 1;\n" },
         { "an attribute after a setting", "#pragma clang section data = \".x\"\n__attribute__((section(\".x\"))) int f(void) { return 1; }\n" },

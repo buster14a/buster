@@ -274,6 +274,9 @@ does, each rule checked against clang's answers on probes of it:
   PROGBITS names such as `.llvm.custom`; `.llvm_custom` is outside this
   reserved family. The diagnostic names the unsupported ELF type or reserved
   family without claiming every reserved name has another ELF type.
+  An empty section attribute clears inherited placement and overrides an
+  active pragma setting while preserving the default section class, including
+  BSS/TBSS zero fill. Its reader event still participates in section conflicts.
 - **File-scope `asm`** (#619's part 2), which `main.c` makes
   `.text.buster_checker` with: its statements' templates in source order, a
   line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
