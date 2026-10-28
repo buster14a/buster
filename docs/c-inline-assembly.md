@@ -250,6 +250,23 @@ register takes the two-byte form, where GNU as takes the one-byte one.
 
 `unwind_tier0_frame` describes it (`Tier0Code.frame_saved` and `frame_size`).
 
+## File-scope assembly
+
+A file-scope `asm` statement (#619: `main.c`'s puts the checker's code in a
+page-aligned `.text.buster_checker`) makes no helper and no code of a function.
+The emission (`check_program_emit_file_asm`, in `c_check_program_emit.c`)
+joins the unit's file-scope templates in source order, a line each, and
+assembles them with `asm_assemble`, the `assemble` command's assembler, as
+clang emits a module's `asm` before its functions. Each section it makes is an
+atom of its class, before the functions' atoms in the link, and in `-c`'s
+object a section of its own name, type and flags
+(`CheckProgramCode.asm_sections`, `check_program_sections`); the direct path's
+executable merges it into its class's output section. Refused by name:
+templates the assembler refuses; templates that define or refer to a symbol (a
+label, an instruction's symbolic operand, CFI), which the unit's symbols don't
+join yet; and a section of a class C's definitions don't have, or of another
+type than its class's (an init array's, a note).
+
 ## What the lowering refuses
 
 Each refusal names its feature, as the driver prints it ("unsupported: ..."):

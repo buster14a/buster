@@ -31,6 +31,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_NAKED_STATEMENT,
     CHECK_INPUT_NAKED_PARAMETER,
     CHECK_INPUT_CONSTANT_INITIALIZER,
+    // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
+    CHECK_INPUT_SECTION,
+    // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
+    CHECK_INPUT_OPTIMIZE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -53,6 +57,8 @@ static const char* const check_input_messages[] =
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
     "initializer element is not a compile-time constant",
+    "invalid '#pragma clang section' or section type conflict",
+    "invalid '#pragma clang optimize'",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -90,6 +96,14 @@ static __attribute__((unused)) uint32_t check_input_report_source(const Parser* 
 }
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputLiteralTable CheckInputLiteralTable;
+struct CheckInputLiteralTable
+{
+    CheckInputLiteralTable* next;
+    uint32_t declaration;
+    CheckInitPart part;
+    CheckInitializer plan;
+};
 typedef struct CheckInputAttributes CheckInputAttributes;
 typedef struct CheckInputRegion CheckInputRegion;
 typedef struct CheckInputVla CheckInputVla;
@@ -98,6 +112,7 @@ typedef struct CheckInputDiagnosticPragmas CheckInputDiagnosticPragmas;
 typedef struct CheckInputNonnullPragmas CheckInputNonnullPragmas;
 typedef struct CheckInputFpPragma CheckInputFpPragma;
 typedef struct CheckInputPackPragmas CheckInputPackPragmas;
+typedef struct CheckInputVisibilityPragmas CheckInputVisibilityPragmas;
 typedef struct CheckInputIntrinsicDeclaration CheckInputIntrinsicDeclaration;
 typedef struct CheckInputIntrinsicCall CheckInputIntrinsicCall;
 typedef struct CheckInputPackedMember CheckInputPackedMember;
@@ -115,6 +130,10 @@ struct CheckInputPackedMember
 };
 typedef struct CheckInputLoopDiagnostic CheckInputLoopDiagnostic;
 typedef struct CheckInputNakedDiagnostic CheckInputNakedDiagnostic;
+typedef struct CheckInputSections CheckInputSections;
+typedef struct CheckInputSectionSetting CheckInputSectionSetting;
+typedef struct CheckInputSectionEvent CheckInputSectionEvent;
+typedef struct CheckInputOptimizePragmas CheckInputOptimizePragmas;
 struct CheckInputNakedDiagnostic
 {
     uint32_t position;
@@ -157,9 +176,17 @@ struct CheckInput
     CheckInputDiagnosticPragmas* diagnostic_pragmas;
     CheckInputNonnullPragmas* nonnull_pragmas;
     CheckInputPackPragmas* pack_pragmas;
+    CheckInputVisibilityPragmas* visibility_pragmas;
+    uint8_t* object_visibility;
+    bool visibility_error;
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
     CheckInputLoopDiagnostic* loop_diagnostic;
     CheckInputNakedDiagnostic* naked_diagnostic;
+    // #619: the unit's #pragma clang section settings, diagnostics and conservative emission-refusal candidates
+    // (c_check_section_input.c); NULL in a unit without a section pragma or attribute.
+    CheckInputSections* sections;
+    // #619: the unit's erroneous #pragma clang optimize lines' diagnostics (c_check_optimize_input.c), or NULL.
+    CheckInputOptimizePragmas* optimize_pragmas;
     uint8_t* pack_log2;
     CheckInputFpPragma* fp_pragmas;
     uint32_t fp_pragma_count;
@@ -177,6 +204,11 @@ struct CheckInput
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
+    uint32_t* implicit_function_tokens;
+    uint32_t implicit_function_count;
+    uint8_t implicit_function_diagnostic;
+    bool implicit_function_c99;
+    bool implicit_function_system;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
@@ -233,6 +265,10 @@ struct CheckInput
     uint32_t* string_ids;
     uint32_t string_count;
     uint32_t token_count;
+    // Large, proven file-scope integer literal lists, in declaration order: one immutable bytes part per table.
+    CheckInputLiteralTable* literal_tables;
+    CheckInputLiteralTable* literal_tables_last;
+    uint32_t literal_table_count;
     CBindingStatistics binding_statistics;
     uint32_t binding_event_count;
     CBindingStatistics parser_binding_statistics;
@@ -417,6 +453,9 @@ typedef struct CheckInputReader CheckInputReader;
 typedef struct CheckDeferred CheckDeferred;
 static void check_deferred_cut(CheckInputReader* reader, uint32_t opening);
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader);
+// The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
+// body's opening.
+static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
 typedef struct CheckInputVarargs CheckInputVarargs;
 typedef struct CheckInputSpecifierJob CheckInputSpecifierJob;
 struct CheckInputSpecifierJob
@@ -467,6 +506,7 @@ struct CheckInputReader
     CheckWarningBuffer warning_events;
     CheckConstBuffer const_values;
     uint32_t const_warning_capacity;
+    bool literal_tables_disabled;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -475,6 +515,7 @@ struct CheckInputReader
     uint32_t specifier_owner;
     uint32_t specifier_query_depth;
     bool specifier_pending;
+    uint32_t implicit_function_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
@@ -488,6 +529,7 @@ struct CheckInputReader
     uint8_t* linkage;
     uint32_t* objects;
     uint8_t* ignored;
+    // Assignment modes 1 (scalar) and 2 (list); 3 marks a complete compact #embed list item.
     uint8_t* initializers;
     uint8_t* static_initializers;
     uint32_t* initializer_declarations;
@@ -610,6 +652,13 @@ struct CheckInputReader
     uint32_t function_end;
     uint32_t function_body;
     bool naked_functions;
+    // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
+    // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
+    // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
+    CheckInputSectionEvent* section_events;
+    uint32_t section_event_count;
+    uint32_t section_event_capacity;
+    uint32_t section_record_from;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -631,6 +680,8 @@ struct CheckInputReader
     uint32_t predefined_positions[BUSTER_PARSE_PREDECLARED_TYPEDEFS];
     CheckDeferred* deferred;
     const char* lane_reason;
+    // A lane's first tag of its own: the top level's are below it.
+    uint32_t lane_tags;
     bool lane;
     bool lane_unsupported;
 };
@@ -1228,6 +1279,10 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 reader->tag_completions[tag] = BUSTER_CHECK_NONE;
                 // A deferred body's tag takes an index that an earlier body on its lane may have had (c_check_deferred.c).
                 reader->enum_fixed[tag] = BUSTER_CHECK_ENUM_NONE;
+                if (reader->transparent_unions != 0)
+                {
+                    reader->transparent_unions[tag] = 0;
+                }
                 if (fixed)
                 {
                     // Complete here: at the `{` or the `;` after the base.
@@ -1608,6 +1663,12 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
     const uint32_t source = reader->parser->tokens.sources[token];
     PPTokens* output = &reader->pp->output;
     const uint8_t kind = output->kinds[source];
+    // A compact resource has no single-token spelling. A speculative literal-table proof must fall back to the
+    // resource initializer path before interpreting its embed index as a spelling-end location.
+    if (kind == BUSTER_PP_KIND_EMBED)
+    {
+        return false;
+    }
     const uint64_t capacity = kind == BUSTER_PP_KIND_INTEGER ? 24 : (uint64_t)output->values[source] - output->locations[source] + 1;
     uint8_t* buffer = arena_push(reader->scratch, capacity, 1);
     if (buffer != 0)
@@ -1621,8 +1682,11 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_function_name_input.c"
 #include "c_check_pragma_input.c"
 #include "c_check_pack_input.c"
+#include "c_check_visibility_input.c"
 #include "c_check_fp_input.c"
 #include "c_check_loop_input.c"
+#include "c_check_section_input.c"
+#include "c_check_optimize_input.c"
 
 static void check_input_pragma_report(CheckInputReader* reader)
 {
@@ -1737,7 +1801,17 @@ static void check_input_literal(CheckInputReader* reader, uint32_t token, CheckL
     uint32_t length = 0;
     *result = (CheckLiteral){ 0 };
     const uint32_t name = reader->parser->tokens.names[token];
-    if (name == C_NAME_TRUE || name == C_NAME_FALSE)
+    uint32_t embed_length = 0;
+    const uint8_t* embed = parse_embed_bytes(reader->parser, token, &embed_length);
+    if (embed != NULL)
+    {
+        // A multi-element resource is accepted only as a complete list item, marked by initializer preparation.
+        // Treating it as one value in a call or expression would silently change the preprocessing token sequence.
+        result->type = BUSTER_TYPE_INT;
+        result->integer = embed[0];
+        result->valid = embed_length == 1 || reader->initializers[token] == 3;
+    }
+    else if (name == C_NAME_TRUE || name == C_NAME_FALSE)
     {
         result->type = BUSTER_TYPE_BOOL;
         result->integer = name == C_NAME_TRUE;
@@ -1876,11 +1950,13 @@ static void check_input_transparent_union(CheckInputReader* reader, TypeId type,
         {
             const TypeTransparentUnionResult marked = type_mark_transparent_union(reader->types, type);
             attribute->ignored = marked.status != TYPE_TRANSPARENT_UNION_APPLIED;
-            // A block's typedef may make a file-scope union transparent for what follows: source order's.
-            check_input_lane_refuse(reader, reader->lane && !attribute->ignored, "a body makes a union transparent");
+            const uint32_t tag = !attribute->ignored ? reader->types->types.index[type_index(type_strip_aligned(reader->types, type))] : 0;
+            // A block's typedef may make a file-scope union transparent for what follows: source order's, as is a
+            // definition's parameter-list union its body defines so (#436). A union the body made is its own, which
+            // nothing after the body can name, and the merge takes.
+            check_input_lane_refuse(reader, reader->lane && !attribute->ignored && tag < reader->lane_tags, "a body makes a union of the top level's transparent");
             if (!attribute->ignored)
             {
-                const uint32_t tag = reader->types->types.index[type_index(type_strip_aligned(reader->types, type))];
                 reader->output->resource |= reader->transparent_unions == 0;
                 if (reader->transparent_unions != 0 && reader->transparent_unions[tag] == 0)
                 {
@@ -3524,6 +3600,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->output->initializer_ends[name] = valid ? reader->ends[right] + 1 : i + 1;
                     i = valid ? reader->ends[right] + 1 : i;
                 }
+                // A declarator that ends before the first setting or section attribute is no section event (a section
+                // attribute of its own comes before its end): the walk tests that here, so that a unit without either pays
+                // a compare per declarator.
+                if (valid && !is_typedef && i >= reader->section_record_from)
+                {
+                    check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
+                                                    !function && reader->static_objects[name], type);
+                }
                 more = valid && i < count && parser->tokens.kinds[i] == PARSE_KIND_COMMA;
                 if (more)
                 {
@@ -3667,8 +3751,6 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    // A body's declaration with linkage is the file-scope entity's, which later declarations see: source order's.
-    check_input_lane_refuse(reader, reader->lane && reader->linkage[token] != 0, "a body declares something with linkage");
     if (!overload && reader->linkage[token] != 0 && reader->output->report_count == 0)
     {
         // Lexical scope restoration does not create a new externally linked entity. Keep its compatibility and
@@ -3711,7 +3793,28 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         {
             reader->linked_declarations[name] = token + 1;
         }
+        // A body's declaration with linkage is the file-scope entity's, which later declarations see. A lane, whose
+        // linked state is source order's at its body's opening (c_check_deferred.c), takes one that leaves nothing
+        // different after it: of an entity declared before the opening, whose type it doesn't change, and which replaces
+        // the entity's linked declaration only by one later declarations inherit the same from (its kind, linkage and
+        // thread-local storage it must share, and the rest it inherited, but whether it is naked).
+        if (reader->lane)
+        {
+            const bool replaced = linked != 0 && reader->linked_declarations[name] != linked;
+            const uint32_t flags = replaced ? reader->output->function_flags[token] ^ reader->output->function_flags[linked - 1] : 0;
+            check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
+            check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
+            check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
+        }
         reader->linked_types[name] = composite;
+        if (reader->deferred != 0)
+        {
+            check_deferred_linked(reader, name, token);
+        }
+    }
+    if (reader->output->visibility_pragmas != NULL || (reader->output->attributes != NULL && reader->output->attributes[token] != NULL))
+    {
+        check_input_visibility_declare(reader, token, point);
     }
     check_input_overload_declare(reader, token, point, old, overload);
     if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, kind, token, point, reader->scope_count) == 0)
@@ -3720,6 +3823,61 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+// The C90 compatibility rule is a declaration at the first direct call's source point, with block scope and
+// external linkage. Reuse the ordinary declaration/binding path so later prototypes share its entity while calls
+// made before a prototype keep default argument promotions. C23 removed this rule even when its warning is off.
+static void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t callee = token;
+    const uint32_t parent = parser->tree.parents[callee];
+    const bool call = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CALL &&
+                      callee + 1 < parent && parser->tree.roles[callee + 1] == PARSE_ROLE_OPEN_CALL;
+    const uint32_t name = parser->tokens.names[token];
+    const bool builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
+    const bool missing = call && !builtin && reader->pp->options.language.standard < 2023 &&
+                         c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
+    check_input_lane_refuse(reader, reader->lane && missing, "an implicit function declaration needs source-order linkage");
+    if (missing && !reader->lane)
+    {
+        const TypeId type = check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0));
+        CheckInput* input = reader->output;
+        if (input->implicit_function_count == reader->implicit_function_capacity)
+        {
+            const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
+                                      reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
+            uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+            if (tokens == NULL)
+            {
+                input->resource = true;
+            }
+            else
+            {
+                if (input->implicit_function_count != 0)
+                {
+                    memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
+                }
+                input->implicit_function_tokens = tokens;
+                reader->implicit_function_capacity = capacity;
+            }
+        }
+        if (!input->resource && type != 0)
+        {
+            input->implicit_function_tokens[input->implicit_function_count++] = token;
+            input->declarations[token] = token;
+            reader->declared_types[token] = type;
+            reader->declaration_kinds[token] = C_BINDING_FUNCTION;
+            reader->objects[token] = token + 1;
+            reader->static_objects[token] = true;
+            reader->linkage[token] = 2;
+            input->declaration_bodies[token] = reader->function_body;
+            check_input_bind(reader, token, token);
+        }
+    }
+}
+
+#include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
@@ -4029,6 +4187,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 break;
             }
             check_input_initializer_prepare(reader, i);
+            const CheckInputLiteralTable* table = reader->output->literal_tables_last;
+            if (table != NULL && table->declaration == declaration)
+            {
+                i = reader->output->initializer_ends[declaration] - 1;
+                continue;
+            }
         }
         if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
@@ -4213,6 +4377,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
             {
                 const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
+                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
+                {
+                    check_input_implicit_function(reader, i);
+                }
                 if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
                 {
                     const uint32_t close = parser->tree.parents[i];
@@ -4232,7 +4400,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         }
                     }
                 }
-                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
+                         c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
                 {
                     reader->output->resource = true;
                 }
@@ -5024,6 +5193,12 @@ static void check_input_expressions(CheckInputReader* reader)
                 op = CHECK_OP_COUNT;
                 supported = node != BUSTER_CHECK_NONE;
             }
+            else
+            {
+                // Resolving the operand's type may fold its arithmetic and record source warnings. The sizeof
+                // action checks that type but does not evaluate those operations; independent bounds stay live.
+                check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
+            }
         }
         if (op != CHECK_OP_COUNT && supported)
         {
@@ -5658,13 +5833,40 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
+// Retained uint32 output columns all use UINT32_MAX as their empty value. Fill one bounded column at a time so
+// libc's vector stores replace the aliasing token-wise stores (#628). Dirty and borrowed output storage is cleared
+// explicitly; the scalar reader below retains its original interleaved initialization as the independent twin.
+// The caller has proved all these mandatory reservations. Even count zero owns one sentinel; optional zero-default
+// columns (notably asm_ids) are excluded and keep their existing guarded initialization.
+static void check_input_output_none(CheckInput* input, uint32_t count)
+{
+    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE output columns use all-one bytes");
+    const uint64_t bytes = ((uint64_t)count + 1) * sizeof(uint32_t);
+    memset(input->declarations, 0xff, bytes);
+    memset(input->initializer_nodes, 0xff, bytes);
+    memset(input->initializer_begins, 0xff, bytes);
+    memset(input->initializer_ends, 0xff, bytes);
+    memset(input->token_nodes, 0xff, bytes);
+    memset(input->body_declarations, 0xff, bytes);
+    memset(input->declaration_bodies, 0xff, bytes);
+    memset(input->parameter_next, 0xff, bytes);
+    memset(input->control_owners, 0xff, bytes);
+    memset(input->label_targets, 0xff, bytes);
+    memset(input->case_ranges, 0xff, bytes);
+    memset(input->string_ids, 0xff, bytes);
+    memset(input->parameters, 0xff, bytes);
+}
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred, bool environment)
+                            CheckDeferred* deferred, bool environment, bool literal_tables)
 {
-    *input = (CheckInput){ 0 };
+    *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
+                                                        pp->options.language.standard >= 1999 ? 3 : 1,
+                         .implicit_function_c99 = pp->options.language.standard >= 1999,
+                         .implicit_function_system = pp->options.implicit_function_system };
     // Plain char's signedness, which every phase after the reader reads from the table too.
     types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
@@ -5722,6 +5924,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .scratch = scratch,
         .warning_events = { .arena = arena },
         .const_values = { .arena = arena },
+        .literal_tables_disabled = !literal_tables,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
@@ -5733,6 +5936,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .resolve_position = BUSTER_CHECK_NONE,
         .resolve_message = CHECK_INPUT_UNSUPPORTED,
         .expression_limit = count,
+        .section_record_from = BUSTER_CHECK_NONE,
         .fragment_end = original_end,
         .deferred = deferred,
         .syntax = syntax,
@@ -6050,27 +6254,45 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
-        for (uint32_t i = 0; i <= count; i += 1)
+        if (parser->options.scalar)
         {
-            input->declarations[i] = BUSTER_CHECK_NONE;
-            input->initializer_nodes[i] = BUSTER_CHECK_NONE;
-            input->initializer_begins[i] = BUSTER_CHECK_NONE;
-            input->initializer_ends[i] = BUSTER_CHECK_NONE;
-            input->token_nodes[i] = BUSTER_CHECK_NONE;
-            input->body_declarations[i] = BUSTER_CHECK_NONE;
-            input->declaration_bodies[i] = BUSTER_CHECK_NONE;
-            input->parameter_next[i] = BUSTER_CHECK_NONE;
-            input->control_owners[i] = BUSTER_CHECK_NONE;
-            input->label_targets[i] = BUSTER_CHECK_NONE;
-            input->case_ranges[i] = BUSTER_CHECK_NONE;
-            reader.string_ids[i] = BUSTER_CHECK_NONE;
-            reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-            reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-            reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-            reader.activate[i] = BUSTER_CHECK_NONE;
-            reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.first_value[i] = BUSTER_CHECK_NONE;
-            reader.last_value[i] = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                input->declarations[i] = BUSTER_CHECK_NONE;
+                input->initializer_nodes[i] = BUSTER_CHECK_NONE;
+                input->initializer_begins[i] = BUSTER_CHECK_NONE;
+                input->initializer_ends[i] = BUSTER_CHECK_NONE;
+                input->token_nodes[i] = BUSTER_CHECK_NONE;
+                input->body_declarations[i] = BUSTER_CHECK_NONE;
+                input->declaration_bodies[i] = BUSTER_CHECK_NONE;
+                input->parameter_next[i] = BUSTER_CHECK_NONE;
+                input->control_owners[i] = BUSTER_CHECK_NONE;
+                input->label_targets[i] = BUSTER_CHECK_NONE;
+                input->case_ranges[i] = BUSTER_CHECK_NONE;
+                reader.string_ids[i] = BUSTER_CHECK_NONE;
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.parameters[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
+        }
+        else
+        {
+            check_input_output_none(input, count);
+            // Reader-internal columns keep their token-wise initialization and ownership. Only retained output
+            // columns change their fill order; no reader arena format or walk is changed.
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
         }
         if (traversal != 0)
         {
@@ -6132,8 +6354,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 bool prepared = check_input_diagnostic_pragmas(&reader, handled);
                 prepared = prepared && check_input_nonnull_pragmas(&reader, handled);
                 prepared = prepared && check_input_pack_pragmas(&reader, handled);
+                prepared = prepared && check_input_visibility_pragmas(&reader, handled, true);
                 prepared = prepared && check_input_fp_pragmas(&reader, handled);
                 prepared = prepared && check_input_loop_pragmas(&reader, handled, loop_messages, &delayed);
+                prepared = prepared && check_input_section_pragmas(&reader, handled, loop_messages);
+                prepared = prepared && check_input_optimize_pragmas(&reader, handled, loop_messages);
                 input->resource |= !prepared;
                 uint32_t pack = 0;
                 bool handler_error = false;
@@ -6144,6 +6369,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         pack += 1;
                     }
                     const uint32_t position = parser->tokens.pragma_positions[pragma];
+                    if (handled[pragma] == 0 && check_input_completed_pragma(&reader, pragma))
+                    {
+                        handled[pragma] = 1;
+                    }
                     if ((handled[pragma] == 0 || handled[pragma] >= 3) &&
                         (input->deferred_tokens == 0 || deferred != 0 || input->deferred_tokens[position] == 0))
                     {
@@ -6204,6 +6433,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 types = reader.types;
                 // Lanes may have appended warnings after a top-level range last summarized their shared columns.
                 reader.warning_index_ready = false;
+            }
+            if (input->sections != 0 || reader.section_event_count != 0)
+            {
+                check_input_section_conflicts(&reader);
             }
             if (input->report_count == 0 && !input->resource)
             {
@@ -6322,7 +6555,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+}
+
+// Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
+static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -6330,7 +6569,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -6339,14 +6578,14 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
@@ -6356,7 +6595,7 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
-                           false);
+                           false, true);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -6364,5 +6603,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }

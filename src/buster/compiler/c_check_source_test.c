@@ -3,6 +3,129 @@
 // Original declaration/statement fixtures run through both production parser/checker schedules and external Clang.
 // Include after check_test_source; no Clang implementation or external fixture is incorporated.
 
+// Keep the synthetic fixture's known regions out of the measured helper's optimizer. Otherwise it can prove that
+// every transfer succeeds and delete even the old quadratic parent walk, defeating the work-bound regression.
+static __attribute__((noinline)) bool check_test_source_region_transfer_call(const CheckInputReader* reader, uint32_t source, uint32_t target)
+{
+    return check_input_region_transfer(reader, source, target);
+}
+
+static void check_test_source_region_transfers(CheckTest* test)
+{
+    const Parser no_region_parser = { .tokens = { .count = 1 } };
+    CheckInput no_regions = { 0 };
+    const CheckInputReader no_region_reader = { .parser = &no_region_parser, .output = &no_regions };
+    check_test_expect(test, check_input_region_transfer(&no_region_reader, 0, 0), "an empty region set needs neither region nor postorder columns");
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const char* source = "int f(int x){outer:;{({inner:;if(x)goto inner;({deep:;x++;});x;});}"
+                         "({sibling:;x;});return x;}";
+    const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 24);
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
+    ready = ready && arena.base != 0 && scratch.base != 0 && pp_run_source(&pp, "region-transfers.c", (const uint8_t*)source, strlen(source));
+    for (uint32_t schedule = 0; ready && schedule < 4; schedule += 1)
+    {
+        arena_pop_to(&arena, 0);
+        arena_pop_to(&scratch, 0);
+        CheckTestTypes types = { 0 };
+        const ParseOptions parse_options = { .scalar = (schedule & 1) != 0, .tree_only = (schedule & 2) != 0 };
+        bool adapted = check_test_types_open(&types) && parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
+        check_test_expect(test, adapted && parser.sizes == NULL && ((parser.postorder == NULL) == parse_options.tree_only),
+                          "region-transfer fixture retains no optional parser sizes, including tree-only schedules");
+        CheckInput input = { 0 };
+        adapted = adapted && check_input(&input, &parser, &pp, &types.table, &arena, &scratch);
+        check_test_expect(test, adapted && input.report_count == 0 && input.region_count == 3,
+                          "reader-owned traversal adapts nested and sibling statement expressions on every schedule");
+        const uint64_t slots = (uint64_t)parser.tokens.count + 1;
+        uint32_t* columns = adapted ? arena_push_array(&scratch, 9 * slots, sizeof(uint32_t), 4) : NULL;
+        check_test_expect(test, columns != NULL, "region-transfer oracle traversal allocation");
+        if (columns != NULL)
+        {
+            // Derive test-only metadata after check_input released its scratch. Production retains this same
+            // traversal for all of the reader's consumers; it never needs Parser.sizes or another size pass.
+            uint32_t* postorder = columns + 2 * slots;
+            uint32_t* positions = columns + 3 * slots;
+            uint32_t* sizes = columns + 8 * slots;
+            parse_tree_columns(parser.tree.parents, parser.tokens.count, columns, columns + slots, postorder, positions,
+                               columns + 4 * slots, columns + 5 * slots, columns + 6 * slots, columns + 7 * slots, sizes);
+            for (uint32_t token = 0; token < parser.tokens.count; token += 1)
+            {
+                const uint32_t position = positions[token];
+                check_test_expect(test, position < parser.tokens.count && postorder[position] == token && sizes[position] != 0 && sizes[position] <= position + 1,
+                                  "every token, including control punctuation, has a bounded reader-owned subtree");
+            }
+            const CheckInputReader reader = { .parser = &parser, .output = &input, .postorder_positions = positions, .subtree_sizes = sizes };
+            // Every token pair includes region boundaries, descendants, siblings, both jump directions and an absent token.
+            for (uint32_t from = 0; from <= parser.tokens.count; from += 1)
+            {
+                for (uint32_t to = 0; to <= parser.tokens.count; to += 1)
+                {
+                    const uint32_t source_token = from == parser.tokens.count ? BUSTER_CHECK_NONE : from;
+                    const uint32_t target_token = to == parser.tokens.count ? BUSTER_CHECK_NONE : to;
+                    parser.options.scalar = true;
+                    const bool expected = check_input_region_transfer(&reader, source_token, target_token);
+                    parser.options.scalar = false;
+                    check_test_expect(test, check_input_region_transfer(&reader, source_token, target_token) == expected,
+                                      "bounded region transfer equals the full ancestor walk without parser-owned size metadata");
+                }
+            }
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+    arena_release(&scratch);
+    arena_release(&arena);
+
+    // A chain's postorder is its token order. Every source is its target's immediate parent, and the one region holds
+    // the whole chain. A full walk costs two billion dependent loads; stopping at the shared subtree costs two each.
+    enum { COUNT = 65536 };
+    uint32_t* parents = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* order = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* sizes = malloc((uint64_t)COUNT * sizeof(uint32_t));
+    uint32_t* selected = calloc(COUNT, sizeof(uint32_t));
+    ready = parents != 0 && order != 0 && sizes != 0 && selected != 0;
+    check_test_expect(test, ready, "deep region-transfer fixture allocation");
+    if (ready)
+    {
+        for (uint32_t token = 0; token < COUNT; token += 1)
+        {
+            parents[token] = token + 1;
+            order[token] = token;
+            sizes[token] = token + 1;
+        }
+        CheckInputRegion region = { .opening = 0, .closing = COUNT - 1 };
+        Parser chain = { .tokens = { .count = COUNT }, .tree = { .parents = parents } };
+        CheckInput output = { .expression_regions = selected, .regions = &region };
+        const CheckInputReader reader = { .parser = &chain, .output = &output, .postorder_positions = order, .subtree_sizes = sizes };
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            output.region_count = variant;
+            selected[COUNT - 1] = variant;
+            struct timespec start = { 0 };
+            struct timespec end = { 0 };
+            const bool started = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start) == 0;
+            uint32_t accepted = 0;
+            for (uint32_t target = 1; target + 2 < COUNT; target += 1)
+            {
+                accepted += check_test_source_region_transfer_call(&reader, target + 1, target);
+            }
+            const bool finished = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &end) == 0;
+            const int64_t elapsed = ((int64_t)end.tv_sec - start.tv_sec) * INT64_C(1000000000) + end.tv_nsec - start.tv_nsec;
+            check_test_expect(test, accepted == COUNT - 3 && started && finished && elapsed < INT64_C(1000000000),
+                              "65533 deep transfers with no region or one enclosing region finish within one CPU second");
+        }
+    }
+    free(selected);
+    free(sizes);
+    free(order);
+    free(parents);
+}
+
 static void check_test_source_fp_history(CheckTest* test, bool complex)
 {
     static InternTable identifiers;
@@ -774,6 +897,30 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
         {
             "switch cannot enter statement expression",
             "int f(int n){switch(n){return ({case 0: 3;});}return 0;}\n",
+            true,
+            false
+        },
+        {
+            "goto within and out of nested statement expressions",
+            "int f(int n){top:;n=({inside:;if(n==1)goto inside;({if(n==2)goto inside;n;});if(n==3)goto top;n;});return n;}\n",
+            false,
+            false
+        },
+        {
+            "goto cannot enter sibling statement expression",
+            "int f(int n){({if(n)goto sibling;n;});return ({sibling:3;});}\n",
+            true,
+            false
+        },
+        {
+            "switch inside statement expression owns its own cases",
+            "int f(int n){return ({switch(n){case 0:n++;break;default:n--;}n;});}\n",
+            false,
+            false
+        },
+        {
+            "switch cannot enter a nested statement expression",
+            "int f(int n){return ({switch(n){return ({default:3;});}n;});}\n",
             true,
             false
         },
@@ -1551,4 +1698,5 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
     check_test_source_builtin_effects(test);
     check_test_source_transparent_history(test);
     check_test_source_intrinsic_range(test);
+    check_test_source_region_transfers(test);
 }

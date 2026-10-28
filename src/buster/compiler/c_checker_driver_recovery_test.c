@@ -52,6 +52,23 @@ static bool check_test_driver_recovery_groups(const char* text, char* groups, ui
 static void check_test_driver_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
+        "int first(void){return 2147483647\n#error before_plus\n+1;}\n",
+        "int first(void){return 2147483647+\n#error before_rhs\n1;}\n",
+        "int first(void){return 2147483647+1\n#error after_rhs\n;}\n",
+        "int first(void){return 2147483647+1;\n#error after_semicolon\n}\n",
+        "int first(void){return 2147483647+1;}\n#error after_body\n",
+        "int first(void){return 1<<32;}\n#error after_body\n",
+        "#pragma GCC visibility pop\n#error later\nint anchor;\n",
+        "#pragma GCC visibility pop\nint anchor;\n#error later\n",
+        "#pragma GCC visibility push\n#error later\nint anchor;\n",
+        "#pragma GCC visibility push(bad)\n#error later\nint anchor;\n",
+        "#pragma GCC visibility pop\nint first(void){break;return 0;}\n#error later\n",
+        "int first(void){return missing\n#error before_open\n(1); }\n",
+        "int first(void){return missing(\n#error after_open\n1); }\n",
+        "int first(void){return missing(1\n#error before_close\n); }\n",
+        "int first(void){return missing(1)\n#error after_close\n; }\n",
+        "int first(void){return 2147483647+1;}\nint incomplete = ;\n#error later\n",
+        "int first(void){return 1<<32;}\n#warning lookahead\nint incomplete = ;\n#error later\n",
         "int first(void){return missing;}\n#error later\n",
         "#error earlier\nint later(void){return missing;}\n",
         "int first(void){return missing;}\nint later(void){return 1<<32;}\n",
@@ -251,6 +268,113 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
                 check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
                                        actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
                                        strcmp(actual.summary, expected.summary) == 0, description);
+                free(text);
+            }
+        }
+    }
+    // Analysis-based return warnings distinguish genuine errors from warnings promoted to errors. A real
+    // error in the immediate post-body lookahead inhibits analysis; a later error after an anchor does not.
+    // Keep this in the implemented aggregate-return domain; ordinary calls stay in a fully returning helper.
+    static const struct
+    {
+        const char* text;
+        const char* header;
+        const char* standard;
+        const char* first;
+        const char* second;
+    } returns[] = {
+        { "typedef long long V __attribute__((vector_size(32)));struct S{long a,b;};struct S first(V x,struct S s){if(__builtin_ia32_vec_ext_v4di(x,4))return s;}struct S second(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-march=x86-64-v4", "-Werror=return-type" },
+        { "struct S{long a,b;};struct S first(int n,struct S s){if(n)return s;}\n#pragma GCC visibility pop\nstruct S second(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=return-type", NULL },
+        { "#error before\nstruct S{long a,b;};struct S f(void){}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){\n#error inside\nif(n)return s;}\nstruct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n#error lookahead\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\nint anchor;\n#error later\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;\n#warning before_close\n}\n#warning after_close\n", NULL, "-std=gnu17", NULL, NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(int n,struct S s){int x=2147483647+1;if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=integer-overflow", "-Werror=return-type" },
+        { "struct S{long a,b;};struct S f(int n,struct S s){int x=1<<32;if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Werror=shift-count-overflow", "-Werror=return-type" },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", NULL, NULL },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu17", "-Wno-error=implicit-function-declaration", "-Werror=return-type" },
+        { "int helper(void){return missing(1);}struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}struct S g(int n,struct S s){if(n)return s;}\n", NULL, "-std=gnu89", "-Werror=implicit-function-declaration", "-Werror=return-type" },
+        { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", NULL, NULL },
+        { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", "-Wsystem-headers", NULL },
+        { "#include \"recovery-header.h\"\n", "#pragma GCC system_header\nstruct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", "-std=gnu17", "-Wsystem-headers", "-Werror=return-type" },
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(returns); fixture += 1)
+    {
+        made = parse_test_write(source, returns[fixture].text, strlen(returns[fixture].text)) &&
+               (returns[fixture].header == NULL || parse_test_write(header, returns[fixture].header, strlen(returns[fixture].header)));
+        check_test_expect(test, made, "return publication and system-header source is available");
+        for (uint32_t limit = 0; made && limit < 3; limit += 1)
+        {
+            char* arguments[16] = { (char*)clang, (char*)returns[fixture].standard, "-fsyntax-only", "-fno-color-diagnostics" };
+            uint32_t used = 4;
+            if (limit != 0)
+            {
+                arguments[used++] = (char*)limits[limit];
+            }
+            if (returns[fixture].first != NULL)
+            {
+                arguments[used++] = (char*)returns[fixture].first;
+            }
+            if (returns[fixture].second != NULL)
+            {
+                arguments[used++] = (char*)returns[fixture].second;
+            }
+            arguments[used++] = source;
+            char* reference = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &reference);
+            char expected_groups[32768];
+            const bool expected_valid = check_test_driver_recovery_groups(reference, expected_groups, sizeof(expected_groups));
+            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(reference);
+            free(reference);
+            for (uint32_t route = 0; route < 4; route += 1)
+            {
+                static const char sentinel[] = "keep-return-rejected-output";
+                const bool prior = parse_test_write(object, sentinel, sizeof(sentinel));
+                char* checked[20] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), (char*)returns[fixture].standard };
+                used = 2;
+                if ((route & 1) != 0)
+                {
+                    checked[used++] = "--scalar";
+                }
+                checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
+                checked[used++] = "-o";
+                checked[used++] = object;
+                if (limit != 0)
+                {
+                    checked[used++] = (char*)limits[limit];
+                }
+                if (returns[fixture].first != NULL)
+                {
+                    checked[used++] = (char*)returns[fixture].first;
+                }
+                if (returns[fixture].second != NULL)
+                {
+                    checked[used++] = (char*)returns[fixture].second;
+                }
+                checked[used++] = source;
+                char* text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                char actual_groups[32768];
+                const bool actual_valid = check_test_driver_recovery_groups(text, actual_groups, sizeof(actual_groups));
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                char description[160];
+                snprintf(description, sizeof(description), "return publication fixture=%u limit=%u route=%u keeps exact Clang groups and status", fixture, limit, route);
+                check_test_expect(test, expected_valid && actual_valid && status == oracle && strcmp(expected_groups, actual_groups) == 0, description);
+                check_test_expect(test, actual.errors == expected.errors && actual.warnings == expected.warnings && actual.fatal == expected.fatal &&
+                                       !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0,
+                                  "return warning class, suppression and budget match the independent oracle");
+                FILE* emitted = fopen(object, "rb");
+                char bytes[sizeof(sentinel)] = { 0 };
+                const uint64_t taken = emitted != NULL ? fread(bytes, 1, sizeof(bytes), emitted) : 0;
+                const bool unchanged = taken == sizeof(bytes) && memcmp(bytes, sentinel, sizeof(bytes)) == 0 && emitted != NULL && fgetc(emitted) == EOF;
+                const bool elf = taken >= 4 && memcmp(bytes, "\177ELF", 4) == 0;
+                check_test_expect(test, prior && (oracle != 0 || route < 2 ? unchanged : elf), "return diagnostic-only work never publishes a rejected object");
+                if (emitted != NULL)
+                {
+                    fclose(emitted);
+                }
                 free(text);
             }
         }

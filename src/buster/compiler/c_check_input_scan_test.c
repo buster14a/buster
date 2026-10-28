@@ -81,8 +81,114 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)((acts ? BUSTER_CHECK_EXPRESSION_ACTS : 0) | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0));
 }
 
+static CheckInput check_test_output_none_columns(uint32_t* const* columns, uint32_t count)
+{
+    return (CheckInput)
+    {
+        .declarations = columns[0],
+        .initializer_nodes = columns[1],
+        .initializer_begins = columns[2],
+        .initializer_ends = columns[3],
+        .token_nodes = columns[4],
+        .body_declarations = columns[5],
+        .declaration_bodies = columns[6],
+        .parameter_next = columns[7],
+        .control_owners = columns[8],
+        .label_targets = columns[9],
+        .case_ranges = columns[10],
+        .string_ids = columns[11],
+        .parameters = columns[12],
+        .token_count = count,
+    };
+}
+
+static void check_test_output_none(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[13];
+    bool ready = true;
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        mappings[column] = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "guarded retained NONE output columns allocate");
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint32_t* columns[BUSTER_ARRAY_LENGTH(mappings)];
+        for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+        {
+            memset(mappings[column], 0xa5, page);
+            columns[column] = (uint32_t*)(mappings[column] + page - ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
+        CheckInput input = check_test_output_none_columns(columns, count);
+        check_input_output_none(&input, count);
+        bool exact = true;
+        for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+        {
+            const uint64_t prefix = page - ((uint64_t)count + 1) * sizeof(uint32_t);
+            for (uint64_t at = 0; at < prefix; at += 1)
+            {
+                exact &= mappings[column][at] == 0xa5;
+            }
+            for (uint32_t token = 0; token <= count; token += 1)
+            {
+                exact &= columns[column][token] == UINT32_MAX;
+            }
+        }
+        char description[120];
+        snprintf(description, sizeof(description), "retained NONE outputs: %u dirty tokens plus sentinel match scalar bits within guard bounds", count);
+        check_test_expect(test, exact, description);
+    }
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], 2 * page);
+        }
+    }
+    Arena owned = arena_reserve(UINT64_C(1) << 17);
+    check_test_expect(test, owned.base != NULL, "borrowed dirty NONE output arena allocates");
+    static const uint32_t counts[] = { 0, 1, 257 };
+    for (uint32_t at = 0; owned.base != NULL && at < BUSTER_ARRAY_LENGTH(counts); at += 1)
+    {
+        memset(owned.base, 0x63, owned.capacity);
+        owned.length = 37;
+        Arena borrowed = owned;
+        uint32_t* columns[13];
+        bool exact = true;
+        for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+        {
+            columns[column] = BUSTER_ARENA_PUSH_ARRAY(&borrowed, uint32_t, (uint64_t)counts[at] + 1);
+            exact &= columns[column] != NULL;
+        }
+        uint32_t asm_id = UINT32_C(0x91919191);
+        CheckInput input = check_test_output_none_columns(columns, counts[at]);
+        input.asm_ids = &asm_id;
+        if (exact)
+        {
+            check_input_output_none(&input, counts[at]);
+            for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+            {
+                for (uint32_t token = 0; token <= counts[at]; token += 1)
+                {
+                    exact &= columns[column][token] == BUSTER_CHECK_NONE;
+                }
+            }
+        }
+        for (uint32_t byte = 0; byte < owned.length; byte += 1)
+        {
+            exact &= owned.base[byte] == 0x63;
+        }
+        check_test_expect(test, exact && owned.length == 37 && asm_id == UINT32_C(0x91919191),
+                          "dirty columns borrowed through an arena copy retain the owner's prefix, sentinel and excluded zero-default column");
+    }
+    arena_release(&owned);
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
+    check_test_output_none(test);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     // The columns, each in two pages, the second PROT_NONE: kinds, roles, names (or 32-bit values), pointers, and the
     // syntax bits and the marks count_tokens writes; then the expressions' classes' inputs (ignored tokens, first children

@@ -816,6 +816,10 @@ arenas. Popping a context gives its tokens back when they are on top.
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
   with clang's values (unsigned with `-funsigned-char`: "The `-f` options").
+  A name left before `(` is diagnosed at that name as Clang 23's undefined
+  function-like macro, including disabled recursive names and short-circuited
+  operands. Names alone still become zero; numeric and parenthesized values
+  followed by `(` retain the invalid-binary-operator diagnostic (#706).
   A line is copied to `pp->arguments` (64 tokens at a time, but for a line of
   up to three) and expanded through a barrier and a capture. A line whose
   expansion would only write its tokens into the capture is expanded straight
@@ -1044,10 +1048,23 @@ each set, clang preprocesses the header with its own set and with ours
 
 Then our preprocessor with `--buster-headers` must give clang's tokens on all
 the headers and their macros in each mode, and warn no more than clang does in
-the unit itself: it reports warnings in system headers too, which clang hides
-without `-Wsystem-headers`, and the headers must give none. In strict C89,
+the unit itself. Ordinary preprocessing warnings in system headers are hidden
+and not counted unless `-Wsystem-headers` enables them; `-Wno-system-headers`
+restores suppression. System directories and `#pragma GCC system_header` use
+the same expansion-location judgment as the checker. `#warning` remains visible
+there, and errors are never hidden. Macro-redefinition notes follow their primary
+warning's visibility. In strict C89,
 clang's own `<stdint.h>` and `<stdckdint.h>` put their `//` comments in the
 output as tokens; the check drops those lines from clang's side.
+
+For deferred history, exact source-level runs classify the preprocessing
+warnings without constructing expansion history. A warning whose run crosses a
+system-level boundary requests the existing replay, which supplies its canonical
+visibility and count, including for quiet clients. The system-warning tests cover
+both kernels, immediate/deferred history, quiet counting, both option states,
+macro uses in both directions, nested headers, predefined-macro whitespace and
+invocations spanning header exits. Destringized `_Pragma` messages retain their
+scratch-spelling step and column as a generated diagnostic source.
 
 Then the headers among others (#255's review), in each mode, hosted and
 freestanding: two units include buster's 11, the C library's headers that
@@ -1106,6 +1123,24 @@ for token as clang does, and compile with clang.
 ### `#embed`
 
 `#embed` (C23 6.10.3) works as clang 23's does (#117).
+
+The checker accepts a resource as a complete initializer-list item in ordinary
+`char`, `signed char` and `unsigned char` arrays, for static and automatic
+storage (#621). The parser retains one operand and the initializer planner
+borrows the immutable byte span. Inferred bounds count every resource byte;
+explicit bounds retain the fitting prefix and diagnose excess elements as for
+an ordinary list. Designated starting indices and brace elision use the same
+subobject cursor. `prefix` and `suffix` retain their ordinary tokens and must
+supply any separators; a resource adds neither a separator nor a terminating
+zero. An empty resource or `limit(0)` retains only `if_empty`'s tokens.
+
+Multi-byte resources currently require character subobjects without volatile
+or bit-field access, and cannot be the value of a GNU range designator. A
+resource inside a call or expression, including a `prefix` or `suffix` operator
+that binds to its first or last byte, is refused instead of being treated as
+one scalar. A one-byte resource is an ordinary `int` constant and follows the
+normal expression and conversion rules. Wider arrays and general expression
+sequences need a separate compact conversion representation.
 
 - **The header name** is read as an `#include`'s (`pp_read_header_name`, which
   `pp_include` shares): `<...>` or a string literal as written, or a computed
@@ -2149,6 +2184,22 @@ buffer, written with `fwrite` as it fills, in three steps:
    with branches only for line markers (which `-P` doesn't print), a run of
    blank lines, and spellings longer than 64 bytes.
 
+For `-P`, a batch whose spellings each have 1–64 bytes and which has no pragma
+end or streamed `#embed` computes all output offsets first (#649). Two
+32-word SIMD prefix sums include each spelling and its optional single gap
+byte. The resulting copy addresses are independent; a batch needs at most
+4,160 bytes and is flushed as a whole when necessary. Loads and stores remain
+masked to each spelling's logical length, including a final partial batch.
+Marker output and exceptional batches use the existing per-token route. No
+new output metadata is retained by the preprocessor, and the spelling and
+separation rules are unchanged.
+
+[The frozen #649 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-649/target)
+compares `123d22ae` with `bc1b4861` on the locked 9700X. Its printing and
+whole-process results measure `-E -P` on identical frozen input trees; they do
+not establish ordinary `-c` throughput or the timing of later ports. The
+retrospective interference audit excludes the extra reversed main phase pair.
+
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
 The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
@@ -2156,6 +2207,13 @@ The two give the same bytes on every test. A variant whose first step had no
 branch on the kind (it looked up both spellings and picked one) was 1–2%
 slower in an A/B: the location lookups it adds for identifiers cost more than
 the mispredictions it saves.
+
+`test-preprocessor` checks every 0–64-token prefix size with guarded input and
+output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
+printer fixtures move a pragma end through all 64 alignments, continue into
+ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
+bytes with the independent scalar printer. Long literals, line splices,
+trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
 
 ## The oracle
 
