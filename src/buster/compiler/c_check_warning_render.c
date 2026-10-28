@@ -26,7 +26,8 @@ static CheckWarningSeverity check_driver_warning_severity(const Preprocessor* pp
 {
     const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
         (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0);
-    const CheckWarningSeverity severity = command.quiet || (!command.system_headers && check_graph_system_token(&input->graph, event->token)) ?
+    const CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ||
+        (!command.system_headers && check_graph_system_token(&input->graph, event->token)) ?
         CHECK_WARNING_IGNORE : check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
     return severity;
 }
@@ -160,7 +161,7 @@ static bool check_driver_warning_events(const Parser* parser, Preprocessor* pp, 
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&
                     event->note_count <= view->note_count - event->note_first &&
-                    event->kind < CHECK_WARNING_EVENT_KIND_COUNT && (event->flags & ~BUSTER_CHECK_WARNING_DEFAULT_IGNORED) == 0 &&
+                    event->kind < CHECK_WARNING_EVENT_KIND_COUNT && (event->flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED)) == 0 &&
                     (event->source == BUSTER_CHECK_WARNING_NO_SOURCE || event->source < pp->output.count) &&
                     (event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ||
                      (event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN ? event->completion <= parser->tokens.count :
