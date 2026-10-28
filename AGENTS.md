@@ -2512,11 +2512,17 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
-- parts (rules 1 and 3): 12 inputs cut by `lane_parts_by_cost`, whose parts the
+- parts (rules 1 and 3): 13 inputs cut by `lane_parts_by_cost`, whose parts the
   lanes take with `lane_take`, then count, place and fill by part, with a late
   lane in every loop. The output must be byte-identical to the reference,
-  every part must be taken once, and every lane must get the same order,
-  costliest first.
+  every part must be taken once, and every lane must get the same order: the
+  costliest part first, then the others costliest first to within a factor of
+  two (one input's costs grow within one factor of two, so that its costliest
+  part isn't its first). `parts_by_cost`, the same cut by one thread for a phase
+  cut before its lanes start, must give the group's boundaries and order for its
+  lane count, and for 1, 2, 3, 5, 8, 64, 256 and 257 lanes as many parts as such
+  a group cuts (of 256 lanes, the most a group has, for 257),
+  `range_part_by_cost`'s boundaries and every part once in that order.
 
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
@@ -4884,21 +4890,35 @@ transparent union or an intrinsic, a completion of its parameter-list tag, an
 error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
-of the bodies' tokens beyond twice the largest body's, no more than its lanes
-or the bodies: a lane's copy of the reader and its wake-up must be paid for by
-its share of the walks, and a woken lane reads at about half the first lane's
-speed.
+(and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
+of the bodies' tokens beyond the larger of the largest body's and twice the
+second largest's, no more than its lanes or the bodies: a lane's copy of the
+reader, which grows with the top level, and its wake-up must be paid for by its
+share of the walks. The calling thread cuts the bodies into parts before the
+lanes start (`parts_by_cost`), stably promotes the part containing the largest
+body, and reads that part at once as the first lane. The others, woken for the
+bodies, take the rest in the remaining cost order from the counter
+and read at about half its speed. The state (`CheckDeferred`, zeroed first)
+keeps its memory across its readings, each lane's arenas one mapping reserved
+on the calling thread before the lanes start, until `check_deferred_release`.
 
-`./build/compiler test-checker-deferred [--keep]` checks 50 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 65 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
-and by the lanes' rule, its reader copied only by lanes that take a part. Six
-fixtures of bodies of known tokens must take the rule's lanes on each side of
-its steps. Each that merges must give source order's result again with its
-merge failing after the replay, and count as a resource failure with its
-state's allocation failing; timed, one lane must wait for no other, preserve
+and by the lanes' rule, its reader copied only by lanes that take a part, in
+as many parts as a group of its lanes cuts. Eight fixtures of bodies of known
+tokens must take the rule's lanes on each side of its steps, their largest body
+the first lane's, also when the first lane starts after every other lane's
+first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
+128 and 512 parts also require the first lane to read the largest body, with
+that lane delayed under the reader's rule and with all lanes forced. Each that
+merges must give source
+order's result again with its merge failing after the replay and when a state
+that read it before reads it again (its memory poisoned or as left, and kept),
+and count as a resource failure with its state's allocation failing; timed, one
+lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
@@ -4907,11 +4927,15 @@ lanes' dispatch and wake-up must fall within their span; and the benchmark's
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
 left to source order by reason. `./build/compiler benchmark-checker-deferred
-[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [-E's options] file...`
-times source order's reader against the deferred one on one lane and on up to
-N, with the parse, the top level, the bodies' walks, their position checks, the
-lanes' span and the merge apart, and what a lane costs: its copy of the reader,
-the launcher's dispatch and the other lanes' wake-up. One active lane uses
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
+file...` times source order's reader against the deferred one on one lane and
+on up to N, with the parse, the top level, the bodies' walks, their position
+checks, the lanes' span and the merge apart, and what a lane costs: its copy of
+the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
+waits for, and the lanes' arenas before the lanes start; and in how many passes
+the first lane read the largest body. Each deferred reading releases its state,
+as a process's one reading does, or with `--warm` keeps it for the next, as a
+process's later readings do. One active lane uses
 the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no
 affinity calls and isolates the reading without changing generic team validation;
 multiple lanes retain `lane_run` and their CPU list. Its passes take the six
