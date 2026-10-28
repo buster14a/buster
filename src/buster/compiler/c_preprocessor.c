@@ -249,6 +249,9 @@ typedef enum PPRawStrings
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
+    // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
+    uint8_t implicit_function_diagnostic;
+    bool implicit_function_system;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
     FileCache* files;
@@ -314,6 +317,8 @@ struct PPOptions
     // Count the diagnostics without printing them: test-preprocessor's fuzz runs compare acceptance, and print a
     // difference's diagnostics when they run its case again.
     bool quiet;
+    // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
+    bool system_header_warnings;
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
     // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
     uint32_t error_limit;
@@ -1207,6 +1212,7 @@ typedef enum PPGeneratedKind
 {
     PP_GENERATED_PASTE,
     PP_GENERATED_STRING,
+    PP_GENERATED_PRAGMA,
 } PPGeneratedKind;
 
 typedef struct PPGenerated PPGenerated;
@@ -1391,6 +1397,8 @@ struct Preprocessor
     bool history_fatal;
     uint32_t history_errors;
     uint32_t history_warnings;
+    // A warning while system-level runs were inexact needs the history replay's canonical visibility/count.
+    bool history_warning_filter_deferred;
     Preprocessor* history_replay;
     Arena history_replay_arena;
     // Only set around synchronous expansion/substitution work; never inferred from a spelling location.
@@ -1561,6 +1569,8 @@ typedef enum PPSeverity
     PP_SEVERITY_FATAL,
     // Rendered only inside an accepted diagnostic group; never passed through the counting gate.
     PP_SEVERITY_NOTE,
+    // #warning's diagnostic is explicitly visible in system headers, unlike ordinary preprocessing warnings.
+    PP_SEVERITY_WARNING_ALWAYS,
 } PPSeverity;
 
 typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
@@ -1583,6 +1593,7 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
+static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
 static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const char* format, va_list arguments);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Preprocessor* pp);
@@ -1630,8 +1641,11 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(con
 // gives them, and the column. PPOptions.quiet only counts it.
 BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
 {
-    bool limited;
-    const bool accepted = pp_diagnostic_begin(pp, &severity, &limited);
+    const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+    severity = always ? PP_SEVERITY_WARNING : severity;
+    const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    bool limited = false;
+    const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
     if (accepted && !pp->options.quiet && limited)
     {
         pp_diagnostic_limit(pp);
@@ -14004,7 +14018,26 @@ static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPToken
     uint8_t* written = length != BUSTER_PP_NONE ? arena_push(scratch.arena, 4 * (uint64_t)length + 2, 1) : 0;
     if (written != 0)
     {
-        pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, location, "%.*s", (int)length, (const char*)text + 1);
+        const uint32_t name = names_begin + (kind != PP_PRAGMA_MESSAGE);
+        const uint32_t diagnostic_location = names->locations[name];
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        if (from_operator)
+        {
+            // The destringized pragma has its own scratch spelling. Retain that step before the operator's parent
+            // expansion, so its note and relative column remain distinct from the macro that contained _Pragma.
+            const PPSource source = { .location = names->locations[names_begin] };
+            const uint32_t origin = pp_history_generated(pp, PP_GENERATED_PRAGMA, diagnostic_location, location, &source, 1);
+            if (origin != 0)
+            {
+                pp->generated[(origin & BUSTER_PP_ORIGIN_INDEX) - 1].expansion = saved_origin;
+                pp->diagnostic_origin = origin;
+            }
+        }
+        if (!pp->fatal)
+        {
+            pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+        }
+        pp->diagnostic_origin = saved_origin;
         uint32_t n = 0;
         written[n] = '"';
         n += 1;
@@ -14100,7 +14133,16 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
     }
     else
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, location, pop ? "pragma diagnostic pop could not pop, no matching push"
+        uint32_t diagnostic_location = begin < end ? tokens->locations[begin] : location;
+        const uint32_t range = pop && begin < end ? pp_find_range(pp, diagnostic_location) : BUSTER_PP_NONE;
+        if (range != BUSTER_PP_NONE)
+        {
+            const PPRange* source = pp->ranges + range;
+            const uint32_t after = pp_identifier_end(pp, source->bytes, source->length, diagnostic_location - source->base);
+            const ScalarLexer lexer = { .source = source->bytes, .length = source->length, .trigraphs = pp->options.trigraphs };
+            diagnostic_location = source->base + (uint32_t)pp_skip_blanks(&lexer, after);
+        }
+        pp_diagnose(pp, PP_SEVERITY_WARNING, diagnostic_location, pop ? "pragma diagnostic pop could not pop, no matching push"
                                                            : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
     }
     if (printed)
@@ -14613,7 +14655,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_WARNING:
         {
             pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
-                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING);
+                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
@@ -15451,11 +15493,23 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             }
             else if (kind == C_TOKEN_RAW_IDENTIFIER)
             {
-                // An identifier left after expansion is 0; in C23, true is 1 (and false 0).
-                const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 2023;
-                values[value_count] = (PPValue){ .bits = is_true };
-                value_count += 1;
-                expect_operand = false;
+                // A remaining name followed by '(' is an undefined function-like invocation, even if expansion
+                // painted a recursive macro name. Diagnose the name before the ordinary identifier-to-zero rule.
+                if (i + 1 < end && tokens->kinds[i + 1] == C_TOKEN_L_PAREN)
+                {
+                    const IdentId name = tokens->values[i];
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "function-like macro '%.*s' is not defined",
+                                (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    valid = false;
+                }
+                else
+                {
+                    // An identifier left after expansion is 0; in C23, true is 1 (and false 0).
+                    const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 2023;
+                    values[value_count] = (PPValue){ .bits = is_true };
+                    value_count += 1;
+                    expect_operand = false;
+                }
             }
             else
             {
@@ -17967,10 +18021,17 @@ static void pp_history_record(Preprocessor* pp, bool report)
         const bool result = pp->history_path != 0 ? pp_preprocess_file(replay, pp->history_path) :
                                                     pp_preprocess_source(replay, pp->history_name, pp->history_bytes, pp->history_length);
         same = result == pp->history_result && replay->fatal == pp->history_fatal && replay->errors == pp->history_errors &&
-               replay->warnings == pp->history_warnings && pp_tokens_same(&replay->output, &pp->output);
+               (pp->history_warning_filter_deferred || replay->warnings == pp->history_warnings) && pp_tokens_same(&replay->output, &pp->output);
     }
     if (same)
     {
+        // An inexact run cannot classify a warning from an expansion that spans a system-level transition. The
+        // first pass counted it provisionally; the replay has exact expansion locations and supplies its count.
+        if (pp->history_warning_filter_deferred)
+        {
+            pp->warnings = pp->warnings - pp->history_warnings + replay->warnings;
+            pp->history_warnings = replay->warnings;
+        }
         pp->history = replay->history;
         pp->history_count = replay->history_count;
         pp->history_capacity = replay->history_capacity;
@@ -18049,7 +18110,7 @@ static void pp_history_report(Preprocessor* pp, bool result)
     if (pp->history_deferred)
     {
         pp->options.quiet = pp->history_quiet;
-        if ((!pp->history_quiet || pp->options.collect_diagnostics) && (pp->errors != 0 || pp->warnings != 0))
+        if (((!pp->history_quiet || pp->options.collect_diagnostics) && (pp->errors != 0 || pp->warnings != 0)) || pp->history_warning_filter_deferred)
         {
             pp_history_record(pp, !pp->history_quiet);
         }
@@ -18150,10 +18211,9 @@ static uint8_t pp_system_level_at(const Preprocessor* pp, uint32_t location)
 // `token`'s (pp_history_at's): the place is the begin of the outermost expansion it came from, or the anchor of a paste
 // or stringification, or for an argument read from a file, the token's own location. Returns 0 when its history doesn't
 // lead to a location.
-static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+static uint32_t pp_expansion_place(const Preprocessor* pp, uint32_t location, uint32_t origin)
 {
-    bool valid = token < pp->output.count && pp->output.locations != 0;
-    uint32_t location = valid ? pp->output.locations[token] : 0;
+    bool valid = true;
     const uint64_t limit = (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count;
     for (uint64_t step = 0; valid && origin != 0 && step <= limit; step += 1)
     {
@@ -18179,6 +18239,29 @@ static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, ui
     }
     valid &= origin == 0;
     return valid ? location : 0;
+}
+
+static uint32_t pp_expansion_location(const Preprocessor* pp, uint32_t token, uint32_t origin)
+{
+    const bool valid = token < pp->output.count && pp->output.locations != 0;
+    return valid ? pp_expansion_place(pp, pp->output.locations[token], origin) : 0;
+}
+
+// The deferred first run has no expansion graph. Its exact source-level runs already record where its current
+// expansion was read; an inexact run instead requests canonical warning classification during the usual replay.
+static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin)
+{
+    bool visible = pp->options.system_header_warnings;
+    if (!visible && pp->history_deferred)
+    {
+        pp->history_warning_filter_deferred |= pp->system_runs_inexact;
+        visible = pp->system_runs_inexact || pp->system_run_count == 0 || pp->system_runs[pp->system_run_count - 1].level == BUSTER_PP_USER_FILE;
+    }
+    else if (!visible)
+    {
+        visible = pp_system_level_at(pp, pp_expansion_place(pp, location, origin)) == BUSTER_PP_USER_FILE;
+    }
+    return visible;
 }
 
 // Every output token's system level, in `levels` (room for pp->output.count), by the expansion history: its expansion
@@ -19164,6 +19247,33 @@ static uint32_t pp_print_line(Preprocessor* pp, PPPrintLines* lines, uint32_t ra
     return result;
 }
 
+// Output offsets for a -P batch of at most 64 nonempty spellings of at most 64 bytes, with at most one gap byte each.
+// Two 32-word prefix sums remove the dependence between successive stores. Inactive input lanes are never read and
+// only `count` offsets are written. The bounded batch needs at most 4160 bytes, so its word sums cannot overflow.
+// Zero means a spelling needs the general printer; the scalar printer remains the independent output oracle.
+static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64_t gaps, uint16_t* offsets)
+{
+    uint32_t total = 0;
+    bool ordinary = true;
+    for (uint32_t first = 0; first < count; first += 32)
+    {
+        const uint32_t take = count - first < 32 ? count - first : 32;
+        const uint32_t low = take < 16 ? take : 16;
+        const uint32_t high = take > 16 ? take - 16 : 0;
+        const __m512i a = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(~0u, low), lengths + first);
+        const __m512i b = high != 0 ? _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(~0u, high), lengths + first + 16) : _mm512_setzero_si512();
+        ordinary &= (_mm512_mask_cmplt_epu32_mask((__mmask16)_bzhi_u32(~0u, low), _mm512_sub_epi32(a, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) == (__mmask16)_bzhi_u32(~0u, low));
+        ordinary &= (_mm512_mask_cmplt_epu32_mask((__mmask16)_bzhi_u32(~0u, high), _mm512_sub_epi32(b, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) == (__mmask16)_bzhi_u32(~0u, high));
+        const __m512i words = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi32_epi16(a)), _mm512_cvtepi32_epi16(b), 1);
+        const __m512i sizes = _mm512_mask_add_epi16(words, (__mmask32)((gaps >> first) & _bzhi_u64(~0ull, take)), words, _mm512_set1_epi16(1));
+        const __m512i ends = _mm512_add_epi16(pp_prefix_sum_words(sizes), _mm512_set1_epi16((short)total));
+        _mm512_mask_storeu_epi16(offsets + first, (__mmask32)_bzhi_u64(~0ull, take), _mm512_sub_epi16(ends, sizes));
+        // Inactive words are zero, so the final lane also holds the last active word's end.
+        total = (uint16_t)_mm256_extract_epi16(_mm512_extracti64x4_epi64(ends, 1), 15);
+    }
+    return ordinary ? total : 0;
+}
+
 // Prints the output as pp_print_scalar does, byte for byte, 64 tokens at a time into one buffer that is written as it
 // fills. For each chunk: each token's spelling (an identifier's from the intern table, else its bytes in the location
 // space through the printer's directory, with masked 64-byte loads checking for the rare backslash), then the spaces
@@ -19339,9 +19449,37 @@ static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
         const uint64_t spaced = (spaces | joins) & ~line_starts & valid;
         // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
         const uint64_t unknowns = markers ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
+        // -P's common batch has no marker, pragma end or streamed embed. Its gaps are each at most one byte, and
+        // nonempty short spellings fit one bounded load/store. Prefix offsets let all copy addresses be independent.
+        const uint64_t batch_breaks = (line_starts & valid) & ~(uint64_t)line_start;
+        const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
+        uint16_t offsets[64];
+        const uint32_t batch_bytes = result && !markers && pragma_ends == 0 && embeds == 0 ? pp_print_offsets(lengths, available, batch_breaks | spaced, offsets) : 0;
+        if (batch_bytes != 0)
+        {
+            if (used + batch_bytes > capacity)
+            {
+                result = fwrite(buffer, 1, used, stream) == used;
+                used = 0;
+            }
+            for (uint32_t k = 0; result && k < available; k += 1)
+            {
+                const uint32_t newline = (uint32_t)((batch_breaks >> k) & 1);
+                const uint32_t gap = (uint32_t)(((batch_breaks | spaced) >> k) & 1);
+                uint8_t* destination = buffer + used + offsets[k];
+                destination[0] = (uint8_t)(' ' + newline * ('\n' - ' '));
+                const __mmask64 bytes = _bzhi_u64(~0ull, lengths[k]);
+                _mm512_mask_storeu_epi8(destination + gap, bytes, _mm512_maskz_loadu_epi8(bytes, spellings[k]));
+            }
+            used += batch_bytes;
+            line_start = false;
+            force_line = false;
+            previous_last = lasts[available - 1];
+            previous_kind = out_kinds[c + available - 1];
+        }
         // 3. Copies, with the line breaks and markers between: without a branch per token but for line markers (which
         // -P doesn't print), the rare line of more than one break, and spellings past 64 bytes.
-        for (uint32_t k = 0; result && k < available; k += 1)
+        for (uint32_t k = batch_bytes != 0 ? available : 0; result && k < available; k += 1)
         {
             const uint32_t i = c + k;
             const uint32_t length = lengths[k];
@@ -19856,6 +19994,14 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     *markers = true;
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
+    // Fold this diagnostic's option mappings in source order for both possible language defaults. The final -std
+    // chooses one: disabling then enabling a default error leaves a warning, while enabling an error preserves it.
+    uint8_t implicit_before_c99 = 1;
+    uint8_t implicit_since_c99 = 3;
+    bool implicit_mapped = false;
+    bool implicit_no_error = false;
+    bool implicit_everything = false;
+    bool warning_errors = false;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
     const char* error_limit = 0;
@@ -19898,6 +20044,10 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         else if (strcmp(argument, "-P") == 0)
         {
             *markers = false;
+        }
+        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        {
+            options->system_header_warnings = strcmp(argument, "-Wsystem-headers") == 0;
         }
         else if (strcmp(argument, "-dM") == 0)
         {
@@ -19969,6 +20119,46 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         {
             embeds[options->embed_directory_count] = argument + 12;
             options->embed_directory_count += 1;
+        }
+        else if (strcmp(argument, "-Wno-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-implicit") == 0 ||
+                 strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
+        {
+            implicit_before_c99 = 1;
+            implicit_since_c99 = 1;
+            implicit_mapped = true;
+            implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
+        }
+        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0 ||
+                 strcmp(argument, "-Wno-error-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=all") == 0)
+        {
+            implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
+            implicit_no_error = true;
+        }
+        else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0 || strcmp(argument, "-Werror=implicit") == 0 ||
+                 strcmp(argument, "-Werror-implicit-function-declaration") == 0 || strcmp(argument, "-Werror=all") == 0)
+        {
+            implicit_before_c99 = 3;
+            implicit_since_c99 = 3;
+            implicit_mapped = true;
+        }
+        else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
+        {
+            implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
+            implicit_mapped = true;
+        }
+        else if (strcmp(argument, "-Weverything") == 0)
+        {
+            implicit_everything = true;
+        }
+        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        {
+            options->implicit_function_system = strcmp(argument, "-Wsystem-headers") == 0;
+        }
+        else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+        {
+            warning_errors = strcmp(argument, "-Werror") == 0;
         }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
@@ -20060,6 +20250,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         fprintf(stderr, "error: invalid value '%s' in '%s'\n", mode, standard);
         result = false;
     }
+    uint8_t implicit = options->language.standard >= 1999 ? implicit_since_c99 : implicit_before_c99;
+    implicit = implicit == 1 && !implicit_mapped && implicit_everything ? 2 : implicit;
+    options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;

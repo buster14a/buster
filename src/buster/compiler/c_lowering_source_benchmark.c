@@ -188,6 +188,7 @@ static bool lowering_source_file(const char* file, char** options, uint32_t opti
         .identifiers = pp.table,
         .initializer_references = data.references,
         .initializer_reference_count = data.reference_count,
+        .target_features = pp.options.target.features,
     };
     prepared = prepared && check_program(&program, &parser, &path.input, &path.stream, &path.types, program_options, &path.output_arena, &path.scratch);
     if (prepared && fault.stage == LOWERING_SOURCE_STAGE_PREPARE)

@@ -2240,7 +2240,13 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
                                                                                      check_driver_input_report_message(input, input->reports + index);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
-                if (source != BUSTER_CHECK_NONE)
+                if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                {
+                    const uint32_t name = parser->tokens.names[token];
+                    pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "use of undeclared identifier '%.*s'",
+                                       (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                }
+                else if (source != BUSTER_CHECK_NONE)
                 {
                     pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
                 }
@@ -2728,6 +2734,9 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_packed_test.c"
 #include "c_check_x86_diagnostic_test.c"
 #include "c_check_capacity_test.c"
+#include "c_check_visibility_driver_test.c"
+#include "c_check_implicit_driver_test.c"
+#include "c_check_return_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
 // after adaptation; placement/conflicts must retain a complete diagnostic graph through the annotated statement.
@@ -3202,6 +3211,33 @@ static int run_checker_driver_tests(int argc, char** argv)
             .name = "late assembler label respects ignored attribute policy",
             .source = "#pragma clang diagnostic ignored \"-Wignored-attributes\"\nint object=1;\nextern int object asm(\"renamed\");\n",
         },
+        {
+            .name = "visibility warning follows earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n#pragma GCC visibility push(bad)\n",
+            .rejected = true,
+            .warnings = 1,
+        },
+        {
+            .name = "visibility error cannot hide earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n#pragma GCC visibility pop\n",
+            .rejected = true,
+        },
+        {
+            .name = "promoted visibility warning cannot hide earlier switch constraint",
+            .source = "int f(int n){switch(n){case 1:;case 1:;}return 0;}\n"
+                      "#pragma clang diagnostic error \"-Wignored-attributes\"\n#pragma GCC visibility push(bad)\n",
+            .rejected = true,
+        },
+        {
+            .name = "visibility warning inside unfinished initializer retains parser placement",
+            .source = "int value=\n#pragma GCC visibility push(bad)\n;\n",
+            .rejected = true,
+        },
+        {
+            .name = "legal visibility directive survives an erased malformed body",
+            .source = "int f(void){\n#pragma GCC visibility push(hidden)\nreturn 1+;\n}\n",
+            .rejected = true,
+        },
     };
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
@@ -3274,6 +3310,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (executable != NULL)
         {
             check_test_driver_libraries(&test, executable, directory);
+            check_test_driver_visibility(&test, clang, executable, directory);
+            check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
             check_test_driver_switch_tables(&test, clang, executable, directory);

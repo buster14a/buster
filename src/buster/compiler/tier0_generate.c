@@ -41,8 +41,8 @@
 
 #define BUSTER_TIER0_GENERATE_MAX_FUNCTIONS 64
 #define BUSTER_TIER0_GENERATE_MAX_GLOBALS 64
-#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 32
-#define BUSTER_TIER0_GENERATE_MAX_LOCALS 64
+#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 128
+#define BUSTER_TIER0_GENERATE_MAX_LOCALS 256
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
 #define BUSTER_TIER0_GENERATE_NESTING 4
@@ -58,6 +58,8 @@
 #define BUSTER_TIER0_GENERATE_OBJECT_TARGET(o, part) (BUSTER_TIER0_GENERATE_MAX_LOCALS + (o) * 256u + (part))
 // The work a call of a function may cost, at most (statements run, as the generator counts them).
 #define BUSTER_TIER0_GENERATE_WORK 20000
+// Consumer fixtures may keep the same callees active long enough for sampled profilers.
+#define BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS 128u
 // A scope's objects, at most: the function's own (BUSTER_TIER0_GENERATE_MAX_OBJECTS), its records' (with
 // Tier0ProgramOptions.records: its parameters that are records, and those it passes and returns), and its
 // variable-length arrays, which a statement declares only while the scope has fewer than
@@ -179,6 +181,8 @@ struct Tier0ProgramOptions
     uint32_t functions;
     uint32_t statements;
     uint32_t expression_nodes;
+    // Repeat the entry's callee/fold block, at most ENTRY_REPETITIONS; 0 and 1 preserve the ordinary stream and C.
+    uint32_t entry_repetitions;
     bool calls;
     bool loops;
     bool floating;
@@ -2458,7 +2462,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         state.record_temporaries[r] = UINT32_MAX;
     }
     // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers (with the
-    // `deep` option, 13 to 32 one time in four before that, past the depth tables). With the
+    // `deep` option, 65 to 127 one time in four before that, past the old call bound and the depth tables). With the
     // `indirect` option, now and then an earlier function's, so that a pointer to a function can hold either. With
     // records (but for the entry), now and then a record's result, and parameters that are records, up to
     // BUSTER_TIER0_GENERATE_RECORD_PARAMETERS: objects in the scope. A record returned through a hidden pointer makes
@@ -2469,7 +2473,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     const uint32_t model_first = model != 0 ? model->first_local + (model->hidden ? 1u : 0u) : 0;
     const uint32_t parameters = model != 0 ? model->parameter_count - (model->hidden ? 1u : 0u)
                                 : entry   ? 3
-                                : options->deep && tier0_generate_chance(random, 25) ? 13 + tier0_generate_below(random, 20)
+                                : options->deep && tier0_generate_chance(random, 25) ? 65 + tier0_generate_below(random, 63)
                                 : tier0_generate_chance(random, 20)                  ? 7 + tier0_generate_below(random, 6)
                                                                                      : tier0_generate_below(random, 7);
     function->result_class = (uint8_t)(model != 0 ? model->result_class
@@ -2792,6 +2796,15 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         tier0_text(program, "    unsigned long v%u = 0;\n", sum);
         tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
         tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, sum);
+        const bool repeated = options->entry_repetitions > 1;
+        const uint32_t counter = repeated ? tier0_generate_local(program, &state, BUSTER_TYPED_CLASS_I32, 0) : UINT32_MAX;
+        if (repeated)
+        {
+            tier0_text(program, "    for (int v%u = 0; v%u < %u; v%u++) {\n", counter, counter, options->entry_repetitions, counter);
+            tier0_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_emit(program, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, counter);
+        }
+        const uint32_t repeat_top = tier0_here(program, function);
         for (uint32_t callee = 0; callee < index && options->calls; callee += 1)
         {
             const Tier0GeneratedFunction* target = &program->functions[callee];
@@ -2908,6 +2921,13 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
                 tier0_text(program, ");\n");
             }
         }
+        if (repeated)
+        {
+            tier0_increment(program, counter);
+            tier0_counter_test(program, counter, options->entry_repetitions);
+            tier0_emit(program, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, repeat_top);
+            tier0_text(program, "    }\n");
+        }
         // The result: the sum with a value of the entry's own.
         tier0_emit(program, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, sum);
         tier0_text(program, "    return v%u + ", sum);
@@ -2943,6 +2963,10 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
 static bool tier0_generate_program(Tier0Program* program, Arena* arena, uint64_t seed, Tier0ProgramOptions options, const char* prefix)
 {
     memset(program, 0, sizeof(*program));
+    if (options.entry_repetitions > BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS)
+    {
+        return false;
+    }
     uint64_t random = seed;
     const uint32_t functions = options.functions < 1 ? 1 : options.functions > BUSTER_TIER0_GENERATE_MAX_FUNCTIONS ? BUSTER_TIER0_GENERATE_MAX_FUNCTIONS : options.functions;
     program->function_count = functions;
