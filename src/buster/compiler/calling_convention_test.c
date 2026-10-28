@@ -5375,7 +5375,10 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         // (#136, #712), but not in a function with memory-class values (a long double, a 128-bit integer or a vector), whose
         // slots its depths index. Our caller's `r = c_callee(...)` may hold r's address under them when the result is a
         // struct, a union, a long double or a 128-bit integer. So in a compiled world's signature with such a value, an
-        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both).
+        // argument past 12 integer or 15 floating ones becomes one of the other stack's (21 named and 6 unnamed fit both). A
+        // _BitInt of 65 to 127 bits, whose value extends from its width as it loads (the convention leaves the bits past it
+        // unspecified) through shifts of 128 bits whose count takes the depth above it, takes one depth more than a 128-bit
+        // integer: it is never the last of the 12.
         bool memory = cross->compiled && abi_test_tier0_memory(table, signature->result);
         for (uint32_t a = 0; a < signature->count; a += 1)
         {
@@ -5387,7 +5390,9 @@ static bool abi_test_cross_signatures(AbiTestCross* cross, const TypeId* types, 
         {
             const TypeId stripped = type_strip_aligned(table, cross->arguments[argument + a]);
             const bool floating = type_kind(table, stripped) == BUSTER_TYPE_KIND_FLOATING && type_unqualified(stripped) != BUSTER_TYPE_LONG_DOUBLE;
-            const bool full = depths[floating] == (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3);
+            const uint64_t width = type_kind(table, stripped) == BUSTER_TYPE_KIND_BIT_INT ? type_integer_width(table, stripped) : 0;
+            const uint32_t extends = width > 64 && width < 128 ? 1 : 0;
+            const bool full = depths[floating] >= (floating ? BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS - 1 : BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS - 3 - extends);
             const TypeId type = memory && full ? (floating ? BUSTER_TYPE_LONG : BUSTER_TYPE_DOUBLE) : cross->arguments[argument + a];
             depths[floating != full] += 1;
             cross->arguments[argument + a] = type;

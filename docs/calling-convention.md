@@ -1487,7 +1487,11 @@ arguments or as its result
 (`abi_test_tier0_memory`) passes at most 12 integer values (an aggregate is
 its address, and a `long double` or a 128-bit integer takes an integer depth)
 and 15 floating ones, an argument past them becoming one of the other stack's,
-and the others pass their 21 named and 6 unnamed arguments as drawn. Our side is C (`abi_test_write_ours`): per signature, a callee
+and the others pass their 21 named and 6 unnamed arguments as drawn. A
+`_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
+as it loads (the convention leaves the bits past it unspecified), through
+128-bit shifts whose count takes the depth above it, one more than a
+128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
 that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
 returns the result's from the signature's data, and a caller that copies each
 argument's bytes into a local of its type, calls the C callee with them and

@@ -1474,7 +1474,7 @@ What the lowering covers past scalars (#145's programs):
 
 Everything else the lowering can't express is refused with
 `error: unsupported: FEATURE`, naming the feature: complex integer types,
-`_BitInt`s past 64 bits, inline assembly and so on. The c-testsuite harness counts such a
+`_BitInt`s past 128 bits, inline assembly and so on. The c-testsuite harness counts such a
 test as unsupported, not failed.
 
 Builtin module results retain exact argument conversions, runtime operation
