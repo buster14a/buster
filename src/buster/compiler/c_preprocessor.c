@@ -3479,7 +3479,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
 static PPPrepareStatus pp_prepare_into(const PPPrepare* prepare, InternTable* table, Arena* columns, Arena* arena, PPFileData* data, uint64_t* ticks)
 {
     const uint64_t window = prepare->window_bytes != 0 ? prepare->window_bytes : BUSTER_PP_WINDOW_BYTES;
-    const bool windows = BUSTER_VECTOR_PATH(prepare->vectorized) && !prepare->dollar_punctuation && data->length >= 2 * window &&
+    const bool windows = prepare->vectorized && !prepare->dollar_punctuation && data->length >= 2 * window &&
                          data->length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK && !c_tokenize_scalar_only(data->bytes, data->length, prepare->refine_flags);
     return windows ? pp_prepare_windows(prepare, table, columns, arena, data, window, ticks) : pp_prepare_whole(prepare, table, columns, arena, data, ticks);
 }
@@ -4018,7 +4018,7 @@ static PPPrepare pp_prepare_options(const PPOptions* options)
                         (options->language.standard < 2023 ? C_TOKENIZER_NO_DIGIT_SEPARATORS : 0),
         .split_kinds = pp_split_kinds(options->language),
         .dollar_punctuation = pp_dollar_punctuation(options),
-        .vectorized = BUSTER_HOST_VECTOR && !BUSTER_SCALAR_PATH(options->scalar),
+        .vectorized = !options->scalar,
         .window_bytes = options->window_bytes,
     };
 }
@@ -4030,7 +4030,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
         .refine_flags = pp->refine_flags,
         .split_kinds = pp->split_kinds,
         .dollar_punctuation = pp_dollar_punctuation(&pp->options),
-        .vectorized = BUSTER_VECTOR_PATH(pp->vectorized),
+        .vectorized = pp->vectorized,
         .window_bytes = pp->options.window_bytes,
     };
 }
@@ -10475,7 +10475,7 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     }
     valid = valid && pp_new_argument(pp);
     const bool collected = valid && (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
-                                    (BUSTER_VECTOR_PATH(pp->vectorized) && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count)));
+                                    (pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count)));
     const bool finished = collected && pp->vectorized && pp_finish_simple(pp, &invocation);
     valid = valid && !finished;
     if (valid && !collected)
@@ -17356,7 +17356,6 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
     pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
-    pp->options.scalar |= !BUSTER_HOST_VECTOR;
     pp->table = table;
     // A deferred history records nothing until pp_history_ensure (PPOptions.defer_history); its run prints no
     // diagnostic (pp_run), but this setup's are printed, its fatal errors among them.
@@ -17364,7 +17363,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
     pp->history_quiet = options->quiet;
     pp->options.no_history |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
-    pp->vectorized = BUSTER_VECTOR_PATH(prepare.vectorized);
+    pp->vectorized = prepare.vectorized;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
     // The memory, reserved in turn until a reservation fails (pp_release releases what was).
