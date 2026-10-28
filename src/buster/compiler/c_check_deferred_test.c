@@ -441,12 +441,42 @@ static bool check_deferred_test_memory(void)
     return valid;
 }
 
+// Whether every page of the `bytes` from `begin` is resident (mincore).
+static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uintptr_t first = (uintptr_t)begin & ~(uintptr_t)(page - 1);
+    const uint64_t pages = ((uintptr_t)begin + bytes - first + page - 1) / page;
+    bool result = begin != 0;
+    for (uint64_t i = 0; result && i < pages; i += 1)
+    {
+        unsigned char resident = 0;
+        result = mincore((void*)(first + i * page), page, &resident) == 0 && (resident & 1) != 0;
+    }
+    return result;
+}
+
+// Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_commit asks for.
+static bool check_deferred_test_populates(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    void* probe = mmap(0, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool result = probe != MAP_FAILED && madvise(probe, page, BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE) == 0;
+    if (probe != MAP_FAILED)
+    {
+        munmap(probe, page);
+    }
+    return result;
+}
+
 // A lane's per-name columns (c_check_deferred.c, check_deferred_lane_names): from room for 4,096 names, in its names
-// arena in order, each on a 64-byte line and clear of the next, the columns that start as none zero; at the same places
-// for a reading of fewer names and for the next reading, with what the last left in them, but for the columns that start
-// as none where a reading was poisoned (check_deferred_poison), which are cleared with the stamp; the intrinsics' cache
-// only where the top level has one; laid out again on zero pages for more names than the room; and refused for more
-// than the arena holds, after which a reading of fewer names takes the places of the room it had.
+// arena in order, each on a 64-byte line and clear of the next, the pages of the reading's names' entries committed and
+// none past them (where the kernel takes MADV_POPULATE_WRITE: check_deferred_lane_commit), the columns that start as none
+// zero; at the same places for a reading of fewer names and for the next reading, with what the last left in them, but
+// for the columns that start as none where a reading was poisoned (check_deferred_poison), which are cleared with the
+// stamp; the intrinsics' cache only where the top level has one; laid out again on zero pages for more names than the
+// room, their entries committed again; and refused for more than the arena holds, after which a reading of fewer names
+// takes the places of the room it had.
 static bool check_deferred_test_lane_names(void)
 {
     static CheckDeferred state;
@@ -459,15 +489,25 @@ static bool check_deferred_test_lane_names(void)
     CheckDeferredArenas* arenas = lane.arenas;
     CheckInputReader* reader = &lane.reader;
     bool valid = check_deferred_lane_arenas(arenas);
+    const bool populates = check_deferred_test_populates();
     uint8_t* first[8] = { 0 };
     for (uint32_t layout = 0; valid && layout < 2; layout += 1)
     {
         const uint32_t room = layout == 0 ? 4096 : 8192;
-        valid = check_deferred_lane_names(&state, &lane, layout == 0 ? 100 : 4097) && arenas->name_room == room && arenas->stamp == 0;
+        const uint32_t names = layout == 0 ? 100 : 4097;
+        valid = check_deferred_lane_names(&state, &lane, names) && arenas->name_room == room && arenas->stamp == 0 && arenas->names_committed == names &&
+                arenas->intrinsics_committed == names;
         uint8_t* columns[8] = { (uint8_t*)reader->bindings.heads, (uint8_t*)reader->parameter_seen, (uint8_t*)reader->member_seen, (uint8_t*)lane.stamps,
                                 (uint8_t*)reader->linked_declarations, (uint8_t*)reader->linked_types, (uint8_t*)reader->intrinsic_names, (uint8_t*)reader->builtin_names };
         const uint64_t bytes[8] = { (uint64_t)room * C_BINDING_NAMESPACES * 4, (uint64_t)room * 4, (uint64_t)room * 4, (uint64_t)room * 4,
                                     (uint64_t)room * 4, (uint64_t)room * sizeof(TypeId), (uint64_t)room * 4, (uint64_t)room * 2 };
+        // The names' entries committed as they are laid out, before anything reads them, and the rest of each column's
+        // room not: its last page is past them.
+        for (uint32_t c = 0; valid && populates && c < 8; c += 1)
+        {
+            const uint64_t used = bytes[c] / room * names;
+            valid = check_deferred_test_resident(columns[c], used) && !check_deferred_test_resident(columns[c] + bytes[c] - 1, 1);
+        }
         valid = valid && columns[0] == arenas->names.base && arenas->name_bytes == arenas->names.length;
         for (uint32_t c = 0; valid && c < 8; c += 1)
         {

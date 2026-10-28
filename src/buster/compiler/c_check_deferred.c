@@ -54,6 +54,9 @@
 // columns of 4 GB.
 #define BUSTER_CHECK_DEFERRED_LANE_ARENAS 6
 #define BUSTER_CHECK_DEFERRED_LANE_BYTES ((UINT64_C(3) << 36) + (UINT64_C(1) << 34) + (UINT64_C(2) << 32))
+// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name: a lane's per-name columns committed
+// before its bodies (check_deferred_lane_commit).
+#define BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE 23
 
 // The top level's counts where its walk skipped a body.
 typedef struct CheckDeferredCut CheckDeferredCut;
@@ -145,8 +148,8 @@ struct CheckDeferredResult
 // A lane's arenas, in one mapping that the state keeps across its readings (check_deferred_lane_arenas): its reader's
 // records and scratch, its bodies' results, its copy of the top level's table and the table's index, and its per-name
 // columns, at places they keep from one reading to the next (check_deferred_lane_names): the names they have room for,
-// their bytes, the last body's stamp, and whether the columns that start as none may hold anything else (the tests'
-// poison).
+// their bytes, the names whose entries are committed (the columns' and the intrinsics' cache's), the last body's stamp,
+// and whether the columns that start as none may hold anything else (the tests' poison).
 typedef struct CheckDeferredArenas CheckDeferredArenas;
 struct CheckDeferredArenas
 {
@@ -160,6 +163,8 @@ struct CheckDeferredArenas
     uint32_t name_room;
     uint32_t stamp;
     uint64_t name_bytes;
+    uint32_t names_committed;
+    uint32_t intrinsics_committed;
     bool names_dirty;
 };
 
@@ -444,6 +449,48 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
     return arenas->mapping != 0;
 }
 
+// The pages of `column`'s entries from `from` to `to`, each of `bytes`, committed (MADV_POPULATE_WRITE).
+static void check_deferred_commit(void* column, uint32_t from, uint32_t to, uint64_t bytes)
+{
+    const uintptr_t begin = ((uintptr_t)column + from * bytes) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uintptr_t end = ((uintptr_t)column + to * bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    if (to > from)
+    {
+        // The advice only commits the pages, zeroed as a fault would: the columns work whether or not the kernel takes
+        // it.
+        madvise((void*)begin, end - begin, BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE);
+    }
+}
+
+// The pages of the entries a reading of `names` names takes in the lane's per-name columns, committed past those an
+// earlier reading took, each column's in one call (MADV_POPULATE_WRITE; the intrinsics' cache only where the reader has
+// one): the heads' first three times `names` and the others' first `names`. A body's position checks set a few entries
+// of every column for the names it spells, far apart, and their faults, a few at each body, took the position checks on
+// #697's units to up to 7 times main's on one lane and 14 times on eight, whose copies of the top level's columns
+// committed theirs together.
+static void check_deferred_lane_commit(CheckDeferredLane* lane, uint32_t names)
+{
+    CheckDeferredArenas* arenas = lane->arenas;
+    CheckInputReader* reader = &lane->reader;
+    const uint32_t from = arenas->names_committed;
+    if (names > from)
+    {
+        check_deferred_commit(reader->bindings.heads, from * C_BINDING_NAMESPACES, names * C_BINDING_NAMESPACES, sizeof(uint32_t));
+        check_deferred_commit(reader->parameter_seen, from, names, sizeof(uint32_t));
+        check_deferred_commit(reader->member_seen, from, names, sizeof(uint32_t));
+        check_deferred_commit(lane->stamps, from, names, sizeof(uint32_t));
+        check_deferred_commit(reader->linked_declarations, from, names, sizeof(uint32_t));
+        check_deferred_commit(reader->linked_types, from, names, sizeof(TypeId));
+        check_deferred_commit(reader->builtin_names, from, names, sizeof(uint16_t));
+        arenas->names_committed = names;
+    }
+    if (reader->intrinsic_names != 0 && names > arenas->intrinsics_committed)
+    {
+        check_deferred_commit(reader->intrinsic_names, arenas->intrinsics_committed, names, sizeof(uint32_t));
+        arenas->intrinsics_committed = names;
+    }
+}
+
 // The lane's per-name columns, in its names arena at places they keep from one reading to the next, so that a lane
 // copies none of the top level's:
 //   - The columns every body leaves as none come first: the binding heads and the parameters' and members' marks, which
@@ -451,9 +498,9 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
 //   - Then the stamps, which only grow from body to body and reading to reading (check_deferred_heads).
 //   - Then the linked declarations and types and the intrinsics' and builtins' caches, which each body sets for the names
 //     it spells before its walk reads them (check_deferred_heads, check_deferred_name_state).
-// A reading with more names than the places have room for lays them out again, on zero pages. The tests' poison
-// (check_deferred_poison) leaves the columns that start as none dirty, and the next reading clears them. Whether the
-// columns fit.
+// A reading with more names than the places have room for lays them out again, on zero pages. The entries of a reading's
+// names are committed before its bodies (check_deferred_lane_commit). The tests' poison (check_deferred_poison) leaves
+// the columns that start as none dirty, and the next reading clears them. Whether the columns fit.
 static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferredLane* lane, uint32_t names)
 {
     CheckDeferredArenas* arenas = lane->arenas;
@@ -472,6 +519,8 @@ static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferr
             madvise(arena->base, arenas->name_bytes, MADV_DONTNEED);
         }
         arenas->name_bytes = 0;
+        arenas->names_committed = 0;
+        arenas->intrinsics_committed = 0;
         arenas->stamp = 0;
         arenas->names_dirty = false;
     }
@@ -506,6 +555,7 @@ static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferr
         reader->intrinsic_names = deferred->top_reader->intrinsic_names != 0 ? intrinsic_names : 0;
         reader->builtin_names = builtin_names;
         lane->stamps = stamps;
+        check_deferred_lane_commit(lane, names);
     }
     return valid;
 }
