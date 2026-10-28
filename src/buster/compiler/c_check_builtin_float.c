@@ -18,6 +18,9 @@
 // never approximated through host long double. These actions grant no source/selector capability by themselves.
 // FABS/FABSF/FABSL use their declared FP prototype conversion before clearing the sign. Unlike the integer
 // classifiers, a folded floating call is neither an ICE nor a floating literal, including in an unevaluated arm.
+// ISGREATER ... ISUNORDERED take two arguments whose usual arithmetic conversions, as clang makes them for a comparison,
+// must give a real floating type, both then converted to it; their quiet comparisons' int folds, an ICE, as the
+// classifiers' does.
 #ifndef BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 #define BUSTER_C_CHECK_BUILTIN_FLOAT_INCLUDED
 
@@ -343,6 +346,46 @@ static void check_builtin_float_nan_argument(TypeTable* table, const CheckBuilti
     }
 }
 
+// isgreater ... isunordered of two checked arguments: clang's UsualArithmeticConversions for a comparison of the two must
+// give a real floating type ("ordered compare requires two args of floating point type", at the first), which both
+// convert to; two constants fold, quietly, to the int the comparison gives.
+static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output, CheckValue* values)
+{
+    const bool arithmetic = check_action_is_arithmetic(table, values[0].type) && check_action_is_arithmetic(table, values[1].type);
+    const TypeId common = arithmetic ? type_usual_arithmetic(table, values[0].type, values[1].type) : 0;
+    if (common == 0 || check_action_kind(table, common) != BUSTER_TYPE_KIND_FLOATING)
+    {
+        check_action_diagnose(&output->action, CHECK_DIAG_INVALID_TYPE, 0);
+    }
+    else
+    {
+        output->floating_type = common;
+        const bool supported = check_action_float_supported(table, common);
+        if (!supported)
+        {
+            output->unsupported |= BUSTER_CHECK_BUILTIN_FLOAT_UNSUPPORTED_FORMAT;
+        }
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            check_action_conversion(table, &values[i], common, BUSTER_CHECK_CONVERT_ARITHMETIC, &output->argument_conversions[i], input->node);
+        }
+        check_builtin_float_inherit(output, values, 3, 3, 2);
+        const bool known = supported && values[0].constant_kind == CHECK_CONSTANT_FLOATING && values[1].constant_kind == CHECK_CONSTANT_FLOATING &&
+                           output->action.value.fault == CHECK_FAULT_NONE;
+        if (known)
+        {
+            const long double a = values[0].floating;
+            const long double b = values[1].floating;
+            const bool answer = input->id == CBUILTIN_ISGREATER ? __builtin_isgreater(a, b) : input->id == CBUILTIN_ISGREATEREQUAL ? __builtin_isgreaterequal(a, b) :
+                                input->id == CBUILTIN_ISLESS ? __builtin_isless(a, b) : input->id == CBUILTIN_ISLESSEQUAL ? __builtin_islessequal(a, b) :
+                                input->id == CBUILTIN_ISLESSGREATER ? __builtin_islessgreater(a, b) : __builtin_isunordered(a, b);
+            output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
+            output->action.value.integer = answer;
+            output->folded = (output->action.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+        }
+    }
+}
+
 static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output)
 {
     *output = (CheckBuiltinFloatResult){
@@ -351,10 +394,11 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
     const bool special = input->id >= CBUILTIN_HUGE_VAL && input->id <= CBUILTIN_INFL;
     const bool nan = input->id >= CBUILTIN_NAN && input->id <= CBUILTIN_NANL;
     const bool classify = input->id >= CBUILTIN_ISNAN && input->id <= CBUILTIN_ISINF_SIGN;
+    const bool compare = input->id >= CBUILTIN_ISGREATER && input->id <= CBUILTIN_ISUNORDERED;
     const bool absolute = input->id == CBUILTIN_FABS || input->id == CBUILTIN_FABSF || input->id == CBUILTIN_FABSL;
     const bool selectors = input->id == CBUILTIN_FPCLASSIFY;
-    const uint32_t count = special ? 0 : selectors ? 6 : 1;
-    if (!special && !nan && !classify && !absolute)
+    const uint32_t count = special ? 0 : selectors ? 6 : compare ? 2 : 1;
+    if (!special && !nan && !classify && !absolute && !compare)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
     }
@@ -377,7 +421,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         {
             result_type = BUSTER_TYPE_LONG_DOUBLE;
         }
-        output->action.value.type = classify ? BUSTER_TYPE_INT : result_type;
+        output->action.value.type = classify || compare ? BUSTER_TYPE_INT : result_type;
         output->action.value.category = CHECK_RVALUE;
         output->runtime_builtin = input->id;
         CheckValue values[6] = { 0 };
@@ -462,6 +506,10 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 }
             }
         }
+        else if (compare && output->action.diagnostic == CHECK_DIAG_NONE)
+        {
+            check_builtin_float_compare(table, input, output, values);
+        }
         else if (classify && output->action.diagnostic == CHECK_DIAG_NONE)
         {
             const uint32_t fp = selectors ? 5 : 0;
@@ -544,7 +592,7 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
         if (output->folded)
         {
             output->runtime_builtin = CBUILTIN_NONE;
-            if (classify)
+            if (classify || compare)
             {
                 output->action.value.flags |= BUSTER_CHECK_ICE;
             }

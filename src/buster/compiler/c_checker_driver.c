@@ -39,7 +39,6 @@ static const char* check_driver_fault_message(CheckFault fault)
         case CHECK_FAULT_DIVIDE_BY_ZERO: result = "division by zero in constant expression"; break;
         case CHECK_FAULT_SHIFT_COUNT: result = "invalid shift count in constant expression"; break;
         case CHECK_FAULT_SHIFT_VALUE: result = "invalid signed shift in constant expression"; break;
-        case CHECK_FAULT_FLOAT_RANGE: result = "constant conversion is outside the target type's range"; break;
         case CHECK_FAULT_UNSUPPORTED_CONSTANT: result = "constant expression is not yet supported"; break;
         case CHECK_FAULT_NONE: break;
     }
@@ -254,10 +253,13 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
     const uint32_t scanned = count < input->token_count ? count : input->token_count;
     const uint32_t nodes = stream != NULL ? stream->count : 0;
+    const bool attribute_warnings = !input->asm_warnings_prepared || input->ignored_asm_count != 0;
+    const uint32_t constant_warnings = input->constant_warnings_prepared ? input->constant_warning_count : scanned;
+    const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
     const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
-    const uint64_t warning_room = show_warnings ? 2 * (uint64_t)scanned + nodes + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
@@ -303,9 +305,9 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             firsts[first_count] = UINT64_MAX;
         }
         uint32_t warning_total = 0;
-        for (uint32_t first = 0; show_warnings && input->attributes != NULL && first < scanned; first += 8)
+        for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
-            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, scanned) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, scanned);
+            const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -316,7 +318,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
             }
         }
-        for (uint32_t first = 0; show_warnings && input->constant_warnings != NULL && first < scanned; first += 64)
+        for (uint32_t first = 0; show_warnings && constant_warnings != 0 && input->constant_warnings != NULL && first < scanned; first += 64)
         {
             const uint64_t lanes = scalar ? check_input_scan_all(first, scanned) : check_input_scan_nonzero(input->constant_warnings, first, scanned);
             for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
@@ -330,7 +332,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
             }
         }
-        for (uint32_t first = 0; show_warnings && first < nodes; first += 16)
+        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
         {
             const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
@@ -1122,8 +1124,10 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
 
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
-static int run_check_command(int count, char** arguments, bool executable)
+// Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
+static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
 {
+    WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
     // option: a compile without it reads neither the clocks nor its resource use. A value that spells the option (`-o
     // --time-stages`) starts the clock too, which the arguments' loop below doesn't then hand to the stages.
@@ -1138,6 +1142,7 @@ static int run_check_command(int count, char** arguments, bool executable)
         check_clock_start(&clock_storage);
     }
     time_stages = false;
+    worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
     Arena arena = arena_reserve(1ull << 36);
     Arena scratch = arena_reserve(1ull << 36);
@@ -1172,6 +1177,9 @@ static int run_check_command(int count, char** arguments, bool executable)
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
     // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them.
     CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
+    // of additional workers at emission time. No external budget changes the body's profitability decision itself.
+    lanes.budget = &worker_budget;
     bool invalid_lanes = false;
     for (int i = 0; filtered != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
@@ -1239,6 +1247,14 @@ static int run_check_command(int count, char** arguments, bool executable)
             lanes.lanes = (uint32_t)lane_count;
             lanes.every_lane = true;
         }
+        else if (strcmp(arguments[i], "--worker-budget") == 0 || strncmp(arguments[i], "--worker-budget=", 16) == 0)
+        {
+            const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
+            char* end = NULL;
+            const unsigned long workers = value != NULL ? strtoul(value, &end, 10) : 0;
+            invalid_lanes |= value == NULL || end == value || *end != 0 || workers == 0 || workers > BUSTER_CHECK_EMIT_MAX_LANES;
+            worker_budget.maximum = (uint32_t)workers;
+        }
         else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
             lazy_system_headers = true;
@@ -1298,10 +1314,14 @@ static int run_check_command(int count, char** arguments, bool executable)
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
-    if (!parsed)
+    if (worker_budget.dry_run)
+    {
+        result = 0;
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
-                        "[--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
+                        "[--worker-budget N] [--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1424,7 +1444,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                 // reports share source order with declaration reports, but this fragment can never be emitted.
                 if (input_valid || input.diagnostic_graph)
                 {
-                    const CheckOptions check_options = { .scalar = scalar };
+                    const CheckOptions check_options = { .scalar = scalar, .verify = verify };
                     CheckStream stream;
                     ready = check_graph_run(&types, &input.graph, &output_arena, &scratch, &check_options, &stream);
                     ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, &scratch);
@@ -1539,6 +1559,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                         const CheckProgramOptions program_options = {
                             .initializers = &initializers,
                             .asms = &asms,
+                            .prepared_data = (emit_object || link) && !prefix_only ? &data : NULL,
                             .identifiers = pp.table,
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,
@@ -1632,19 +1653,41 @@ static int run_check_command(int count, char** arguments, bool executable)
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
-        parse_release(&parser);
-        pp_release(&pp);
-        intern_release(&identifiers);
+        if (release)
+        {
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+        }
     }
-    arena_release(&index_arena);
-    arena_release(&type_arena);
-    arena_release(&output_arena);
-    arena_release(&scratch);
-    arena_release(&arena);
+    if (release)
+    {
+        arena_release(&index_arena);
+        arena_release(&type_arena);
+        arena_release(&output_arena);
+        arena_release(&scratch);
+        arena_release(&arena);
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     if (stage_clock != NULL)
     {
         check_clock_report(stage_clock, pp_ticks, PP_PHASE_COUNT, stderr);
+        if (worker_budget.requested != 0)
+        {
+            const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
+                               worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
+            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tfallback=%u\n", mode,
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, (uint32_t)lanes.again);
+        }
     }
+    worker_budget_close(&worker_budget);
     return result;
+}
+
+// Tests and other reusable callers release all owned mappings before returning. Only main's terminal source
+// commands select the other mode: the kernel tears their mappings down once when the process exits, after the
+// stage report and stdio flush, rather than through each subsystem's individual munmap calls first.
+static int run_check_command(int count, char** arguments, bool executable)
+{
+    return run_check_command_mode(count, arguments, executable, true);
 }

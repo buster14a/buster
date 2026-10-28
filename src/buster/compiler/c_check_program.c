@@ -90,6 +90,8 @@ struct CheckProgramOptions
 {
     const CheckInitializers* initializers;
     const CheckAsms* asms;
+    // Completed static declarations from the same unit, when emission already prepared them.
+    const CheckDataPrepared* prepared_data;
     // Borrowed for main recognition and compatibility checks before adding target-runtime call symbols.
     const InternTable* identifiers;
     const uint32_t* initializer_references;
@@ -1625,7 +1627,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
                 !program->input->static_objects[value.object - 1])
             {
-                const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value.object - 1] : 0;
+                const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
                 if (selected == 0 || selected > program->initializers->count)
                 {
                     check_program_fail(program, CHECK_PROGRAM_INVALID, value.object - 1);
@@ -2040,6 +2042,18 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
     return room;
 }
 
+// Preparation already grouped each object's declarations in their original token order. Different objects have no
+// shared state here: the last declaration, first naked spelling and needed bit are each an object's own reduction.
+static bool check_program_static_prepared(CheckProgram* program, const CheckDataPrepared* prepared, uint8_t* needed, Arena* output)
+{
+    bool room = true;
+    for (uint32_t d = 0; d < prepared->declaration_count; d += 1)
+    {
+        room = check_program_static_object(program, needed, (uint32_t)prepared->declaration_keys[d], output, room);
+    }
+    return room;
+}
+
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
@@ -2064,7 +2078,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                  stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
-            (options.initializer_reference_count == 0 || options.initializer_references != 0);
+            (options.initializer_reference_count == 0 || options.initializer_references != 0) &&
+            (options.prepared_data == NULL || (options.prepared_data->status == CHECK_DATA_INPUT_OK &&
+             options.prepared_data->object_count == count + 1 &&
+             (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint32_t capacity = count * 8 + 16;
@@ -2395,7 +2412,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one.
-        const bool naked_room = check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
+        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output) :
+                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
         {
             const uint32_t object = options.initializer_references[i];

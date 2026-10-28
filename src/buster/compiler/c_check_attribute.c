@@ -182,6 +182,8 @@ struct CheckInputAttribute
     bool resolved;
     bool standard;
     bool ignored;
+    // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
+    bool keyword;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
@@ -907,6 +909,7 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
                         kind == PARSE_KIND_CALLING_CONVENTION ? CHECK_ATTRIBUTE_CALLING_CONVENTION : name == C_NAME_NORETURN ? CHECK_ATTRIBUTE_NORETURN : CHECK_ATTRIBUTE_NULLABILITY,
                 .schema = kind == PARSE_KIND_ALIGNAS ? CHECK_ATTRIBUTE_INTEGER : kind == PARSE_KIND_ASM ? CHECK_ATTRIBUTE_STRING : CHECK_ATTRIBUTE_NO_ARGUMENTS,
                 .resolved = kind != PARSE_KIND_ALIGNAS,
+                .keyword = true,
             };
             i += 1;
             if (kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ASM)

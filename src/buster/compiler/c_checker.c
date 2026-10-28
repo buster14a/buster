@@ -119,6 +119,24 @@ struct CheckRegionProof
     uint32_t flags;
 };
 
+// The allocation/scheduling facts produced in node order. vector_blocks describes the independent validator,
+// rather than the graph, and is deliberately excluded when comparing a reader's recorded facts.
+typedef struct CheckGraphValidation CheckGraphValidation;
+struct CheckGraphValidation
+{
+    uint32_t maximum_arguments;
+    uint32_t maximum_effects;
+    uint32_t builtins[6];
+    uint32_t arguments;
+    uint32_t varargs;
+    uint32_t builtin_calls;
+    uint32_t vectors;
+    uint32_t x86;
+    uint32_t overloads;
+    uint32_t leaves;
+    uint32_t vector_blocks;
+};
+
 struct CheckGraph
 {
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
@@ -196,6 +214,13 @@ struct CheckGraph
     CheckRegionProofStep* region_steps;
     uint32_t region_step_count;
     uint32_t region_step_capacity;
+    // Only the source reader publishes these facts, after completing every node and sideband list. The graph
+    // is immutable after publication. Other producers leave recorded_pure null and always use validation.
+    // Exactly capacity bytes, no padding; the scheduler copies count bytes because its marks are mutable.
+    uint8_t* recorded_pure;
+    CheckGraphValidation recorded;
+    uint32_t recorded_nodes;
+    bool recorded_ready;
 };
 
 typedef enum CheckStatus
@@ -452,6 +477,9 @@ struct CheckStream
     // the lowering takes rather than looking the member up again (#591); 0 for every other node.
     uint64_t* member_offsets;
     uint32_t* warnings;
+    // Final nonzero warning rows, published by check_graph_warning_contexts. Hand-built streams leave the flag off.
+    uint32_t warning_count;
+    bool warnings_prepared;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
     CheckReport* reports;
@@ -491,8 +519,14 @@ typedef struct CheckOptions CheckOptions;
 struct CheckOptions
 {
     bool scalar;
+    // Validate reader-owned graphs too, and compare their retained purity/allocation facts with the oracle.
+    bool verify;
     // 0 chooses BUSTER_CHECK_BATCH. Values 1..BUSTER_CHECK_BATCH permit differential partition testing.
     uint32_t batch_size;
+    // The vector path's regions by dependency level (check_graph_region) rather than in postorder batches
+    // (check_graph_region_postorder), its default since the benchmark measured the two on the same actions and
+    // postorder won (#133's open question; docs/c-checker.md, "Level order or postorder"). The typed stream is the same.
+    bool level_order;
 };
 
 // A VALUE node's leaf (CheckGraph.leaves).
@@ -584,6 +618,7 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
         graph->argument_offsets[node] = 0;
         graph->argument_counts[node] = 0;
         graph->count += 1;
+        graph->recorded_ready = false;
         result = node;
     }
     return result;
@@ -636,7 +671,8 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_MISC;
     }
-    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE)
+    else if ((id >= CBUILTIN_HUGE_VAL && id <= CBUILTIN_FLT_ROUNDS) || (id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED) ||
+             check_builtin_math_kind(id) != CHECK_BUILTIN_MATH_NONE)
     {
         op = CHECK_OP_BUILTIN_FLOAT;
     }
@@ -735,24 +771,69 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     return result;
 }
 
-// What check_graph_validate counts as it goes: each argument slice's and sideband list's consumption, in node order, and the
-// maxima and counts check_graph_run sizes its outputs by. Only a valid graph's are defined.
-typedef struct CheckGraphValidation CheckGraphValidation;
-struct CheckGraphValidation
+// Complete newly written nodes while their columns are hot. The reader calls this before adding the next
+// node, after the previous node's leaf, requested type, arguments and witnesses have been filled. The only
+// cross-node work is three already-produced purity bytes; required source order is preserved on both paths.
+static void check_graph_record_nodes(CheckGraph* graph)
 {
-    uint32_t maximum_arguments;
-    uint32_t maximum_effects;
-    uint32_t builtins[6];
-    uint32_t arguments;
-    uint32_t varargs;
-    uint32_t builtin_calls;
-    uint32_t vectors;
-    uint32_t x86;
-    uint32_t overloads;
-    uint32_t leaves;
-    // The blocks check_graph_validate_vector decided itself, without the exact path (0 on that path).
-    uint32_t vector_blocks;
-};
+    for (uint32_t node = graph->recorded_nodes; node < graph->count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t count = graph->argument_counts != NULL ? graph->argument_counts[node] : 0;
+        const bool varargs = op == CHECK_OP_VARARGS;
+        CheckGraphValidation* state = &graph->recorded;
+        graph->recorded_pure[node] = (uint8_t)check_graph_pure(graph, node, graph->recorded_pure);
+        if (varargs)
+        {
+            state->varargs += 1;
+        }
+        else if (count != 0)
+        {
+            state->maximum_arguments = count > state->maximum_arguments ? count : state->maximum_arguments;
+            state->arguments += count;
+        }
+        // Most nodes are leaves or ordinary arithmetic. Leave their cold, exceptional counters untouched:
+        // unconditional zero increments otherwise make Clang load/store the complete counter vector per node.
+        switch (op)
+        {
+            case CHECK_OP_BUILTIN_OVERFLOW: state->maximum_effects += 1; break;
+            case CHECK_OP_BUILTIN_MISC: state->builtins[0] += 1; break;
+            case CHECK_OP_BUILTIN_FLOAT: state->builtins[1] += 1; break;
+            case CHECK_OP_BUILTIN_QUERY: state->builtins[2] += 1; break;
+            case CHECK_OP_BUILTIN_ATOMIC: state->builtins[3] += 1; break;
+            case CHECK_OP_BUILTIN_VECTOR: state->builtins[4] += 1; break;
+            case CHECK_OP_BUILTIN_BIT_CAST: state->builtins[5] += 1; break;
+            default: break;
+        }
+    }
+    graph->recorded_nodes = graph->count;
+}
+
+static void check_graph_record_finish(CheckGraph* graph)
+{
+    check_graph_record_nodes(graph);
+    graph->recorded.builtin_calls = graph->builtin_count;
+    graph->recorded.vectors = graph->vector_member_count;
+    graph->recorded.x86 = graph->x86_count;
+    graph->recorded.overloads = graph->overload_count;
+    // check_graph_add already counts the compact VALUE leaves as it appends their slots.
+    graph->recorded.leaves = graph->leaf_count;
+    graph->recorded_ready = true;
+}
+
+static bool check_graph_recorded_equal(const CheckGraph* graph, const CheckGraphValidation* validation, const uint8_t* pure, uint32_t* failed)
+{
+    CheckGraphValidation expected = *validation;
+    expected.vector_blocks = 0;
+    bool result = graph->recorded_ready && graph->recorded_nodes == graph->count &&
+                  memcmp(&expected, &graph->recorded, sizeof(expected)) == 0;
+    for (uint32_t node = 0; result && node < graph->count; node += 1)
+    {
+        result = pure[node] == graph->recorded_pure[node];
+        *failed = result ? BUSTER_CHECK_NONE : node;
+    }
+    return result;
+}
 
 // The graph's own counts, its sideband lists and the columns every node needs, before any node.
 static bool check_graph_validate_lists(const CheckGraph* graph)
@@ -2055,9 +2136,10 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     stream->statistics.scalar_nodes += 1;
 }
 
-// Count/place/fill a stable level order inside one mutation-free postorder region. Dependencies before begin are
-// already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them out of
-// the schedule. Relative heights keep all histogram clears together linear even for many tiny regions.
+// Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+// default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+// are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+// out of the schedule. Relative heights keep all histogram clears together linear even for many tiny regions.
 static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end, uint32_t batch_size,
                                uint32_t* levels, uint32_t* counts, uint32_t* order)
 {
@@ -2148,6 +2230,78 @@ static void check_graph_region(TypeTable* types, const CheckGraph* graph, CheckS
     stream->statistics.levels += scheduled != 0 ? maximum + 1 : 0;
 }
 
+// A mutation-free region in postorder, the vector path's default, and its level order's alternative (check_graph_region,
+// CheckOptions.level_order), which the benchmark measured slower on sqlite3.c's bodies: its leaves complete first, as
+// there; then, from the first node not yet done, a batch of up to `batch_size` consecutive nodes that read none of
+// each other (an operand in the region not done is the batch's, an earlier member's), checked as one of level order's
+// batches is, through the same actions. A batch ends at the first node that reads a member, which in a tree's postorder
+// is most often the next one: a parent follows its last child.
+static void check_graph_region_postorder(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* marks, uint32_t begin, uint32_t end,
+                                         uint32_t batch_size)
+{
+    for (uint32_t node = begin; node < end; node += 1)
+    {
+        if (graph->ops[node] == CHECK_OP_VALUE)
+        {
+            check_graph_leaf(types, graph, stream, node);
+            marks[node] |= BUSTER_CHECK_MARK_DONE;
+        }
+    }
+    uint32_t node = begin;
+    while (node < end)
+    {
+        uint32_t members[BUSTER_CHECK_BATCH];
+        uint32_t count = 0;
+        bool open = true;
+        while (open && node < end && count < batch_size)
+        {
+            if ((marks[node] & BUSTER_CHECK_MARK_DONE) == 0)
+            {
+                const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                for (uint32_t i = 0; i < 3; i += 1)
+                {
+                    open &= operands[i] == BUSTER_CHECK_NONE || operands[i] < begin || (marks[operands[i]] & BUSTER_CHECK_MARK_DONE) != 0;
+                }
+                if (open || count == 0)
+                {
+                    members[count++] = node;
+                    node += 1;
+                }
+            }
+            else
+            {
+                node += 1;
+            }
+        }
+        if (count == 1)
+        {
+            check_graph_scalar_node(types, graph, stream, members[0], 0, 0, false);
+        }
+        else if (count != 0)
+        {
+            CheckAction actions[BUSTER_CHECK_BATCH];
+            CheckActionResult results[BUSTER_CHECK_BATCH];
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                check_graph_action(graph, stream, members[i], 0, &actions[i]);
+                const bool vector = check_action_vector_eligible(types, &actions[i]);
+                stream->statistics.vector_nodes += (uint32_t)vector;
+                stream->statistics.scalar_nodes += (uint32_t)!vector;
+            }
+            check_actions(types, actions, results, count);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                check_graph_store(stream, members[i], &results[i]);
+            }
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            marks[members[i]] |= BUSTER_CHECK_MARK_DONE;
+        }
+        stream->statistics.batches += count != 0;
+    }
+}
+
 static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckMessage message, CheckDiagnostic diagnostic, CheckFault fault)
 {
     uint32_t token = graph->tokens != 0 ? graph->tokens[node] : node;
@@ -2193,20 +2347,35 @@ static bool check_graph_inherited_error(const CheckGraph* graph, const CheckStre
     return result;
 }
 
+// Whether `value`, a static assertion's in its GNU context, is a real floating constant, which clang folds and converts to
+// _Bool there (`_Static_assert(0.5, "")` holds), as a GNU constant.
+static bool check_graph_floating_assertion(uint32_t context, const CheckValue* value)
+{
+    return (context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 &&
+           value->constant_kind == CHECK_CONSTANT_FLOATING && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+}
+
+// Whether `value`, in `context`, is a GNU constant where an ICE is required: an integer constant that isn't an ICE, or a
+// static assertion's floating constant.
+static bool check_graph_gnu_constant(uint32_t context, const CheckValue* value)
+{
+    return (context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 &&
+           (value->flags & BUSTER_CHECK_ICE) == 0 &&
+           (check_action_integer_constant(value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT) || check_graph_floating_assertion(context, value));
+}
+
 // Whether `node` has a warning or a GNU constant where an ICE is required, which check_graph_warning_contexts must place.
 static bool check_graph_warning_needed(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
     const uint32_t context = graph->contexts != NULL ? graph->contexts[node] : 0;
-    return stream->warnings[node] != 0 ||
-           ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
-            (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (stream->values[node].flags & BUSTER_CHECK_ICE) == 0 &&
-            check_action_integer_constant(stream->values + node, BUSTER_CHECK_EXTENSION_GNU_CONSTANT));
+    return stream->warnings[node] != 0 || check_graph_gnu_constant(context, stream->values + node);
 }
 
 static void check_graph_warning_contexts(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states, bool scalar)
 {
     (void)scalar;
-
+    stream->warning_count = 0;
+    stream->warnings_prepared = true;
     bool needed = false;
     uint32_t node = 0;
     // The vector path reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context
@@ -2266,13 +2435,12 @@ static void check_graph_warning_contexts(const TypeTable* types, const CheckGrap
         stream->warnings[node] &= ~((states[node] & 2) == 0 ? unevaluated : (states[node] & 4) != 0 ? required : 0);
         stream->warnings[node] &= ~(graph->warning_suppressed != NULL ? graph->warning_suppressed[node] : 0);
         const CheckValue* value = stream->values + node;
-        if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 &&
-            (context & BUSTER_CHECK_CONTEXT_GNU_CONSTANT) != 0 && (value->flags & BUSTER_CHECK_ICE) == 0 &&
-            check_action_integer_constant(value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT))
+        if (check_graph_gnu_constant(context, value))
         {
             stream->warnings[node] |= CHECK_WARNING_GNU_CONSTANT;
             stream->warning_ignored[node] |= CHECK_WARNING_GNU_CONSTANT;
         }
+        stream->warning_count += stream->warnings[node] != 0;
         const CheckOp op = graph->ops[node];
         uint32_t mask = UINT32_MAX;
         bool truth = false;
@@ -2327,11 +2495,13 @@ static void check_graph_report_node(const CheckGraph* graph, CheckStream* stream
             const uint32_t source = value->fault_node < graph->count ? value->fault_node : node;
             check_graph_report(graph, stream, source, CHECK_MESSAGE_CONSTANT, CHECK_DIAG_NONE, value->fault);
         }
-        else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !check_action_integer_constant(value, extensions))
+        else if ((context & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0 && !check_action_integer_constant(value, extensions) &&
+                 !check_graph_floating_assertion(context, value))
         {
             check_graph_report(graph, stream, node, CHECK_MESSAGE_ICE, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
         }
-        else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 && value->integer == 0)
+        else if ((context & BUSTER_CHECK_CONTEXT_ASSERT) != 0 &&
+                 (value->constant_kind == CHECK_CONSTANT_FLOATING ? value->floating == 0 : value->integer == 0))
         {
             check_graph_report(graph, stream, node, CHECK_MESSAGE_STATIC_ASSERT, CHECK_DIAG_NONE, CHECK_FAULT_NONE);
         }
@@ -2448,8 +2618,25 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     CheckGraphValidation validation = { 0 };
     if (result)
     {
-        result = BUSTER_SCALAR_PATH(options->scalar) ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
-                                   check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
+        const bool recorded = graph->recorded_ready && graph->recorded_nodes == count &&
+                              (count == 0 || graph->recorded_pure != NULL);
+        if (recorded && !options->verify)
+        {
+            validation = graph->recorded;
+            if (count != 0)
+            {
+                memcpy(pure, graph->recorded_pure, count);
+            }
+        }
+        else
+        {
+            result = BUSTER_SCALAR_PATH(options->scalar) ? check_graph_validate(graph, pure, &validation, &stream->failed_node) :
+                                       check_graph_validate_vector(graph, pure, &validation, &stream->failed_node);
+            if (result && recorded)
+            {
+                result = check_graph_recorded_equal(graph, &validation, pure, &stream->failed_node);
+            }
+        }
         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
     }
     const uint32_t maximum_arguments = validation.maximum_arguments;
@@ -2533,7 +2720,14 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
                 {
                     node += 1;
                 }
-                check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
+                if (options->level_order)
+                {
+                    check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
+                }
+                else
+                {
+                    check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
+                }
             }
         }
         for (uint32_t pass = 0; result && pass < 2; pass += 1)

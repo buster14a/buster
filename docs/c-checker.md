@@ -24,7 +24,9 @@ The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
 (`executable_write`). A binding that finds the snapshot damaged discards it and
-links once more from a fresh import. `--verify` also checks every function's
+links once more from a fresh import. `--verify` checks the reader's expression
+graph and its retained scheduling/allocation facts against the independent
+graph validator, and also checks every function's
 records with `x86_validate`, as the c-testsuite harness asks
 ([the c-testsuite guide](c-testsuite.md)), with `-c` too. Without it, the
 emission checks only each function's branch columns, which branch sizing reads
@@ -386,6 +388,51 @@ mutants are compared with clang in "Corpus comparison and semantic mutations"
 below; 9700X measurements at the qualified revision are still required, and
 historical evidence below applies only to its named checkpoints.
 
+K&R function definitions (C17 6.9.1) are read as clang reads them, as #154's
+decision has it. The declarator records an identifier list's names as the
+definition's parameters, in the list's order, without a prototype
+(`CheckDeclaratorPart.identifier_list`), and its scan ends before the
+declaration list, since no specifier follows a group in a declarator. The
+declaration list (`check_input_kr_declarations`) gives each name its type,
+adjusted as a parameter's, under C17 6.9.1p6's constraints, each refused where
+clang reports it:
+- no storage class but `register`, no function specifier or typedef;
+- only the list's names, each declared once, and none with an initializer;
+- every listed name declared (clang refuses the implicit `int`).
+
+A struct, union or enum defined in the list, and a variably modified
+parameter there, are refused by name. The definition's type is the prototype of
+its parameters' default argument promotions, as clang types it (`float a`
+makes `float (double)`). So a later prototype must agree with them, and its
+calls convert their arguments as a prototype's do. Where clang only warns about
+a call with the wrong number of arguments, the checker refuses it.
+
+An identifier list outside a definition is refused, as C17 6.7.6.3p3 has it.
+The producer lowers a K&R definition whose parameters' types the promotions
+leave alone. It refuses by name one with a `char`, `short`, `_Bool` or `float`
+parameter, which would convert from its promoted type on entry
+(`CHECK_INPUT_FUNCTION_KR`).
+
+Where clang takes a construct C's constraints exclude, the checker takes it
+too:
+- a declaration of no declarator, which declares its tag or nothing, at file
+  scope, in a block and as a member, whatever its storage class, typedef,
+  qualifiers and attributes (clang warns, `-Wmissing-declarations`, and this
+  doesn't), though a function specifier there is an error;
+- a union's flexible array members, anywhere among its members, each of size 0
+  and its element's alignment (GNU's extension; `type_complete_record` takes
+  them);
+- an incomplete type, `void`'s too, in a `_Generic` association, which matches
+  no control (C2y's extension);
+- a static assertion of a floating constant, converted to `_Bool` as clang
+  converts it (`check_graph_floating_assertion`).
+
+`inline` and the `_Noreturn` keyword declare only functions, as clang has it.
+Each is refused at its keyword on an object, a typedef (`_Noreturn` on a
+function's type too) or a member, and so is an `inline main`. `CheckInputAttribute.keyword`
+tells the keyword's record from a `noreturn` attribute's, which clang only
+warns about there.
+
 ## Entry points and storage ownership
 
 The implementation is included in the compiler's existing C translation units.
@@ -409,8 +456,9 @@ void check_actions(TypeTable* types, const CheckAction* actions,
                     CheckActionResult* results, uint32_t count);
 ```
 
-The parser must retain its complete tree and postorder; `tree_only` mode is not
-enough. Parser tokens and the preprocessor's interned identifiers remain alive
+The parser must retain its complete tree. The reader derives shared traversal
+metadata when `tree_only` omits the parser's postorder; optional parser size
+metadata is not required. Parser tokens and the preprocessor's interned identifiers remain alive
 while adapting and diagnosing that source. The adapter puts its graph,
 declaration identities and reports in the supplied output arena, and releases
 its temporary scratch allocations before returning. `CheckInput.resource`
@@ -468,7 +516,47 @@ of the previous nonempty slice. This gives every argument-conversion record a
 single owner. The source adapter produces exactly that layout. Arguments are
 already checked expressions, not syntax that the call action must reparse.
 `check_graph_run` validates topology, arity, slice bounds, operation values and
-context bits before reading child results. Empty graphs need no node columns;
+context bits before reading child results for graphs supplied by other
+producers. The source reader publishes immutable graph facts (#674): one
+purity byte per node, maximum call width, overflow-effect and builtin counts,
+and argument/sideband consumption totals, including the compact VALUE leaf
+count. `check_input_add` completes the
+preceding node after its caller filled the leaf, requested type and call data,
+before a later node can consume its purity. The reader flushes its final node
+and publishes the sideband totals before returning, including diagnostic-only
+prefixes. This costs constant work per node while its columns are still hot;
+it avoids a later pass over those columns. Both reader paths use the same
+protocol. Required dependency order makes each node's purity depend only on
+its operator, requested type and at most three existing purity bytes.
+
+Only this reader publishes `recorded_ready`; `check_graph_initialize` and
+other graph producers leave it false. `check_graph_add` invalidates a published
+summary, so a subsequent run falls back to validation. A caller that directly
+changes a published graph must clear `recorded_ready` first. All columns and
+sideband lists remain immutable while a summary is published. The retained
+purity column has exactly `capacity` readable bytes and lives with the graph;
+only `count` initialized bytes are copied to the scheduler's mutable marks.
+Allocation failure follows the reader's ordinary resource failure path.
+
+`CheckOptions.verify`, selected by the C driver's `--verify`, validates these
+graphs too and checks every counter and purity byte against the reader's
+facts. Mismatches return `CHECK_STATUS_INVALID_GRAPH` and roll back output;
+a purity mismatch names its first node. Generated graphs and fixtures retain
+the ordinary scalar/vector validators as independent oracles. `test-checker`
+checks both recorded schedules with and without verification on its generated
+graphs, compares both validators with each source fixture's recorded facts,
+and mutates every counter and purity byte to check rejection and rollback.
+
+[The frozen #674 qualification](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-674/target/README.md)
+compares `bc1b4861` with `7274e1bc`. Eight physical workers compile the pinned
+SQLite corpus at 190.958 versus 194.163 MB/s (+1.68% pooled), with positive
+unpaired ranges across actual checker-section placements and fresh executable
+copies, balanced predecessor work and retained faults. The one-worker gain
+remains unresolved against placement/copy variation. Later compact-leaf and
+reader adaptations preserve the contract but need their own performance
+qualification; those frozen timings are not measurements of a rebased head.
+
+Empty graphs need no node columns;
 an empty action batch may use null input and output pointers.
 
 Counted auxiliary records retain builtin calls, overload candidates/selections
@@ -552,20 +640,26 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder. The vector schedule
-finds contiguous regions whose type behavior is known to stay within builtin
-arithmetic types, computes their relative dependency heights, and stably groups
-ready nodes at each height. Operations that can create a pointer, decay an
-array or function, or otherwise intern a derived type are postorder barriers.
-This conservative rule preserves newly allocated `TypeId` numbers across fresh
+The scalar schedule processes graph nodes in postorder, one at a time. The
+vector schedule finds contiguous regions whose type behavior is known to stay
+within builtin arithmetic types, and checks each region in postorder batches
+(`check_graph_region_postorder`). From the first node not yet done, a batch
+takes consecutive nodes that read none of each other, up to the batch size.
+The alternative, the region's level order (`check_graph_region`,
+`CheckOptions.level_order`), computes the nodes' relative dependency heights
+and stably groups the ready nodes at each height. The benchmark measured both
+on the same actions, and the postorder batches won ("Level order or
+postorder" below). Operations that can create a pointer, decay an array or
+function, or otherwise intern a derived type are postorder barriers. This
+conservative rule preserves newly allocated `TypeId` numbers across fresh
 scalar and vector type tables. Comparing both schedules in a table already
 populated by one schedule would miss that requirement.
 
 `CheckOptions.batch_size` is a logical batching limit: zero selects 16 and
-values 1 through 16 are valid. Every dependency level and region end flushes
-its partial batch. The vector arithmetic kernel uses eight 64-bit lanes, with
-per-lane 32-bit or 64-bit C arithmetic semantics; the logical batch size is
-independent of that lane count. Eligible addition/subtraction, unary integer
+values 1 through 16 are valid. A batch ends at a node that reads a member (in
+level order, at every level) and at its region's end. The vector arithmetic
+kernel uses eight 64-bit lanes, with per-lane 32-bit or 64-bit C arithmetic
+semantics; the logical batch size is independent of that lane count. Eligible addition/subtraction, unary integer
 operations, shifts, comparisons and bitwise operations use that kernel.
 Irregular types and operations, integer multiplication/division/remainder,
 128-bit arithmetic, pointer semantics, member lookup, calls and floating
@@ -579,8 +673,9 @@ the action gives: the leaf with its type as operand 0's conversion, or for an
 invalid type, that type's diagnostic and a zero value. It writes the records in
 node order: the barrier's leaves in the walk, a region's in its level pass,
 which then schedules only the rest. A separate pass of leaves wrote each
-output cache line twice. The vector path also validates the graph 16 nodes at a
-time (`check_graph_validate_vector`): the operators' classes come from one
+output cache line twice. When validation is required (an external producer or
+`--verify`), the vector path validates the graph 16 nodes at a time
+(`check_graph_validate_vector`): the operators' classes come from one
 `vpermi2b` table built from the scalar rules, and each argument slice's offset
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
@@ -605,6 +700,73 @@ are the peak live allocation above the caller's initial arena position,
 including temporary overload, region and query allocations that are released
 before return.
 
+### Level order or postorder
+
+#133 left open which schedule the vector path's regions should take, decided
+by a benchmark on the same tables: their level order, or a vectorized walk in
+postorder. `benchmark-checker-source` times both in one build, with the same
+actions, type table and graph: its paths `vector` (the postorder batches, the
+default) and `levels` (`CheckOptions.level_order`), beside `scalar`. Before it
+times them, it checks that each gives the scalar path's typed stream, and
+`test-checker` compares both orders at every batch size with the scalar path.
+
+Level order computes each region node's height from its operands, counts the
+heights, places the nodes by height, then checks each level in batches. The
+postorder batches skip those passes. From the first node not yet done, a batch
+takes the nodes after it until one reads a member, which in a tree's postorder
+is most often the next node, since a parent follows its last child. So its
+batches are smaller: 32,446 of them in `sqlite3.c`'s bodies, against level
+order's 27,749 in 27,701 levels. A few more nodes take the scalar action alone
+(54.17% of the vector path's nodes, against 53.95%), but the walk reads the
+region's nodes once, in order.
+
+On the 9700X, pinned to CPU 2 under the lock for each run: the frozen
+`sqlite3.c`'s 2,608 bodies, 311,601 body nodes, as nanoseconds and cycles a
+node, each a median of 21 passes, over three processes per build (main's over
+both rounds' six):
+
+| Build | Scalar | Level order | Postorder batches |
+| --- | --- | --- | --- |
+| main, `321f5976` | 45.35–46.23 ns, 249.5–255.3 | 34.27–35.00 ns, 189.8–194.0 | |
+| level order the default, `0f26899e` | 44.60–44.89 ns, 243.8–246.5 | 33.56–33.91 ns, 184.9–187.0 | 31.60–31.84 ns, 173.4–175.3 |
+| postorder the default, `fe35a8b5` | 44.08–45.30 ns, 242.9–247.8 | 33.29–33.98 ns, 184.1–186.8 | 31.47–32.15 ns, 174.0–176.5 |
+
+Each path alone (`--only`, one process), and after 100 ms of scalar work
+before each sample (`--after-scalar 100`), the state after lighter code in
+which Zen 5's power cap slows heavy AVX-512 loops (#199):
+
+| Build | Path | Alone | After scalar work |
+| --- | --- | --- | --- |
+| `0f26899e` | level order | 33.11 ns, 183.1 | 33.65 ns, 185.7 |
+| `0f26899e` | postorder batches | 32.00 ns, 177.2 | 32.70 ns, 180.2 |
+| `fe35a8b5` | level order | 35.13 ns, 194.6 | 33.57 ns, 185.4 |
+| `fe35a8b5` | postorder batches | 32.97 ns, 182.6 | 32.58 ns, 180.2 |
+
+The postorder batches took 5.3 to 6.2% less time a node than level order in
+each process's interleaved passes, 3.4 and 6.1% alone and 2.8 and 2.9% after
+scalar work. The second build makes them the default. Its other paths ran as
+fast as the first build's. Both builds' scalar and level-order paths ran 1.6
+to 2.8% faster than main's (by the processes' medians), from their other
+changes or their code's placement. The comparison that decides is between the
+two orders in one build, on one table.
+
+Whole compiles of `sqlite3.c` (with `-DSQLITE_OMIT_LOAD_EXTENSION
+-DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`), by
+`time-runs`, 21 runs of each build in a rotating order:
+
+| Command | main, `321f5976` | `0f26899e` | `fe35a8b5` |
+| --- | --- | --- | --- |
+| `-c` | 127.95 ms, 599.5M cycles, 1,274.5M instructions | 127.39 ms (−0.44%), 595.8M (−0.61%), 1,275.3M | 126.46 ms (−1.16%), 591.3M (−1.37%), 1,269.2M |
+| `-fsyntax-only` | 102.41 ms, 464.1M cycles, 988.9M instructions | 102.38 ms (−0.03%), 464.3M (+0.03%), 989.6M | 101.25 ms (−1.13%), 458.1M (−1.29%), 983.5M |
+
+The switch to the postorder batches saved 6.08M instructions a whole compile
+with these four SQLite defines. The graph benchmark above uses a different
+preprocessing configuration, so its node count does not normalize that
+instruction delta. The first build's other changes (the
+catalogue's fixes, the comparison builtins, K&R definitions) cost 0.78M on
+`-c` and 0.67M on `-fsyntax-only`. [The measurement record](https://github.com/buster14a/buster-performance/blob/f7fd1b498aa19706204b1b8e82f486db480d526c/docs/measurements/checker-schedules-133-2026-10-28/README.md) has
+the commands, the trees and the logs.
+
 ## Constant evaluation
 
 Integer constants contain target-width bits in `unsigned __int128`. Promotions,
@@ -624,8 +786,17 @@ Exotic floating formats retain explicit unsupported folding requirements.
 
 Constraint diagnostics and evaluation faults are separate. An invalid operand
 type is an error even in an unselected expression. A possible divide by zero,
-overflow, invalid shift or out-of-range floating conversion travels with its
-value and source node until an enclosing context requires that evaluation.
+overflow or invalid shift travels with its value and source node until an
+enclosing context requires that evaluation. A floating value converted to an
+integer type outside its range is undefined, and clang's folding takes it as
+APFloat converts it, saturated to the type's range and a NaN to 0.
+`check_action_convert_plain` folds it so: a GNU constant
+(`BUSTER_CHECK_GNU_FLOAT_RANGE`), not an integer constant expression. clang
+takes it where one is required (an enumerator's value, a case label, a static
+assertion), and as a static initializer's value (`int b = (int)1e10;` is
+`INT_MAX`), but not in an array bound, which it doesn't fold, and neither does
+the checker (`check_input_vla_bound`'s folding, `check_input_integer_attribute`).
+`__builtin_constant_p` of it is 1, as clang's is, with no proof of its own.
 `&&`, `||` and `?:` discard faults in unselected operands; `sizeof` does not
 evaluate its ordinary operand. Thus these two cases have different outcomes:
 
@@ -740,6 +911,51 @@ regressions also check a C23 assertion with no message. The retained scaling
 campaign measures the default production path. Scalar/vector semantic checks
 establish equality, while the scalar reference's separate value-chain walks
 remain outside this string-specific scaling claim.
+
+### Large integer literal tables (#658)
+
+`c_check_literal_table_input.c` recognizes file-scope integer arrays with at least
+128 elements whose complete initializer consists of number tokens, optional
+unary minus signs, commas and one outer brace pair. The scalar path checks the
+same grammar; the vector path carries predecessor masks across bounded
+64-token blocks. Sixteen spellings form a conversion batch: short decimal and
+two-digit hexadecimal literals decode together, while other integer spellings
+reuse the existing literal parser and unary action. Each value must fit its
+8-, 16-, 32- or 64-bit element exactly. A case needing a conversion warning,
+an excess-element warning, another numeric format or general expression
+checking falls back before the producer changes any source state.
+
+Successful lists retain one `CheckInputLiteralTable` record and one immutable
+`CHECK_INIT_BYTES` part. Their elements produce no expression nodes,
+`CheckValue` rows or individual initializer/data-plan parts. Inferred array
+lengths are completed through the ordinary type constructor; omitted tails
+remain zero-filled by the existing static-data consumer. Declaration order and
+canonical object identity remain unchanged. The records are linked in source
+order, and `check_initializers_run` advances through them with its declarations.
+Compact and ordinary plans publish the same ascending `declaration_tokens`
+index, so sparse lookup and retained string indices keep their usual contracts.
+The payload and part belong to the input arena and remain alive with its
+initializer plans. Deferred checking replays their array TypeIds with the
+top-level declaration types. A failed payload or record reservation restores
+the unpublished output suffix and scratch and sets the resource status.
+
+Automatic arrays, volatile and atomic elements, floating/128-bit elements,
+designators, nested braces and nonliteral expressions retain ordinary
+checking and planning. `check_input_tables_reference` provides that exact
+source path for tests. Permanent tests compare complete bytes and array bounds
+between it and both compact paths, exercise protected syntax/output tails,
+reservation rollback and deferred replay/fallback, and execute representative
+generated objects against Clang. This bounded path leaves the reader's existing
+token columns in place; their initialization and the parser remain substantial
+costs on very large tables. It does not establish the full memory/work target
+described in #658 or a general compilation speedup.
+
+The [frozen native qualification record](https://github.com/buster14a/buster-performance/blob/32b96dd2a12c12c7aaf25be3639a31b7fc87cdd9/docs/measurements/unclaimed-perf-2026-10-28/issue-658/target/RESULTS.md)
+measured 2.32 to 2.98 times lower whole-process wall time for its eligible byte
+tables on the original base and candidate. Those exact-revision measurements
+do not establish the gain on a later publication stack. Fallback and ordinary
+SQLite controls, complete objects, runtime checks and remaining costs are
+retained alongside them.
 
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be
@@ -1442,6 +1658,48 @@ both checker schedules and, with `--executable`, both production command routes;
 it compares warning decisions, complete messages and presumed line/column pairs
 with Clang, and covers guarded classifier/interval tails and allocation failure.
 
+## The constraint catalogue
+
+`test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For
+every Constraints paragraph of C17's 6.4 to 6.10 it has a violation of each of the paragraph's rules and a valid
+twin. Fixtures of the conversions (6.3), the constant expressions (6.6) and the initializers (6.7.9) join them:
+322 fixtures and 644 sources in all, 21 of 6.3, 14 of 6.4, 99 of 6.5, 13 of 6.6, 114 of 6.7, 26 of 6.8, 15 of
+6.9 and 20 of 6.10.
+
+Each source is checked as the corpus check checks a file (`check_corpus_file`): preprocessing, the parse, the
+checker and the program's control flow, as the driver checks it, by both paths alike. A directive's source (6.10)
+runs through the preprocessor's two kernels instead (`check_test_constraint_preprocess`), its first error's line read
+from the diagnostics, since the corpus check gives a preprocessing error no place. Every source is also checked by
+`clang -fsyntax-only -std=gnu17`. The acceptance and the first error's line must be clang's and the fixture's own
+record of them. A fixture records clang's verdict on its violation:
+- an error, for 263;
+- acceptance with a warning clang gives by default, for 33;
+- acceptance without one, for 26: an extension of GNU's or a later standard's, or a rule clang doesn't diagnose.
+
+Every valid twin is accepted.
+
+The first survey of the catalogue (main at `321f597`) found 14 of the 644 sources differing from clang, each
+fixed with its fixture there:
+- **Rejected, where clang takes them:**
+  - declarations and members of no declarator;
+  - a union's flexible array member;
+  - an incomplete type in a `_Generic` association;
+  - a static assertion of a floating constant;
+  - an out-of-range floating constant converted to an integer in a static initializer;
+  - K&R definitions, all five of their fixtures' sources ("Implementation boundary" above, and "Constant
+    evaluation").
+- **Accepted, where clang refuses them:** the `_Noreturn` keyword on an object, and an `inline main`.
+
+One difference stays, recorded with the line the checker refuses the violation at. It's GNU's folding of a
+`const` object's value in an integer constant expression: `const int k = 3; enum { E = k };`, which clang folds,
+silently but for `-Wgnu-folding-constant`. The checker reads an object's value only as an address constant's
+place, not its initializer's value. It refuses the enumerator as clang refuses a non-`const` object's. Clang
+reads the initializers of `const` objects of every type there (members of a `const` struct's too), and this
+would need their values at the declaration.
+
+The warnings clang gives for the 33 aren't all the checker's. It gives no `-Wmissing-declarations` for a
+declaration of no declarator, which the catalogue doesn't ask of it: only acceptance and the first error.
+
 ## Corpus comparison and semantic mutations
 
 ```sh
@@ -1499,15 +1757,32 @@ after the fixes:
 
 Files compared counts each corpus's files, the mutated units' bases and the
 mutants. The scalar and vector paths gave identical columns on every one. The
-differences left are in bases, and mutants aren't made of a unit whose base
-differs. Lua's `lvm.c`, GNU's labels as values (`&&L_OP_MOVE`, `goto *`), was
-one: since the checker takes them (#133), Lua's 34 files agree with clang (the
-corpus comparison, without mutants, on a laptop's clang 23). Two are left:
+differences were in bases, and mutants aren't made of a unit whose base
+differs. Both are gone. Lua's `lvm.c` uses GNU's labels as values
+(`&&L_OP_MOVE`, `goto *`), which the checker takes now (#133). The libc
+corpus's `mingw/math/fmaxl.c` and `fminl.c` use `__builtin_isgreaterequal` and
+`__builtin_islessequal` on `long double`, which the floating comparison
+builtins check now (#148, [the builtin integration
+guide](c-builtins-integration.md)).
 
-- the libc corpus's `mingw/math/fmaxl.c` and `fminl.c`:
-  `__builtin_isgreaterequal` and `__builtin_islessequal` on `long double`,
-  floating comparison builtins that [#148](https://github.com/buster14a/buster/issues/148)'s
-  families don't have yet.
+The corpus comparison without mutants then finds no difference, on a laptop
+with clang 23.1.4 and its system's headers:
+
+| Corpus | Options | Files | Both accept | Both reject, at the same first error's line | Neither preprocesses |
+| --- | --- | --- | --- | --- | --- |
+| SQLite 3.53.4's `sqlite3.c` | `-std=gnu17` | 1 | 1 | | |
+| Lua 5.4.8's 34 files in `src` | `-std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX` | 34 | 34 | | |
+| The libc corpus's C files | `-std=gnu17` | 2,315 | 733 | 612 | 970 |
+| The libc corpus's headers | `-std=gnu17` | 6,668 | 3,110 | 675 | 2,883 |
+
+A unit that neither side preprocesses lacks a header, stops at an `#error` or
+has an `#if` line that doesn't evaluate. The comparison gives no line for a
+preprocessing failure, so it doesn't compare their first errors. Clang parses
+as it preprocesses, so it reports some of them after an earlier error. On
+seven headers' `#if` lines, clang 23 says that a function-like macro isn't
+defined (`IS_IN`, `__GLIBC_USE`), and the preprocessor gives the older "token
+is not a valid binary operator in a preprocessor subexpression", on the same
+line.
 
 What the mutants and the bases found, each fixed with its fixture:
 
@@ -1818,7 +2093,7 @@ Audit pin: `42630114aeb0553c3e2fabfd7fe9bc84b0ce6126`;
 | Full parser tree/postorder and PP spelling → `check_input` | Implemented supported-source reader; declarations/types are elaborated in source order, expressions in postorder. Parser/PP source IDs are retained. |
 | Declaration elaboration → binding event resolver → expression graph | Implemented checker-side events and exact declaration/type columns. Since [#336](https://github.com/buster14a/buster/issues/336), each use's retained answer is published directly, without the parser's second grammar replay ([the binding handoff](c-check-bindings.md)). |
 | Literal spelling → `c_check_literals.c` → leaf `CheckValue` | Counted physical/logical spelling is decoded once for its graph value; invalid/unsupported literals are errors. Macro occurrence remains the diagnostic identity. |
-| `CheckGraph` → dependency scheduler → `check_actions` / scalar actions | Implemented earlier-node operands, call argument slices, source tokens and contexts; actual operand heights define readiness. Type-interning actions form ordered barriers. |
+| `CheckGraph` → dependency scheduler → `check_actions` / scalar actions | Implemented earlier-node operands, call argument slices, source tokens and contexts; actual operand edges define readiness (a postorder batch ends at a node that reads a member; level order, `CheckOptions.level_order`, groups by operand heights). Type-interning actions form ordered barriers. |
 | Actions/constants/conversions → `CheckStream` → typed dump/diagnostics/static selection | Implemented node-indexed values, explicit operand/store/argument conversions and stable source-ordered reports. Faults in unevaluated branches remain conditional as described above. |
 | Source declaration/object columns + stream → `check_data_input` → `check_data_emit` → Link | Implemented scalar static-data subset. Canonical object IDs and latest composite types select one definition, without reparsing or name lookup in the emitter. |
 | Graph/stream → executable typed functions / SSA | Missing at this pin. Graph nodes plus conversions are not an evaluation-order function stream or CFG; [#133](https://github.com/buster14a/buster/issues/133)/[#136](https://github.com/buster14a/buster/issues/136)/[#131](https://github.com/buster14a/buster/issues/131)/[#134](https://github.com/buster14a/buster/issues/134)/[#145](https://github.com/buster14a/buster/issues/145) own the bridge. |
@@ -1928,3 +2203,29 @@ Frozen SQLite has a small measured cost in this paired build: syntax checking
 byte-identical objects. The record separates the deep Clang enum oracle's
 limit, focused sanitizer evidence, full checker/driver/deferred suites and
 whole-process measurements. It makes no whole-compiler sanitizer/corpus claim.
+
+### Statement-expression jump-region checks (#657)
+
+The control reader uses its existing postorder intervals when checking
+whether a case, goto or asm-goto enters a GNU statement expression. A unit with
+no statement-expression regions needs no region walk. Otherwise the target's
+ancestors are checked only up to the first subtree containing the source: every
+region above that ancestor also contains the source. A case therefore stops at
+its switch instead of revisiting every enclosing switch. The subtree test uses
+the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
+new token column and does not require the parser's optional size metadata.
+The scalar reader keeps the full ancestor walk as an independent diagnostic
+oracle. Both use the same strict region-boundary rules, including jumps out of
+nested regions and refusals when entering sibling regions.
+
+`test-checker` compares both walks for every pair of tokens in nested and sibling
+regions, including boundaries and absent tokens, on scalar/vector normal and
+tree-only parser schedules with no parser-owned size column. It also checks 65,533 transfers
+in a depth-65,536 chain, with and without an enclosing region, within one CPU
+second, and runs the source-level legality fixtures against Clang. This bound
+checks the repeated-walk regression; it is not a throughput measurement.
+
+The [frozen qualification record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-657/target)
+retains the exact source/binary identities, stage clocks, every object and all
+outliers. Those timings compare `bc1b4861` with `086c24b1`; they do not measure
+this later integration's whole-compile throughput.

@@ -173,9 +173,9 @@ static void check_builtin_atomic_test_values(CheckBuiltinAtomicTest* test, TypeT
     arguments[0].type = type_pointer(table, BUSTER_TYPE_UCHAR);
     arguments[1] = check_test_float(BUSTER_TYPE_DOUBLE, 257.75L);
     result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
-    check_builtin_atomic_test_expect(test, result.action.value.fault == CHECK_FAULT_FLOAT_RANGE &&
-                                    result.action.value.fault_node == 148 && result.action.diagnostic == CHECK_DIAG_NONE,
-                                    "out-of-range floating store conversion retains a deferred fault without executing memory");
+    check_builtin_atomic_test_expect(test, result.action.value.fault == CHECK_FAULT_NONE && result.store_value.integer == 255 &&
+                                    result.action.diagnostic == CHECK_DIAG_NONE,
+                                    "out-of-range floating store conversion saturates, as clang folds it, without executing memory");
     arguments[1] = check_test_integer(BUSTER_TYPE_ULLONG, 257);
     result = check_builtin_atomic_test_action(table, CBUILTIN_ATOMIC_STORE_N, arguments, 3);
     check_builtin_atomic_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.store_value.integer == 1,

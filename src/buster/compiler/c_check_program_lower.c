@@ -3649,6 +3649,81 @@ static void check_lower_selector_test(CheckLowerWriter* writer, uint32_t local, 
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, local);
 }
 
+// isgreater ... isunordered of `node`'s two arguments, converted to `common`, the real floating type of their usual
+// arithmetic conversions, with quiet compares, as clang -O0's are (ucomiss, ucomisd, fucomip): a NaN raises FE_INVALID
+// only when it signals. Tier 0's EQ and NE are quiet in every class, but its LT and LE of floats and doubles signal
+// (cmpsd's LT_OS and LE_OS, C's relational operators'). Their operands stay in their common format, so that the SSE
+// comparisons retain MXCSR's DAZ policy. Evaluate both once before any comparison, then test both with quiet self-EQs:
+// their eager AND raises FE_INVALID for either signaling NaN, including one beside a quiet NaN. Only an ordered pair
+// reaches LT/LE/GT/GE. The x87's own ordered compares are quiet already and need no guard.
+// islessgreater is `(a == a) & (b == b) & (a != b)` of temporaries that hold them, and isunordered `(a != a) | (b != b)`.
+// Pushed in reverse, as tasks run.
+static void check_lower_floating_compare(CheckLowerWriter* writer, uint32_t node, CBuiltinId id, TypeId common)
+{
+    const uint8_t class = check_lower_class(writer, common);
+    if (id == CBUILTIN_ISLESSGREATER || id == CBUILTIN_ISUNORDERED)
+    {
+        const bool unordered = id == CBUILTIN_ISUNORDERED;
+        const uint32_t a = check_lower_temporary(writer, class);
+        const uint32_t b = check_lower_temporary(writer, class);
+        if (!unordered)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+        }
+        check_lower_instruction(writer, unordered ? BUSTER_TYPED_OR : BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_instruction(writer, unordered ? BUSTER_TYPED_NE : BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+        check_lower_instruction(writer, unordered ? BUSTER_TYPED_NE : BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, b);
+        check_lower_operand(writer, node, 4, false, common);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, a);
+        check_lower_operand(writer, node, 3, false, common);
+    }
+    else
+    {
+        const uint8_t kind = id == CBUILTIN_ISGREATER ? BUSTER_TYPED_GT : id == CBUILTIN_ISGREATEREQUAL ? BUSTER_TYPED_GE :
+                             id == CBUILTIN_ISLESS ? BUSTER_TYPED_LT : BUSTER_TYPED_LE;
+        if (class == BUSTER_TYPED_CLASS_F80)
+        {
+            check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_operand(writer, node, 4, false, common);
+            check_lower_operand(writer, node, 3, false, common);
+        }
+        else
+        {
+            const uint32_t a = check_lower_temporary(writer, class);
+            const uint32_t b = check_lower_temporary(writer, class);
+            const uint32_t unordered = check_lower_label(writer);
+            const uint32_t end = check_lower_label(writer);
+            check_lower_mark(writer, end);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_mark(writer, unordered);
+            check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_I32, end);
+            check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, unordered);
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, b);
+            check_lower_operand(writer, node, 4, false, common);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, a);
+            check_lower_operand(writer, node, 3, false, common);
+        }
+    }
+}
+
 static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -3665,10 +3740,15 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         const CheckBuiltinFloatEffect* effect = stream->floating + selected;
         const CBuiltinId id = effect->runtime_builtin;
         const bool classify = (id >= CBUILTIN_ISNAN && id <= CBUILTIN_ISINF_SIGN) || id == CBUILTIN_FABS || id == CBUILTIN_FABSF || id == CBUILTIN_FABSL;
+        const bool compare = id >= CBUILTIN_ISGREATER && id <= CBUILTIN_ISUNORDERED;
         const bool selectors = id == CBUILTIN_FPCLASSIFY;
-        if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)))
+        if (effect->unsupported != 0 || (classify && count != (selectors ? 6u : 1u)) || (compare && count != 2))
         {
             check_lower_unsupported(writer, "this floating builtin");
+        }
+        else if (compare)
+        {
+            check_lower_floating_compare(writer, node, id, effect->floating_type);
         }
         else if (selectors && effect->selected_selector < 5)
         {
@@ -3824,7 +3904,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
         program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
-        const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value->object - 1] : 0;
+        const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
         if (selected == 0)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -5043,7 +5123,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
     const uint32_t alignment_log2 = declared_alignment > type_alignment ? declared_alignment : type_alignment;
     const uint64_t alignment = UINT64_C(1) << (alignment_log2 & 63);
-    const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
+    const bool initialized = program->initializers != 0 && check_initializers_plan_index(program->initializers, object - 1) != 0;
     if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -6081,9 +6161,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->result_size = 16;
         }
         uint32_t declared = 0;
+        // A K&R definition's callers pass its parameters' promoted types, its ABI's (CHECK_INPUT_FUNCTION_KR).
+        const bool kr = (input->function_flags[body.declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
         for (uint32_t parameter = bare ? BUSTER_CHECK_NONE : input->parameters[body.opening]; parameter != BUSTER_CHECK_NONE; parameter = input->parameter_next[parameter])
         {
             const TypeId parameter_type = input->declared_types[parameter];
+            if (kr && type_default_argument_promote(types, type_unqualified(parameter_type)) != type_unqualified(parameter_type))
+            {
+                check_lower_unsupported(writer, "K&R parameters the default argument promotions change");
+            }
             const CheckInputAttributes* attributes = input->attributes[parameter];
             // A struct or union parameter is a frame object, whose bytes the prologue places (aligned past 16 bytes, in a
             // realigned frame, or where they arrive).

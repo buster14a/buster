@@ -408,9 +408,190 @@ static bool pp_test_history_growth(const char* directory, bool with_clang)
     return result;
 }
 
+// The old piecewise fprintf path is an independent byte oracle. Exercise every small-buffer edge, multiple grows,
+// and unavailable scratch: the latter may stream, but must retain every prefix and the complete oversized message.
+static bool pp_test_diagnostic_buffer(void)
+{
+    const uint32_t capacities[] =
+    {
+        1,
+        2,
+        7,
+        64,
+        BUSTER_PP_DIAGNOSTIC_BYTES,
+    };
+    const uint32_t lengths[] =
+    {
+        0,
+        1,
+        7,
+        8,
+        63,
+        64,
+        BUSTER_PP_DIAGNOSTIC_BYTES - 1,
+        BUSTER_PP_DIAGNOSTIC_BYTES,
+        8192,
+    };
+    char message[8193];
+    for (uint32_t i = 0; i < sizeof(message) - 1; i += 1)
+    {
+        message[i] = (char)('a' + i % 26);
+    }
+    message[sizeof(message) - 1] = 0;
+    bool result = true;
+    uint32_t checked = 0;
+    // A finite arena permits an early growth and then forces fallback on a later append.
+    for (uint32_t mode = 0; result && mode < 3; mode += 1)
+    {
+        Arena arena = mode == 0 ? arena_reserve_small(1 << 20, 1 << 20) : mode == 1 ? (Arena){ 0 } : arena_reserve_small(4096, 4096);
+        for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
+        {
+            for (uint32_t l = 0; result && l < BUSTER_ARRAY_LENGTH(lengths); l += 1)
+            {
+                FILE* actual = tmpfile();
+                FILE* expected = tmpfile();
+                char bytes[BUSTER_PP_DIAGNOSTIC_BYTES];
+                PPDiagnostic diagnostic =
+                {
+                    .stream = actual,
+                    .arena = &arena,
+                    .bytes = bytes,
+                    .capacity = capacities[c],
+                };
+                result = actual != 0 && expected != 0 && (mode == 1 || arena.base != 0);
+                if (result)
+                {
+                    fputs("before\n", actual);
+                    fputs("before\n", expected);
+                    const long before = ftell(actual);
+                    pp_diagnostic_append(&diagnostic, "prefix %u: ", UINT32_MAX);
+                    pp_diagnostic_append(&diagnostic, "%.*s", (int)lengths[l], message);
+                    pp_diagnostic_append(&diagnostic, "\n%s %d %%\n", "note", INT32_MIN);
+                    result = (mode != 0 || (!diagnostic.direct && ftell(actual) == before));
+                    pp_diagnostic_flush(&diagnostic);
+                    fputs("after\n", actual);
+                    fprintf(expected, "prefix %u: %.*s\n%s %d %%\n", UINT32_MAX, (int)lengths[l], message, "note", INT32_MIN);
+                    fputs("after\n", expected);
+                    result = result && fseek(actual, 0, SEEK_SET) == 0 && fseek(expected, 0, SEEK_SET) == 0;
+                    uint8_t a[4096];
+                    uint8_t b[4096];
+                    size_t read = 0;
+                    do
+                    {
+                        read = fread(a, 1, sizeof(a), actual);
+                        const size_t reference = fread(b, 1, sizeof(b), expected);
+                        result = result && read == reference && memcmp(a, b, read) == 0;
+                    } while (result && read == sizeof(a));
+                    result = result && !ferror(actual) && !ferror(expected);
+                    arena.length = 0;
+                    checked += 1;
+                }
+                if (actual != 0)
+                {
+                    fclose(actual);
+                }
+                if (expected != 0)
+                {
+                    fclose(expected);
+                }
+            }
+        }
+        arena_release(&arena);
+    }
+    // A caller's unbuffered FILE receives the full diagnostic before the entry point returns. Quiet mode only
+    // counts, and a separately supplied note follows the primary line without changing the severity counts.
+    FILE* stream = tmpfile();
+    result = result && stream != 0 && setvbuf(stream, 0, _IONBF, 0) == 0;
+    if (result)
+    {
+        static Preprocessor pp;
+        pp = (Preprocessor){ 0 };
+        pp.options.diagnostics = stream;
+        const PPDiagnosticNote note =
+        {
+            .message = "follow-up",
+        };
+        pp_diagnose(&pp, PP_SEVERITY_WARNING, 0, "value %u", 17u);
+        pp_diagnose_note(&pp, PP_SEVERITY_ERROR, 0, &note, "bad %s", "input");
+        pp.options.quiet = true;
+        pp_diagnose(&pp, PP_SEVERITY_FATAL, 0, "silent");
+        const char expected[] = "warning: value 17\nerror: bad input\nnote: follow-up\n";
+        char actual[sizeof(expected)];
+        const ssize_t read = pread(fileno(stream), actual, sizeof(actual), 0);
+        result = read == sizeof(expected) - 1 && memcmp(actual, expected, sizeof(expected) - 1) == 0 && pp.warnings == 1 && pp.errors == 2 && pp.fatal;
+    }
+    if (stream != 0)
+    {
+        fclose(stream);
+    }
+    printf("diagnostic buffers: %u cases, %s (exact bytes, growth, unavailable scratch and ordering)\n", checked, result ? "pass" : "FAIL");
+    return result;
+}
+
 static bool pp_test_history(const char* directory, bool with_clang)
 {
     static const PPHistoryCase cases[] = {
+        {
+            .name = "undefined function-like name",
+            .source = "#if IS_IN (libc)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in elif",
+            .source = "#if 0\n#elif MISSING/**/(1) && 1\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in short-circuited operands",
+            .source = "#if 0 && MISSING(1)\n#endif\n#if 1 || UNKNOWN(2)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like alias",
+            .source = "#define ALIAS MISSING\n#if ALIAS(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in nested expansion",
+            .source = "#define INNER MISSING\n#define OUTER INNER\n#define ID(x) x\n#if ID(OUTER)(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like self expansion",
+            .source = "#define SELF SELF\n#if SELF(1)\n#endif\n",
+        },
+        {
+            .name = "disabled function-like recursive expansion",
+            .source = "#define F(x) F\n#if F(1)(2)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like Unicode name",
+            .source = "#if caf\\u00e9(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like long name is not truncated",
+            .source = "#if UNDEFINED_FUNCTION_WITH_A_NAME_LONGER_THAN_SIXTY_FOUR_BYTES_FOR_FULL_DIAGNOSTIC_SPELLING(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name before a splice",
+            .source = "#if MISSING\\\n(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like included name",
+            .source = "#line 40 \"caller.c\"\n#include \"history.h\"\n",
+            .header = "#define ALIAS UNKNOWN\n#line 70 \"renamed.h\"\n#if ALIAS(1)\n#endif\n",
+        },
+        {
+            .name = "number before parentheses keeps its operator diagnostic",
+            .source = "#define NUMBER 1\n#if NUMBER(2)\n#endif\n",
+        },
+        {
+            .name = "defined before parentheses keeps its operator diagnostic",
+            .source = "#if defined(X)(1)\n#endif\n",
+        },
+        {
+            .name = "name after a value keeps its operator diagnostic",
+            .source = "#if 1 MISSING(1)\n#endif\n",
+        },
+        {
+            .name = "parenthesized name keeps its operator diagnostic",
+            .source = "#if (MISSING)(1)\n#endif\n",
+        },
         {
             .name = "object",
             .source = "#define OBJ \"bad\"\n#if OBJ\n#endif\n",
@@ -595,5 +776,6 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool copies = pp_test_history_copies();
     const bool lifetimes = pp_test_history_lifetimes(directory);
     const bool growth = pp_test_history_growth(directory, with_clang);
-    return runs && copies && lifetimes && growth && failures == 0;
+    const bool diagnostic_buffer = pp_test_diagnostic_buffer();
+    return runs && copies && lifetimes && growth && diagnostic_buffer && failures == 0;
 }

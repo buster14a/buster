@@ -90,8 +90,8 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
     const uint32_t end = reader->selection_type_ends[first];
     const TypeId type = end > first ? check_input_constant_type(reader, first, end) : 0;
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
-    const bool valid = type != 0 && type_is_complete(reader->types, type) && kind != BUSTER_TYPE_KIND_VOID &&
-                       kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
+    // An incomplete type, void's too, is a C2y extension clang takes (-Wc2y-extensions): it matches no control.
+    const bool valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
     if (valid)
     {
         reader->selection_types[end] = type;
