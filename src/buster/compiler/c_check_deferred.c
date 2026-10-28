@@ -562,6 +562,26 @@ static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t
     return result;
 }
 
+// The end of the updates at or before `point` within one name's position-ordered history. Equal positions keep the
+// last logged update (a declarator followed by its initializer). A body may spell a name with many later declarations;
+// binary search bounds each lookup by the history's logarithm instead of scanning its later updates again per body.
+static uint32_t check_deferred_linked_end(const CheckDeferredLinked* linked, uint32_t begin, uint32_t end, uint32_t point)
+{
+    while (begin < end)
+    {
+        const uint32_t middle = begin + (end - begin) / 2;
+        if (linked[middle].position <= point)
+        {
+            begin = middle + 1;
+        }
+        else
+        {
+            end = middle;
+        }
+    }
+    return begin;
+}
+
 // Sets the lane's state of `name` that the top level's walk changes as it goes to source order's at the body's opening
 // (`cut`): its linked declaration and type, the last of the top level's updates before the opening
 // (check_deferred_linked), and its intrinsic's cache entry, which a declaration the top level made after the cut
@@ -574,11 +594,7 @@ static void check_deferred_name_state(const CheckDeferred* deferred, CheckDeferr
     if (deferred->linked_offsets != 0)
     {
         const uint32_t begin = deferred->linked_offsets[name];
-        uint32_t slot = deferred->linked_offsets[name + 1];
-        while (slot > begin && deferred->linked_names[slot - 1].position > cut->opening)
-        {
-            slot -= 1;
-        }
+        const uint32_t slot = check_deferred_linked_end(deferred->linked_names, begin, deferred->linked_offsets[name + 1], cut->opening);
         declaration = slot > begin ? deferred->linked_names[slot - 1].declaration : 0;
         type = slot > begin ? deferred->linked_names[slot - 1].type : 0;
     }

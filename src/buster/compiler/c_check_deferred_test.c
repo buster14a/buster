@@ -232,6 +232,50 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
       "int g(void) { enum T : short { Y = 2 }; return Y + (int)sizeof(enum T); }\nint h(void) { enum T u = X; return u; }\n", true, "-std=gnu23" },
 };
 
+// Every cut of empty, singleton and repeated-position histories against a simple forward oracle. Each history ends
+// exactly at a protected page, so an upper-bound search must not read its end or an empty history. Nonzero starts
+// keep earlier names out; declaration/type payloads distinguish the last equal-position update from the first.
+static bool check_deferred_test_linked_history(void)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    for (uint32_t length = 0; valid && length <= 128; length += 1)
+    {
+        const uint32_t prefix = 3;
+        CheckDeferredLinked* records = (CheckDeferredLinked*)(mapping + page) - length - prefix;
+        for (uint32_t i = 0; i < length + prefix; i += 1)
+        {
+            records[i] = (CheckDeferredLinked){
+                .position = i < prefix ? UINT32_MAX : 3 + (i - prefix) / 3 * 2,
+                .declaration = i + 1,
+                .type = i + 7,
+            };
+        }
+        for (uint32_t point = 0; valid && point <= 90; point += 1)
+        {
+            uint32_t expected = prefix;
+            for (uint32_t i = prefix; i < prefix + length; i += 1)
+            {
+                expected += records[i].position <= point;
+            }
+            const uint32_t actual = check_deferred_linked_end(records, prefix, prefix + length, point);
+            valid = actual == expected;
+            if (actual > prefix && valid)
+            {
+                valid = records[actual - 1].declaration == expected && records[actual - 1].type == expected + 6;
+            }
+        }
+        valid = valid && check_deferred_linked_end(records, prefix, prefix + length, UINT32_MAX) == prefix + length;
+    }
+    valid = valid && check_deferred_linked_end(NULL, 0, 0, 0) == 0;
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    return valid;
+}
+
 static uint32_t check_deferred_benchmark_cpus(const char* text, uint32_t* cpus, uint32_t capacity);
 
 // benchmark-checker-deferred's --cpus (#432's review), into room for BUSTER_CHECK_DEFERRED_MAX_LANES CPUs that ends at a
@@ -811,6 +855,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
         {
             unlink(path);
         }
+    }
+    const bool linked_history = check_deferred_test_linked_history();
+    checks += 1;
+    failures += !linked_history;
+    if (!linked_history)
+    {
+        fprintf(stderr, "test-checker-deferred: a linked history lookup read outside its name or selected the wrong update\n");
     }
     const bool cpus = check_deferred_test_cpus();
     checks += 1;
