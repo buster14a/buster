@@ -111,17 +111,16 @@ static CBuiltinMiscLowerCall cbuiltin_misc_lower_test_call(CBuiltinId id)
     return result;
 }
 
-static bool cbuiltin_misc_lower_test_program(CBuiltinMiscLowerTestTally* tally, Arena* arena, CBuiltinId id, CBuiltinMiscLowerTestProgram programs[2], uint32_t item)
+static bool cbuiltin_misc_lower_test_program(CBuiltinMiscLowerTestTally* tally, Arena* arena, CBuiltinMiscLowerCall call, CBuiltinMiscLowerTestProgram programs[2], uint32_t item)
 {
     const uint64_t mark = arena->length;
     CBuiltinMiscLowerTestStream streams[2];
     CBuiltinLowerResult lowered[2] = { 0 };
-    const CBuiltinMiscLowerCall call = cbuiltin_misc_lower_test_call(id);
     bool result = true;
     for (uint32_t path = 0; path < 2; path += 1)
     {
         CBuiltinMiscLowerTestStream* stream = streams + path;
-        cbuiltin_misc_lower_test_stream(stream, id);
+        cbuiltin_misc_lower_test_stream(stream, call.id);
         cbuiltin_misc_lower_test_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0x73);
         cbuiltin_misc_lower_test_emit(stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
         cbuiltin_misc_lower_test_emit(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, BUSTER_CBUILTIN_MISC_TEST_SENTINEL);
@@ -228,6 +227,177 @@ static int cbuiltin_misc_lower_test_sign(int value)
     return result;
 }
 
+static void cbuiltin_misc_lower_test_constants(CBuiltinMiscLowerTestTally* tally)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 26);
+    uint8_t* left = mmap(0, BUSTER_CBUILTIN_MISC_TEST_PAGE * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* right = mmap(0, BUSTER_CBUILTIN_MISC_TEST_PAGE * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool guarded = left != MAP_FAILED && right != MAP_FAILED &&
+        mprotect(left + BUSTER_CBUILTIN_MISC_TEST_PAGE, BUSTER_CBUILTIN_MISC_TEST_PAGE, PROT_NONE) == 0 &&
+        mprotect(right + BUSTER_CBUILTIN_MISC_TEST_PAGE, BUSTER_CBUILTIN_MISC_TEST_PAGE, PROT_NONE) == 0;
+    if (cbuiltin_misc_lower_test_expect(tally, arena.base != 0 && guarded, "constant arena and guards", 0))
+    {
+        for (uint32_t p = 5; p <= 8; p += 1)
+        {
+            for (uint32_t size = 0; size <= BUSTER_CBUILTIN_MISC_SMALL_BYTES + 1; size += 1)
+            {
+                CBuiltinMiscLowerCall call = cbuiltin_misc_lower_test_call(cbuiltin_misc_lower_test_ids[p]);
+                call.constant_size_known = true;
+                call.constant_size = size;
+                CBuiltinMiscLowerTestProgram programs[2] = { 0 };
+                const bool valid = cbuiltin_misc_lower_test_program(tally, &arena, call, programs, p * 100 + size);
+                for (uint32_t path = 0; valid && path < 2; path += 1)
+                {
+                    for (uint32_t alignment = 0; alignment < 16; alignment += 1)
+                    {
+                        for (int distance = -17; distance <= 17; distance += 1)
+                        {
+                            uint8_t actual[256];
+                            uint8_t expected[256];
+                            uint8_t source[256];
+                            for (uint32_t i = 0; i < sizeof(source); i += 1)
+                            {
+                                source[i] = (uint8_t)(i * 149u + 73u);
+                                actual[i] = expected[i] = source[i];
+                            }
+                            const uint32_t at = 80 + alignment;
+                            uint8_t* target = actual + at + distance;
+                            uint8_t* destination = expected + at + distance;
+                            const uint8_t* from = p == 6 ? actual + at : source + at;
+                            uint64_t wanted = (uintptr_t)target;
+                            uint64_t second = (uintptr_t)from;
+                            if (p == 5)
+                            {
+                                memcpy(destination, source + at, size);
+                            }
+                            else if (p == 6)
+                            {
+                                memmove(destination, expected + at, size);
+                            }
+                            else if (p == 7)
+                            {
+                                second = (uint64_t)(int64_t)(distance * 129);
+                                memset(destination, distance * 129, size);
+                            }
+                            else
+                            {
+                                wanted = (uint64_t)(int64_t)memcmp(target, from, size);
+                            }
+                            const uint64_t value = cbuiltin_misc_lower_test_invoke(programs + path, (uintptr_t)target, second, size);
+                            const bool equal = p == 8 ? cbuiltin_misc_lower_test_sign((int)(uint32_t)value) == cbuiltin_misc_lower_test_sign((int)(uint32_t)wanted) : value == wanted;
+                            cbuiltin_misc_lower_test_expect(tally, equal && memcmp(actual, expected, sizeof(actual)) == 0, "constant sizes, close overlap and guards", size * 10000 + p * 100 + alignment);
+                        }
+                    }
+                    memset(left, 0x80, BUSTER_CBUILTIN_MISC_TEST_PAGE);
+                    memset(right, 0x80, BUSTER_CBUILTIN_MISC_TEST_PAGE);
+                    uint8_t* source = left + BUSTER_CBUILTIN_MISC_TEST_PAGE - size;
+                    uint8_t* target = right + BUSTER_CBUILTIN_MISC_TEST_PAGE - size;
+                    const uint64_t value = cbuiltin_misc_lower_test_invoke(programs + path, (uintptr_t)target, p == 7 ? 0x180 : (uintptr_t)source, size);
+                    cbuiltin_misc_lower_test_expect(tally, value == (p == 8 ? 0 : (uintptr_t)target) && memcmp(target, source, size) == 0, "constant exact guarded tail, including zero", size);
+                    if (p == 6 && size != 0)
+                    {
+                        for (uint32_t direction = 0; direction < 2; direction += 1)
+                        {
+                            uint8_t expected[128];
+                            for (uint32_t i = 0; i < sizeof(expected); i += 1)
+                            {
+                                expected[i] = left[BUSTER_CBUILTIN_MISC_TEST_PAGE - sizeof(expected) + i] = (uint8_t)(i * 149 + 73);
+                            }
+                            uint8_t* end = left + BUSTER_CBUILTIN_MISC_TEST_PAGE;
+                            uint8_t* to = end - size - direction;
+                            uint8_t* from = end - size - (1 - direction);
+                            memmove(expected + sizeof(expected) - size - direction, expected + sizeof(expected) - size - (1 - direction), size);
+                            const uint64_t moved = cbuiltin_misc_lower_test_invoke(programs + path, (uintptr_t)to, (uintptr_t)from, size);
+                            cbuiltin_misc_lower_test_expect(tally, moved == (uintptr_t)to && memcmp(end - sizeof(expected), expected, sizeof(expected)) == 0, "constant overlap at guarded end", size);
+                        }
+                    }
+                }
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    if (programs[path].bytes != 0 && programs[path].bytes != MAP_FAILED)
+                    {
+                        munmap(programs[path].bytes, programs[path].mapping_bytes);
+                    }
+                }
+            }
+        }
+    }
+    if (left != MAP_FAILED)
+    {
+        munmap(left, BUSTER_CBUILTIN_MISC_TEST_PAGE * 2);
+    }
+    if (right != MAP_FAILED)
+    {
+        munmap(right, BUSTER_CBUILTIN_MISC_TEST_PAGE * 2);
+    }
+    arena_release(&arena);
+}
+
+static void cbuiltin_misc_lower_test_large(CBuiltinMiscLowerTestTally* tally, CBuiltinMiscLowerTestProgram programs[BUSTER_CBUILTIN_MISC_TEST_PROGRAMS], uint32_t path)
+{
+    static const uint32_t lengths[] =
+    {
+        256,
+        4095,
+        4096,
+        1048576,
+    };
+    const uint32_t capacity = 1048576 + 256;
+    uint8_t* source = malloc(capacity);
+    uint8_t* actual = malloc(capacity);
+    uint8_t* expected = malloc(capacity);
+    if (cbuiltin_misc_lower_test_expect(tally, source != 0 && actual != 0 && expected != 0, "large buffers", path))
+    {
+        for (uint32_t size = 0; size < sizeof(lengths) / sizeof(lengths[0]); size += 1)
+        {
+            const uint32_t n = lengths[size];
+            for (uint32_t alignment = 0; alignment < 16; alignment += 1)
+            {
+                const uint32_t at = 64 + alignment;
+                for (uint32_t i = 0; i < capacity; i += 1)
+                {
+                    source[i] = (uint8_t)(1 + i % 255);
+                    actual[i] = expected[i] = 0xa5;
+                }
+                memcpy(expected + at, source + 64, n);
+                uint64_t value = cbuiltin_misc_lower_test_invoke(programs + 5, (uintptr_t)(actual + at), (uintptr_t)(source + 64), n);
+                cbuiltin_misc_lower_test_expect(tally, value == (uintptr_t)(actual + at) && memcmp(actual, expected, capacity) == 0, "large copy", n);
+                memset(expected + at, 0x80, n);
+                value = cbuiltin_misc_lower_test_invoke(programs + 7, (uintptr_t)(actual + at), 0x180, n);
+                cbuiltin_misc_lower_test_expect(tally, value == (uintptr_t)(actual + at) && memcmp(actual, expected, capacity) == 0, "large fill", n);
+                for (int distance = -17; distance <= 17; distance += 1)
+                {
+                    memcpy(actual, source, capacity);
+                    memcpy(expected, source, capacity);
+                    memmove(expected + at + distance, expected + at, n);
+                    value = cbuiltin_misc_lower_test_invoke(programs + 6, (uintptr_t)(actual + at + distance), (uintptr_t)(actual + at), n);
+                    cbuiltin_misc_lower_test_expect(tally, value == (uintptr_t)(actual + at + distance) && memcmp(actual, expected, capacity) == 0, "large close overlap both directions", n);
+                }
+                for (uint32_t difference = 0; difference <= 8; difference += 1)
+                {
+                    memcpy(actual + at, source + 64, n);
+                    if (difference != 0)
+                    {
+                        // Opposite orders in adjacent bytes catch integer-order comparisons and an imprecise first-byte mask.
+                        const uint32_t byte = n / 2 + difference - 1;
+                        actual[at + byte] = source[64 + byte] ^ 0x80;
+                        actual[at + byte + 1] = source[64 + byte + 1] ^ 0x80;
+                    }
+                    const int oracle = memcmp(actual + at, source + 64, n);
+                    value = cbuiltin_misc_lower_test_invoke(programs + 8, (uintptr_t)(actual + at), (uintptr_t)(source + 64), n);
+                    cbuiltin_misc_lower_test_expect(tally, cbuiltin_misc_lower_test_sign((int)(uint32_t)value) == cbuiltin_misc_lower_test_sign(oracle), "large compare and each mismatch byte", n);
+                }
+                source[at + n] = 0;
+                value = cbuiltin_misc_lower_test_invoke(programs + 9, (uintptr_t)(source + at), 0, 0);
+                cbuiltin_misc_lower_test_expect(tally, value == n, "large length", n);
+            }
+        }
+    }
+    free(source);
+    free(actual);
+    free(expected);
+}
+
 static void cbuiltin_misc_lower_test_memory(CBuiltinMiscLowerTestTally* tally, CBuiltinMiscLowerTestProgram programs[BUSTER_CBUILTIN_MISC_TEST_PROGRAMS], uint32_t path)
 {
     static const uint32_t lengths[] = { 0, 1, 7, 8, 15, 16, 31, 32, 63, 64, 65, 255 };
@@ -290,8 +460,9 @@ static void cbuiltin_misc_lower_test_memory(CBuiltinMiscLowerTestTally* tally, C
             }
             memset(actual, 0x81, sizeof(actual));
             actual[destination + n] = 0;
+            memset(actual + destination + n + 1, 1, 8);
             result = cbuiltin_misc_lower_test_invoke(programs + 9, (uintptr_t)(actual + destination), 0, 0);
-            cbuiltin_misc_lower_test_expect(tally, result == strlen((const char*)actual + destination), "strlen values and alignments", item++);
+            cbuiltin_misc_lower_test_expect(tally, result == strlen((const char*)actual + destination), "strlen alignments and borrow after zero", item++);
         }
     }
 }
@@ -530,7 +701,7 @@ static int run_builtin_misc_lower_tests(int argc, char** argv)
         for (uint32_t p = 0; valid && p < BUSTER_CBUILTIN_MISC_TEST_PROGRAMS; p += 1)
         {
             CBuiltinMiscLowerTestProgram programs[2] = { 0 };
-            valid = cbuiltin_misc_lower_test_program(&tally, &arena, cbuiltin_misc_lower_test_ids[p], programs, p);
+            valid = cbuiltin_misc_lower_test_program(&tally, &arena, cbuiltin_misc_lower_test_call(cbuiltin_misc_lower_test_ids[p]), programs, p);
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 native[path][p] = programs[path];
@@ -547,12 +718,14 @@ static int run_builtin_misc_lower_tests(int argc, char** argv)
             const pid_t child = fork();
             if (child == 0)
             {
-                alarm(10);
+                alarm(30);
+                cbuiltin_misc_lower_test_constants(shared);
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
                     cbuiltin_misc_lower_test_hints(shared, native[path], path);
                     cbuiltin_misc_lower_test_memory(shared, native[path], path);
                     cbuiltin_misc_lower_test_native_guards(shared, native[path], path);
+                    cbuiltin_misc_lower_test_large(shared, native[path], path);
                 }
                 _exit(shared->failures == 0 ? 0 : 1);
             }

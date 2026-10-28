@@ -3116,6 +3116,21 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = stream->misc[selected].runtime_builtin, .argument_count = count };
+        if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
+        {
+            const uint32_t size_node = graph->argument_nodes[first + 2];
+            const CheckOp size_op = graph->ops[size_node];
+            const CheckValue* size = stream->values + size_node;
+            // Match ordinary constant emission's proof: a retained folded value is not a runtime size when a
+            // floating environment or evaluation effect still matters. Argument evaluation remains below.
+            if (size_op != CHECK_OP_BUILTIN_QUERY && size_op != CHECK_OP_STATEMENT_VALUE && size_op != CHECK_OP_INITIALIZE &&
+                size->category == CHECK_RVALUE && size->constant_kind == CHECK_CONSTANT_INTEGER && size->fault == CHECK_FAULT_NONE &&
+                (size->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && (uint64_t)size->integer <= UINT32_MAX)
+            {
+                call->constant_size_known = true;
+                call->constant_size = (uint32_t)(uint64_t)size->integer;
+            }
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const TypeId type = stream->argument_conversions[first + i].type;
