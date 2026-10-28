@@ -71,6 +71,8 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         "int first(void){return *\n#error after_operator\n1;}\nint later(void){return 1<<32;}\n",
         "int x=1<<32\n#warning before_semicolon\n;\n#warning after_semicolon\nint first(void){return missing;}\n",
         "enum { A=2147483647+1\n#warning inside_enum\n};\nint first(void){return missing;}\n",
+        "int array[1]={1,2}\n#error after_initializer\n;\n",
+        "struct P{int x;};\nint f(void){struct P p={.x=(int[1]){1,2}[0]\n#warning after_inner\n};return p.x;}\n",
     };
     static const char* const limits[] = { NULL, "-ferror-limit=0", "-ferror-limit=1", "-ferror-limit=2", "-ferror-limit=20" };
     static const char* const policies[] = { NULL, "error", "ignored", "-w" };
@@ -195,51 +197,59 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
             }
         }
     }
-    // A TU-final constraint stays independent of the rejected body's graph, even when its located declaration is
-    // earlier. The existing forward-tag note is a separate checker text boundary; this control pins primary
-    // counts, final error location and cutoff, while the fixtures above compare every existing macro/include note.
-    const char tentative[] = "struct S;\nstruct S object;\nint first(void){return missing;}\nint later(void){return 1<<32;}\n";
-    made = parse_test_write(source, tentative, sizeof(tentative) - 1);
-    check_test_expect(test, made, "independent tentative-definition constraint source can be written");
-    for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
+    // Completed control and TU-final constraints stay independent of preprocessing/body rejection. Existing
+    // forward-tag/previous-case notes are separate checker text boundaries: these controls pin primary counts,
+    // final error location and cutoff, while the fixtures above compare every existing macro/include note.
+    const char* constraints[] = {
+        "struct S;\nstruct S object;\nint first(void){return missing;}\nint later(void){return 1<<32;}\n",
+        "int f(int n){switch(n){case 0:;case 0:;}\n#error after_switch\nreturn 0;}\n",
+        "int f(void){break\n#error before_semicolon\n;return 0;}\n",
+        "int f(void){continue;\n#error after_semicolon\nreturn 0;}\n",
+    };
+    for (uint32_t constraint = 0; constraint < BUSTER_ARRAY_LENGTH(constraints); constraint += 1)
     {
-        char* arguments[10] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
-        uint32_t used = 4;
-        if (limits[limit] != NULL)
+        made = parse_test_write(source, constraints[constraint], strlen(constraints[constraint]));
+        check_test_expect(test, made, "independent completed constraint source can be written");
+        for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(limits); limit += 1)
         {
-            arguments[used++] = (char*)limits[limit];
-        }
-        arguments[used++] = source;
-        char* text = NULL;
-        const int oracle = check_test_driver_spawn(arguments, &text);
-        const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
-        free(text);
-        for (uint32_t route = 0; route < 4; route += 1)
-        {
-            char* checked[12] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
-            used = 2;
-            if ((route & 1) != 0)
-            {
-                checked[used++] = "--scalar";
-            }
-            checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
-            if (route >= 2)
-            {
-                checked[used++] = "-o";
-                checked[used++] = object;
-            }
+            char* arguments[10] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics" };
+            uint32_t used = 4;
             if (limits[limit] != NULL)
             {
-                checked[used++] = (char*)limits[limit];
+                arguments[used++] = (char*)limits[limit];
             }
-            checked[used++] = source;
-            text = NULL;
-            const int status = check_test_driver_spawn(checked, &text);
-            const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
-            check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
-                                   actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
-                                   strcmp(actual.summary, expected.summary) == 0, "independent TU-final constraint keeps Clang counts, order and error budget");
+            arguments[used++] = source;
+            char* text = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &text);
+            const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
             free(text);
+            for (uint32_t route = 0; route < 4; route += 1)
+            {
+                char* checked[12] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17" };
+                used = 2;
+                if ((route & 1) != 0)
+                {
+                    checked[used++] = "--scalar";
+                }
+                checked[used++] = route < 2 ? "-fsyntax-only" : "-c";
+                if (route >= 2)
+                {
+                    checked[used++] = "-o";
+                    checked[used++] = object;
+                }
+                if (limits[limit] != NULL)
+                {
+                    checked[used++] = (char*)limits[limit];
+                }
+                checked[used++] = source;
+                text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.warnings == expected.warnings &&
+                                       actual.fatal == expected.fatal && actual.last_error_line == expected.last_error_line && !actual.after_fatal &&
+                                       strcmp(actual.summary, expected.summary) == 0, "independent completed constraint keeps Clang counts, order and error budget");
+                free(text);
+            }
         }
     }
     unlink(source);
