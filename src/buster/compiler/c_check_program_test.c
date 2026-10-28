@@ -2130,6 +2130,7 @@ static void check_test_program_return_marks(CheckTest* test)
 }
 
 #include "c_check_program_batch_test.c"
+#include "c_check_literal_table_test.c"
 
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
 {
@@ -2161,6 +2162,7 @@ static void check_test_program_many_aggregate_returns(CheckTest* test, const cha
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_return_marks(test);
+    check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_many_aggregate_returns(test, clang);
