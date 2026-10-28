@@ -22,7 +22,14 @@ The predicate compares the actual optimizer's scalar and SIMD paths with the
 original function through the checked interpreter. It compares the returned
 bits and all bytes of one registered 32-byte global, symbol 2. The function is
 symbol 1. Unbound calls and other unsupported interpreter forms are unavailable
-observations. `--verify` selects the verifier-disagreement predicate instead.
+observations. `--verify` instead rechecks the two verifiers on admitted functions
+and supports the explicit `verify-phi` observer injection.
+Both input admission and every replacement require both complete verifiers to
+accept the function before this observer runs. Consequently, this hook cannot
+reduce an ordinary input on which those deterministic verifiers disagree;
+reduction of input-verifier disagreements remains separate future work. The
+injected fixture qualifies the classified reduction/replay path within that
+admission boundary, not that deferred capability.
 `--passes 0..7` chooses the existing SCCP/DCE/CFG pass mask.
 
 The reducer rebuilds selected blocks and instructions into fresh columns, with
