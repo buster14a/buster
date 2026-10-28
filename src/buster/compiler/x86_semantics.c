@@ -899,6 +899,27 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
 #define BUSTER_X86_RESOURCE_LOWER_VECTORS (0xffffull << BUSTER_X86_RESOURCE_VECTOR_SHIFT)
 #define BUSTER_X86_RESOURCE_ALL (~0ull)
 
+// The resources the x87's and vzeroupper's properties add, by the properties' bits 8 to 10 (X87, X87_CONTROL and
+// ZERO_UPPER): X87 reads the x87's state and control word and writes the state, X87_CONTROL writes the control word too,
+// and ZERO_UPPER reads and writes ZMM0 to ZMM15. A lookup rather than a test per property: on the 9700X the scalar twin
+// took 11 instructions and 2% of its cycles per record fewer so.
+_Static_assert(BUSTER_X86_EFFECT_X87 == 0x0100 && BUSTER_X86_EFFECT_X87_CONTROL == 0x0200 && BUSTER_X86_EFFECT_ZERO_UPPER == 0x0400,
+               "the x87's and vzeroupper's properties are bits 8 to 10");
+#define BUSTER_X86_RARE_READS(bits) \
+    (((bits) & 1 ? BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL : 0) | ((bits) & 4 ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0))
+#define BUSTER_X86_RARE_WRITES(bits) \
+    (((bits) & 1 ? BUSTER_X86_RESOURCE_X87 : 0) | ((bits) & 2 ? BUSTER_X86_RESOURCE_X87_CONTROL : 0) | ((bits) & 4 ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0))
+static const uint64_t x86_rare_reads[8] = {
+    BUSTER_X86_RARE_READS(0), BUSTER_X86_RARE_READS(1), BUSTER_X86_RARE_READS(2), BUSTER_X86_RARE_READS(3),
+    BUSTER_X86_RARE_READS(4), BUSTER_X86_RARE_READS(5), BUSTER_X86_RARE_READS(6), BUSTER_X86_RARE_READS(7),
+};
+static const uint64_t x86_rare_writes[8] = {
+    BUSTER_X86_RARE_WRITES(0), BUSTER_X86_RARE_WRITES(1), BUSTER_X86_RARE_WRITES(2), BUSTER_X86_RARE_WRITES(3),
+    BUSTER_X86_RARE_WRITES(4), BUSTER_X86_RARE_WRITES(5), BUSTER_X86_RARE_WRITES(6), BUSTER_X86_RARE_WRITES(7),
+};
+#undef BUSTER_X86_RARE_READS
+#undef BUSTER_X86_RARE_WRITES
+
 // A register operand's resource: a general register (AH to BH are RAX to RBX's) or a vector one. The covered forms take
 // general registers 0 to 15, as x86_encode does.
 static uint64_t x86_register_resource(uint8_t value, bool vector)
@@ -930,11 +951,9 @@ static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Inst
         read = effects->implicit_reads | (uint64_t)flags_read << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
         write = effects->implicit_writes | (uint64_t)(flags_written | flags_undefined) << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
         read |= (effects->properties & BUSTER_X86_EFFECT_MXCSR) ? BUSTER_X86_RESOURCE_MXCSR : 0;
-        read |= (effects->properties & BUSTER_X86_EFFECT_X87) ? BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL : 0;
-        write |= (effects->properties & BUSTER_X86_EFFECT_X87) ? BUSTER_X86_RESOURCE_X87 : 0;
-        write |= (effects->properties & BUSTER_X86_EFFECT_X87_CONTROL) ? BUSTER_X86_RESOURCE_X87_CONTROL : 0;
-        read |= (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0;
-        write |= (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0;
+        const uint32_t rare = (effects->properties >> 8) & 7;
+        read |= x86_rare_reads[rare];
+        write |= x86_rare_writes[rare];
         const uint8_t values[BUSTER_X86_ROLES] = { instruction->reg, instruction->rm, instruction->vvvv };
         for (uint32_t role = 0; role < BUSTER_X86_ROLES; role += 1)
         {
