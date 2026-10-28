@@ -14,6 +14,7 @@ struct CheckPragmaFixture
     uint32_t nonnull_records;
     uint32_t completed_records;
     uint32_t completed_warnings;
+    uint32_t completed_errors;
     uint32_t other;
     bool rejected;
     bool semantic_error;
@@ -284,6 +285,44 @@ static void check_test_pragma_history(CheckTest* test, const Parser* parser, Pre
     arena_release(&arena);
 }
 
+// The general parser oracle suppresses warnings. Completed directives instead compare their complete diagnostic
+// groups against an unsuppressed preprocessing invocation, including _Pragma's expansion notes.
+static char* check_test_completed_pragma_clang(const char* clang, const char* path, bool rejected)
+{
+    FILE* diagnostics = tmpfile();
+    char* text = NULL;
+    const pid_t child = diagnostics != NULL ? fork() : -1;
+    if (child == 0)
+    {
+        const int output = open("/dev/null", O_WRONLY);
+        if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(diagnostics), STDERR_FILENO) >= 0)
+        {
+            execlp(clang, clang, "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fno-diagnostics-show-option",
+                   "-fmacro-backtrace-limit=0", path, (char*)NULL);
+        }
+        _exit(127);
+    }
+    int status = 0;
+    pid_t waited = child;
+    while (child > 0 && (waited = waitpid(child, &status, 0)) < 0 && errno == EINTR)
+    {
+    }
+    size_t length = 0;
+    if (child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == rejected)
+    {
+        if (!pp_test_read_output(diagnostics, &text, &length))
+        {
+            free(text);
+            text = NULL;
+        }
+    }
+    if (diagnostics != NULL)
+    {
+        fclose(diagnostics);
+    }
+    return text;
+}
+
 static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const char* clang)
 {
     const CheckPragmaFixture fixtures[] =
@@ -325,6 +364,7 @@ static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const 
         {
             .name = "GCC error remains a preprocessing rejection",
             .source = "#pragma GCC error \"completed error\"\nint f(void){return 3;}\n",
+            .completed_errors = 1,
             .rejected = true,
         },
         {
@@ -455,6 +495,9 @@ static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const 
     {
         const CheckPragmaFixture* fixture = &fixtures[i];
         check_test_expect(test, outcomes[i].rejected == (fixture->rejected || fixture->semantic_error), fixture->name);
+        const bool completed = fixture->completed_records != 0 || fixture->completed_errors != 0;
+        char* oracle = completed ? check_test_completed_pragma_clang(clang, paths[i], fixture->rejected) : NULL;
+        check_test_expect(test, !completed || oracle != NULL, "completed directive diagnostic oracle runs unsuppressed");
         for (uint32_t variant = 0; variant < 2; variant += 1)
         {
             InternTable identifiers = { 0 };
@@ -472,11 +515,12 @@ static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const 
             bool initialized = diagnostics != 0 && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
                                parse_initialize(&parser, &parse_options, options.language);
             check_test_expect(test, initialized, "diagnostic pragma fixture initializes");
-            const bool preprocessed = initialized && pp_run_source(&pp, "diagnostic-pragmas.c", (const uint8_t*)fixture->source, (uint32_t)strlen(fixture->source));
+            const bool preprocessed = initialized && pp_run_source(&pp, paths[i], (const uint8_t*)fixture->source, (uint32_t)strlen(fixture->source));
             check_test_expect(test, preprocessed != fixture->rejected, fixture->name);
-            if (fixture->completed_records != 0)
+            if (completed)
             {
-                check_test_expect(test, pp.errors == 0 && pp.warnings == fixture->completed_warnings, "completed directives have only their original preprocessing diagnostics");
+                check_test_expect(test, pp.errors == fixture->completed_errors && pp.warnings == fixture->completed_warnings,
+                                  "completed directives have only their original preprocessing diagnostics");
             }
             if (preprocessed)
             {
@@ -494,12 +538,26 @@ static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const 
                 uint32_t first_line = 0;
                 while (first_line == 0 && fgets(line, sizeof(line), diagnostics) != 0)
                 {
-                    if (strstr(line, "error:") != 0)
+                    if (strncmp(line, paths[i], strlen(paths[i])) == 0 && strstr(line, "error:") != 0)
                     {
-                        sscanf(line, "diagnostic-pragmas.c:%u:", &first_line);
+                        sscanf(line + strlen(paths[i]), ":%u:", &first_line);
                     }
                 }
                 check_test_expect(test, first_line == outcomes[i].line, "pragma syntax errors retain Clang's exact first source line");
+            }
+            if (completed && diagnostics != NULL)
+            {
+                char* text = NULL;
+                size_t length = 0;
+                const bool read = pp_test_read_output(diagnostics, &text, &length);
+                if (text != NULL && oracle != NULL)
+                {
+                    pp_test_normalize_scratch(text);
+                    pp_test_normalize_scratch(oracle);
+                }
+                check_test_expect(test, read && text != NULL && oracle != NULL && strcmp(text, oracle) == 0,
+                                  "completed directives retain Clang's diagnostic groups exactly once");
+                free(text);
             }
             parse_release(&parser);
             pp_release(&pp);
@@ -509,6 +567,7 @@ static __attribute__((noinline)) void check_test_pragmas(CheckTest* test, const 
                 fclose(diagnostics);
             }
         }
+        free(oracle);
         if (!fixture->rejected && fixture->other == 0)
         {
             const CheckSourceFixture semantic =
