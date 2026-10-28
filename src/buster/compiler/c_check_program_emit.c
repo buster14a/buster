@@ -1097,7 +1097,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        // The first emitted definition a #pragma clang section setting places, or BUSTER_CHECK_NONE (#619).
+        // The first emitted definition under active #pragma clang section settings, or BUSTER_CHECK_NONE (#619).
+        // Static objects are conservative candidates under any active object setting; section-kind selection belongs
+        // with actual section emission, so the refusal must not claim that this object would use the named section.
         const CheckInputSections* sections = program->input->sections;
         uint32_t placed = BUSTER_CHECK_NONE;
         for (uint32_t i = 0; sections != NULL && placed == BUSTER_CHECK_NONE && i < sections->definition_count; i += 1)
@@ -1153,13 +1155,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 }
             }
         }
-        // A definition a #pragma clang section setting places (#619) is refused as a section attribute is, where no
+        // A definition under active #pragma clang section settings (#619) is refused as a section attribute is, where no
         // attribute's refusal comes before it: the loop above stops at its token. Such a definition needn't have an
         // attribute at all (a section attribute of its own keeps it out), so the settings list them (CheckInputSections).
         if (valid && placed != BUSTER_CHECK_NONE)
         {
             result->status = CHECK_PROGRAM_UNSUPPORTED;
-            result->reason = "a definition '#pragma clang section' places in a section";
+            result->reason = "a definition under active '#pragma clang section' settings";
             result->token = placed;
             valid = false;
         }

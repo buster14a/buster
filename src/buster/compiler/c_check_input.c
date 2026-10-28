@@ -163,7 +163,7 @@ struct CheckInput
     // Only a rejected loop-hint statement retains this cold diagnostic, with its completion and spelling apart.
     CheckInputLoopDiagnostic* loop_diagnostic;
     CheckInputNakedDiagnostic* naked_diagnostic;
-    // #619: the unit's #pragma clang section settings, its section diagnostics and the definitions the settings place
+    // #619: the unit's #pragma clang section settings, diagnostics and conservative emission-refusal candidates
     // (c_check_section_input.c); NULL in a unit without a section pragma or attribute.
     CheckInputSections* sections;
     // #619: the unit's erroneous #pragma clang optimize lines' diagnostics (c_check_optimize_input.c), or NULL.

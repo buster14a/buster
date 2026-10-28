@@ -241,11 +241,16 @@ does, each rule checked against clang's answers on probes of it:
   retained line keeps its tokens as written), and an error at the line's end,
   whose place the retained line doesn't keep. A setting applies to the
   definitions after it that have no section attribute of their own: text to
-  the functions', the others to the variables' with static storage. `-c` and
-  the direct path refuse the first such definition they emit by name ("a
-  definition '#pragma clang section' places in a section"), as they refuse a
-  `section` attribute, until definitions go into named sections (#619's part
-  2). The deferred reader leaves a unit with a setting to source order, and a
+  the functions', the others by a static-storage variable's final section kind.
+  Until section emission owns that selection (#619's part 2), `-c` and the
+  direct path conservatively refuse any emitted static-storage definition
+  while any bss/data/rodata/relro setting is active, and emitted function
+  definitions while text is active ("a definition under active '#pragma clang
+  section' settings"). For example, a bss-only or rodata-only setting still
+  refuses `int x = 1`, although Clang leaves it in ordinary `.data`. A text-only
+  setting leaves static objects alone, and cleared object settings do too.
+  A definition with its own/inherited `section` attribute retains that
+  attribute's named refusal. The deferred reader leaves a unit with a setting to source order, and a
   lane refuses a body with a section attribute.
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
@@ -1370,8 +1375,9 @@ The test command fails if the oracle cannot run. It covers:
   `check_test_driver_optimize_pragmas`, on all four routes): each line's
   settings and errors, and the section type conflicts in clang's order, against
   clang's first error, place and message; the refusals by name pinned; and
-  `-c` of each unit clang takes, which must refuse a definition a setting or
-  an attribute places, by name, and write the object of every other.
+  `-c` of each unit clang takes, with the conservative active-object-setting
+  refusal and its no-active-object-setting controls pinned, alongside the
+  section attributes' refusals and successful ordinary objects.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on

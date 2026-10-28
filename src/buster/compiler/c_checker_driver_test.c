@@ -2796,12 +2796,12 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 // #619's #pragma clang section against clang: each line's settings and errors, at clang's places with its messages, and
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
-// line's end. Then -c of the units clang takes: a definition a setting places is refused by name, as one an attribute
-// places is, and a unit with neither writes its object.
+// line's end. Then -c of the units clang takes: definitions under active settings are conservatively refused by name,
+// as one an attribute places is, and a unit without an applicable active setting writes its object.
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
-    static const char placed[] = "unsupported: a definition '#pragma clang section' places in a section";
+    static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char attributed[] = "unsupported: this attribute (alias, ifunc, constructor, destructor, weak, retain, section, common or a visibility)";
     static const struct
     {
@@ -2824,6 +2824,12 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a cleared kind places nothing", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\nint f(void) { return 1; }\n", 0, 0 },
         { "data places a block's static", "#pragma clang section data = \".d\"\nint f(void) { static int s = 1; return s; }\n", 0, 2 },
         { "bss places a tentative definition", "#pragma clang section bss = \".x\"\nint z;\nint f(void) { return z; }\n", 0, 2 },
+        // Clang puts these initialized writable objects in ordinary .data: the bounded refusal deliberately includes
+        // every static-storage definition under any active object setting until part 2 selects its final section kind.
+        { "bss conservatively refuses an ordinary data definition", "#pragma clang section bss = \".only_bss\"\nint x = 1;\nint f(void) { return x; }\n", 0, 2 },
+        { "rodata conservatively refuses an ordinary data definition", "#pragma clang section rodata = \".only_rodata\"\nint x = 1;\nint f(void) { return x; }\n", 0, 2 },
+        { "a text setting leaves static objects alone", "#pragma clang section text = \".only_text\"\nint x = 1;\n", 0, 0 },
+        { "cleared object settings leave static objects alone", "#pragma clang section bss = \".b\" rodata = \".r\"\n#pragma clang section bss = \"\" rodata = \"\"\nint x = 1;\n", 0, 0 },
         { "rodata and relro share their flags", "#pragma clang section rodata = \".x\" relro = \".x\"\nconst int c __attribute__((section(\".x\"))) = 1;\n", 0, 2, true },
         { "an extern declaration unifies nothing", "extern int e __attribute__((section(\".x\")));\nint f(void) __attribute__((section(\".x\")));\nint f(void) { return e; }\n", 0, 1, true },
         { "an unknown kind", "#pragma clang section foo = \".x\"\nint f(void) { return 1; }\n" },

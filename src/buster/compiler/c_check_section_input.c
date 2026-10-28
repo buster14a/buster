@@ -8,9 +8,10 @@
 // was a macro's anywhere in the unit is left to the caller's refusal: the retained line can't show what it expanded to.
 // So is an error at the line's end, whose place the retained line doesn't keep.
 //
-// A setting names a section for the definitions after it: text the functions', and bss, data, rodata and relro those
-// of variables with static storage, each without a section attribute of its own (or inherited). The emission refuses
-// such a definition by name until it publishes sections (CheckInputSections.definitions).
+// A text setting applies to function definitions; bss, data, rodata and relro select among variables with static
+// storage according to their final section kind. Until section emission owns that selection, the refusal candidates
+// conservatively include every static-storage definition under any active object setting, without an own/inherited
+// section attribute. CheckInputSections.definitions records those candidates, not a proof of named-section placement.
 //
 // Sema's UnifySection gives each section name one set of flags, its first use's: a setting, or a section attribute of a
 // function's declaration or of a variable's definition with static storage (a tentative one at the unit's end, at its
@@ -95,7 +96,7 @@ struct CheckInputSections
     CheckInputSectionDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
-    // The definitions a setting places, their names' tokens ascending: the emission refuses the first it emits, by name.
+    // Conservative refusal candidates under active settings, tokens ascending: emission refuses the first it emits.
     uint32_t* definitions;
     uint32_t definition_count;
 };
@@ -503,7 +504,7 @@ static bool check_input_section_unify(CheckInputReader* reader, CheckInputSectio
 
 // After the walk: the uses of section names in clang's order (the settings and the walk's events by position, then
 // the tentative definitions' at the unit's end, in their first declarations' order), each conflict reported where clang
-// reports it, and the definitions the settings place. A setting after the walk's first report doesn't count, nor the
+// reports it, and conservative emission-refusal candidates. A setting after the walk's first report doesn't count, nor the
 // unit's end after one.
 static void check_input_section_conflicts(CheckInputReader* reader)
 {
