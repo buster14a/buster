@@ -1312,9 +1312,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             }
         }
         // The definitions' named sections (#619): the executable's classes merge them, as a linker's .text.* and .data.*
-        // do, and a zero-filled variable in one is data.
+        // do, and a zero-filled variable in one is data. The units' links had theirs before they were kept
+        // (check_driver_object's).
         ObjectAtomSection* sections = 0;
-        if (valid && !check_program_sections(&code, program, &bytes, &output, &sections))
+        if (valid && units == NULL && !check_program_sections(&code, program, &bytes, &output, &sections))
         {
             check_driver_emission_failed(parser, pp, &code);
             valid = false;
@@ -1563,6 +1564,9 @@ struct CheckDriverCommand
     // --id-order N (check_driver_id_order).
     bool id_ordered;
     uint64_t id_order;
+    // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
+    // with a pattern, before the next unit reuses them (c_checker_units.c).
+    bool poison_arenas;
     // -c, and the default C command's link, unless -c, -fsyntax-only or a dump says otherwise.
     bool emit_object;
     bool link;
@@ -2034,6 +2038,8 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     bool lower_all = false;
     // --id-order N hands the unit's identifiers their ids in another order (check_driver_id_order): #153's test option.
     bool id_ordered = false;
+    // --poison-arenas: #152's test option (CheckDriverCommand.poison_arenas).
+    bool poison_arenas = false;
     bool invalid_id_order = false;
     uint64_t id_order = 0;
     // --time-stages reports each stage's time, the preprocessor's phases and the process's resource use on standard
@@ -2134,6 +2140,10 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         {
             lower_all = true;
         }
+        else if (strcmp(arguments[i], "--poison-arenas") == 0)
+        {
+            poison_arenas = true;
+        }
         else if (strcmp(arguments[i], "--id-order") == 0 || strncmp(arguments[i], "--id-order=", 11) == 0)
         {
             const char* value = arguments[i][10] == '=' ? arguments[i] + 11 : i + 1 < count ? arguments[++i] : NULL;
@@ -2216,6 +2226,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
         .return_error = return_error,
         .id_ordered = id_ordered,
         .id_order = id_order,
+        .poison_arenas = poison_arenas,
         .emit_object = emit_object,
         .link = link,
         .source_rows = source_rows,
@@ -2229,7 +2240,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--poison-arenas] [--lanes N] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
     }
     else if (!check_input_target_supported(&options))

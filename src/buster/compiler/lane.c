@@ -25,6 +25,7 @@
 //   - Arenas: Arena, arena_reserve, arena_release, arena_push, arena_push_array (BUSTER_ARENA_PUSH_ARRAY) and
 //     arena_pop_to. An arena reserves its address space up front, and the kernel commits each page when it is first
 //     touched. A push that doesn't fit returns 0 and leaves the arena as it was: nothing is ever truncated.
+//     arena_poison overwrites what pushes took, for tests of code that reuses an arena.
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
@@ -84,6 +85,8 @@ struct Arena
     uint64_t capacity;
     // Where base is in its mapping, which starts that much earlier (see arena_reserve).
     uint64_t mapping_offset;
+    // The most bytes from base that pushes have taken since the arena was reserved: no byte past it has been written.
+    uint64_t peak;
 };
 
 // Reserves `capacity` bytes, which the kernel commits a page at a time as they are first touched: the first
@@ -97,12 +100,11 @@ static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
 static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
 
 // The base pages every arena the thread reserves starts with, at least (0 for BUSTER_ARENA_SMALL_BYTES alone; a
-// multiple of BUSTER_ARENA_PAGE_BYTES). A thread whose arenas each hold a small and sparse part of its work, as each
-// lane of the C driver's translation units does (#152: a few kilobytes of each of about 70 arenas per unit, past
-// their first 64 KB), sets it, so that such an arena's first touch past BUSTER_ARENA_SMALL_BYTES takes a base page
-// rather than a huge page the kernel clears whole; a large unit's arenas still take huge pages past it. Only the
-// thread sets and reads it. main.c's units share it, as they share the thread context (below): an arena that one
-// unit's code reserves is another's to use.
+// multiple of BUSTER_ARENA_PAGE_BYTES). A thread whose arenas each hold a small and sparse part of its work, as a lane
+// of the C driver's translation units does for a small unit (#152: a few kilobytes of each of about 70 arenas per
+// unit, past their first 64 KB), sets it, so that such an arena's first touch past BUSTER_ARENA_SMALL_BYTES takes a
+// base page rather than a huge page the kernel clears whole. Only the thread sets and reads it. main.c's units share
+// it, as they share the thread context (below): an arena that one unit's code reserves is another's to use.
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 extern _Thread_local uint64_t arena_small_floor;
 #elif defined(BUSTER_UNIT)
@@ -127,6 +129,9 @@ static __attribute__((unused)) void* arena_push_array(Arena* arena, uint64_t cou
 #define BUSTER_ARENA_PUSH_ARRAY(arena, Type, count) ((Type*)arena_push_array((arena), (count), sizeof(Type), _Alignof(Type)))
 // Frees what was pushed since the arena's length was `length`. Its pages stay committed for the next pushes.
 static __attribute__((unused)) void arena_pop_to(Arena* arena, uint64_t length);
+// Sets every byte pushes have taken (to the arena's peak) to `value`, and empties the arena: a test's way to make what
+// reuses the arena find no byte it didn't write as a fresh arena's zero (#152's --poison-arenas).
+static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
 
 // The bytes arena_reserve maps for `capacity`: whole pages, and past BUSTER_ARENA_SMALL_BYTES room to align the huge
 // pages.
@@ -203,6 +208,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
     {
         result = (void*)aligned;
         arena->length = begin + size;
+        arena->peak = arena->length > arena->peak ? arena->length : arena->peak;
     }
     return result;
 }
@@ -222,6 +228,16 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 {
     assert(length <= arena->length);
     arena->length = length;
+}
+
+static void arena_poison(Arena* arena, uint8_t value)
+{
+    const uint64_t written = arena->peak > arena->length ? arena->peak : arena->length;
+    if (arena->base != 0)
+    {
+        memset(arena->base, value, written < arena->capacity ? written : arena->capacity);
+    }
+    arena->length = 0;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

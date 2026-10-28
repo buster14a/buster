@@ -17,8 +17,13 @@
 // depends on them. Each unit's diagnostics go to a stream of its own, printed in the command line's order once every
 // unit has run, as clang prints them.
 
-// The base pages each arena of a units' lane starts with (arena_small_floor). On the 9700X, ...
-#define BUSTER_CHECK_UNITS_SMALL_BYTES (4ull << 20)
+// The base pages that the arenas a small unit reserves start with (arena_small_floor), and the size of a unit's source
+// past which its arenas start as a command of one file's do: docs/translation-units.md's "Memory" has the 9700X's
+// measurements.
+#define BUSTER_CHECK_UNITS_SMALL_BYTES (16ull << 20)
+#define BUSTER_CHECK_UNITS_LARGE_SOURCE (1ull << 20)
+// What --poison-arenas writes over the bytes a unit left in its lane's arenas (arena_poison).
+#define BUSTER_CHECK_UNITS_POISON 0xa5
 
 // A unit's link kept for the units' link (check_units_keep): a copy of its records, with room for no more, and which of
 // its undefined global symbols a system header declared, for the link's error about them (check_driver_executable's,
@@ -33,12 +38,13 @@ struct CheckUnitsKept
     Arena* bytes;
 };
 
-// A unit of the command: its source file and what compiling it gave: its exit status, its diagnostics' text in the
-// order it wrote them (from open_memstream, or null), whether it was compiled, and its kept link. `object` is the object
-// -c writes.
+// A unit of the command: its source file, and its size, and what compiling it gave: its exit status, its diagnostics'
+// text in the order it wrote them (from open_memstream, or null), whether it was compiled, and its kept link. `object`
+// is the object -c writes.
 struct CheckUnitsUnit
 {
     const char* path;
+    uint64_t bytes;
     const char* object;
     int status;
     char* diagnostics;
@@ -451,24 +457,31 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     return valid;
 }
 
-// The lanes' setup: the intern table and the file cache a lane's units share, and the memory of the links it keeps,
-// the first time the lane takes a unit. False, with the lane failed, if it can't be reserved.
+// The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
+// memory of the links it keeps, the first time the lane takes a unit. False, with the lane failed, if it can't be
+// reserved.
 static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverCommand* command)
 {
     if (!lane->ready && !lane->failed)
     {
+        lane->arena = arena_reserve(1ull << 36);
+        lane->scratch = arena_reserve(1ull << 36);
+        lane->output = arena_reserve(1ull << 36);
         lane->kept = arena_reserve(1ull << 36);
         lane->kept_bytes = arena_reserve(1ull << 36);
-        lane->ready = lane->kept.base != 0 && lane->kept_bytes.base != 0 && intern_initialize(&lane->identifiers) &&
-                      file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
+        lane->ready = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0 && lane->kept.base != 0 && lane->kept_bytes.base != 0 &&
+                      intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
         lane->failed = !lane->ready;
     }
     return lane->ready;
 }
 
 // A unit, on the lane that took it: compiled by check_driver_unit with the lane's intern table and file cache, its
-// functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. Its memory
-// is reserved for it and released after it, as a command of one unit's is: its arenas start as zeros.
+// functions on the lane alone, its diagnostics into its own stream, and with a link to make, its link kept. The arenas
+// it reserves start with BUSTER_CHECK_UNITS_SMALL_BYTES of base pages unless its source is large. The lane's three
+// arenas are emptied after it, their pages kept for the next unit with the bytes the unit left there: the compile
+// reads nothing in them it didn't write, which --poison-arenas checks (arena_poison: a pattern in place of those bytes;
+// docs/translation-units.md, "Memory", has why and what reserving or clearing them again costs).
 static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, CheckUnitsUnit* unit)
 {
     const CheckDriverCommand* command = run->command;
@@ -476,11 +489,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
     unit->unbuffered = errors == NULL;
     unit->status = 1;
     unit->compiled = true;
-    lane->arena = arena_reserve(1ull << 36);
-    lane->scratch = arena_reserve(1ull << 36);
-    lane->output = arena_reserve(1ull << 36);
-    const bool reserved = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0;
-    if (errors != NULL && (!reserved || !check_units_lane_ready(lane, command)))
+    if (errors != NULL && !check_units_lane_ready(lane, command))
     {
         fprintf(errors, "fatal error: can't reserve checker memory\n");
     }
@@ -492,13 +501,24 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
         lane->functions = (CheckProgramLanes){ .lanes = 1 };
         uint64_t ticks[PP_PHASE_COUNT] = { 0 };
+        arena_small_floor = unit->bytes < BUSTER_CHECK_UNITS_LARGE_SOURCE ? BUSTER_CHECK_UNITS_SMALL_BYTES : 0;
         unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
                                          &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true);
+        arena_small_floor = 0;
         check_program_lanes_release(&lane->functions);
+        Arena* arenas[] = { &lane->output, &lane->scratch, &lane->arena };
+        for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(arenas); a += 1)
+        {
+            if (command->poison_arenas)
+            {
+                arena_poison(arenas[a], BUSTER_CHECK_UNITS_POISON);
+            }
+            else
+            {
+                arena_pop_to(arenas[a], 0);
+            }
+        }
     }
-    arena_release(&lane->output);
-    arena_release(&lane->scratch);
-    arena_release(&lane->arena);
     if (errors != NULL && fclose(errors) != 0)
     {
         unit->status = 1;
@@ -507,20 +527,17 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
 }
 
 // A lane of the units' run: takes the units in turn, costliest first, and compiles each as a lane of its own
-// (lane_alone), so that nothing a unit runs takes the group's other lanes for its own. Its arenas start with
-// BUSTER_CHECK_UNITS_SMALL_BYTES of base pages (arena_small_floor).
+// (lane_alone), so that nothing a unit runs takes the group's other lanes for its own.
 static void check_units_lane(void* argument)
 {
     const CheckUnitsRun* run = argument;
     CheckUnitsLane* lane = run->lanes + lane_index();
-    arena_small_floor = BUSTER_CHECK_UNITS_SMALL_BYTES;
     for (uint64_t taken = lane_take(run->count); taken < run->count; taken = lane_take(run->count))
     {
         const Lane group = lane_alone();
         check_units_compile(run, lane, run->units + run->order[taken]);
         lane_restore(group);
     }
-    arena_small_floor = 0;
 }
 
 // The units' objects' names, -c's (check_driver_object_name's), into `units`; false, after saying why, if two units'
@@ -584,9 +601,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
     {
         fprintf(stderr, "error: cannot specify -o when generating multiple output files\n");
     }
-    else if (command->dump || command->dump_static)
+    else if (command->dump || command->dump_static || command->id_ordered)
     {
-        fprintf(stderr, "error: --dump-typed and --dump-static take one source file\n");
+        fprintf(stderr, "error: --dump-typed, --dump-static and --id-order take one source file\n");
     }
     else if (command->link && command->source_rows)
     {
@@ -607,6 +624,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             const uint64_t size = stat(inputs[u], &status) == 0 && status.st_size > 0 ? (uint64_t)status.st_size : 0;
             const uint32_t cost = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX - 1;
             units[u].path = inputs[u];
+            units[u].bytes = size;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
         const uint64_t* sorted = c_bindings_sort(keys, sorting, count, !command->scalar, UINT32_MAX);
@@ -656,7 +674,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             // compiles those alone, as its own lane 0.
             const bool ran = lane_run(active, check_units_lane, &run, NULL);
             const Lane caller = lane_alone();
-            arena_small_floor = BUSTER_CHECK_UNITS_SMALL_BYTES;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 if (!units[order[i]].compiled)
@@ -664,7 +681,6 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                     check_units_compile(&run, states, units + order[i]);
                 }
             }
-            arena_small_floor = 0;
             lane_restore(caller);
             const bool returned = worker_budget_release(&lease);
             lanes->active = ran ? active : 1;
@@ -689,7 +705,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             {
                 fprintf(stderr, "error: could not return GNU make worker slots\n");
             }
-            // The lanes' caches: the kept links are all the link reads.
+            // The lanes' caches and arenas: the kept links are all the link reads.
             for (uint32_t l = 0; l < active; l += 1)
             {
                 CheckUnitsLane* lane = states + l;
@@ -698,6 +714,9 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                     file_cache_release(&lane->cache);
                     intern_release(&lane->identifiers);
                 }
+                arena_release(&lane->output);
+                arena_release(&lane->scratch);
+                arena_release(&lane->arena);
             }
             if (result == 0 && command->link)
             {
