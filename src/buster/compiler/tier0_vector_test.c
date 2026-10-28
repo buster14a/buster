@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-tier0's vectors check (#136): VECTOR values and X86 entries in Tier 0. Functions over them are compiled by both
-// paths, which must give the same records, encoded by both encoders, which must give the same bytes, and run natively in
-// a child process, called from C through function pointers:
+// paths, which must give the same records, encoded by both encoders, which must give the same bytes, and, when the host
+// supports the emitted instructions, run natively in a child process, called from C through function pointers:
 //   - random programs: statements that each write a vector of 16, 32 or 64 bytes, an integer or a float into an output,
 //     or a masked store's bytes, or drop a vector, from inputs, constants (zero ones and words past a sign-extended
 //     imm32), frame objects of each width (LOCAL, STORE_LOCAL and SET_LOCAL), DUP, STORE's kept value and ?:, and the
@@ -858,8 +858,8 @@ static Tier0Function tier0_test_vector_function(const Tier0TestVectorProgram* pr
 // ---------------------------------------------------------------------------------------------------------------------
 // The interpreter
 
-// What the programs reach when they run, which the default count must cover whole: only what the interpreter ran of
-// programs whose native run matched it. A bit per VECTOR kind and width (BUSTER_TIER0_TEST_VECTOR_WIDTH), a bit per row,
+// What the programs reach in the interpreter, which the default count must cover whole. When native execution is
+// available, include only programs whose native run matched it. A bit per VECTOR kind and width, a bit per row,
 // the arms of a ?: of a vector, and a CONST of zeros and one of a word past a sign-extended imm32.
 #define BUSTER_TIER0_TEST_VECTOR_WIDTH(bytes) ((bytes) == 16 ? 0u : (bytes) == 32 ? 1u : 2u)
 typedef struct Tier0TestVectorReach Tier0TestVectorReach;
@@ -1071,6 +1071,17 @@ typedef void (*Tier0TestVectorRun)(const void* code, Tier0TestVectorShared* shar
 
 // Runs `run` on `code` (`length` bytes) in a child, which must exit with status 0: the code mapped executable at a page of
 // its own, `run` calling it from C.
+// The generated rows include AVX2, BMI and AVX-512 with byte, VL and VBMI forms. The shared native detector includes
+// OS save-state support independently of the host build's selected ISA, and remains readable by our own checker.
+static bool tier0_test_vector_can_run(void)
+{
+    const X86Target native = x86_target_native();
+    const uint64_t required = BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(AVX512F) |
+                              BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) |
+                              BUSTER_X86_FEATURE(AVX512VBMI);
+    return (native.features & required) == required;
+}
+
 static bool tier0_test_vector_native(const uint8_t* code, uint32_t length, Tier0TestVectorRun run, Tier0TestVectorShared* shared)
 {
     const pid_t child = fork();
@@ -1134,15 +1145,15 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
     return ready ? (uint32_t)vector_length : 0;
 }
 
-// A function's code (`length` bytes at `image`) run natively on the inputs in `shared`, and by the interpreter on the
-// same ones into outputs of its own: every byte of the outputs, filled alike first, must be the interpreter's. Returns
-// whether both ran and every byte matched, and then adds to *reached what the interpreter reached.
+// Run the interpreter and, where supported, the generated code on the same inputs. Native outputs must match every
+// interpreter byte. Add to *reached what the interpreter reached after the available checks succeed.
 static bool tier0_test_vector_check(Tier0TestTally* tally, const char* name, const Tier0Function* function, const uint8_t* image, uint32_t length,
                                     Tier0TestVectorShared* shared, Tier0TestVectorReach* reached)
 {
     uint8_t* visited = calloc(1, (size_t)function->count + 1);
     memset(shared->out, 0xa5, sizeof(shared->out));
-    const bool ran = tier0_test_expect(tally, tier0_test_vector_native(image, length, tier0_test_vector_run_body, shared), "vectors", "%s: the native run failed", name);
+    const bool native = tier0_test_vector_can_run();
+    const bool ran = !native || tier0_test_expect(tally, tier0_test_vector_native(image, length, tier0_test_vector_run_body, shared), "vectors", "%s: the native run failed", name);
     uint8_t expected[sizeof(shared->out)] __attribute__((aligned(64)));
     memset(expected, 0xa5, sizeof(expected));
     const uint64_t parameters[4] = { (uint64_t)(uintptr_t)shared->in, (uint64_t)(uintptr_t)shared->ints, (uint64_t)(uintptr_t)shared->floats, (uint64_t)(uintptr_t)expected };
@@ -1150,7 +1161,7 @@ static bool tier0_test_vector_check(Tier0TestTally* tally, const char* name, con
     const bool interpreted = tier0_test_expect(tally, visited != 0 && tier0_test_vector_interpret(function, parameters, visited, &reach), "vectors",
                                                "%s: the interpreter can't run it", name);
     bool same = ran && interpreted;
-    for (uint32_t o = 0; o < BUSTER_TIER0_TEST_VECTOR_OUTPUTS && same; o += 1)
+    for (uint32_t o = 0; native && o < BUSTER_TIER0_TEST_VECTOR_OUTPUTS && same; o += 1)
     {
         same = tier0_test_expect(tally, memcmp(shared->out[o], expected + 64 * o, 64) == 0, "vectors", "%s: output slot %u differs from the interpreter's", name, o);
     }
@@ -1238,10 +1249,10 @@ static void tier0_test_vector_programs(Tier0TestTally* tally, uint64_t seed, uin
     for (uint32_t w = 0; w < 3; w += 1)
     {
         tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || (wanted[w] & ~reached.kinds[w]) == 0, "vectors",
-                          "the checked programs' runs don't reach every kind of %u-byte vectors (missing %#" PRIx64 ")", 16u << w, wanted[w] & ~reached.kinds[w]);
+                          "the checked programs' interpreter runs don't reach every kind of %u-byte vectors (missing %#" PRIx64 ")", 16u << w, wanted[w] & ~reached.kinds[w]);
     }
     tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || ((wanted_rows & ~reached.rows) == 0 && reached.arms == 3 && reached.constants == 3), "vectors",
-                      "the checked programs' runs don't reach every row (missing %#x), both arms (%#x) and both kinds of constants (%#x)", wanted_rows & ~reached.rows,
+                      "the checked programs' interpreter runs don't reach every row (missing %#x), both arms (%#x) and both kinds of constants (%#x)", wanted_rows & ~reached.rows,
                       reached.arms, reached.constants);
     arena_release(&arena);
     free(image);
@@ -1918,7 +1929,9 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         }
         memset(shared->out, 0xa5, sizeof(shared->out));
         memset(shared->results, 0xa5, sizeof(shared->results));
-        const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_vector_native(image, length, run, shared), "vectors", "%s: the native run failed", name);
+        // The C helpers' wide-vector calling convention also requires a vector host build.
+        const bool ran = length != 0 && BUSTER_HOST_VECTOR && tier0_test_vector_can_run() &&
+                         tier0_test_expect(tally, tier0_test_vector_native(image, length, run, shared), "vectors", "%s: the native run failed", name);
         uint8_t expected[64];
         memset(expected, 0xa5, sizeof(expected));
         uint8_t written_out[64];
@@ -2320,6 +2333,14 @@ static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint6
     const bool ready = tier0_test_expect(tally, shared != MAP_FAILED && tier0_test_vector_abi(tables, &abi), "vectors", "no memory, or the signatures' types");
     if (ready)
     {
+        if (!tier0_test_vector_can_run())
+        {
+            printf("  vectors: native execution skipped (required CPU features or OS save state unavailable); encoding and interpreter checks run\n");
+        }
+        else if (!BUSTER_HOST_VECTOR)
+        {
+            printf("  vectors: native wide-vector ABI calls skipped (scalar host build); other native runs execute\n");
+        }
         tier0_test_vector_rules(tally);
         tier0_test_vector_placement(tally, seed, shared);
         tier0_test_vector_aggregates(tally, &abi, shared, seed);

@@ -84,8 +84,11 @@ Where it is:
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Do not add other host operating systems, older-CPU
-production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
+ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
+feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
+baseline executable; `native` is the default and `znver5` selects benchmark
+builds. The host choice is made at build time, outside compiler hot paths.
+Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
 
@@ -402,11 +405,16 @@ designs and the compilers already built this way.
   `docs/profiling.md`'s "Placement"): a new one goes there too. The checker
   unit's own tests (`c_checker_test.c` with the sections it includes, and its
   commands' other `*_test.c`) are included between `#pragma clang optimize
-  off` and `on` (#681): the build waits for that unit, and their code was a
-  fifth of its compile (on the 9700X, 33.7 s in the build and 27.4 s
-  unoptimized; the build 33.7 and 28.5 s), while the tests ran as fast,
-  their time being the compiler's code and clang's processes, and `-c` of
-  sqlite3.c as fast too (+0.10% wall). No benchmark's timed code calls them.
+  off` and `on` (#681). On the 9700X, the measured `716c980d` to `4ce693ad`
+  pair's checker-unit mean fell from 33.7 to 27.35 s; compilation-phase wall
+  time fell from 33.7 to 28.5 s (two builds per role, excluding final linking
+  and remaining script overhead). One SQLite compile hold, 21 runs per role,
+  observed +0.10% median wall, +48,704 instructions (+0.00353%) and +380 KiB
+  peak RSS. Four added eager libm imports and layout changes were not isolated
+  from each other; this is no general runtime-neutrality claim or timing of
+  later heads. [The frozen record](https://github.com/buster14a/buster-performance/tree/db74207d9a1a5bd6b59742afc25d53d5e2e03c68/docs/measurements/checker-unit-build-681-2026-10-28)
+  retains the original controller's limitations and correctness scope.
+  No benchmark's timed code calls these tests.
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
@@ -1236,11 +1244,19 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's predefines give as clang's
-do for the same options (`c_predefines.c`).
+The compiler's host path follows the target feature macros, which the
+preprocessor's predefines give as clang's do for the same options
+(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
 
 ## Sharing the 9700X
+
+Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
+Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Non-AVX-512
+CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
+hosted variants pass on the same triggering revision. Failed, cancelled or
+skipped tests cannot start the benchmark job. The existing required check name
+is retained by a hosted aggregation job that fails when either stage fails.
+See [the CI guide](docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
 runs on the same machine. Its timings only mean something when one thing runs

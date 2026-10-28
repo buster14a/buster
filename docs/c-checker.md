@@ -241,9 +241,9 @@ does, each rule checked against clang's answers on probes of it:
   retained line keeps its tokens as written), and an error at the line's end,
   whose place the retained line doesn't keep. A setting applies to the
   definitions after it that have no section attribute of their own: text to
-  the functions', the others to the variables' with static storage. The
-  deferred reader leaves a unit with a setting to source order, and a lane
-  refuses a body with a section attribute.
+  the functions', the others by a static-storage variable's final section
+  kind. The deferred reader leaves a unit with a setting to source order, and
+  a lane refuses a body with a section attribute.
 - **Named sections in `-c` and the direct path** (#619's part 2): a
   definition with a `section` attribute, its own or the latest of its earlier
   declarations' as clang passes them on, and a function a text setting places
@@ -258,12 +258,16 @@ does, each rule checked against clang's answers on probes of it:
   section in BSS, and a function in another kind's section (`.data`) is a
   section of that name of its own, `ax`, as clang makes it. The direct path's
   executable merges each into its class's output section, as a linker's
-  script merges `.text.*` and `.data.*`. Refused by name: a variable a data
-  setting places ("a variable a '#pragma clang section' setting places in a
-  section": clang gives it the setting of the section its kind puts it in,
-  through the pragmas' attributes its tentative definitions pass on, which
-  the reader doesn't follow yet); a name LLVM gives another kind than the
-  definition's (an initialized variable in a `.bss`, which clang's code
+  script merges `.text.*` and `.data.*`. Refused by name: conservatively, any
+  emitted static-storage definition while any bss/data/rodata/relro setting
+  is active ("a definition under active '#pragma clang section' settings"),
+  until the emission selects a variable's final section kind, which clang
+  decides through the pragmas' attributes its tentative definitions pass on:
+  a bss-only or rodata-only setting still refuses `int x = 1`, although clang
+  leaves it in ordinary `.data`, while a text-only setting and cleared object
+  settings leave static objects alone; a definition's own or inherited
+  `section` attribute takes it out of the refusal, into its section. Also
+  refused by name: a name LLVM gives another kind than the definition's (an initialized variable in a `.bss`, which clang's code
   generation refuses too, or one not thread-local in a `.tdata`); and a name
   ELF gives another type (`.note*`, the init and fini arrays').
 - **File-scope `asm`** (#619's part 2), which `main.c` makes
@@ -1404,7 +1408,8 @@ The test command fails if the oracle cannot run. It covers:
   -O0 -c's object puts it in, and have a file-scope `asm`'s sections as
   clang's, with their bytes (`check_test_driver_same_sections`); its
   executable by the direct path, which must exit with 0; and `-c`'s refusals by
-  name.
+  name, the conservative active-object-setting refusal and its
+  no-active-object-setting controls among them.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on

@@ -125,6 +125,8 @@ static __attribute__((unused)) IrSroaOptions ir_sroa_options(void)
 
 static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
 {
+    (void)scalar;
+
     const IrFunction* f = work->ir.function;
     if (f->instruction_count != 0)
     {
@@ -164,11 +166,11 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
             }
         }
     }
-    if (!scalar)
+    if (!BUSTER_SCALAR_PATH(scalar))
     {
         ir_sroa_vector_uses(work);
     }
-    for (uint32_t i = 0; scalar && i < f->instruction_count; i += 1)
+    for (uint32_t i = 0; BUSTER_SCALAR_PATH(scalar) && i < f->instruction_count; i += 1)
     {
         if (work->ir.dominators.rpo_index[work->ir.cfg.instruction_blocks[i]] != BUSTER_DOMINATOR_NONE)
         {
@@ -195,9 +197,11 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar)
 // cannot wrap. Inactive lanes never read fields; the arrays have field_count logical elements, without padding.
 static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t offset, uint32_t type, uint32_t size, bool scalar, bool* overlap)
 {
+    (void)scalar;
+
     uint32_t found = BUSTER_IR_NONE;
     bool conflict = false;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t i = 0; i < work->field_count; i += 1)
         {
@@ -242,6 +246,8 @@ static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t of
 
 static void ir_sroa_fields(IrSroaWork* work, bool scalar)
 {
+    (void)scalar;
+
     const IrFunction* f = work->ir.function;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
@@ -258,7 +264,7 @@ static void ir_sroa_fields(IrSroaWork* work, bool scalar)
             else if (work->refused[root] == 0)
             {
                 bool overlap = false;
-                uint32_t field = ir_sroa_field(work, root, offset, type, bytes, scalar, &overlap);
+                uint32_t field = ir_sroa_field(work, root, offset, type, bytes, BUSTER_SCALAR_PATH(scalar), &overlap);
                 if (overlap)
                 {
                     work->refused[root] = 1;
@@ -405,7 +411,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, options.scalar);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {
@@ -426,8 +432,8 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     IrFunction view = { 0 };
     if (check.error == IR_OK)
     {
-        ir_sroa_provenance(&work, options.scalar);
-        ir_sroa_fields(&work, options.scalar);
+        ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar));
+        ir_sroa_fields(&work, BUSTER_SCALAR_PATH(options.scalar));
         check.error = ir_sroa_view(&work, scratch, &view);
     }
     if (check.error == IR_OK)
@@ -447,7 +453,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = BUSTER_IR_OPTIMIZE_DCE;
-        rewrite.scalar = options.scalar;
+        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         ir_optimize_dce(&work.ir, rewrite);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
@@ -457,7 +463,7 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     }
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, options.scalar);
+        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {

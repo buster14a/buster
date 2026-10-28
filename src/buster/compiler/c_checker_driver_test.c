@@ -1954,8 +1954,8 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     uint64_t batch_nodes = 0;
     const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
     const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
-    check_test_expect(test, counted && expression_nodes >= batch_nodes && batch_nodes != 0,
-                      "--time-stages reports the templates' nonzero share of evaluated expression occurrences");
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes && (BUSTER_HOST_VECTOR ? batch_nodes != 0 : batch_nodes == 0),
+                      "--time-stages reports evaluated expressions and the host's template share");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));
@@ -2951,12 +2951,13 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 // line's end. Then -c of the units clang takes: each function and variable in the section its attribute or a function's
 // text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_emit_file_asm),
 // which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
-// variable a setting places, a section whose name gives it another kind or type, and file-scope assembly with a symbol
-// or of another kind of section.
+// static-storage definition under an active object setting (conservatively, until the emission selects its section
+// kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
+// of section.
 static void check_test_driver_section_pragmas(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char refused[] = "construct is not yet supported by the type checker";
-    static const char placed[] = "unsupported: a variable a '#pragma clang section' setting places in a section";
+    static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
     static const char typed[] = "unsupported: a section of a name ELF gives another type (a note, an init or fini array)";
     static const char asm_symbol[] = "unsupported: file-scope assembly that defines or refers to a symbol";
@@ -2985,6 +2986,15 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "a cleared kind places nothing", "#pragma clang section text = \".x\"\n#pragma clang section text = \"\"\nint f(void) { return 1; }\n" },
         { "data places a block's static", "#pragma clang section data = \".d\"\nint f(void) { static int s = 1; return s; }\n", 0, 2, placed },
         { "bss places a tentative definition", "#pragma clang section bss = \".x\"\nint z;\nint f(void) { return z; }\n", 0, 2, placed },
+        // Clang puts these initialized writable objects in ordinary .data: the bounded refusal deliberately includes
+        // every static-storage definition under any active object setting until the emission selects its final section
+        // kind.
+        { "bss conservatively refuses an ordinary data definition", "#pragma clang section bss = \".only_bss\"\nint x = 1;\nint f(void) { return x; }\n", 0, 2,
+          placed },
+        { "rodata conservatively refuses an ordinary data definition", "#pragma clang section rodata = \".only_rodata\"\nint x = 1;\nint f(void) { return x; }\n", 0, 2,
+          placed },
+        { "a text setting leaves static objects alone", "#pragma clang section text = \".only_text\"\nint x = 1;\n" },
+        { "cleared object settings leave static objects alone", "#pragma clang section bss = \".b\" rodata = \".r\"\n#pragma clang section bss = \"\" rodata = \"\"\nint x = 1;\n" },
         { "rodata and relro share their flags", "#pragma clang section rodata = \".x\" relro = \".x\"\nconst int c __attribute__((section(\".x\"))) = 1;\n" },
         { "an extern declaration unifies nothing", "extern int e __attribute__((section(\".x\")));\nint f(void) __attribute__((section(\".x\")));\nint f(void) { return e; }\n" },
         { "a function's own section", "__attribute__((section(\".text.mine\"))) int f(void) { return 1; }\nint main(void) { return f() - 1; }\n" },

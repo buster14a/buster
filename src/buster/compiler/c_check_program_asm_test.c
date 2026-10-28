@@ -7,6 +7,8 @@
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_TEST_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_ASM_TEST_INCLUDED
 
+#include <cpuid.h>
+
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
@@ -82,11 +84,23 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "char*p=0;__asm__(\"leaq 16(%1), %0\" : \"=r\"(p) : \"r\"(p));unsigned short v=(unsigned short)(n*257+3);unsigned char hi;"
         "__asm__(\"movb %h1, %0\" : \"=q\"(hi) : \"Q\"(v));return (int)counter+small+mid+(int)(long)p+hi;}",
         "asm-output-widths", clang);
-    // XCR0, and rsp's alignment at the template (16, as clang -O0's function bodies have it), and basic asm statements.
+    // rsp's alignment at the template (16, as clang -O0's function bodies have it), and basic asm statements.
     check_test_program_source(test,
-        "int tested(int n){unsigned lo,hi;__asm__ volatile(\"xgetbv\" : \"=a\"(lo),\"=d\"(hi) : \"c\"(0));long sp;"
-        "__asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));__asm__(\"nop\");__asm__ volatile(\"nop\\n\\tnop\");return (int)(lo&0xff)+(int)hi+(int)(sp&15)+n;}",
-        "asm-xgetbv-and-alignment", clang);
+        "int tested(int n){long sp;__asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));"
+        "__asm__(\"nop\");__asm__ volatile(\"nop\\n\\tnop\");return (int)(sp&15)+n;}",
+        "asm-alignment", clang);
+    // XGETBV is executable only with XSAVE and OSXSAVE, even on an x86-64 host.
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & (3u << 26)) == (3u << 26))
+    {
+        check_test_program_source(test,
+            "int tested(int n){unsigned lo,hi;__asm__ volatile(\"xgetbv\" : \"=a\"(lo),\"=d\"(hi) : \"c\"(0));"
+            "return (int)(lo&0xff)+(int)hi+n;}", "asm-xgetbv", clang);
+    }
+    else
+    {
+        printf("  asm-xgetbv: skipped execution (XSAVE or OSXSAVE unavailable)\n");
+    }
     // XMM operands of double and float.
     check_test_program_source(test,
         "int tested(int n){double d=n*0.5,e=n+0.25;__asm__(\"addpd %1, %0\" : \"+x\"(d) : \"x\"(e));float f=(float)n,g;"
@@ -164,8 +178,31 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int s=0;for(int i=0;i<16;i++)s+=f.copy[i];return (int)f.result*3+(int)(f.back*4)+s+(int)(f.ext*8);}",
         "asm-naked-bridge", clang);
     // x86_semantics_test_enter's shape, in Intel syntax: statics RIP-relative, a jump through one to another naked
-    // function, whose template jumps back to the first one's label, and AVX-512's moves.
+    // function, whose template jumps back to the first one's label. Execute SSE2 moves on every x86-64 host;
+    // assemble AVX-512 moves separately so the oracle can run without AVX-512.
     check_test_program_source(test,
+        "static __attribute__((used)) long saved_rsp;"
+        "static __attribute__((used)) long saved_arg;"
+        "static __attribute__((used)) long continuation;"
+        "static __attribute__((naked,noinline)) long enter(long x){__asm__(\".intel_syntax noprefix\\n\""
+        "\"push rbx\\nmov qword ptr [rip + saved_rsp], rsp\\nmov qword ptr [rip + saved_arg], rdi\\nlea rbx, [rdi + 5]\\n\""
+        "\"movdqu xmm0, xmm1\\nmovdqa xmm1, xmm0\\njmp qword ptr [rip + continuation]\\n\""
+        "\"enter_return:\\nmov rax, rbx\\nadd rax, qword ptr [rip + saved_arg]\\npop rbx\\nret\\n.att_syntax prefix\\n\");}"
+        "static __attribute__((used,naked,noinline)) void vector_moves(void){__asm__(\".intel_syntax noprefix\\n"
+        "vmovdqu64 zmm16, zmm17\\nvmovdqa64 zmm17, zmm16\\nvzeroupper\\nret\\n.att_syntax prefix\\n\");}"
+        "static __attribute__((used,naked,noinline)) void bounce(void){__asm__(\"addq $100, %rbx\\n\\tjmp enter_return\\n\");}"
+        "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
+        "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
+        "asm-naked-intel", clang);
+    // The original wide-register path also executes where CPU and OS save-state support permit AVX-512F. Its
+    // compilation, constraints, lowering, encoding, oracle compilation and link remain required on every host.
+    const X86Target native = x86_target_native();
+    const bool wide_native = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
+    if (!wide_native)
+    {
+        printf("test-checker: asm-naked-intel-avx512: AVX-512F unavailable; checking compile/link without native execution\n");
+    }
+    check_test_program_source_native(test,
         "static __attribute__((used)) long saved_rsp;"
         "static __attribute__((used)) long saved_arg;"
         "static __attribute__((used)) long continuation;"
@@ -176,7 +213,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static __attribute__((used,naked,noinline)) void bounce(void){__asm__(\"addq $100, %rbx\\n\\tjmp enter_return\\n\");}"
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
-        "asm-naked-intel", clang);
+        "asm-naked-intel-avx512", clang, wide_native);
     // A naked function whose attribute isn't on its first declaration (#565's review): an unannotated prototype before a
     // naked definition that returns by its own ret, and a naked redeclaration between a prototype and an unannotated
     // definition, both naked as clang takes them; and a naked redeclaration after a definition, which clang ignores with
