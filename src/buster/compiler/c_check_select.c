@@ -178,7 +178,7 @@ static bool check_input_selections(CheckInputReader* reader)
     bool valid = true;
     for (uint32_t position = 0; position < parser->tokens.count; position += 1)
     {
-        const uint32_t close = parser->postorder[position];
+        const uint32_t close = reader->postorder[position];
         const uint32_t keyword = reader->first_child[close];
         const uint32_t name = keyword < parser->tokens.count ? parser->tokens.names[keyword] : 0;
         if (reader->ends[close] < reader->expression_limit && !reader->ignored[close] && parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD &&

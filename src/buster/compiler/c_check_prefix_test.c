@@ -182,7 +182,8 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
     uint32_t lines[2] = { 0 };
     for (uint32_t path_index = 0; initialized && path_index < 2; path_index += 1)
     {
-        const ParseOptions parser_options = { .scalar = path_index == 0 };
+        // The fresh parse's subtree sizes, which the view's must match.
+        const ParseOptions parser_options = { .scalar = path_index == 0, .sizes = true };
         Arena output = arena_reserve(UINT64_C(1) << 20);
         Arena input_storage = arena_reserve(UINT64_C(1) << 24);
         Arena values = arena_reserve(UINT64_C(1) << 24);

@@ -26,7 +26,7 @@ static void check_test_selection_roots(CheckTest* test)
     check_test_expect(test, ready, "selection root oracle initialization");
     for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
     {
-        const ParseOptions parse_options = { .scalar = scalar != 0 };
+        const ParseOptions parse_options = { .scalar = scalar != 0, .sizes = true };
         const bool parsed = parse_initialize(&parser, &parse_options, options.language) && parse_translation_unit(&parser, &pp);
         check_test_expect(test, parsed, "selection root oracle parsing");
         const uint32_t count = parser.tokens.count;
@@ -34,24 +34,12 @@ static void check_test_selection_roots(CheckTest* test)
         CheckInputReader reader =
         {
             .parser = &parser,
-            .ends = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, count),
-            .postorder_positions = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, count),
+            .postorder = parser.postorder,
+            .subtree_sizes = parser.sizes,
+            .ends = parser.ends,
+            .postorder_positions = parser.positions,
         };
-        bool valid = parsed && reader.ends != 0 && reader.postorder_positions != 0;
-        for (uint32_t token = 0; valid && token < count; token += 1)
-        {
-            reader.ends[token] = token;
-        }
-        for (uint32_t order = 0; valid && order < count; order += 1)
-        {
-            const uint32_t token = parser.postorder[order];
-            const uint32_t parent = parser.tree.parents[token];
-            reader.postorder_positions[token] = order;
-            if (parent < count && reader.ends[parent] < reader.ends[token])
-            {
-                reader.ends[parent] = reader.ends[token];
-            }
-        }
+        bool valid = parsed && reader.postorder != 0 && reader.subtree_sizes != 0 && reader.ends != 0 && reader.postorder_positions != 0;
         for (uint32_t first = 0; valid && first <= count; first += 1)
         {
             for (uint32_t end = first; valid && end <= count; end += 1)

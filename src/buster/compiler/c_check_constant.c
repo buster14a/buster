@@ -1923,7 +1923,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
     bool valid = true;
     for (uint32_t order = before; valid && order < after; order += 1)
     {
-        const uint32_t token = parser->postorder[order];
+        const uint32_t token = reader->postorder[order];
         if (token < input->first || token >= input->end)
         {
             continue;
