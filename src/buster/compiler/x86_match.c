@@ -752,6 +752,8 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
 
 static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* request, bool vectorized)
 {
+    (void)vectorized;
+
     X86Match result = {0};
     const uint32_t bucket = x86_match_bucket(index, request->mnemonic);
     uint32_t memory_width = 0;
@@ -765,7 +767,7 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
         const uint32_t left = index->begin[bucket + 1] - first;
         const uint32_t n = left < 16 ? left : 16;
         uint32_t mask = 0;
-        if (vectorized)
+        if (BUSTER_VECTOR_PATH(vectorized))
         {
             mask = x86_match_candidates_vector(index, request, first, n);
         }
@@ -781,7 +783,7 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
             const uint32_t at = first + __builtin_ctz(mask);
             mask &= mask - 1;
             X86Instruction instruction;
-            const bool accepted = vectorized ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            const bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
             if (accepted)
             {
                 const X86FormDescription* form = x86_form_description(instruction.form);
