@@ -787,8 +787,8 @@ these values are not source deltas from the older release builds.
 Each of the four original workloads ran one windows/windows control,
 one windows/whole cohort and its reverse, with 21 timed processes per
 role and two warmups: 504 timed children, all exit zero, with zero major
-faults and complete user-cycle/instruction counts. Every invocation
-used a separate shared-lock grant on CPU 2. Raw process medians, ms:
+faults and complete user-cycle/instruction counts. Each cohort and each phase
+command held a separate shared-lock grant on CPU 2. Raw process medians, ms:
 
 | Workload | Windows/whole cohort | Reverse whole/windows cohort | Peak RSS difference, windows minus whole |
 | --- | ---: | ---: | ---: |
@@ -832,8 +832,10 @@ in lexing, partly offset by refinement. The later page-line fusion at
 controls and +2188 KiB RSS; its alias refinement emitted identical assembly
 and was reverted. This record does not integrate or retune it. The scratch
 words and line pages keep the lifetime/query purpose described above, and
-their roughly 2 MiB measured peak tradeoff remains explicit. No qualified
-replacement mechanism has been demonstrated by this completion record.
+their roughly 2 MiB measured peak tradeoff remains explicit.
+Removing replay while keeping these bounded windows would need the lexer to
+carry lexical and logical-line state across cuts. No whole-process payoff
+for that additional mechanism has been demonstrated by these controls.
 
 Native PP/Clang/window/line checks, refinement on 520 files, and one/two-lane
 file/resource checks pass. All complete `-E` outputs match across both modes
