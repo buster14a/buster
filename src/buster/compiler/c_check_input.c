@@ -3199,21 +3199,23 @@ static TypeId check_input_kr_parameter_type(const TypeTable* types, TypeId decla
 // identifier list (`names`, chained by parameter_next), as C17 6.9.1p6 constrains it and clang reports it: specifiers
 // without a storage class but register, a function specifier or typedef; declarators that each name a listed name not
 // declared yet, without an initializer. Each listed name gets its declared type, adjusted as a parameter's (an array's
-// and a function's to a pointer); one left undeclared is int in C89, or an error at its name from C99 on. A struct, union or enum defined in the list and a variably modified type are refused by name. The list's tokens are
-// the definition's: the walk passes over them.
+// and a function's to a pointer); one left undeclared is int in C89, or an error at its name from C99 on. The list's
+// tags and enumerators have one header scope, which ends before the body, as clang gives an old-style definition;
+// unlike a prototype definition's, its declarations are not published into the body. Variably modified types remain
+// unsupported. The list's tokens are the definition's: the walk passes over them.
 static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names, uint32_t first, uint32_t body)
 {
     const Parser* parser = reader->parser;
+    const uint32_t binding_mark = c_bindings_mark(&reader->bindings);
+    const uint32_t prototype_depth = reader->prototype_depth;
+    reader->prototype_depth += 1;
     bool valid = true;
     uint32_t i = first;
     while (valid && i < body)
     {
         const uint32_t start = i;
-        if (check_input_specifier_definition(reader, i, body) != BUSTER_CHECK_NONE)
-        {
-            check_input_report(reader, start, CHECK_INPUT_UNSUPPORTED);
-            valid = false;
-        }
+        const uint32_t definition = check_input_specifier_definition(reader, i, body);
+        valid = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, body);
         bool is_typedef = false;
         bool is_inline = false;
         uint32_t storage = 0;
@@ -3248,12 +3250,14 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             {
                 listed = parser->tokens.names[parameter] == parser->tokens.names[name] ? parameter : BUSTER_CHECK_NONE;
             }
+            const uint32_t visible = valid ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]) : 0;
             if (valid && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
             {
                 check_input_report(reader, name, CHECK_INPUT_UNSUPPORTED);
                 valid = false;
             }
-            else if (valid && (listed == BUSTER_CHECK_NONE || reader->declared_types[listed] != 0))
+            else if (valid && (listed == BUSTER_CHECK_NONE || reader->declared_types[listed] != 0 ||
+                     (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader))))
             {
                 // A name the list doesn't have ("parameter named 'b' is missing"), or one it declared already.
                 check_input_report(reader, name, listed == BUSTER_CHECK_NONE ? CHECK_INPUT_DECLARATION : CHECK_INPUT_REDECLARATION);
@@ -3268,6 +3272,14 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
                 reader->registers[listed] = storage == C_NAME_REGISTER;
                 reader->output->attributes[listed] = attributes;
+                // A typed parameter is visible to the remainder of this header, including enumerator conflicts
+                // and type queries. Its canonical declaration remains the earlier identifier-list token.
+                if (valid && c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name], C_BINDING_OBJECT,
+                                               listed, i, check_input_declaration_depth(reader)) == 0)
+                {
+                    reader->output->resource = true;
+                    valid = false;
+                }
             }
             if (!valid && reader->output->report_count == 0)
             {
@@ -3297,6 +3309,10 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
     {
         reader->ignored[token] = true;
     }
+    const bool restored = c_bindings_restore(&reader->bindings, binding_mark, body);
+    reader->output->resource |= !restored;
+    reader->prototype_depth = prototype_depth;
+    valid &= restored;
     return valid;
 }
 

@@ -2962,6 +2962,12 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10)+*p;}"
         "int tested(int n){struct T t={n&127,5,7};int v=n&63;return f(65539,259,1.25,&v,3.7)+take(t);}",
         "kr-parenthesized-atomic-and-promoted-parameters", clang);
+    check_test_program_source(test,
+        "struct S{long outer;};enum{A=19};"
+        "int tags(x,p,q)enum E{A=3}x;struct S{char a;long b;}*p;union U{char a;long b;}*q;"
+        "{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}"
+        "int tested(int n){return tags(n&127,0,0);}",
+        "kr-header-tag-layout-enum-abi-and-outer-scope", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
