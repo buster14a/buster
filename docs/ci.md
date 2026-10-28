@@ -12,9 +12,20 @@ existing scalar twins when the compiler's host target lacks the full SIMD
 feature set. Intrinsic-only shared helpers have scalar definitions for that
 build. Generated-code ISA and ABI remain controlled by the existing target
 options. Benchmark commands require a vector host build. Both hosted variants
-may report `scalar`: `native` targets the runner's CPU, which does not guarantee
-the full vector feature set. Each run logs its CPU, target features and selected
-path. Baseline memory boundary tests also run with undefined-behavior checks.
+have a required path: the baseline leg must report `scalar`, and the native leg
+must report `vector` (`BUSTER_HOST_VECTOR=1`, the full native feature predicate
+in `host_isa.h`). Each run logs its CPU, target features and selected path before
+checking this requirement. A native runner that selects the scalar fallback
+fails eligibility before building or running the suites, so two scalar-only
+passes cannot satisfy the required correctness gate. Product native builds
+still select the scalar fallback on CPUs without the complete feature set.
+
+Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
+feature set. A future unsuitable VM can therefore block correctness qualification
+until an eligible hosted runner or a separately qualified vector-algorithm
+correctness variant is provided. The capability check establishes eligibility;
+the current revision must still pass the full native correctness suites.
+Baseline memory boundary tests also run with undefined-behavior checks.
 The baseline job additionally runs Buster under QEMU's `qemu64` CPU to preprocess
 and compile a C fixture and assemble a multi-instruction fixture, then links and
 executes their results on that same emulated CPU.
