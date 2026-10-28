@@ -6697,7 +6697,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 }
                 const uint32_t local = alignment > 3 ? check_lower_object(writer, type_size(types, declared_type), alignment) :
                                                       check_lower_temporary(writer, class);
-                if ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+                if (((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                     type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
                 {
                     writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                 }

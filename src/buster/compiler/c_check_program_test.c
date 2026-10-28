@@ -2945,6 +2945,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}"
         "int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}",
         "kr-unused-promoted-parameter-capacity", clang);
+    check_test_program_source(test,
+        "int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}"
+        "int tested(int n){return f(n&127,(short)(n&63));}", "kr-promoted-atomic-parameter-objects", clang);
     // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
     // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
     // order, and mingw's fmaxl, which the libc corpus's comparison found.
