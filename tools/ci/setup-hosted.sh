@@ -12,16 +12,14 @@ printf '%s\n' 'deb [signed-by=/usr/share/keyrings/buster-llvm.asc] https://apt.l
 sudo apt-get update
 sudo apt-get install --yes --no-install-recommends clang-23 llvm-23-dev llvm-23-tools \
     libclang-23-dev libclang-cpp23-dev libclang-rt-23-dev lld-23 \
-    gcc g++ binutils libc6-dev gdb mold tcc zstd linux-tools-azure
+    gcc g++ binutils libc6-dev gdb mold tcc zstd linux-perf
 # LLVM's release branch receives current patch updates. Use the same toolchain
 # for the build, C/C++ oracles, pragma adapter, object and DWARF consumers.
 toolbin="$RUNNER_TEMP/buster-test-tools"
 mkdir -p "$toolbin"
 ln -s /usr/lib/llvm-23/bin/clang "$toolbin/cc"
 printf '%s\n' "$toolbin" /usr/lib/llvm-23/bin >> "$GITHUB_PATH"
-perf=$(find /usr/lib -maxdepth 3 -type f -path '*linux-tools*/perf' -print -quit)
-test -n "$perf"
-ln -s "$perf" "$toolbin/perf"
+perf --version
 # Match the existing external-linker oracle rather than silently omitting it.
 curl --fail --location --retry 3 \
     https://github.com/wild-linker/wild/releases/download/0.10.0/wild-linker-0.10.0-x86_64-unknown-linux-gnu.tar.gz \
