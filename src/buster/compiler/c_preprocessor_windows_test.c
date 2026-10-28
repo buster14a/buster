@@ -978,6 +978,105 @@ static bool pp_test_line_ends(void)
 // ---------------------------------------------------------------------------------------------------------------------
 // pp_test_windows
 
+// Optional lexer facts against unchanged tokenization and pp_count_page_lines, with independently guarded source and
+// fact tails. Include all-LF blocks (64 lines), CRLF across blocks/pages, comments/literals/splices, uncommon language
+// modes and source alignments. The consumer also partitions the range inside blocks and across pages.
+static uint64_t pp_window_test_line_facts(uint64_t* checks)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, 6 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* fact_mapping = mmap(NULL, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    Arena storage = arena_reserve(1ull << 22);
+    const uint64_t capacity = BUSTER_C_TOKENIZER_CAPACITY(8193);
+    uint8_t* kinds[2];
+    uint32_t* starts[2];
+    uint32_t* ends[2];
+    bool ready = mapping != MAP_FAILED && fact_mapping != MAP_FAILED && storage.base != NULL;
+    ready = ready && mprotect(mapping, page, PROT_NONE) == 0 && mprotect(mapping + 5 * page, page, PROT_NONE) == 0 &&
+            mprotect(fact_mapping + page, page, PROT_NONE) == 0;
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        kinds[path] = arena_push_array(&storage, capacity, sizeof(uint8_t), 64);
+        starts[path] = arena_push_array(&storage, capacity, sizeof(uint32_t), 64);
+        ends[path] = arena_push_array(&storage, capacity, sizeof(uint32_t), 64);
+        ready = ready && kinds[path] != NULL && starts[path] != NULL && ends[path] != NULL;
+    }
+    static const uint32_t lengths[] = { 0, 1, 2, 63, 64, 65, 127, 128, 511, 512, 513, 1023, 1024, 4095, 4096, 4097, 8191, 8192, 8193 };
+    static const uint32_t flags[] = { 0, C_TOKENIZER_NO_DIGIT_SEPARATORS, C_TOKENIZER_RAW_STRINGS, C_TOKENIZER_CPLUSPLUS,
+                                      C_TOKENIZER_NO_DIGRAPHS, C_TOKENIZER_NO_LINE_COMMENTS };
+    static const char* const texts[] = { "\n", "int x;\n", "/* a\nb */ \"s\\\nt\"; x\\\ny;\n", "int x;\r\nint y;\r" };
+    uint64_t failures = !ready;
+    uint64_t known_blocks = 0;
+    for (uint32_t alignment = 0; ready && alignment < 3; alignment += 1)
+    {
+        for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(lengths); size += 1)
+        {
+            const uint32_t length = lengths[size];
+            uint8_t* bytes = alignment == 2 ? mapping + 5 * page - length : mapping + page + alignment;
+            const uint32_t blocks = (length + 63) / 64;
+            uint8_t* facts = fact_mapping + page - blocks;
+            for (uint32_t pattern = 0; pattern < BUSTER_ARRAY_LENGTH(texts); pattern += 1)
+            {
+                const uint32_t text_length = (uint32_t)strlen(texts[pattern]);
+                for (uint32_t at = 0; at < length; at += 1)
+                {
+                    bytes[at] = (uint8_t)texts[pattern][at % text_length];
+                }
+                for (uint32_t mode = 0; mode < BUSTER_ARRAY_LENGTH(flags); mode += 1)
+                {
+                    const int64_t plain = c_tokenize_lines(bytes, length, 0, kinds[0], starts[0], ends[0], flags[mode]);
+                    const int64_t counted = c_tokenize_lines_counted(bytes, length, 0, kinds[1], starts[1], ends[1], flags[mode], facts);
+                    bool same = plain >= 0 && plain == counted && memcmp(kinds[0], kinds[1], (size_t)plain) == 0 &&
+                                memcmp(starts[0], starts[1], (size_t)plain * sizeof(uint32_t)) == 0 && memcmp(ends[0], ends[1], (size_t)plain * sizeof(uint32_t)) == 0;
+                    for (uint32_t block = 0; block < blocks; block += 1)
+                    {
+                        if (facts[block] != 255)
+                        {
+                            uint32_t lines = 0;
+                            bool carriage = false;
+                            for (uint32_t at = block * 64; at < (block + 1) * 64 && at < length; at += 1)
+                            {
+                                lines += bytes[at] == '\n';
+                                carriage |= bytes[at] == '\r';
+                            }
+                            same &= !carriage && (block + 1) * 64 <= length && facts[block] == lines;
+                            known_blocks += 1;
+                        }
+                    }
+                    const PPFileData data = { .bytes = bytes, .length = length };
+                    for (uint32_t split = 1; split <= 4096; split *= 8)
+                    {
+                        uint32_t expected_pages[3] = { 0 };
+                        uint32_t actual_pages[3] = { 0 };
+                        uint32_t expected = 0;
+                        uint32_t actual = 0;
+                        for (uint32_t begin = 0; begin < length; begin += split)
+                        {
+                            const uint32_t end = length - begin < split ? length : begin + split;
+                            pp_count_page_lines(&data, begin, end, expected_pages, &expected);
+                            pp_count_page_lines_facts(&data, begin, end, actual_pages, &actual, facts);
+                            same &= expected == actual && memcmp(expected_pages, actual_pages, sizeof(expected_pages)) == 0;
+                        }
+                    }
+                    *checks += 1;
+                    failures += !same;
+                }
+            }
+        }
+    }
+    failures += ready && known_blocks == 0;
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 6 * page);
+    }
+    if (fact_mapping != MAP_FAILED)
+    {
+        munmap(fact_mapping, 2 * page);
+    }
+    arena_release(&storage);
+    return failures;
+}
+
 // BUSTER_PP_WINDOW_TEST_SOURCES sources from `seed`, each in one of five language modes (with C's raw strings and
 // without, digit separators or not, without "//" comments and digraphs, and with literal prefixes to split), prepared
 // whole by both kernels and in windows of several sizes, each window's line pages against a count a byte at a time.
@@ -992,7 +1091,7 @@ static bool pp_test_windows(uint64_t seed)
         { .standard = 1999, .gnu = true },
     };
     static PPWindowTestRun runs[3];
-    PPWindowTestText text = { .bytes = malloc(BUSTER_PP_WINDOW_TEST_CAPACITY), .capacity = BUSTER_PP_WINDOW_TEST_CAPACITY };
+    PPWindowTestText text = { .bytes = aligned_alloc(64, BUSTER_PP_WINDOW_TEST_CAPACITY), .capacity = BUSTER_PP_WINDOW_TEST_CAPACITY };
     bool initialized = text.bytes != 0;
     for (uint32_t k = 0; k < 3; k += 1)
     {
@@ -1003,6 +1102,8 @@ static bool pp_test_windows(uint64_t seed)
     const uint64_t line_end_failures = pp_window_test_line_ends(&random, &line_end_checks) + pp_window_test_cut_fixtures(&line_end_checks);
     uint64_t place_checks = 0;
     const uint64_t place_failures = pp_window_test_places(&random, &place_checks);
+    uint64_t fact_checks = 0;
+    const uint64_t fact_failures = pp_window_test_line_facts(&fact_checks);
     uint64_t failures = 0;
     uint64_t windowed = 0;
     uint64_t tokens = 0;
@@ -1044,5 +1145,6 @@ static bool pp_test_windows(uint64_t seed)
     printf("windows: %lu of %u sources differ (%lu windowed preparations, %lu tokens); the windows' cut: %lu of %lu checks fail; the directives' "
            "places: %lu of %lu checks fail\n", (unsigned long)failures, BUSTER_PP_WINDOW_TEST_SOURCES, (unsigned long)windowed, (unsigned long)tokens,
            (unsigned long)line_end_failures, (unsigned long)line_end_checks, (unsigned long)place_failures, (unsigned long)place_checks);
-    return initialized && failures == 0 && line_end_failures == 0 && place_failures == 0;
+    printf("line facts: %lu of %lu lexer/block/page checks fail\n", (unsigned long)fact_failures, (unsigned long)fact_checks);
+    return initialized && failures == 0 && line_end_failures == 0 && place_failures == 0 && fact_failures == 0;
 }

@@ -559,6 +559,27 @@ are refined while they are in the caches:
   literal's error are counted per window too (`pp_count_raw_candidates`): a
   count after the last window read the kinds back from memory.
 
+The page-line fusion experiment for #451 uses `c_tokenize_lines_counted` to
+publish one byte per 64 source bytes into caller-owned scratch, disjoint from
+the source and token columns. Its capacity is `(length + 63) / 64` bytes.
+Before each call, entries touching that call's source range become unknown
+(255). The counted C loops, including GNU raw-string mode, retain the physical
+newline masks before token analysis removes comments, literals or splices.
+Complete blocks without CR publish counts 0–64; CR blocks, partial blocks,
+skipped regions, unsupported modes and unaligned sources remain unknown.
+Reclassification overwrites these facts rather than accumulating them.
+The ordinary lexer entry points keep their original loop specializations.
+
+`pp_count_page_lines_facts` consumes only complete blocks in the kept window
+range, summing up to a page of count bytes with SIMD. Unknown blocks and blocks
+shared by windows use `pp_count_block_lines`, with the complete file's
+lookahead so CRLF counts at its LF even across a block, page or window.
+Allocation failure retains `pp_count_page_lines`; that independent byte-scan
+implementation also remains the test oracle. The optional scratch costs about
+149 KB for the pinned 9.5 MB SQLite file. The experimental branch requires
+native lexer, full preparation and whole-process measurements before retention;
+removing the second read alone does not establish a throughput benefit.
+
 Splitting C's grammar between windows would need the lexer's state at a cut;
 cutting where a logical line starts needs none, since a line starts outside every
 token and comment. The records are the whole file's, byte for byte.

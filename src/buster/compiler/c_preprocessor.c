@@ -3271,6 +3271,45 @@ static void pp_count_page_lines(const PPFileData* data, uint64_t begin, uint64_t
     *lines = count;
 }
 
+// The same pages from the lexer's optional 64-byte facts. Sum one page's bytes at a time; unknown (high-bit) facts,
+// including CR and blocks shared by windows, use the independent byte counter with the complete file's lookahead.
+static void pp_count_page_lines_facts(const PPFileData* data, uint64_t begin, uint64_t end, uint32_t* pages, uint32_t* lines, const uint8_t* facts)
+{
+    uint32_t count = *lines;
+    const uint64_t whole_end = end & ~63ull;
+    uint64_t base = begin & ~63ull;
+    while (base < end)
+    {
+        const uint64_t page_end = (base / BUSTER_PP_LINE_PAGE_BYTES + 1) * BUSTER_PP_LINE_PAGE_BYTES;
+        const uint64_t stop = base >= begin && base < whole_end ? (page_end < whole_end ? page_end : whole_end) : base;
+        if (stop > base)
+        {
+            const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)((stop - base) / 64));
+            const __m512i values = _mm512_maskz_loadu_epi8(valid, facts + base / 64);
+            uint64_t unknown = _mm512_movepi8_mask(values);
+            const __m512i known = _mm512_maskz_mov_epi8(~unknown, values);
+            count += (uint32_t)_mm512_reduce_add_epi64(_mm512_sad_epu8(known, _mm512_setzero_si512()));
+            while (unknown != 0)
+            {
+                const uint64_t block = base + 64 * (uint32_t)__builtin_ctzll(unknown);
+                count += pp_count_block_lines(data, block, block, block + 64);
+                unknown &= unknown - 1;
+            }
+            base = stop;
+        }
+        else
+        {
+            count += pp_count_block_lines(data, base, begin, end);
+            base += 64;
+        }
+        if (base % BUSTER_PP_LINE_PAGE_BYTES == 0 && base <= end)
+        {
+            pages[base / BUSTER_PP_LINE_PAGE_BYTES] = count;
+        }
+    }
+    *lines = count;
+}
+
 // pp_prepare_into for a file of at least two windows (`window` bytes) that the vectorized kernels lex: lexed a window at
 // a time (c_tokenize_lines), each window's tokens kept up to the last one that starts a logical line (that line is lexed
 // again with the next window, and a line that takes a whole window doubles it, unlexed when only splices continue it;
@@ -3304,6 +3343,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
     refine_progress_begin(&progress, backslash_chunks);
     // The line ends before each page; those before `lined` are counted (`lines`).
     uint32_t* pages = arena_push_array(arena, length / BUSTER_PP_LINE_PAGE_BYTES + 1, sizeof(uint32_t), 64);
+    uint8_t* line_counts = pages != NULL ? arena_push_array(scratch.arena, (length + 63) / 64, sizeof(uint8_t), 64) : NULL;
     uint64_t lined = 0;
     uint32_t lines = 0;
     if (pages != 0)
@@ -3334,8 +3374,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         const uint64_t end = length - at <= size ? length : at + size;
         last = end == length;
         const uint64_t cut = last ? end : pp_window_cut(data->bytes, at, end, BUSTER_PP_WINDOW_TAIL_BYTES);
-        const int64_t lexed = cut > at ? c_tokenize_lines(data->bytes, cut, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags)
-                                       : 0;
+        const int64_t lexed = cut <= at ? 0 : line_counts != NULL ?
+                             c_tokenize_lines_counted(data->bytes, cut, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags, line_counts) :
+                             c_tokenize_lines(data->bytes, cut, at, data->kinds + count, data->starts + count, data->values + count, prepare->refine_flags);
         int64_t kept = last ? lexed : 0;
         for (int64_t i = lexed - 1; !last && kept == 0 && i > 0; i -= 1)
         {
@@ -3397,7 +3438,14 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
         directives += result == PP_PREPARE_DONE ? pp_scan_directives_window(data->kinds, (uint32_t)begin, (uint32_t)refined, directive_words, directive_words + word_room) : 0;
         if (result == PP_PREPARE_DONE && pages != 0 && at > lined)
         {
-            pp_count_page_lines(data, lined, at, pages, &lines);
+            if (line_counts != NULL)
+            {
+                pp_count_page_lines_facts(data, lined, at, pages, &lines, line_counts);
+            }
+            else
+            {
+                pp_count_page_lines(data, lined, at, pages, &lines);
+            }
             lined = at;
         }
         if (ticks != 0)

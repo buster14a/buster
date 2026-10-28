@@ -470,6 +470,7 @@ BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize(const uint8_t* source, u
 // the source's), or C_TOKENIZER_ERROR_FILE_TOO_BIG; the arrays need BUSTER_C_TOKENIZER_CAPACITY(length - begin) entries.
 BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
                                                         uint32_t flags);
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_lines_counted(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags, uint8_t* line_counts);
 
 // c_tokenize without the scalar lexer: returns C_TOKENIZER_ERROR_NEEDS_SCALAR for the rare inputs that need it for a
 // part (see c_tokenizer.c), with the output arrays clobbered. For testing and benchmarking.
@@ -547,6 +548,30 @@ BUSTER_LEX_ALIGN(64) static const uint8_t c_char_properties[128] =
 BUSTER_LEX_ALIGN(64) static const uint8_t c_char_properties_no_separators[128] =
 {
     0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x08, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x80, 0x00, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+// The counted loop retains a carriage return as both NEWLINE and WHITESPACE. Their intersection is then the CR
+// mask, and subtracting NEWLINE restores the original whitespace mask. The ordinary loop keeps its original tables.
+BUSTER_LEX_ALIGN(64) static const uint8_t c_char_line_properties[128] =
+{
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x0C, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x80, 0x00, 0x00, 0x11,
+    0x00, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+BUSTER_LEX_ALIGN(64) static const uint8_t c_char_line_properties_no_separators[128] =
+{
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x08, 0x04, 0x04, 0x0C, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x04, 0x00, 0x20, 0x00, 0x01, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -2536,10 +2561,12 @@ BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAH
 // Phase I for one 64-byte vector: eight packed property masks and the remaining masks in `o[...][lane]`. Without
 // `digraphs`, no digraph pairs (c_first_char_channels_no_digraphs).
 BUSTER_INLINE void classify(__m512i raw, uint64_t o[][BUSTER_LEX_MASK_LANES], unsigned lane, __m512i* properties_out, __m512i* previous_classes, __m512i* previous_pairs, const bool cplusplus,
-                            const bool digraphs, const bool separators)
+                            const bool digraphs, const bool separators, const bool count_lines)
 {
     const uint64_t nonascii = _mm512_movepi8_mask(raw);
-    __m512i properties = perm2b(separators ? c_char_properties : c_char_properties_no_separators, raw);
+    const uint8_t* property_table = count_lines ? (separators ? c_char_line_properties : c_char_line_properties_no_separators) :
+                                                (separators ? c_char_properties : c_char_properties_no_separators);
+    __m512i properties = perm2b(property_table, raw);
     __m512i classes = perm2b(c_operator_classes, raw);
     if (BUSTER_UNLIKELY(nonascii != 0))
     {
@@ -2865,7 +2892,7 @@ BUSTER_LEX_NOINLINE static OutputCursors write_chunk_outlined(const ChunkTokens*
 // the scalar lexer (see BUSTER_LEX_NEEDS_SCALAR). Without `digraphs`, Phase I classifies with
 // c_first_char_channels_no_digraphs, and every other step is as with them, so the two loops are the same code; without
 // `line_comments`, "//" marks no comment.
-BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin,
+BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs, const bool line_comments, const bool separators, const bool raw_strings, const bool count_lines, uint8_t* line_counts, const uint8_t* source, uint64_t length, uint64_t begin,
                                uint8_t* BUSTER_LEX_RESTRICT kinds_out, uint32_t* BUSTER_LEX_RESTRICT starts_out, uint32_t* BUSTER_LEX_RESTRICT ends_out, uint64_t* written, uint64_t* restart,
                                uint64_t* scalar_until)
 {
@@ -2922,7 +2949,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
     for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
-        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
+        classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators, count_lines);
     }
     // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
     // inside it, else in `raws`, with what is outside of it read as newlines.
@@ -2950,7 +2977,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators, count_lines);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2961,7 +2988,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
                 for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
                 {
                     next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
-                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
+                    classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators, count_lines);
                 }
                 chunk_vectors = next_raw;
             }
@@ -2989,9 +3016,24 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         }
 
 #define BUSTER_LEX_MASK(m) (*(const U64x8*)o[m])
-#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? BUSTER_LEX_LANE(BUSTER_LEX_BITS(properties[current][BUSTER_LEX_VECTOR_COUNT]), (m) & (BUSTER_LEX_VECTOR_COUNT - 1)) : o[m][BUSTER_LEX_VECTOR_COUNT])
+#define BUSTER_LEX_NEXT_RAW(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? BUSTER_LEX_LANE(BUSTER_LEX_BITS(properties[current][BUSTER_LEX_VECTOR_COUNT]), (m) & (BUSTER_LEX_VECTOR_COUNT - 1)) : o[m][BUSTER_LEX_VECTOR_COUNT])
+#define BUSTER_LEX_NEXT(m) (count_lines && (m) == M_WHITESPACE ? BUSTER_LEX_NEXT_RAW(m) & ~BUSTER_LEX_NEXT_RAW(M_NEWLINE) : BUSTER_LEX_NEXT_RAW(m))
         U64x8 newline = BUSTER_LEX_MASK(M_NEWLINE);
         U64x8 whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
+        if (count_lines)
+        {
+            // Only complete file-relative blocks are facts. Shared/tail blocks and skipped/scalar regions keep the
+            // unknown byte initialized by c_tokenize_lines_counted. CR blocks use the independent byte counter.
+            if (chunk_position >= (int64_t)begin && chunk_position + BUSTER_LEX_CHUNK_BYTES <= (int64_t)length)
+            {
+                const __m512i totals = _mm512_popcnt_epi64(BUSTER_LEX_NATIVE(newline));
+                const U64x8 returns = BUSTER_LEX_AND(newline, whitespace);
+                const __mmask8 has_return = _mm512_test_epi64_mask(BUSTER_LEX_NATIVE(returns), BUSTER_LEX_NATIVE(returns));
+                const __m512i counts = _mm512_mask_mov_epi64(totals, has_return, _mm512_set1_epi64(255));
+                _mm_storel_epi64((__m128i*)(line_counts + (uint64_t)chunk_position / BUSTER_LEX_VECTOR_BYTES), _mm512_cvtepi64_epi8(counts));
+            }
+            whitespace = BUSTER_LEX_AND(whitespace, BUSTER_LEX_NOT(newline));
+        }
         U64x8 identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
         U64x8 digit = BUSTER_LEX_MASK(M_DIGIT);
         const U64x8 separator_follower = BUSTER_LEX_MASK(M_SEPARATOR_FOLLOWER);
@@ -3221,6 +3263,10 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 #endif
         newline = BUSTER_LEX_MASK(M_NEWLINE);
         whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
+        if (count_lines)
+        {
+            whitespace = BUSTER_LEX_AND(whitespace, BUSTER_LEX_NOT(newline));
+        }
         identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
         digit = BUSTER_LEX_MASK(M_DIGIT);
         quote = BUSTER_LEX_MASK(M_QUOTE);
@@ -3553,6 +3599,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         suppressed_ends = next_suppressed_ends;
 #undef BUSTER_LEX_MASK
 #undef BUSTER_LEX_NEXT
+#undef BUSTER_LEX_NEXT_RAW
 
         if (last_chunk)
         {
@@ -3568,56 +3615,82 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 BUSTER_LEX_NOINLINE static int64_t tokenize_c(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, true, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, true, false, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_digraphs(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                 uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, true, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, true, separators, raw_strings, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                      uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, false, separators, raw_strings, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_digraphs_no_line_comments(const bool separators, const bool raw_strings, const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds,
                                                                                  uint32_t* starts, uint32_t* ends, uint64_t* written, uint64_t* restart,
                                                                                  uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, false, false, separators, raw_strings, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, false, false, separators, raw_strings, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_cpp(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, true, true, true, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                   uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, false, false, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, false, false, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_cpp_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                     uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(true, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(true, true, true, false, true, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_raw(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                         uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, true, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, true, true, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 BUSTER_LEX_NOINLINE static int64_t tokenize_c_raw_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts,
                                                                       uint32_t* ends, uint64_t* written, uint64_t* restart, uint64_t* scalar_until)
 {
-    return tokenize_chunks(false, true, true, false, true, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+    return tokenize_chunks(false, true, true, false, true, false, NULL, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+// The counted C loops retain the ordinary entry points' compile-time specializations: no optional-output branch
+// enters their hot loops. Less common language modes leave the counts unknown and take the existing byte counter.
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_counted(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                    uint64_t* written, uint64_t* restart, uint64_t* scalar_until, uint8_t* line_counts)
+{
+    return tokenize_chunks(false, true, true, true, false, true, line_counts, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_counted_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                                  uint64_t* written, uint64_t* restart, uint64_t* scalar_until, uint8_t* line_counts)
+{
+    return tokenize_chunks(false, true, true, false, false, true, line_counts, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_counted_raw(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                        uint64_t* written, uint64_t* restart, uint64_t* scalar_until, uint8_t* line_counts)
+{
+    return tokenize_chunks(false, true, true, true, true, true, line_counts, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
+}
+
+BUSTER_LEX_NOINLINE static int64_t tokenize_c_counted_raw_no_separators(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                                      uint64_t* written, uint64_t* restart, uint64_t* scalar_until, uint8_t* line_counts)
+{
+    return tokenize_chunks(false, true, true, false, true, true, line_counts, source, length, begin, kinds, starts, ends, written, restart, scalar_until);
 }
 
 // The chunk loop that `flags` ask for (C_TOKENIZER_CPLUSPLUS, C_TOKENIZER_NO_DIGRAPHS and C_TOKENIZER_NO_LINE_COMMENTS;
@@ -3692,7 +3765,7 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t
 // The vectorized path from `begin` (the source's start, past a byte order mark, or the start of a line), until a chunk
 // it can't tokenize. Then the scalar lexer goes back to the start of the line before that chunk and lexes up to the
 // first line that starts after it, and the vectorized path resumes there.
-static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
+static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags, uint8_t* line_counts)
 {
     uint64_t count = 0;
     int64_t result = -1;
@@ -3701,7 +3774,25 @@ static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t 
         uint64_t written;
         uint64_t restart;
         uint64_t scalar_until;
-        const int64_t vectorized = tokenize_with_flags(flags, source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
+        const uint32_t other_modes = C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_DIGRAPHS | C_TOKENIZER_NO_LINE_COMMENTS;
+        const bool counted = line_counts != NULL && ((uintptr_t)source & 63) == 0 && (flags & other_modes) == 0;
+        int64_t vectorized;
+        if (counted && (flags & C_TOKENIZER_RAW_STRINGS) != 0)
+        {
+            vectorized = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) == 0 ?
+                         tokenize_c_counted_raw(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until, line_counts) :
+                         tokenize_c_counted_raw_no_separators(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until, line_counts);
+        }
+        else if (counted)
+        {
+            vectorized = (flags & C_TOKENIZER_NO_DIGIT_SEPARATORS) == 0 ?
+                         tokenize_c_counted(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until, line_counts) :
+                         tokenize_c_counted_no_separators(source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until, line_counts);
+        }
+        else
+        {
+            vectorized = tokenize_with_flags(flags, source, length, begin, kinds + count, starts + count, ends + count, &written, &restart, &scalar_until);
+        }
         if (vectorized >= 0)
         {
             result = (int64_t)count + vectorized;
@@ -3736,7 +3827,7 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, ui
     else
     {
         const uint64_t begin = length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF ? 3 : 0;
-        result = c_tokenize_from(source, length, begin, kinds, starts, ends, flags);
+        result = c_tokenize_from(source, length, begin, kinds, starts, ends, flags, NULL);
     }
     return result;
 }
@@ -3755,7 +3846,33 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t leng
     else
     {
         const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
-        result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags);
+        result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags, NULL);
+    }
+    return result;
+}
+
+// As c_tokenize_lines, also publishing physical line counts for complete 64-byte file blocks. `line_counts` has
+// (length + 63) / 64 bytes, disjoint from source and token columns. Entries for blocks touching [begin, length) are
+// first unknown (255). A classified complete block without CR publishes 0..64 before token analysis changes its
+// masks; CR, skipped/scalar, partial and unsupported-mode blocks remain unknown. Reclassification overwrites facts,
+// so scalar restarts and discarded window tails do not accumulate counts. The consumer accepts only complete blocks
+// in its kept range, and uses its independent byte counter for unknowns. An unaligned source keeps every entry unknown.
+BUSTER_LEXER_ENTRY BUSTER_LEX_UNUSED int64_t c_tokenize_lines_counted(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags, uint8_t* line_counts)
+{
+    int64_t result;
+    if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
+    {
+        result = C_TOKENIZER_ERROR_FILE_TOO_BIG;
+    }
+    else if (begin >= length)
+    {
+        result = 0;
+    }
+    else
+    {
+        memset(line_counts + begin / 64, 255, (length + 63) / 64 - begin / 64);
+        const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
+        result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags, line_counts);
     }
     return result;
 }
