@@ -23,8 +23,17 @@ static const char check_test_vector_types[] =
     "static void fillf(float*f,int n,int s){for(int i=0;i<n;i++)f[i]=(float)((i*37+s*11)%201-100)/7.0f;f[0]=-0.0f;}\n"
     "static void filld(double*f,int n,int s){for(int i=0;i<n;i++)f[i]=(double)((i*53+s*13)%301-150)/3.0;f[1]=0.0;}\n";
 
+// The programs run where the host has the target's features and saves their state (x86_target_native, CPUID and
+// XCR0, whatever ISA the host build selected); elsewhere they are compiled and linked, as clang's builds are, and not
+// run.
 static void check_test_program_vector_sources(CheckTest* test, const char* clang, const X86Target* target)
 {
+    const X86Target native = x86_target_native();
+    const bool run_native = (native.features & target->features) == target->features;
+    if (!run_native)
+    {
+        printf("  vectors: native execution skipped (the host lacks x86-64-v4's features or their saved state); the programs compile and link\n");
+    }
     static const char* const programs[][2] = {
         {
             "vector-integer-operators",
@@ -116,7 +125,7 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
         if (source != 0)
         {
             snprintf(source, length, "%s%s", check_test_vector_types, programs[i][1]);
-            check_test_program_source_char(test, source, programs[i][0], clang, false, target);
+            check_test_program_source_native_limits(test, source, programs[i][0], clang, false, -1, 0, target, run_native);
             free(source);
         }
     }

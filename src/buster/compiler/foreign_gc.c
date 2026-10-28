@@ -32,7 +32,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_FOREIGN_GC_VECTOR_WORDS 8
 #define BUSTER_FOREIGN_GC_VECTOR_BITS 512

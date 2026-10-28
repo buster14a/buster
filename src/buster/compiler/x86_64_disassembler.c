@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -498,6 +498,9 @@ static uint64_t x86_decode_classify_scalar(const uint8_t* source, uint32_t lengt
 
 static uint64_t x86_decode_classify(const uint8_t* source, uint32_t length)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_decode_classify_scalar(source, length);
+#else
     // Each nibble selects a set; their intersection identifies exactly the legacy/REX prefix bytes.
     const __m128i low = _mm_setr_epi8(5, 1, 5, 5, 3, 3, 11, 3, 1, 1, 1, 17, 1, 1, 9, 1);
     const __m128i high = _mm_setr_epi8(0, 0, 8, 8, 1, 0, 2, 0, 0, 16, 0, 0, 0, 0, 0, 4);
@@ -506,6 +509,7 @@ static uint64_t x86_decode_classify(const uint8_t* source, uint32_t length)
     const __m512i lo = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(low), _mm512_and_si512(bytes, _mm512_set1_epi8(15)));
     const __m512i hi = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(high), _mm512_and_si512(_mm512_srli_epi16(bytes, 4), _mm512_set1_epi8(15)));
     return _mm512_test_epi8_mask(lo, hi) & active;
+#endif
 }
 
 static __m512i x86_decode_window(const uint8_t* source, uint64_t size, uint32_t offset)
@@ -561,6 +565,8 @@ static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* le
 
 static X86DecodeStatus x86_decode_header(const uint8_t* bytes, uint32_t size, uint64_t prefix_bits, bool vectorized, X86DecodeHeader* header)
 {
+    (void)vectorized;
+
     X86DecodeStatus status = X86_DECODE_OK;
     *header = (X86DecodeHeader){0};
     uint32_t at = 0;
@@ -581,7 +587,7 @@ static X86DecodeStatus x86_decode_header(const uint8_t* bytes, uint32_t size, ui
         prefix_count = padding_word;
     }
     // FWAIT is a prefix only when followed by an x87 instruction; the caller retries its standalone form.
-    while (at < size && at < 15 && (vectorized ? ((prefix_bits >> at) & 1) != 0 : x86_decode_is_prefix(bytes[at])) && header->rex == 0)
+    while (at < size && at < 15 && (BUSTER_VECTOR_PATH(vectorized) ? ((prefix_bits >> at) & 1) != 0 : x86_decode_is_prefix(bytes[at])) && header->rex == 0)
     {
         const uint8_t byte = bytes[at];
         at += 1;
@@ -888,8 +894,10 @@ static X86DecodeStatus x86_decode_candidate(const uint8_t* bytes, uint32_t size,
 
 static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint64_t prefixes, bool vectorized, bool compact, bool indexed, X86Decoded* output)
 {
+    (void)vectorized;
+
     X86DecodeHeader header;
-    X86DecodeStatus status = x86_decode_header(bytes, size, prefixes, vectorized, &header);
+    X86DecodeStatus status = x86_decode_header(bytes, size, prefixes, BUSTER_VECTOR_PATH(vectorized), &header);
     if (status == X86_DECODE_OK)
     {
         status = X86_DECODE_UNSUPPORTED;
@@ -912,11 +920,11 @@ static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint6
                 }
             }
         }
-        for (uint32_t i = 0; scan && i < bucket.count && status != X86_DECODE_OK; i += vectorized ? 8 : 1)
+        for (uint32_t i = 0; scan && i < bucket.count && status != X86_DECODE_OK; i += BUSTER_VECTOR_PATH(vectorized) ? 8 : 1)
         {
             const uint32_t first = bucket.first + i;
             uint32_t matches = 0;
-            if (vectorized)
+            if (BUSTER_VECTOR_PATH(vectorized))
             {
                 const __m512i key = _mm512_set1_epi64((long long)header.key);
                 __m512i masks = _mm512_load_si512(x86_decode_masks + first);
@@ -961,6 +969,8 @@ static X86DecodeStatus x86_decode_one(const uint8_t* bytes, uint32_t size, uint6
 
 static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity, bool vectorized, bool compact)
 {
+    (void)vectorized;
+
     X86DecodeResult result = {0};
     if (!x86_decode_initialized || size > UINT32_MAX || (size != 0 && source == 0) || (capacity != 0 && output == 0))
     {
@@ -979,7 +989,7 @@ static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size
         {
             const uint64_t remaining = size - result.consumed;
             const uint32_t available = remaining < 15 ? (uint32_t)remaining : 15;
-            if (vectorized && result.consumed + available > window_end)
+            if (BUSTER_VECTOR_PATH(vectorized) && result.consumed + available > window_end)
             {
                 const uint32_t span = remaining < 64 ? (uint32_t)remaining : 64;
                 window_start = result.consumed;
@@ -987,8 +997,8 @@ static X86DecodeResult x86_disassemble_impl(const uint8_t* source, uint64_t size
                 prefixes = x86_decode_classify(source + window_start, span);
             }
             X86Decoded decoded = {.offset = (uint32_t)result.consumed};
-            const uint64_t prefix_bits = vectorized ? prefixes >> (result.consumed - window_start) : 0;
-            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, vectorized, compact, false, &decoded);
+            const uint64_t prefix_bits = BUSTER_VECTOR_PATH(vectorized) ? prefixes >> (result.consumed - window_start) : 0;
+            result.status = x86_decode_one(source + result.consumed, available, prefix_bits, BUSTER_VECTOR_PATH(vectorized), compact, false, &decoded);
             if (result.status == X86_DECODE_OK)
             {
                 output[result.count] = decoded;
@@ -1197,7 +1207,11 @@ static X86DecodeResult x86_disassemble_batched(const uint8_t* source, uint64_t s
 
 static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_disassemble_scalar(source, size, output, capacity);
+#else
     return x86_disassemble_batched(source, size, output, capacity);
+#endif
 }
 
 typedef struct X86DisassemblyText X86DisassemblyText;

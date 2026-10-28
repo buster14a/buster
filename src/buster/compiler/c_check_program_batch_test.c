@@ -363,13 +363,17 @@ static void check_test_program_batch(CheckTest* test)
                 {
                     check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes <= writers[1].expression_nodes,
                                       "expression coverage counts evaluated occurrences and the batch path decides ordinary nodes itself");
-                    if ((mode == 0 || mode == 1) && graph->ops[count - 1] != CHECK_OP_VALUE)
+                    if (BUSTER_HOST_VECTOR && (mode == 0 || mode == 1) && graph->ops[count - 1] != CHECK_OP_VALUE)
                     {
                         check_test_expect(test, writers[1].batch_nodes != 0, "an ordinary operation takes its vector-classified native template");
                     }
-                    if (mode == 0 && count == 2)
+                    if (BUSTER_HOST_VECTOR && mode == 0 && count == 2)
                     {
                         check_test_expect(test, writers[1].batch_nodes == 2, "a unary leaf pair shares a bulk output template");
+                    }
+                    if (!BUSTER_HOST_VECTOR)
+                    {
+                        check_test_expect(test, writers[1].batch_nodes == 0, "the scalar host does not take vector templates");
                     }
                 }
             }

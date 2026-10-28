@@ -72,11 +72,13 @@ static uint32_t c_body_bindings_bound(const CBindings* bindings, uint32_t point,
 static bool c_body_bindings_counts(const CBindings* source, uint32_t first, uint32_t end, uint32_t point, bool scalar,
                                     uint32_t* file_count, uint32_t* declaration_count, uint32_t* use_count)
 {
+    (void)scalar;
+
     bool valid = first <= end && end <= source->count;
     uint32_t file = 0;
     uint32_t declarations = 0;
     uint32_t uses = 0;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t event = first; valid && event < end; event += 1)
         {
@@ -118,6 +120,8 @@ static bool c_body_bindings_counts(const CBindings* source, uint32_t first, uint
 static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvironment* environment, uint32_t slot, uint32_t first,
                                         uint32_t base, bool scalar, uint32_t* file_count)
 {
+    (void)scalar;
+
     *span = (CBodyBindingSpan){ 0 };
     const CBindings* source = environment->bindings;
     const CBodyRange body = environment->bodies[slot];
@@ -125,7 +129,7 @@ static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvir
     uint32_t file = 0;
     uint32_t declarations = 0;
     uint32_t uses = 0;
-    bool valid = c_body_bindings_counts(source, first, end, body.begin, scalar, &file, &declarations, &uses);
+    bool valid = c_body_bindings_counts(source, first, end, body.begin, BUSTER_SCALAR_PATH(scalar), &file, &declarations, &uses);
     valid = valid && base <= source->count - file;
     const uint32_t mark = base + file;
     // Readers may restore at the closing token or immediately afterward, and may omit empty restores. Include
@@ -155,6 +159,8 @@ static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvir
 // for the whole unit instead of rescanning the prefix separately for every body.
 static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment* environment, uint32_t slot, bool scalar)
 {
+    (void)scalar;
+
     *span = (CBodyBindingSpan){ 0 };
     const CBindings* source = environment->bindings;
     bool valid = environment->valid && source != 0 && source->valid && slot < environment->body_count;
@@ -165,8 +171,8 @@ static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment*
     uint32_t declarations = 0;
     uint32_t uses = 0;
     uint32_t inside = 0;
-    valid = valid && c_body_bindings_counts(source, 0, first, BUSTER_C_BINDING_NONE, scalar, &file, &declarations, &uses);
-    valid = valid && c_body_bindings_finish_span(span, environment, slot, first, file, scalar, &inside);
+    valid = valid && c_body_bindings_counts(source, 0, first, BUSTER_C_BINDING_NONE, BUSTER_SCALAR_PATH(scalar), &file, &declarations, &uses);
+    valid = valid && c_body_bindings_finish_span(span, environment, slot, first, file, BUSTER_SCALAR_PATH(scalar), &inside);
     return valid;
 }
 
@@ -174,6 +180,8 @@ static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment*
 // Each source event's classification contributes to exactly one prefix/body range. Metadata is O(body_count).
 static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, const CheckEnvironment* environment, bool scalar, uint32_t* maximum)
 {
+    (void)scalar;
+
     const CBindings* source = environment->bindings;
     bool valid = environment->valid && source != 0 && source->valid && capacity >= environment->body_count;
     uint32_t cursor = 0;
@@ -187,10 +195,10 @@ static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, co
         uint32_t added = 0;
         uint32_t declarations = 0;
         uint32_t uses = 0;
-        valid = valid && cursor <= first && c_body_bindings_counts(source, cursor, first, BUSTER_C_BINDING_NONE, scalar, &added, &declarations, &uses);
+        valid = valid && cursor <= first && c_body_bindings_counts(source, cursor, first, BUSTER_C_BINDING_NONE, BUSTER_SCALAR_PATH(scalar), &added, &declarations, &uses);
         file += added;
         uint32_t inside = 0;
-        valid = valid && c_body_bindings_finish_span(spans + slot, environment, slot, first, file, scalar, &inside);
+        valid = valid && c_body_bindings_finish_span(spans + slot, environment, slot, first, file, BUSTER_SCALAR_PATH(scalar), &inside);
         if (valid)
         {
             // File declarations in a body interval can only activate at its opening boundary.
@@ -209,6 +217,8 @@ static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, co
 // unspecified end entries of use/restore events.
 static bool c_body_bindings_view(CBindings* view, const CBindings* source, const CBodyBindingSpan* span, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     const uint32_t count = span->end - span->begin;
     *view = (CBindings)
     {
@@ -224,7 +234,7 @@ static bool c_body_bindings_view(CBindings* view, const CBindings* source, const
     view->declaration = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     view->end = view->declaration != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     bool valid = count == 0 || view->end != 0;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t event = 0; valid && event < count; event += 1)
         {
@@ -267,9 +277,11 @@ static bool c_body_bindings_view(CBindings* view, const CBindings* source, const
 static bool c_body_bindings_globals(const CheckEnvironment* environment, const uint32_t* keys, const uint32_t* points,
                                     const uint32_t* destinations, uint32_t count, bool scalar, uint32_t* output_handles)
 {
+    (void)scalar;
+
     uint32_t handles[16];
     bool valid = true;
-    if (scalar)
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -314,7 +326,7 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
     if (valid)
     {
         status = C_BODY_BINDINGS_RESOURCE;
-        valid = c_body_bindings_view(&view, source, span, scratch, scalar);
+        valid = c_body_bindings_view(&view, source, span, scratch, BUSTER_SCALAR_PATH(scalar));
         if (!valid && view.end != 0)
         {
             status = C_BODY_BINDINGS_INVALID;
@@ -368,13 +380,13 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
         }
         if (valid && pending == 16)
         {
-            valid = c_body_bindings_globals(environment, keys, points, destinations, pending, scalar, output->handles);
+            valid = c_body_bindings_globals(environment, keys, points, destinations, pending, BUSTER_SCALAR_PATH(scalar), output->handles);
             pending = 0;
         }
     }
     if (valid && pending != 0)
     {
-        valid = c_body_bindings_globals(environment, keys, points, destinations, pending, scalar, output->handles);
+        valid = c_body_bindings_globals(environment, keys, points, destinations, pending, BUSTER_SCALAR_PATH(scalar), output->handles);
     }
     valid = valid && written == span->uses;
     if (valid)

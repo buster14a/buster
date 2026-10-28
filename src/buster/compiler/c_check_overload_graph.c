@@ -143,6 +143,8 @@ static CheckDiagnostic check_graph_overload_operands(TypeTable* types, const Che
 static CheckOverloadResult check_graph_overload_call(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckAction* action,
                                                      uint32_t head, Arena* scratch, bool scalar, CheckActionResult* result)
 {
+    (void)scalar;
+
     const uint64_t mark = scratch->length;
     bool pending = false;
     for (uint32_t i = 0; i < action->argument_count; i += 1)
@@ -154,7 +156,7 @@ static CheckOverloadResult check_graph_overload_call(TypeTable* types, const Che
     if (!pending || arguments != 0)
     {
         selected = check_overload_call(types, action, graph->overload_candidates, graph->overload_candidate_count,
-                                      head, scratch, scalar, result, arguments, &stream->statistics.scratch_bytes);
+                                      head, scratch, BUSTER_SCALAR_PATH(scalar), result, arguments, &stream->statistics.scratch_bytes);
         for (uint32_t i = 0; arguments != 0 && i < action->argument_count; i += 1)
         {
             if (arguments[i].status == CHECK_OVERLOAD_OK && arguments[i].candidate != BUSTER_CHECK_NONE &&

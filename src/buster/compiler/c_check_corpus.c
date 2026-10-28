@@ -507,6 +507,8 @@ static void check_corpus_late_diagnostics(CheckCorpusPath* path, const Parser* p
 
 static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, Preprocessor* pp, bool scalar)
 {
+    (void)scalar;
+
     path->repair = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckRepair, 1);
     bool ready = path->repair != NULL;
     if (ready)
@@ -571,7 +573,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             {
                 const CheckOptions options =
                 {
-                    .scalar = scalar,
+                    .scalar = BUSTER_SCALAR_PATH(scalar),
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
                 result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
@@ -656,6 +658,8 @@ static bool check_corpus_deferred_same_memory(const CheckDeferredMemory* before,
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
+    (void)scalar;
+
     path->suppress_warnings = suppress_warnings;
     path->warning_token = BUSTER_CHECK_NONE;
     path->warning_source = BUSTER_CHECK_NONE;
@@ -664,7 +668,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     path->pragma = 0;
     path->phase = "parse";
     const ParseOptions parse_options = {
-        .scalar = scalar,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
     };
     bool ready = parse_initialize(parser, &parse_options, pp->options.language);
     if (ready)
@@ -779,7 +783,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     {
         path->phase = path->adapted ? "expression" : path->phase;
         const CheckOptions options = {
-            .scalar = scalar,
+            .scalar = BUSTER_SCALAR_PATH(scalar),
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
@@ -828,7 +832,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .initializers = &path->initializers,
             .asms = &path->asms,
             .identifiers = pp->table,
-            .scalar = scalar,
+            .scalar = BUSTER_SCALAR_PATH(scalar),
             .target_features = pp->options.target.features,
         };
         path->programmed = check_program(&path->program, view, &path->input, &path->stream, &path->types, options,
@@ -884,7 +888,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     if (ready && !path->parsed && !path->resource)
     {
         // Diagnostic-only recovery retains the original parse rejection and uses only whitelisted reports.
-        check_corpus_repair(path, parser, pp, scalar);
+        check_corpus_repair(path, parser, pp, BUSTER_SCALAR_PATH(scalar));
     }
     if (ready && !path->parsed && !path->resource && parser->tokens.pragma_count != 0)
     {
@@ -1284,7 +1288,9 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
 
 static bool check_corpus_check(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar)
 {
-    return check_corpus_check_policy(path, parser, pp, scalar, false);
+    (void)scalar;
+
+    return check_corpus_check_policy(path, parser, pp, BUSTER_SCALAR_PATH(scalar), false);
 }
 
 static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
