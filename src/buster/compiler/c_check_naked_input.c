@@ -270,7 +270,12 @@ static void check_input_naked_finish(CheckInputReader* reader)
         if (input->naked_diagnostic != NULL)
         {
             *input->naked_diagnostic = diagnostic;
+            const uint32_t before = input->report_count;
             check_input_report(reader, diagnostic.position, message);
+            if (input->report_count != before)
+            {
+                input->reports[before].completion = diagnostic.position;
+            }
         }
     }
 }

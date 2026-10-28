@@ -205,6 +205,7 @@ static void check_test_driver_recovery(CheckTest* test, const char* clang, const
         "int f(int n){switch(n){case 0:;case 0:;}\n#error after_switch\nreturn 0;}\n",
         "int f(void){break\n#error before_semicolon\n;return 0;}\n",
         "int f(void){continue;\n#error after_semicolon\nreturn 0;}\n",
+        "#pragma unroll 4\n#error after_file_pragma\nint object;\n",
     };
     for (uint32_t constraint = 0; constraint < BUSTER_ARRAY_LENGTH(constraints); constraint += 1)
     {
