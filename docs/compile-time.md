@@ -201,6 +201,18 @@ Three allocations touched far more memory than they used.
 [#572](https://github.com/buster14a/buster/issues/572) then took 121 MB more off
 the checker ("The checker's columns", below). The objects are the same bytes.
 
+The remaining parser scratch work in [#628](https://github.com/buster14a/buster/issues/628)
+separates the production vector workspace from the kernel benchmark's nine
+traversal arrays (36 bytes per token). The C driver requests `tree_only`; other
+clients build final traversal columns after popping the vector workspace.
+Those unused arrays had created a hole before live K4 slots and fallback
+scratch. The obsolete candidate stack, another six bytes per token, had no
+consumer either. The benchmark explicitly reserves its traversal arrays;
+production retains the borrowed arena's mark and initializes every value it
+reads, including on dirty pages and arena copies. This reduces the scratch
+span; its RSS and system-time effect requires separate whole-process
+measurement and is not implied by the virtual byte count.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:
