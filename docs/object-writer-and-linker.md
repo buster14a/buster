@@ -2883,6 +2883,25 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   numbered after the loader's (`runtime_export_library`), and the snapshot
   keeps its versions, its exports' versions and types, its path and its
   soname as it keeps the loader's (format 7, after #490's 6).
+- **Deferred validation (#489's follow-up, format 8).** `runtime_find_gcc_s`
+  marks its search probes deferred, without growing `RuntimeProbe`. The
+  snapshot retains that flag in its hashed directory. `runtime_open` checks
+  the other probes; binding checks the deferred paths once when it takes a
+  strong `libgcc_s` import, retains it for a named library's reference, or
+  checks a named library's version need from it. Undefined-name errors also
+  check those paths, since a library installed since the snapshot could
+  define the missing name. A shared library's permitted strong undefined
+  names do the same. A stale path gives `BIND_ERROR_SNAPSHOT`; existing
+  callers discard the snapshot and re-import before retrying. Links that
+  use none of these facts, including weak-only unwinder references, do not
+  check the deferred paths. Imported runtimes already read the files.
+  GCC discovery also retains the chosen `crtbeginS.o` path directly in
+  `Runtime.object_paths[RUNTIME_OBJECT_BEGIN]`. Dynamic PIEs, shared libraries
+  and static PIEs reuse it instead of probing that same file again. Its one
+  ordinary probe still detects changes and removals. A static executable
+  independently searches for `crtbeginT.o`. `test-import` checks both the
+  retained path through a GCC-version change and exactly one ordinary probe
+  of each kind's begin object.
 - **The order.** The driver's line is `-lgcc -lgcc_s_asneeded -lc -lgcc
   -lgcc_s_asneeded`: a member of `libgcc.a` comes before `libgcc_s.so.1`,
   which exports most of the members' names too (`__udivti3`), so binding
@@ -2902,6 +2921,12 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   definition of one of its names with default visibility is exported, as lld
   exports it whether or not the library is needed (GNU ld doesn't when it
   isn't), as the loader's are.
+  The pass computes each library's lowest and highest version index once,
+  then classifies imports with range comparisons. `runtime_move_versions`
+  gives the libraries disjoint ranges, including when a library's own
+  version indices have gaps or appear out of order. This removes a full
+  version scan for each import in each of the pass's two loops; the exact
+  membership scan remains available to the independent tests.
 - **A named library's references.** GNU ld's `--as-needed` also keeps a
   library for a needed library's strong reference that the referring
   library's own `DT_NEEDED` entries don't cover, nor those of another
@@ -2927,6 +2952,14 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   selects (`ExecutableLibrary.required` false), so that only a link with an
   import of its names gets its `DT_NEEDED` entry and its versions'
   `.gnu.version_r` entries.
+  After as-needed pruning, `bind_end` publishes `Bind.gcc_s_needed` in the
+  structure's existing padding. `dynamic_inputs` includes the GCC library
+  and reserves and copies its version catalog only when that flag is set,
+  preserving the same named-library and runtime order. This keeps an unused
+  catalog out of the writer's version scans as well. `test-dynamic` derives
+  the need independently from strong bound imports and forced dependencies,
+  checks that unused library and version entries are absent, and still
+  loads and runs the unwinder and split-stack outputs.
 - **Split-stack code in a dynamic PIE.** `morestack.o` binds now, and makes
   `generic-morestack.o` join, whose thread-locals it reaches by general- and
   local-dynamic accesses, which the writer relaxes in a dynamic PIE since
@@ -2934,22 +2967,56 @@ runtimes import it as a third library beside `libc.so.6` and the loader:
   in a static executable; a shared library keeps them, with GOT pairs.
   Split-stack PIEs and libraries link and run.
 
-**The cost**, on the 9700X against #511's merge base (e04462c), with #483's
+**The original #511 cost**, on the 9700X against its merge base (e04462c), with #483's
 harness in three alternating rounds
-([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/libgcc-s-489-2026-10-27)):
+([the original record](https://github.com/buster14a/buster-performance/tree/ff9d360bb9e06daa449ba5f8f7c8e3f38ca92264/docs/measurements/libgcc-s-489-2026-10-27)):
 the dynamic runtime's snapshot grew from 3,282,344 bytes to 3,286,696 (45
 more global names, 3,432, and four more probes: `libgcc_s.so.1` in GCC's
 installation and in the library directories). A link that doesn't import
-`libgcc_s.so.1` pays 0.8 us in `runtime_open` (11.7 to 11.9 us before, 12.6
+`libgcc_s.so.1` paid 0.8 us in `runtime_open` (11.7 to 11.9 us before, 12.6
 to 12.7 after), nearly all of it the probes' `stat`s, and 0.02 to 0.04 us in
 `bind_end` (1,919 instructions for one worker: the as-needed pass over a third
-library); `bind_begin`, the write and the direct link's resident memory are
+library); `bind_begin`, the write and the direct link's resident memory were
 the same. The C driver's hello world took 0.08 to 0.10 ms and 2 MB more, all
 of it one transparent huge page of `.bss`: the larger code moves `.bss`, and
 `unwind.c`'s `unwind_indices`, which every link clears whole, then straddles
 a 2 MB boundary. With huge pages disabled the two builds' runs take memory
 within 20 KB and, in two rounds of three, time within 0.01 ms. That page follows
 the executable's layout, which any change can move.
+
+**The #489 no-import follow-up** defers the optional file checks, reuses the
+already-discovered begin-object path, replaces repeated version scans with
+range classification, and omits the unused catalog from the writer's inputs.
+Three alternating rounds on the same 9700X compare e04462c, the immediate
+baseline 8fcf19ce and implementation 3760045a
+([the follow-up record](https://github.com/buster14a/buster-performance/tree/7dfb7a1d1e4102800710b692916cd06c4dd8f135/docs/measurements/libgcc-s-no-import-489-2026-10-27)).
+The tiny PIE's median total is 21.4, 22.6 and 21.2 us respectively; every
+final round is at or below its paired historical total. Its cached runtime
+load is 11.0--11.4 us, against the historical 11.4--12.0 us, and the writer's
+count phase is back to 1.0 us. A supplementary tiny-PIE `bind_end` sample uses
+6,738 instructions versus the historical 7,233 and immediate baseline's 9,152;
+its separate wall median, 0.34 versus 0.32 us historically, does not establish
+an individual phase speedup. The tiny shared library's load is 10.5--10.8 us,
+against 11.0--11.5 us historically; its summed load and binding/input phases
+are lower too. Shared close/write times vary widely, and the larger-output
+totals do not establish a general linker speedup: all workloads and their
+ranges remain in the record. A single-executable control pair also removes
+the fixed tiny-PIE cost (21.8 to 21.2 us); its large shared total is higher,
+so it supports no general speedup claim either. The whole-driver sample is
+2.241 ms and 30,500 KB peak RSS versus the immediate 2.267 ms and 29,584 KB:
+it establishes no whole-driver memory improvement. Traced cached ordinary links check no GCC DSO
+path, dependent unwinder links check all four, and the begin object is checked
+once. Both ordinary and unwinder outputs remain byte-identical to the
+implementation before catalog omission. The snapshot, binding, import,
+dynamic-output, C-driver and call-graph checks pass on the physical 9700X,
+including both binding paths, stale-file retries, unwinding and split-stack
+execution.
+Unversioned strong references from needed named libraries have separate
+stale/retry coverage for both paths and runtime kinds, and the common path
+comparison checks `gcc_s_needed` too. Test-only build e65a6f3e passes the four
+affected checks; its one complete-link smoke gives 21.4 us for the tiny PIE,
+matching the historical median. The production modules are unchanged from
+3760045a; this smoke does not replace the three-round comparison.
 
 `test-import` checks `libgcc_s.so.1`'s soname, exports, versions past both
 libraries' and its exports apart from theirs, `__udivti3` a member's of

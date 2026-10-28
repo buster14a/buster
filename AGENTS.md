@@ -3273,6 +3273,11 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   rename, removed, created where a probe found nothing, a file added to a
   probed directory, written with its times put back), and one written by
   another executable, must be stale, and `runtime_open` must rebuild them;
+- deferred probes: changed and newly created optional-library paths leave
+  snapshot loading and no-use or weak-only links alone. Strong unwinder and
+  split-stack references, undefined names (including shared-library names),
+  and a needed library's version need request a snapshot retry. Both binding
+  paths check the result, and discarding the snapshot re-imports current data;
 - invalid files, of the dynamic PIE's runtime's snapshot and of the static
   PIE's: 1,600 damaged copies (cut short, one byte longer, a byte of the
   directory changed at sampled offsets and in every byte of the header), each
