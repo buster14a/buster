@@ -1905,7 +1905,7 @@ static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t 
 {
     const uint8_t warnings = input->reader->output->constant_warnings[closing];
     const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
-    input->reader->output->constant_warnings[closing] = warnings;
+    check_input_constant_warning_set(input->reader->output, closing, warnings);
     check_input_warning_changed(input->reader, closing, warnings);
     return valid;
 }
