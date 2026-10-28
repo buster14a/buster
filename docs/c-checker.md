@@ -1708,11 +1708,40 @@ does in Clang. Both output paths share the publication gate, including deferred
 preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
 graph's construction.
 
-Collection still has two pre-existing recovery boundaries: a preprocessing
-error prevents semantic collection of earlier source (#698), and an undeclared
-identifier can leave later independent expression warnings outside the safe
-graph prefix (#699). The publication limit does not supply those missing
-diagnostics or establish a combined source-order merge across stages.
+The source driver collects preprocessing, parser and checker groups before
+publication (#698). Their order follows expansion-output boundaries and proven
+semantic completion points, independently of the diagnostic's located token.
+For example, an earlier missing name precedes a later `#error`; runtime shift
+warnings complete after their function's closing brace and its lookahead, so
+an EOF preprocessing diagnostic can precede that warning. Required constant
+evaluation retains its own expression-completion boundary in a sparse warning
+fact. Include stacks and macro/explicit notes are rendered with their primary
+after the final order is known. The shared gate then counts only published
+groups and applies the error budget once. Standalone preprocessing retains
+immediate publication.
+
+A nonfatal preprocessing error leaves the source stream available for
+diagnostics. A real preprocessing fatal leaves only its produced prefix;
+existing complete-declaration/statement recovery can diagnose safe original
+fragments there. Either outcome remains a rejected unit and cannot replace an
+object file, even if the final budget hides a later error. Diagnostic capture
+exhaustion also rejects the unit and publishes one fatal rather than accepting
+an incompletely diagnosed warning-only source. Failed history replays keep
+queued groups' backing alive or replace a silent failure safely.
+
+After the whole declaration/body resolver has completed, ordinary missing-name
+binding reports can retain independent later declarations (#699). Two bounded
+forest passes give each rejected top-level declaration its earlier safe graph
+prefix; independent declarations keep their full graphs. Missing operands
+acquire no invented value or type. Initializer, assembly and control scans use
+the same local completion cuts, including whole-switch completion barriers,
+and independent tentative-definition constraints still run at translation-unit
+end. Type-query/declarator failures, unsupported pragmas, resource failures and
+unfinished resolver states retain the conservative prefix. Repaired/deferred
+views with skipped bodies do not enable this new binding recovery. A successful
+deferred merge has the same complete unit as source order and uses the same cuts.
+All these views remain
+diagnostic-only and preserve the original source rejection.
 
 ### What the lowering costs (#531)
 
