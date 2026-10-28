@@ -26,7 +26,9 @@ Issue #147 stays open until the rows that say so are done.
 | `cleanup` | Checked as clang checks it, its scopes' jumps too, and called at each exit from its variable's scope, the named return value's after the return's cleanups as clang's NRVO has it ([the checker guide](c-checker.md)) | A function of a parameter other than a pointer, or whose result is an aggregate (including a register-returned one), a 128-bit integer or a vector, is refused by name |
 | `transparent_union`, `gnu_inline`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |
-| `weak`, `alias`, `visibility`, constructors/destructors | Parsed and retained; link representation has relevant primitives | Source-to-symbol/atom creation, init/fini entries and execution tests |
+| `constructor`, `destructor` | An entry of `.init_array` or `.fini_array` each, its priority's `.init_array.N` or `.fini_array.N` in `-c`'s object, in LLVM's order (stably by priority, past 65535 its default), run against clang's build ([the checker guide](c-checker.md)) | None |
+| `weak` | A weak symbol, defined or undefined; clang's error without external linkage, and one after the definition ignored | A weak declaration after a use makes the reference weak, as GCC's does, where clang's stays global (GCC says the behavior is unspecified) |
+| `alias`, `ifunc`, `weakref` | Parsed and retained; link representation has relevant primitives | Refused by name at emission: the symbols they name |
 | `section` | Parsed and retained | Custom named-section representation and source emission |
 | Inline assembly statements | Existing parser grammar, kept distinct from asm labels; the checker's operands; constraints, operand substitution, clobbers and assembly into per-unit helpers ([the inline assembly guide](c-inline-assembly.md)) | `asm goto`, naked functions, and templates that refer to symbols |
 

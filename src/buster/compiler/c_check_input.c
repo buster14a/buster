@@ -44,6 +44,8 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CLEANUP_PARAMETERS,
     CHECK_INPUT_CLEANUP_TYPE,
     CHECK_INPUT_CLEANUP_ARGUMENTS,
+    // GNU's weak attribute on a declaration without external linkage.
+    CHECK_INPUT_WEAK_LINKAGE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -73,6 +75,7 @@ static const char* const check_input_messages[] =
     "'cleanup' argument is not a function",
     "'cleanup' function must take 1 parameter",
     "'cleanup' function's parameter has a type incompatible with the variable's address",
+    "weak declaration cannot have internal linkage",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -688,8 +691,12 @@ struct CheckInputReader
     uint32_t section_event_capacity;
     uint32_t section_record_from;
     // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
-    // (check_input_cleanup_declaration).
+    // (check_input_cleanup_declaration), a weak one, which only then each declarator's are for its linkage, and a weak,
+    // a constructor or a destructor, which only then each redeclaration's are for those after a definition
+    // (check_input_attribute_late).
     bool cleanup_attributes;
+    bool weak_attributes;
+    bool late_attributes;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -3541,6 +3548,18 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                         reader->linkage[name] = reader->linkage[declaration] != 0 ? reader->linkage[declaration] : reader->linkage[name];
                     }
                 }
+                // GNU's weak attribute needs external linkage (#147): clang's error at the attribute, but on a typedef,
+                // where it warns and ignores it (all of a typedef's declarators are typedefs).
+                for (uint32_t a = 0; reader->weak_attributes && attributes != 0 && a < attributes->count; a += 1)
+                {
+                    CheckInputAttribute* attribute = attributes->records + a;
+                    attribute->ignored |= attribute->kind == CHECK_ATTRIBUTE_WEAK && is_typedef;
+                    if (attribute->kind == CHECK_ATTRIBUTE_WEAK && !attribute->ignored && reader->linkage[name] != 2)
+                    {
+                        check_input_report(reader, attribute->name_token, CHECK_INPUT_WEAK_LINKAGE);
+                        valid = false;
+                    }
+                }
                 if (function && kind == PARSE_KIND_L_BRACE)
                 {
                     reader->parameter_vla_begin = vla_begin;
@@ -3762,6 +3781,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
             else
             {
+                check_input_attribute_late(reader, token, previous);
                 reader->definition_seen[token] |= reader->definition_seen[previous];
                 reader->objects[token] = reader->objects[previous];
                 check_input_naked_inherit(reader, token, previous);

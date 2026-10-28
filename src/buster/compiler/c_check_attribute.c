@@ -854,6 +854,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
             reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
+            reader->weak_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK;
+            reader->late_attributes |= rule->kind == CHECK_ATTRIBUTE_WEAK || rule->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || rule->kind == CHECK_ATTRIBUTE_DESTRUCTOR;
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)
@@ -1291,6 +1293,34 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         }
     }
     return valid;
+}
+
+// The attributes clang drops from a declaration after its entity's definition, with its warning that an attribute
+// declaration must precede the definition (Sema's checkNewAttributesAfterDef): of those the emission gives a meaning to,
+// weak, constructor and destructor, which then make no symbol weak or array entry (#147). A specifier's list is each
+// declarator's: one declarator's is copied before its records are marked.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous)
+{
+    const CheckInputAttributes* attributes = reader->late_attributes ? reader->output->attributes[token] : 0;
+    const bool after = attributes != 0 && reader->definition_seen[previous] && !reader->defined[token];
+    bool late = false;
+    for (uint32_t i = 0; after && i < attributes->count; i += 1)
+    {
+        const CheckInputAttributeKind kind = attributes->records[i].kind;
+        late |= !attributes->records[i].ignored && (kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+    }
+    CheckInputAttributes* copy = late ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : 0;
+    const bool copied = copy != 0 && check_input_attribute_copy(reader, attributes, copy);
+    reader->output->resource |= late && !copied;
+    for (uint32_t i = 0; copied && i < copy->count; i += 1)
+    {
+        const CheckInputAttributeKind kind = copy->records[i].kind;
+        copy->records[i].ignored |= kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR;
+    }
+    if (copied)
+    {
+        reader->output->attributes[token] = copy;
+    }
 }
 
 // Run after a full declarator is available, including a function-pointer typedef. Prefix attributes cannot perform

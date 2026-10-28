@@ -1223,6 +1223,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
+    // Each symbol's weak binding, and its constructor's and destructor's priorities (#147), two a symbol, each plus one (0
+    // for none), with the declaration whose attribute gave it: the latest declaration's first, as clang takes it.
+    uint8_t* weak = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    uint32_t* structors = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
+    uint32_t* structor_tokens = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * ((uint64_t)program->symbol_count + 1)) : 0;
+    valid = valid && weak != 0 && structors != 0 && structor_tokens != 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
@@ -1233,6 +1239,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
+        memset(weak, 0, (uint64_t)program->symbol_count + 1);
+        memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
         // declaration's attributes and keeps parameters' retain/alias obligations as well as static declarations'.
         uint32_t attributed = 0;
@@ -1304,18 +1312,28 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                         }
                     }
                     const CheckInputAttributeKind kind = attribute->kind;
+                    // A weak declaration's symbol is weak: the reader ignores one after the definition and refuses one
+                    // without external linkage. A constructor's or destructor's priority is its argument, 65535 without
+                    // one, past which LLVM takes 65535 (AsmPrinter's preprocessXXStructorList).
+                    weak[symbol] |= symbol != 0 && !attribute->ignored && kind == CHECK_ATTRIBUTE_WEAK;
+                    const uint32_t structor = (kind == CHECK_ATTRIBUTE_DESTRUCTOR ? 1u : 0u) + 2 * symbol;
+                    if (symbol != 0 && !attribute->ignored && (kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR) &&
+                        program->input->declaration_kinds[token] == C_BINDING_FUNCTION && (structors[structor] == 0 || structor_tokens[structor] < token))
+                    {
+                        const uint64_t priority = attribute->argument_count != 0 && attribute->resolved ? (uint64_t)attribute->value : 65535;
+                        structors[structor] = (uint32_t)(priority < 65535 ? priority : 65535) + 1;
+                        structor_tokens[structor] = token;
+                    }
                     const bool alias = kind == CHECK_ATTRIBUTE_ALIAS || kind == CHECK_ATTRIBUTE_IFUNC;
                     const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
-                    const bool unpublished = kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
-                                             kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
-                                             kind == CHECK_ATTRIBUTE_COMMON;
+                    const bool unpublished = kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN || kind == CHECK_ATTRIBUTE_COMMON;
                     if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
                     {
-                        // The typed source contract retains these obligations. Until symbol aliases and startup
-                        // lists and weak semantics are published, refusing code
-                        // emission is required. A dropped definition has no object-format obligation of its own.
+                        // The typed source contract retains these obligations. Until symbol aliases, weak references to
+                        // other names, retained sections and common symbols are published, refusing code emission is
+                        // required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (alias, ifunc, constructor, destructor, weak, retain or common)";
+                        result->reason = "this attribute (alias, ifunc, weakref, retain or common)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
@@ -1444,21 +1462,28 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
+    // The defined functions' constructors' and destructors' entries, an atom of an init or fini array each (#147).
+    uint32_t structor_count = 0;
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+        structor_count += (structors[2 * symbol] != 0) + (structors[2 * symbol + 1] != 0);
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count;
-    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
+                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count;
+    const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names;
     valid = valid && atom_count < UINT32_MAX && fixup_count < UINT32_MAX && wide_count < UINT32_MAX && symbol_count < UINT32_MAX &&
-            name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities < UINT32_MAX;
+            name_count < UINT32_MAX && (uint64_t)data_capacity.priorities + runtime.priorities + structor_count < UINT32_MAX;
     const LinkCapacity capacity = {
         .names = valid ? (uint32_t)name_count : 0,
         .atoms = valid ? (uint32_t)atom_count : 0,
         .symbols = valid ? (uint32_t)symbol_count : 0,
         .fixups = valid ? (uint32_t)fixup_count : 0,
         .wide_addends = valid ? (uint32_t)wide_count : 0,
-        .priorities = valid ? data_capacity.priorities + runtime.priorities : 0,
+        .priorities = valid ? data_capacity.priorities + runtime.priorities + structor_count : 0,
     };
     valid = valid && link_initialize(&result->link, output, output, capacity);
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
@@ -1549,7 +1574,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
-            flags = kind | (program->input->linkage[declaration] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
+            flags = kind | (program->input->linkage[declaration] != 2 ? BUSTER_LINK_SYMBOL_LOCAL : weak[s + 1] ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL);
             if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
             {
                 flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
@@ -1898,6 +1923,40 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             result->link.symbols.source[symbol] = BUSTER_LINK_SOURCE_PROGRAM;
         }
     }
+    // The constructors' and destructors' entries (#147): a pointer to the function each, in an init or fini array atom
+    // of its own, in the order LLVM writes llvm.global_ctors and llvm.global_dtors: stably by priority, from the
+    // definitions' order. One below 65535 has its priority (-c's .init_array.N and .fini_array.N, check_program_sections),
+    // and the others are their arrays' own.
+    if (valid && structor_count != 0)
+    {
+        uint64_t* order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, structor_count);
+        uint64_t* sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, structor_count);
+        valid = order != 0 && sorting != 0;
+        uint32_t entries = 0;
+        for (uint32_t b = 0; valid && b < count; b += 1)
+        {
+            const SymbolId symbol = program->object_symbols[program->bodies[b].object];
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                if (structors[2 * symbol + k] != 0)
+                {
+                    order[entries++] = ((uint64_t)((k << 16) | (structors[2 * symbol + k] - 1)) << 32) | b;
+                }
+            }
+        }
+        const uint64_t* sorted = valid ? c_bindings_sort(order, sorting, structor_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : 0;
+        for (uint32_t e = 0; valid && e < structor_count; e += 1)
+        {
+            const uint32_t k = (uint32_t)(sorted[e] >> 48);
+            const uint32_t priority = (uint32_t)(sorted[e] >> 32) & 0xffff;
+            const SymbolId symbol = program->object_symbols[program->bodies[(uint32_t)sorted[e]].object];
+            uint8_t* data = arena_push(bytes, 8, 8);
+            const AtomId atom = data != 0 ? link_add_atom(&result->link, k != 0 ? BUSTER_LINK_CLASS_FINI_ARRAY : BUSTER_LINK_CLASS_INIT_ARRAY, 3, 8,
+                                                       (uint8_t*)memset(data, 0, 8), 0) : 0;
+            valid = atom != 0 && link_add_fixup(&result->link, atom, 0, BUSTER_LINK_FIXUP_ABS64, symbol, 0) != 0 &&
+                    (priority == 65535 || link_add_priority(&result->link, atom, priority));
+        }
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     if (!valid)
     {
@@ -1985,7 +2044,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     Link* link = &code->link;
     *table = 0;
     bool valid = true;
-    if (placements != 0 || code->asm_atom_count != 0)
+    if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -1999,6 +2058,19 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 descriptors[code->asm_atoms[a]] = code->asm_sections[a];
             }
+            // A prioritized constructor's or destructor's entry (#147) is in .init_array.N or .fini_array.N, as clang's
+            // object has it (TargetLoweringObjectFileELF's getStaticCtorSection), of its array's type and flags.
+            for (uint32_t p = 1; valid && p < link->priorities.count; p += 1)
+            {
+                const AtomId atom = link->priorities.atom[p];
+                const uint8_t class = link->atoms.class[atom];
+                char* name = BUSTER_ARENA_PUSH_ARRAY(output, char, 24);
+                valid = name != 0;
+                const int length = valid ? snprintf(name, 24, "%s.%u", object_class_sections[class].name, (unsigned)link->priorities.priority[p]) : 0;
+                descriptors[atom] = (ObjectAtomSection){ .name = { .pointer = name, .length = (uint64_t)length }, .type = object_class_sections[class].type,
+                                                         .flags = object_class_sections[class].flags };
+            }
+            code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
             *table = descriptors;
         }
         for (uint32_t p = 0; valid && p < placements; p += 1)
