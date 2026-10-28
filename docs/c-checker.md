@@ -953,10 +953,14 @@ What the lowering covers past scalars (#145's programs):
   implicit-return safeguard. A second walk selects constant conditions for
   `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
   suppression. Return warnings currently cover aggregate bodies without
-  statement-expression regions, assembly, query builtins or reachable call
-  expressions; these retain conservative handling until their source-flow
-  facts are available to the control graph. Source/native tests cover register and hidden results,
-  branches, switch, loops, labels and defined paths through partial returns.
+  statement-expression regions, assembly, reachable call or semantic-query
+  expressions, or nonconstant enum selectors. Calls, queries and enum switches
+  retain conservative handling until their noreturn, context-sensitive constant
+  and exhaustive-enumerator facts are available to the control graph. Constant
+  switch dispatch follows converted side-effect-free source selector
+  values and signed case ranges only in the warning walk; the Tier 0 walk
+  retains every dispatch edge. Source/native tests cover register and hidden
+  results, branches, switch, loops, labels and defined paths through partial returns.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
