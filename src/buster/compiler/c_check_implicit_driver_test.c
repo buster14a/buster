@@ -19,7 +19,7 @@ static void check_test_driver_implicit_system(CheckTest* test, const char* clang
         const char* standard;
         const char* first;
         const char* second;
-        bool pragma;
+        uint8_t pragma;
         bool user;
     } cases[] = {
         { "-std=gnu17", NULL, NULL, false, false },
@@ -34,6 +34,12 @@ static void check_test_driver_implicit_system(CheckTest* test, const char* clang
         { "-std=gnu17", NULL, NULL, true, false },
         { "-std=gnu17", "-Wsystem-headers", NULL, true, false },
         { "-std=gnu17", NULL, NULL, false, true },
+        { "-std=gnu89", "-Werror=implicit-function-declaration", "-w", false, true },
+        { "-std=gnu89", "-w", NULL, true, true },
+        { "-std=gnu17", "-w", NULL, true, true },
+        { "-std=gnu17", "-Wsystem-headers", NULL, 2, false },
+        { "-std=gnu17", "-Wsystem-headers", NULL, 3, false },
+        { "-std=gnu89", "-Wsystem-headers", NULL, 4, false },
     };
     char header[512];
     char source[512];
@@ -44,14 +50,20 @@ static void check_test_driver_implicit_system(CheckTest* test, const char* clang
     snprintf(objects[1], sizeof(objects[1]), "%s/implicit-system-vector.o", directory);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
-        static const char ordinary[] = "int system_function(void){return system_missing(1);}\n";
-        static const char promoted[] = "#pragma clang diagnostic error \"-Wimplicit-function-declaration\"\n"
-            "int system_function(void){return system_missing(1);}\n";
+        static const char* const pragmas[] = {
+            "",
+            "#pragma clang diagnostic error \"-Wimplicit-function-declaration\"\n",
+            "#pragma clang diagnostic ignored \"-Wall\"\n",
+            "#pragma clang diagnostic warning \"-Wall\"\n",
+            "#pragma clang diagnostic error \"-Wall\"\n",
+        };
         static const char system_only[] = "#include <implicit-system.h>\n";
         static const char user[] = "#include <implicit-system.h>\nint user_function(void){return user_missing(1);}\n";
-        const char* body = cases[c].pragma ? promoted : ordinary;
+        char body[256];
+        const int body_length = snprintf(body, sizeof(body), "%sint system_function(void){return system_missing(1);}\n", pragmas[cases[c].pragma]);
         const char* unit = cases[c].user ? user : system_only;
-        const bool written = parse_test_write(header, body, strlen(body)) && parse_test_write(source, unit, strlen(unit));
+        const bool written = body_length > 0 && (uint32_t)body_length < sizeof(body) &&
+                             parse_test_write(header, body, (uint64_t)body_length) && parse_test_write(source, unit, strlen(unit));
         check_test_expect(test, written, "implicit system-header fixture is written");
         for (uint32_t mode = 0; written && mode < 2; mode += 1)
         {
@@ -144,6 +156,12 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
         { "-std=gnu89", "-Weverything", NULL },
         { "-std=gnu17", "-Wno-implicit", "-Weverything" },
         { "-std=gnu89", "-Werror-implicit-function-declaration", NULL },
+        { "-std=gnu17", "-Wno-error-implicit-function-declaration", NULL },
+        { "-std=gnu17", "-Wno-error=all", NULL },
+        { "-std=gnu89", "-Werror=all", NULL },
+        { "-std=gnu89", "-Werror=implicit-function-declaration", "-w" },
+        { "-std=gnu23", "-Wno-implicit", NULL },
+        { "-std=gnu23", "-Wno-all", NULL },
     };
     static const char source[] = "int first(void);int second(void);\nint first(void){int x=missing(1);return x+missing(2);}\n"
         "int second(void){return missing(3);}\n";

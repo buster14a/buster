@@ -19790,14 +19790,15 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             implicit_mapped = true;
             implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
         }
-        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0)
+        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0 ||
+                 strcmp(argument, "-Wno-error-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=all") == 0)
         {
             implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
             implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
             implicit_no_error = true;
         }
         else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0 || strcmp(argument, "-Werror=implicit") == 0 ||
-                 strcmp(argument, "-Werror-implicit-function-declaration") == 0)
+                 strcmp(argument, "-Werror-implicit-function-declaration") == 0 || strcmp(argument, "-Werror=all") == 0)
         {
             implicit_before_c99 = 3;
             implicit_since_c99 = 3;

@@ -353,7 +353,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         {
             const uint32_t token = input->implicit_function_tokens[i];
             const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
-            if (token < count && severity != CHECK_WARNING_IGNORE && (!quiet || severity >= CHECK_WARNING_ERROR) &&
+            if (token < count && severity != CHECK_WARNING_IGNORE && (!quiet || (input->implicit_function_c99 && severity >= CHECK_WARNING_ERROR)) &&
                 (repair == NULL || check_repair_warning_token(repair, token)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
