@@ -1247,6 +1247,24 @@ What the lowering covers past scalars (#145's programs):
   with no baseline runtime speedup claimed for them. The record includes raw
   samples, identities, native/Clang scalar/vector checks and source-corpus
   receipts, including the successful pinned c-testsuite rerun.
+- **C11 atomics (#671).** The C11 builtin family and ordinary atomic lvalues
+  share the existing raw-bit native leaves for aligned representations through
+  eight bytes, with generic libatomic calls for other layouts. Reads, assignment,
+  compound updates and prefix/postfix increments preserve one evaluation of each
+  source operand. Atomic storage padding, static size/alignment and addressable
+  locals are distinct from their unwrapped C values. The
+  [builtin guide](c-builtins-integration.md#atomic-and-terminal-helper-calls)
+  records the runtime ABI and remaining value-representation limits.
+  Floating min/max under `FENV_ACCESS ON` calls the target's `fminf`, `fmin`,
+  `fmaxf` or `fmax` within the retry, as Clang's strict path does, retaining
+  native DAZ behavior and requiring `-lm` when linking. Address and RHS
+  evaluation remain outside that retry. This does not extend the existing
+  floating retry-exception conformance claim.
+  Atomic vector loads, stores, exchange and compare-exchange retain vector value
+  bytes and their declared atomic ABI, including calls and returns. Read-modify-write
+  updates of atomic vectors are explicitly refused until their retry computation
+  has a vector lowering.
+
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
