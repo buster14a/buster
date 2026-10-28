@@ -71,6 +71,9 @@ static void check_test_warning_render(CheckTest* test)
             ready = ready && check_driver_warning_events(&parser, &pp, &input, &types.table, &view, NULL, &scratch);
             check_test_expect(test, ready && scratch.length == mark && promoted == (mode != 2),
                               "source mappings and -w govern promotion while sparse rendering releases temporary storage");
+            check_test_expect(test, !pp.options.collect_diagnostics || mode == 2 ||
+                                   (pp.diagnostic_last != NULL && pp.diagnostic_last->severity == PP_SEVERITY_MAPPED_ERROR),
+                              "a promoted sparse warning retains warning-origin class for later body analysis");
             if (mode != 1 && mode != 2)
             {
                 const PPDiagnosticRecord* mapped = pp.diagnostic_last;
