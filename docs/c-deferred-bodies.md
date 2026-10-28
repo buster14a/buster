@@ -236,7 +236,7 @@ passes every checker test.
 
 ## Tests
 
-- `./build/compiler test-checker-deferred [--keep]`: 98 fixtures, 83 of the
+- `./build/compiler test-checker-deferred [--keep]`: 100 fixtures, 85 of the
   issue's cases, 400 bodies that call each other, 8 of the lanes' rule and 6
   of grouped parts, each
   written to a file and checked as `test-checker-corpus` checks one: on the
@@ -323,8 +323,9 @@ passes every checker test.
   linkage, which merge where they leave the entity's linked state as it was
   at the opening (after its definition and before it, a prototype before the
   function's definition, an array without the size the top level gives it
-  later) and go to source order where they don't (its first declaration, a
-  size or parameters it lacked, a conflict); intrinsics in a body, in two,
+  later, a naked prototype's attribute it inherits) and go to source order
+  where they don't (its first declaration, a size or parameters it lacked, the
+  naked attribute it adds, a conflict); intrinsics in a body, in two,
   before and after the top level's use of them and of vector types, which
   merge;
   strings and `__func__`, string initializers' indices, statement

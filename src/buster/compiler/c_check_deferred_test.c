@@ -115,6 +115,12 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
     { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
     { "block-scope-prototype-adds-parameters", "int h();\nint f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    // A naked prototype's later declarations inherit the attribute: a block's declaration that inherits it merges, and
+    // one that adds it, which the later definition inherits in source order, is source order's.
+    { "block-scope-declaration-inherits-naked", "__attribute__((naked)) void n(void);\nint f(void) { void n(void); n(); return 0; }\n"
+      "void n(void) { __asm__(\"ret\"); }\n", true },
+    { "block-scope-declaration-adds-naked", "void n(void);\nint f(void) { __attribute__((naked)) void n(void); return 0; }\n"
+      "void n(void) { __asm__(\"ret\"); }\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
