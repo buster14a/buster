@@ -2194,9 +2194,11 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         }
         else if (role == PARSE_ROLE_CLOSE_SPECIFIER)
         {
-            const uint32_t keyword = reader->first_child[token];
-            const uint32_t name = keyword < token ? parser->tokens.names[keyword] : 0;
             const uint32_t type_first = input->type_begin[index];
+            // A K&R list can precede the specifier keyword among this node's children. The type range was
+            // recorded at its OPEN_SPECIFIER, immediately after the keyword and opening parenthesis.
+            const uint32_t keyword = type_first != BUSTER_CHECK_NONE ? type_first - 2u : reader->first_child[token];
+            const uint32_t name = keyword < token ? parser->tokens.names[keyword] : 0;
             if (type_first == BUSTER_CHECK_NONE && count == 1)
             {
                 valid = check_constant_resolve(input, &action.operands[0], 0, &action.operands[0]);
