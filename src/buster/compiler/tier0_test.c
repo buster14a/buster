@@ -749,6 +749,7 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
                 const uint64_t value = 0;
                 const SymbolId target = indirect != 0 ? 0 : 1;
                 uint8_t absorbed = 0;
+                uint16_t template = 0;
                 const uint32_t before_integer = floating != 0 ? indirect : arguments + 1 + indirect;
                 const uint32_t before_floating = floating != 0 ? arguments + 1 : 0;
                 int8_t integer_effect = (int8_t)(floating != 0 ? -(int32_t)indirect : 1 - (int32_t)arguments - (int32_t)indirect);
@@ -758,6 +759,7 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
                 Tier0Entries entries =
                 {
                     .absorbed = &absorbed,
+                    .templates = &template,
                     .integer_effects = &integer_effect,
                     .floating_effects = &floating_effect,
                     .depths = &integer_depth,
