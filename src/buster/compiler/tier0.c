@@ -158,8 +158,11 @@
 //   - X86: the machine operation `value` of Tier0Function.operations (Tier0Operation, a short run of records), which
 //     pops its operands, the first pushed first, of the classes its row says, and pushes its result, of the row's result
 //     class (`class`, or nothing for VOID): a vector operation, an intrinsic's instruction.
-// A function with ALLOCA, STACK_SAVE or STACK_RESTORE has a frame pointer, rbp, which then neither a depth nor a home
-// takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
+//   - FRAME_ADDRESS: pushes the function's frame address (`class` U64; `value` 0), its frame pointer: the address of the
+//     caller's rbp that its prologue pushed, under the return address and 16 bytes below its incoming arguments, as
+//     clang -O0's frame has it (__builtin_frame_address(0)).
+// A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
+// nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
 // outgoing area, aligned past 16 bytes: Tier0Frame.alignment_log2); with those entries too, r15 holds the realigned
 // frame's address, which rsp leaves, and its integer stack has two depths fewer.
 // Long double (F80) takes CONST (`value` an index into Tier0Function.x87_constants), DUP, NEG, CONVERT (to and from every
@@ -233,9 +236,12 @@
 #define BUSTER_TYPED_ALLOCA 42
 #define BUSTER_TYPED_STACK_SAVE 43
 #define BUSTER_TYPED_STACK_RESTORE 44
-#define BUSTER_TYPED_JUMP_INDIRECT 45
-#define BUSTER_TYPED_X86 46
-#define BUSTER_TYPED_KINDS 47
+// After the stack's other kinds, so that the four are one range (tier0_moves_stack).
+#define BUSTER_TYPED_FRAME_ADDRESS 45
+#define BUSTER_TYPED_JUMP_INDIRECT 46
+// The vectors' kind, the last, which the validators' paths test as one with the kinds past it.
+#define BUSTER_TYPED_X86 47
+#define BUSTER_TYPED_KINDS 48
 // Every kind below 64, so that a kind table is one ZMM register for vpermb.
 #define BUSTER_TYPED_KIND_LIMIT 64
 // Tier 0's own kinds, past the stream's: GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL and SET_GLOBAL, in that order from each
@@ -609,11 +615,14 @@ static const uint8_t tier0_integer_depths[BUSTER_TIER0_INTEGER_DEPTHS] = {
     X86_REGISTER_RBP,
 };
 
-// Whether an entry of this kind moves rsp in the body (ALLOCA, STACK_SAVE and STACK_RESTORE), which gives its function a
-// frame pointer.
+// Whether an entry of this kind is one of the stack's, which give its function a frame pointer: those that move rsp in
+// the body or read it (ALLOCA, STACK_SAVE and STACK_RESTORE), and FRAME_ADDRESS, which reads the frame pointer itself.
+// A function with any of them has the frame of one whose rsp moves.
 static bool tier0_moves_stack(uint32_t kind)
 {
-    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_STACK_RESTORE;
+    _Static_assert(BUSTER_TYPED_FRAME_ADDRESS == BUSTER_TYPED_STACK_RESTORE + 1 && BUSTER_TYPED_STACK_RESTORE == BUSTER_TYPED_ALLOCA + 2,
+                   "the stack's kinds are one range");
+    return kind >= BUSTER_TYPED_ALLOCA && kind <= BUSTER_TYPED_FRAME_ADDRESS;
 }
 
 // The integer depths a function may reach: the table's, less rbp, its last, in a function with a frame pointer (one whose
@@ -2455,10 +2464,11 @@ static void tier0_define_templates(void)
     tier0_defer(BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
     // COPY: tier0_emit_deferred's, its moves by its size.
     tier0_defer(BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_VARIANT_PLAIN);
-    // ALLOCA, STACK_SAVE and STACK_RESTORE: tier0_emit_deferred's, which read the frame's outgoing area.
+    // ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS: tier0_emit_deferred's, which read the frame's outgoing area.
     tier0_defer(BUSTER_TYPED_ALLOCA, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_STACK_SAVE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     tier0_defer(BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
+    tier0_defer(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_VARIANT_PLAIN);
     // Integer arithmetic, by the class it is done in.
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier0_arithmetic_classes); c += 1)
     {
@@ -2941,6 +2951,7 @@ static const Tier0Shape tier0_shapes[BUSTER_TYPED_KIND_LIMIT] = {
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SINK,
     [BUSTER_TYPED_X86] = { BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_NONE, BUSTER_TIER0_STACK_CLASS },
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 1] = BUSTER_TIER0_LEAF,
     [BUSTER_TIER0_KIND_GOT + 2] = BUSTER_TIER0_UNARY,
@@ -5261,14 +5272,14 @@ static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* e
                entries->floating_depths[i]);
 }
 
-// ALLOCA's records, and STACK_SAVE's and STACK_RESTORE's (tier0_emit_stack's).
+// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's).
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
 #define BUSTER_TIER0_STACK_RECORDS 1
 
-// The entries that move rsp, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
+// The stack's entries, in a function with a frame pointer: ALLOCA's count (at depth − 1) rounded up to 16 (to a
 // realigned frame's alignment, so that rsp keeps it) and taken from rsp, and the allocation's address in its register,
 // above the outgoing area (add, and, sub and lea, or mov with no area); STACK_SAVE's rsp into the register at its depth,
-// and STACK_RESTORE's back from the one at depth − 1.
+// STACK_RESTORE's back from the one at depth − 1, and FRAME_ADDRESS's rbp into the register at its depth.
 static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* frame, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t kind = entries->key_kinds[i];
@@ -5290,9 +5301,10 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         }
     }
-    else if (kind == BUSTER_TYPED_STACK_SAVE)
+    else if (kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_FRAME_ADDRESS)
     {
-        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, tier0_integer_depths[depth], X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+        const uint8_t source = kind == BUSTER_TYPED_STACK_SAVE ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+        tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, tier0_integer_depths[depth], source, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
     else
     {
@@ -7491,9 +7503,10 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 }
                 else if (tier0_moves_stack(function->kinds[i]))
                 {
-                    // The frame pointer's; STACK_SAVE's value at its depth (ALLOCA's and STACK_RESTORE's operand is
-                    // the entry before's).
-                    integer_top = function->kinds[i] == BUSTER_TYPED_STACK_SAVE && depth > integer_top ? depth : integer_top;
+                    // The frame pointer's; STACK_SAVE's and FRAME_ADDRESS's value at its depth (ALLOCA's and
+                    // STACK_RESTORE's operand is the entry before's).
+                    const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
+                    integer_top = leaf && depth > integer_top ? depth : integer_top;
                     moves = true;
                 }
                 else if (memory && tier0_vector_entry(entries, i))
@@ -7591,8 +7604,8 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else
     {
-        // ALLOCA, STACK_SAVE and STACK_RESTORE: an operand, a result, or both, at their depths.
-        const bool operand = kind != BUSTER_TYPED_STACK_SAVE;
+        // ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS: an operand, a result, or both, at their depths.
+        const bool operand = kind != BUSTER_TYPED_STACK_SAVE && kind != BUSTER_TYPED_FRAME_ADDRESS;
         uses[0] = true;
         window[0] = operand ? 1 : 0;
         touch[0] = operand ? (int32_t)before[0] - 1 : (int32_t)before[0];
@@ -9145,16 +9158,20 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Fun
             case BUSTER_TYPED_ALLOCA:
             case BUSTER_TYPED_STACK_SAVE:
             case BUSTER_TYPED_STACK_RESTORE:
-                // A byte count in, an address out; a position out; a position in.
-                if ((kind != BUSTER_TYPED_STACK_SAVE && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
+            case BUSTER_TYPED_FRAME_ADDRESS:
+            {
+                // A byte count in, an address out; a position out; a position in; the frame's address out.
+                const bool leaf = kind == BUSTER_TYPED_STACK_SAVE || kind == BUSTER_TYPED_FRAME_ADDRESS;
+                if ((!leaf && tier0_pop(&validator, i) != BUSTER_TYPED_CLASS_U64) || class != BUSTER_TYPED_CLASS_U64 || value != 0)
                 {
-                    tier0_reject(&validator, i, "an allocation, or a stack position saved or restored, that isn't U64 or has a value");
+                    tier0_reject(&validator, i, "an allocation, a stack position saved or restored, or a frame's address, that isn't U64 or has a value");
                 }
                 if (kind != BUSTER_TYPED_STACK_RESTORE)
                 {
                     tier0_push(&validator, class);
                 }
                 break;
+            }
             default:
             {
                 // The binary operations and the compares.
@@ -10063,8 +10080,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             }
             else if (tier0_moves_stack(function->kinds[i]))
             {
-                const bool save = function->kinds[i] == BUSTER_TYPED_STACK_SAVE;
-                deferred_integer_top = save && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+                const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
+                deferred_integer_top = leaf && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
                 moves = true;
             }
             else if (memory && tier0_vector_entry(entries, i))
@@ -10596,6 +10613,7 @@ static const uint8_t tier0_scan_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((a
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_SCAN_PUSH,
     [BUSTER_TYPED_STACK_RESTORE] = 1,
     [BUSTER_TYPED_JUMP_INDIRECT] = 1,
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_SCAN_PUSH,
 };
 
 // Per kind, the bounds of its value (tier0_validate_accepts' table of them, the function's): none; a local, a call, a
@@ -10628,6 +10646,7 @@ static const uint8_t tier0_scan_bounds[BUSTER_TYPED_KIND_LIMIT] __attribute__((a
     [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_BOUND_ZERO,
     [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_BOUND_ZERO,
     [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_BOUND_ZERO,
+    [BUSTER_TYPED_FRAME_ADDRESS] = BUSTER_TIER0_BOUND_ZERO,
 };
 
 // Per kind, its operands' rules: it reads the class of its top operand (TOP: one it pops, or DUP's) and of the one below
@@ -10784,7 +10803,8 @@ _Static_assert(BUSTER_TYPED_CLASS_VECTOR == 14 && BUSTER_TYPED_CLASS_F80 == 11 &
     entry(BUSTER_TYPED_ALLOCA, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                             \
     entry(BUSTER_TYPED_STACK_SAVE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                         \
     entry(BUSTER_TYPED_STACK_RESTORE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
-    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
+    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
+    entry(BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
 static const uint8_t tier0_scan_own_low[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_LOW_BYTE) };
 static const uint8_t tier0_scan_own_high[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_HIGH_BYTE) };
 
