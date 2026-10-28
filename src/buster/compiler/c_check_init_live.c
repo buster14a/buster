@@ -228,7 +228,27 @@ static CheckInitStatus check_init_live_aggregate(const TypeTable* types, const C
                     const uint32_t tag = types->types.index[type_index(frame->type)];
                     const uint32_t begin = types->tags.member_begin[tag];
                     const uint32_t count = types->tags.member_count[tag];
-                    while (frame->next < count && child == 0)
+                    const bool indexed = kind == BUSTER_TYPE_KIND_STRUCT && type_is_complete(types, frame->type);
+                    uint32_t limit = count;
+                    if (indexed && frame->next == 0)
+                    {
+                        // Completed structs place physical members in order without overlapping positive-sized
+                        // members. Only the last start at or before this target can contain its positive width.
+                        // Empty ties before a positive member are skipped; unions still inspect every alternative.
+                        const uint64_t relative = part->bit_offset - frame->offset;
+                        uint32_t low = 0;
+                        uint32_t high = count;
+                        while (low < high)
+                        {
+                            const uint32_t middle = low + (high - low) / 2;
+                            const bool before = types->members.offset[begin + middle] <= relative;
+                            low = before ? middle + 1 : low;
+                            high = before ? high : middle;
+                        }
+                        frame->next = low != 0 ? low - 1 : count;
+                        limit = low;
+                    }
+                    while (frame->next < limit && child == 0)
                     {
                         const uint32_t member = begin + frame->next;
                         frame->next += 1;
@@ -247,6 +267,10 @@ static CheckInitStatus check_init_live_aggregate(const TypeTable* types, const C
                                 offset = start;
                             }
                         }
+                    }
+                    if (indexed)
+                    {
+                        frame->next = count;
                     }
                 }
                 if (child != 0)
@@ -363,7 +387,7 @@ static CheckInitStatus check_initializer_live_writes(const TypeTable* types, con
         uint32_t at = check_init_uncovered(next, positions[p * 2]);
         const bool aggregate = check_init_aggregate(types, part->type);
         bool evaluated = at < high;
-        if (aggregate && part->kind == CHECK_INIT_VALUE)
+        if (aggregate && part->kind == CHECK_INIT_VALUE && !evaluated)
         {
             status = check_init_live_aggregate(types, initialized, part, &whole, scratch, &search, &evaluated);
         }
