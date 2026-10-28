@@ -559,11 +559,19 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
     return equal;
 }
 
-static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, bool scalar, CheckStream* stream)
+// The paths a sample takes: the scalar schedule (postorder, a node at a time), the vector path (its regions in postorder
+// batches), and the vector path with its regions by dependency level instead (CheckOptions.level_order), on the same
+// actions: #133's question of which order wins, which these decided.
+#define BUSTER_CHECK_SOURCE_PATHS 3u
+
+static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "levels" };
+
+static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, uint32_t path, CheckStream* stream)
 {
     arena_pop_to(output, 0);
     const CheckOptions options = {
-        .scalar = scalar,
+        .scalar = path == 0,
+        .level_order = path == 2,
     };
     return check_graph_run(types, graph, output, scratch, &options, stream) && stream->report_count == 0;
 }
@@ -574,7 +582,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     uint64_t passes = 21;
     uint64_t iterations = 0;
     uint64_t after = 0;
-    uint32_t only = 2;
+    uint32_t only = BUSTER_CHECK_SOURCE_PATHS;
     Arena option_arena = arena_reserve(UINT64_C(1) << 24);
     char** own = BUSTER_ARENA_PUSH_ARRAY(&option_arena, char*, (uint64_t)count + 1);
     uint32_t used = 0;
@@ -593,8 +601,12 @@ static int run_checker_source_benchmark(int count, char** arguments)
             }
             else if (strcmp(option, "--only") == 0)
             {
-                only = strcmp(value, "scalar") == 0 ? 0 : strcmp(value, "vector") == 0 ? 1 : 2;
-                valid = valid && only != 2;
+                only = BUSTER_CHECK_SOURCE_PATHS;
+                for (uint32_t named = 0; named < BUSTER_CHECK_SOURCE_PATHS; named += 1)
+                {
+                    only = strcmp(value, check_source_path_names[named]) == 0 ? named : only;
+                }
+                valid = valid && only != BUSTER_CHECK_SOURCE_PATHS;
             }
             else
             {
@@ -633,13 +645,14 @@ static int run_checker_source_benchmark(int count, char** arguments)
     valid = valid && check_corpus_equal(paths, paths + 1, parsers, parsers + 1);
     Arena graph_arena = arena_reserve(UINT64_C(1) << 36);
     Arena oracle_arena = arena_reserve(UINT64_C(1) << 36);
-    Arena outputs[2] =
+    Arena outputs[BUSTER_CHECK_SOURCE_PATHS] =
     {
+        arena_reserve(UINT64_C(1) << 36),
         arena_reserve(UINT64_C(1) << 36),
         arena_reserve(UINT64_C(1) << 36),
     };
     Arena scratch = arena_reserve(UINT64_C(1) << 36);
-    valid = valid && graph_arena.base != 0 && oracle_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && scratch.base != 0;
+    valid = valid && graph_arena.base != 0 && oracle_arena.base != 0 && outputs[0].base != 0 && outputs[1].base != 0 && outputs[2].base != 0 && scratch.base != 0;
     CheckGraph graph = { 0 };
     uint32_t bodies = 0;
     uint32_t* mapping = 0;
@@ -647,12 +660,14 @@ static int run_checker_source_benchmark(int count, char** arguments)
     valid = valid && check_source_body_graph(&graph, &paths[0].input, parsers, &pp, body, &graph_arena, &scratch, &bodies, &mapping);
     const uint64_t selection_ns = check_source_time() - selection_begin;
     CheckStream reference = { 0 };
-    CheckStream streams[2] = { 0 };
-    valid = valid && check_source_graph_run(&paths[0].types, &graph, &oracle_arena, &scratch, true, &reference);
+    CheckStream streams[BUSTER_CHECK_SOURCE_PATHS] = { 0 };
+    valid = valid && check_source_graph_run(&paths[0].types, &graph, &oracle_arena, &scratch, 0, &reference);
     valid = valid && check_source_body_equal(&paths[0].input.graph, &paths[0].stream, &graph, &reference, mapping);
-    for (uint32_t path = 0; valid && path < 2; path += 1)
+    // The level order runs on the vector path's table, as its postorder batches do.
+    TypeTable* tables[BUSTER_CHECK_SOURCE_PATHS] = { &paths[0].types, &paths[1].types, &paths[1].types };
+    for (uint32_t path = 0; valid && path < BUSTER_CHECK_SOURCE_PATHS; path += 1)
     {
-        valid = check_source_graph_run(&paths[path].types, &graph, outputs + path, &scratch, path == 0, streams + path) &&
+        valid = check_source_graph_run(tables[path], &graph, outputs + path, &scratch, path, streams + path) &&
                 check_test_stream_equal(&reference, streams + path, graph.argument_count);
     }
     if (iterations == 0)
@@ -671,21 +686,21 @@ static int run_checker_source_benchmark(int count, char** arguments)
     };
     const int counter = valid ? (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, 0) : -1;
     bool counters = counter >= 0;
-    uint64_t nanoseconds[2][BUSTER_CHECK_SOURCE_MAX_PASSES] = { 0 };
-    uint64_t cycles[2][BUSTER_CHECK_SOURCE_MAX_PASSES] = { 0 };
+    uint64_t nanoseconds[BUSTER_CHECK_SOURCE_PATHS][BUSTER_CHECK_SOURCE_MAX_PASSES] = { 0 };
+    uint64_t cycles[BUSTER_CHECK_SOURCE_PATHS][BUSTER_CHECK_SOURCE_MAX_PASSES] = { 0 };
     for (uint32_t pass = 0; valid && pass < passes; pass += 1)
     {
-        for (uint32_t step = 0; valid && step < 2; step += 1)
+        for (uint32_t step = 0; valid && step < BUSTER_CHECK_SOURCE_PATHS; step += 1)
         {
-            const uint32_t path = (pass + step) & 1;
-            if (only == 2 || only == path)
+            const uint32_t path = (pass + step) % BUSTER_CHECK_SOURCE_PATHS;
+            if (only == BUSTER_CHECK_SOURCE_PATHS || only == path)
             {
-                if (path == 1 && after != 0)
+                if (path != 0 && after != 0)
                 {
                     const uint64_t until = check_source_time() + after * 1000000;
                     while (valid && check_source_time() < until)
                     {
-                        valid = check_source_graph_run(&paths[0].types, &graph, outputs, &scratch, true, streams);
+                        valid = check_source_graph_run(&paths[0].types, &graph, outputs, &scratch, 0, streams);
                     }
                 }
                 if (counter >= 0)
@@ -695,7 +710,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
                 const uint64_t begin = check_source_time();
                 for (uint64_t iteration = 0; valid && iteration < iterations; iteration += 1)
                 {
-                    valid = check_source_graph_run(&paths[path].types, &graph, outputs + path, &scratch, path == 0, streams + path);
+                    valid = check_source_graph_run(tables[path], &graph, outputs + path, &scratch, path, streams + path);
                 }
                 nanoseconds[path][pass] = check_source_time() - begin;
                 uint64_t counts[3] = { 0 };
@@ -719,16 +734,16 @@ static int run_checker_source_benchmark(int count, char** arguments)
                " graph_bytes=%" PRIu64 " binding_events=%u binding_walked_uses=%" PRIu64 " binding_fallback_uses=%" PRIu64 "\n",
                validation[0], validation[1], selection_ns, graph_arena.length, paths[1].input.binding_event_count,
                paths[1].input.binding_statistics.walked_uses, paths[1].input.binding_statistics.fallback_uses);
-        for (uint32_t path = 0; path < 2; path += 1)
+        for (uint32_t path = 0; path < BUSTER_CHECK_SOURCE_PATHS; path += 1)
         {
-            if (only == 2 || only == path)
+            if (only == BUSTER_CHECK_SOURCE_PATHS || only == path)
             {
                 const double nodes = (double)graph.count * (double)iterations;
                 const CheckStatistics statistics = streams[path].statistics;
-                printf("body_graph: path=%s ns_per_node=%.3f cycles_per_node=%.3f cycles_available=%u scalar_nodes=%u vector_nodes=%u scalar_share=%.6f query_proof_nodes=%" PRIu64 " query_replay_nodes=%" PRIu64 " output_bytes=%" PRIu64 " scratch_bytes=%" PRIu64 "\n",
-                       path == 0 ? "scalar" : "vector", (double)check_source_median(nanoseconds[path], (uint32_t)passes) / nodes,
+                printf("body_graph: path=%s ns_per_node=%.3f cycles_per_node=%.3f cycles_available=%u scalar_nodes=%u vector_nodes=%u scalar_share=%.6f batches=%u levels=%u query_proof_nodes=%" PRIu64 " query_replay_nodes=%" PRIu64 " output_bytes=%" PRIu64 " scratch_bytes=%" PRIu64 "\n",
+                       check_source_path_names[path], (double)check_source_median(nanoseconds[path], (uint32_t)passes) / nodes,
                        counters ? (double)check_source_median(cycles[path], (uint32_t)passes) / nodes : -1.0, counters,
-                       statistics.scalar_nodes, statistics.vector_nodes, (double)statistics.scalar_nodes / graph.count,
+                       statistics.scalar_nodes, statistics.vector_nodes, (double)statistics.scalar_nodes / graph.count, statistics.batches, statistics.levels,
                        statistics.query_proof_nodes, statistics.query_replay_nodes, outputs[path].length, statistics.scratch_bytes);
             }
         }
@@ -742,6 +757,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
         close(counter);
     }
     arena_release(&scratch);
+    arena_release(outputs + 2);
     arena_release(outputs + 1);
     arena_release(outputs);
     arena_release(&oracle_arena);

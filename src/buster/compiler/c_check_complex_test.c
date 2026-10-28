@@ -136,12 +136,14 @@ static void check_test_complex_actions(CheckTest* test, TypeTable* table)
         input.flags = BUSTER_CHECK_SIDE_EFFECT;
         const CheckAction cast = { .op = CHECK_OP_CAST, .operands = { input }, .type = type_complex(table, BUSTER_TYPE_INT), .node = 101 };
         const CheckActionResult result = check_test_action(test, table, cast);
+        // Each component converts as a real value does: the out-of-range one saturates, as clang folds it.
+        const unsigned __int128 real = imaginary_fault != 0 ? 1 : INT32_MAX;
+        const unsigned __int128 imaginary = imaginary_fault != 0 ? INT32_MAX : 1;
         check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == cast.type &&
-                               result.value.constant_kind == CHECK_CONSTANT_NONE && result.value.integer == 0 &&
-                               result.value.floating == 0 && result.value.imaginary == 0 &&
-                               result.value.fault == CHECK_FAULT_FLOAT_RANGE && result.value.fault_node == cast.node &&
+                               result.value.constant_kind == CHECK_CONSTANT_COMPLEX && result.value.integer == (real | imaginary << 64) &&
+                               result.value.fault == CHECK_FAULT_NONE && (result.value.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0 &&
                                (result.value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0,
-                          "either out-of-range complex component invalidates the whole converted constant and preserves effects");
+                          "either out-of-range complex component saturates and the conversion preserves effects");
     }
     const CheckOp rejected[] = { CHECK_OP_LESS, CHECK_OP_GREATER_EQUAL, CHECK_OP_REMAINDER, CHECK_OP_BIT_AND };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(rejected); i += 1)

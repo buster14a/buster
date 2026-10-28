@@ -102,13 +102,18 @@ static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table
                 {
                     const CheckOptions options = { .scalar = path == 0 };
                     CheckStream stream;
+                    // Saturated, as clang folds the undefined conversion (a NaN to 0), and so constant, as clang's
+                    // __builtin_constant_p of it answers in either FP environment.
+                    const unsigned __int128 maximum = targets[target] == BUSTER_TYPE_INT ? INT32_MAX : targets[target] == BUSTER_TYPE_UINT ? UINT32_MAX :
+                                                      targets[target] == BUSTER_TYPE_INT128 ? ~(unsigned __int128)0 >> 1 : ~(unsigned __int128)0;
+                    const bool sign = targets[target] == BUSTER_TYPE_INT || targets[target] == BUSTER_TYPE_INT128;
+                    const unsigned __int128 expected = value == 0 ? maximum : value == 1 && sign ? maximum + 1 : 0;
                     check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &options, &stream) && stream.report_count == 0 &&
-                        stream.values[cast].fault == CHECK_FAULT_FLOAT_RANGE && stream.values[cast].constant_kind == CHECK_CONSTANT_NONE &&
-                        stream.values[query].integer == 1 && stream.queries[0].runtime_value.integer == 1 &&
+                        stream.values[cast].fault == CHECK_FAULT_NONE && stream.values[cast].constant_kind == CHECK_CONSTANT_INTEGER &&
+                        stream.values[cast].integer == expected && stream.values[query].integer == 1 && stream.queries[0].runtime_value.integer == 1 &&
                         stream.queries[0].runtime_plan == CHECK_BUILTIN_QUERY_RUNTIME_SKIP && stream.queries[0].evaluated_operands == 0 &&
-                        stream.statistics.query_proof_nodes == 9 && stream.statistics.query_replay_nodes == 3 &&
                         stream.statistics.scalar_nodes + stream.statistics.vector_nodes == 3,
-                        "speculative FP saturation proves query without weakening the strict conversion or hiding proof work");
+                        "a constant query of an out-of-range floating conversion is constant, the value saturated as clang folds it");
                     arena_pop_to(&output, 0);
                 }
             }
