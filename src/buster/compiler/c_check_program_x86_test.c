@@ -5,7 +5,7 @@
 // each family's builtins called directly, at their prototypes' types, on inputs from the call's argument, with every
 // result folded into the program's hash. The programs run where the host has the features their rows take (AVX-512F,
 // BW, CD, DQ, VL, VBMI, VBMI2, BITALG, VNNI, IFMA and BF16, GFNI, VAES, AES, FMA, AVX2 and BMI2, by x86_target_native's
-// CPUID and XCR0);
+// CPUID and XCR0), and those of whose code clang takes more where it has that too (the dot products' AVX-VNNI);
 // elsewhere they compile and link, as clang's builds do, and don't run. Include after c_check_program_vector_test.c.
 
 static const char check_test_x86_types[] =
@@ -26,9 +26,18 @@ static const char check_test_x86_types[] =
     "static void fill(void*p,unsigned long n,unsigned s){unsigned char*b=p;for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;b[i]=(unsigned char)(s>>16);}}\n"
     "static unsigned long long mask(int n){return (unsigned long long)((unsigned)n*2654435761u)<<32|((unsigned)n*40503u+5u);}\n";
 
+// An x86 builtin program: its name, its body after check_test_x86_types, and the features clang's code of it takes past
+// those every program's rows take, which the host must have too to run it.
+typedef struct CheckTestX86Program
+{
+    const char* name;
+    const char* body;
+    uint64_t features;
+} CheckTestX86Program;
+
 static void check_test_program_x86_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
-    static const char* const programs[][2] = {
+    static const CheckTestX86Program programs[] = {
         {
             // The floating selects, which move bits: each width of ps, pd and pbf, and the scalar ones, whose first element
             // is a's or w's by the mask's first bit and whose others are a's. (ph's rows are pbf's; their builtins need
@@ -389,6 +398,9 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "v4si r6=__builtin_ia32_vpdpwssd128(s6,a6,b6);FOLD(r6);v8si r7=__builtin_ia32_vpdpwssd256(s7,a7,b7);FOLD(r7);"
             "v16si r8=__builtin_ia32_vpdpwssd512(s8,a8,b8);FOLD(r8);v4si r9=__builtin_ia32_vpdpwssds128(s9,a9,b9);FOLD(r9);"
             "v8si r10=__builtin_ia32_vpdpwssds256(s10,a10,b10);FOLD(r10);v16si r11=__builtin_ia32_vpdpwssds512(s11,a11,b11);FOLD(r11);return (int)h;}",
+            // clang's code for znver5 writes the 128- and 256-bit ones in AVX-VNNI's VEX forms, which a host of AVX512-VNNI
+            // alone (Zen 4) hasn't; ours are their EVEX forms.
+            BUSTER_X86_FEATURE(AVXVNNI),
         },
         {
             // Batch 2's binary rules: each builtin at its prototype's types, by both paths against clang -O0's code for
@@ -1230,15 +1242,22 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "return (int)h;}",
         },
     };
+    const X86Target native = x86_target_native();
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
-        const size_t length = strlen(check_test_x86_types) + strlen(programs[i][1]) + 1;
+        const bool run = run_native && (native.features & programs[i].features) == programs[i].features;
+        if (run_native && !run)
+        {
+            printf("  %s: native execution skipped (the host lacks features clang's code of it takes); the program compiles and links\n",
+                   programs[i].name);
+        }
+        const size_t length = strlen(check_test_x86_types) + strlen(programs[i].body) + 1;
         char* source = malloc(length);
         check_test_expect(test, source != 0, "x86 builtin program source");
         if (source != 0)
         {
-            snprintf(source, length, "%s%s", check_test_x86_types, programs[i][1]);
-            check_test_program_source_native_limits(test, source, programs[i][0], clang, false, -1, 0, target, run_native);
+            snprintf(source, length, "%s%s", check_test_x86_types, programs[i].body);
+            check_test_program_source_native_limits(test, source, programs[i].name, clang, false, -1, 0, target, run);
             free(source);
         }
     }
