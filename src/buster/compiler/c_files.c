@@ -1301,6 +1301,17 @@ static void files_add_probes(FilesRun* run)
         if (entry != 0)
         {
             file_cache_identify(cache, entry);
+            // One lane adds snapshots between probe waves. A directory earns its listing after a real miss, so a
+            // first successful include in a large user directory keeps its original cost. Other lanes only read it.
+            for (uint32_t d = 0; run->found[p].error == ENOENT && d < run->search->directory_count; d += 1)
+            {
+                const uint32_t length = run->search->directory_lengths[d];
+                const char* directory = run->search->directories[d];
+                if (path->length > length + 1 && path->path[length] == '/' && memcmp(path->path, directory, length) == 0)
+                {
+                    file_cache_list_directory(cache, directory, length);
+                }
+            }
         }
         else if (run->found[p].mapped)
         {
@@ -1614,7 +1625,6 @@ static void files_run_ahead(FilesRun* run)
     }
     bool more = files_broadcast(mine, FILES_PHASE_SEARCH, lane == 0 && ready && !run->failed && run->item_count > run->round_items) != 0;
     uint32_t round = 0;
-    bool directories_listed = false;
     while (more)
     {
         round += 1;
@@ -1633,16 +1643,6 @@ static void files_run_ahead(FilesRun* run)
         if (lane == 0)
         {
             files_search_requests(run);
-            // The probes only read the snapshots. Build them on one lane before the first wave of include probes,
-            // inside the measured walk; flat walks and files with no literal includes need no listing.
-            if (!directories_listed && run->request_count != 0)
-            {
-                for (uint32_t d = 0; d < run->search->directory_count; d += 1)
-                {
-                    file_cache_list_directory(run->cache, run->search->directories[d], run->search->directory_lengths[d]);
-                }
-                directories_listed = true;
-            }
             files_tick(mine, FILES_PHASE_ALONE);
         }
         files_sync(mine, FILES_PHASE_SEARCH);

@@ -2844,7 +2844,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
         uint32_t reads;
         uint32_t skips;
     } cases[] = {
-        { "absent.h", false, 2, 0, 0, 2 },
+        { "absent.h", false, 2, 0, 0, 0 },
         { "absent.h", false, 0, 0, 0, 0 },
         { "value.h", true, 2, 1, 1, 1 },
         { "value.h", true, 0, 0, 0, 0 },
@@ -2943,15 +2943,24 @@ static bool pp_test_directory_snapshot(const char* root)
     const uint32_t length = (uint32_t)strlen(directory);
     if (result)
     {
-        // A quoted include found beside the source does not pay to enumerate that source directory.
+        // First hits both beside the source and in an explicit -I directory must not enumerate the directory.
         snprintf(query, sizeof(query), "%s/local.c", directory);
         static InternTable local_table;
         static Preprocessor local_unit;
-        const PPOptions local_options = { .no_standard_includes = true, .quiet = true };
-        result = pp_test_write_file(query, "#include \"value.h\"\n") && intern_initialize(&local_table) &&
-                 pp_initialize(&local_unit, &local_options, &local_table) && pp_run(&local_unit, query) && local_unit.cache->directory_opens == 0;
-        pp_release(&local_unit);
-        intern_release(&local_table);
+        const char* const includes[] = { directory };
+        for (uint32_t explicit = 0; result && explicit < 2; explicit += 1)
+        {
+            const PPOptions local_options = {
+                .no_standard_includes = true,
+                .quiet = true,
+                .include_directories = includes,
+                .include_directory_count = explicit,
+            };
+            result = pp_test_write_file(query, explicit == 0 ? "#include \"value.h\"\n" : "#include <value.h>\n") && intern_initialize(&local_table) &&
+                     pp_initialize(&local_unit, &local_options, &local_table) && pp_run(&local_unit, query) && local_unit.cache->directory_opens == 0;
+            pp_release(&local_unit);
+            intern_release(&local_table);
+        }
         unlink(query);
         file_cache_list_directory(&cache, directory, length);
         const bool supported = cache.directories != 0 && cache.directories->slots != 0;
@@ -3102,12 +3111,12 @@ static bool pp_test_lookup_accounting(const char* directory)
         Preprocessor* pp = &runs[k];
         result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) && pp_run(pp, path);
         const PPStatistics* stats = &pp->statistics;
-        // Complete directory snapshots eliminate six missing candidates. Listing opens are separate from file
+        // The first missing name earns each snapshot; later names eliminate four candidates. Listing opens are separate from file
         // probes. On an unsupported filesystem the original ten probes remain. Every existing entry is still probed.
         const bool listed = pp->cache->directories != 0 && pp->cache->directories->slots != 0;
-        const uint64_t include_opens = listed ? 2 : 8;
+        const uint64_t include_opens = listed ? 4 : 8;
         result = result && pp->probes.opens == include_opens + 2 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0 &&
-                 pp->probes.directory_skips == (listed ? 6u : 0u);
+                 pp->probes.directory_skips == (listed ? 4u : 0u);
         if (options.timing)
         {
             result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == include_opens &&
