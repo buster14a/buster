@@ -1564,43 +1564,6 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "files",
     },
     {
-        .name = "a checker source with a digit in its name",
-        .files = "src/buster/compiler/c_check_x86_input.c",
-        .outputs_true = "checker",
-        .measured = "checker-source checker-bindings checker-deferred backend-source check-lanes lowering-source "
-                    "check-debug",
-    },
-    {
-        .name = "Tier 0's unwind tables, which the emission and the streamed output write",
-        .files = "src/buster/compiler/unwind_tier0.c",
-        .measured = "streaming unwind backend-source check-lanes lowering-source check-debug",
-    },
-    {
-        .name = "the streamed output sizes its branches",
-        .files = "src/buster/compiler/branch_sizing.c",
-        .measured = "streaming unwind",
-    },
-    {
-        .name = "the emission's inline assembly and its link's room",
-        .files = "src/buster/compiler/assembler_words.c src/buster/compiler/bind.c",
-        .measured = "backend-source check-lanes lowering-source check-debug",
-    },
-    {
-        .name = "the type table's transparent queries, which checking makes",
-        .files = "src/buster/compiler/c_types_transparent.c",
-        .measured = "checker-source checker-bindings checker-deferred backend-source",
-    },
-    {
-        .name = "the preprocessor's history and its builtin queries",
-        .files = "src/buster/compiler/c_preprocessor_history.c src/buster/compiler/c_builtin_catalog.c",
-        .measured = "gnu parser-bindings",
-    },
-    {
-        .name = "zlib, which foreign debug sections are read through",
-        .files = "src/buster/compiler/inflate.c",
-        .measured = "foreign-strings",
-    },
-    {
         .name = "the debug rows",
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
@@ -1643,6 +1606,43 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the compiler's code outside the attribution's sources",
         .files = "src/buster/compiler/tier0.c src/buster/compiler/c_checker_driver_test.c",
         .outputs_false = "compile_time",
+    },
+    {
+        .name = "a checker source with a digit in its name",
+        .files = "src/buster/compiler/c_check_x86_input.c",
+        .outputs_true = "checker",
+        .measured = "checker-source checker-bindings checker-deferred backend-source check-lanes lowering-source "
+                    "check-debug",
+    },
+    {
+        .name = "Tier 0's unwind tables, which the emission and the streamed output write",
+        .files = "src/buster/compiler/unwind_tier0.c",
+        .measured = "streaming unwind backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the streamed output sizes its branches",
+        .files = "src/buster/compiler/branch_sizing.c",
+        .measured = "streaming unwind",
+    },
+    {
+        .name = "the emission's inline assembly and its link's room",
+        .files = "src/buster/compiler/assembler_words.c src/buster/compiler/bind.c",
+        .measured = "backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the type table's transparent queries, which checking makes",
+        .files = "src/buster/compiler/c_types_transparent.c",
+        .measured = "checker-source checker-bindings checker-deferred backend-source",
+    },
+    {
+        .name = "the preprocessor's history and its builtin queries",
+        .files = "src/buster/compiler/c_preprocessor_history.c src/buster/compiler/c_builtin_catalog.c",
+        .measured = "gnu parser-bindings",
+    },
+    {
+        .name = "zlib, which foreign debug sections are read through",
+        .files = "src/buster/compiler/inflate.c",
+        .measured = "foreign-strings",
     },
 };
 
