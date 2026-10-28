@@ -485,6 +485,17 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
         { .name = "overload nested calls use selected type", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; _Static_assert(_Generic(f(f(1.0)),double:1,default:0),\"nested\");\n" },
         { .name = "overload typeof uses selected type", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__(f(1.0)) value; _Static_assert(__builtin_types_compatible_p(__typeof__(value),double),\"typeof\");\n" },
         { .name = "overload common parameter redeclaration", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int f(int) O; _Static_assert(_Generic(f(1),int:1,default:0),\"redecl\");\n" },
+        { .name = "indexed aligned parameter redeclaration", .source = "#define O __attribute__((overloadable))\ntypedef int A __attribute__((aligned(16))); int f(A**) O; int f(int**) O; _Static_assert(_Generic(f((int**)0),int:1,default:0),\"aligned\");\n" },
+        { .name = "indexed sibling scopes share linkage and restore outer set", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; void g(void){{int f(int) O;} {int f(int) O; _Static_assert(_Generic(f(1.0),int:1,default:0),\"sibling\");} _Static_assert(_Generic(f(1.0),double:1,default:0),\"restored\");}\n" },
+        { .name = "indexed sibling linkage return conflict", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O;} {double f(int) O;}}\n", .rejected = true },
+        { .name = "indexed oldstyle returns retain earlier prototype constraint", .source = "#define O __attribute__((overloadable))\nint (*f(int))(int) O; int (*f(int))() O; int (*f(int))(double) O;\n", .rejected = true },
+        { .name = "indexed redeclarations retain earlier definition", .source = "#define O __attribute__((overloadable))\nint f(int x) O{return x;} double f(double) O; int f(int) O; int f(int x) O{return x;}\n", .rejected = true },
+        { .name = "indexed activation retains ordinary definition history", .source = "#define O __attribute__((overloadable))\nint f(int x){return x;} int f(int); double f(double) O; int f(int x){return x;}\n", .rejected = true },
+        { .name = "indexed activation inherits ordinary unavailable history", .source = "#define O __attribute__((overloadable))\nint f(int) __attribute__((unavailable)); int f(int); double f(double) O; int f(int); void g(void){f(1);}\n", .rejected = true },
+        { .name = "indexed second unmarked signature rejects", .source = "#define O __attribute__((overloadable))\nint f(int); double f(double) O; int f(char);\n", .rejected = true },
+        { .name = "indexed explicit linkage change rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O; static int f(int) O;\n", .rejected = true },
+        { .name = "indexed ABI inherited across sibling scopes", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O __attribute__((ms_abi));} {int f(int) O; int (__attribute__((ms_abi))*p)(int)=f;}}\n" },
+        { .name = "indexed explicit ABI conflict across sibling scopes", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O __attribute__((ms_abi));} {int f(int) O __attribute__((sysv_abi));}}\n", .rejected = true },
         { .name = "overload changing return type rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O;\ndouble f(int) O;\n", .rejected = true },
         { .name = "overload changing marked declaration rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O;\nint f(int);\n", .rejected = true },
         { .name = "overload one unmarked signature", .source = "#define O __attribute__((overloadable))\nint f(int); double f(double) O; _Static_assert(_Generic(f(1),int:1,default:0),\"unmarked\"); _Static_assert(_Generic(f(1.0),double:1,default:0),\"marked\");\n" },
@@ -538,6 +549,8 @@ static __attribute__((noinline)) void check_test_overload_sources(CheckTest* tes
     rmdir(directory);
 }
 
+#include "c_check_overload_index_test.c"
+
 static __attribute__((noinline)) void check_test_overloads(CheckTest* test, const char* clang)
 {
     CheckTestTypes types = { 0 };
@@ -546,6 +559,7 @@ static __attribute__((noinline)) void check_test_overloads(CheckTest* test, cons
     if (ready)
     {
         check_test_overload_declarations(test, &types.table);
+        check_test_overload_index(test, &types.table);
         check_test_overload_selection(test, &types.table, clang);
         check_test_overload_history(test, &types.table);
         check_test_overload_arguments(test, &types.table);

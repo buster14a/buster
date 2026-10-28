@@ -4351,6 +4351,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_body_bindings_test.c"
 #include "c_check_environment_test.c"
 #include "c_check_source_test.c"
+#include "c_check_record_input_test.c"
 #include "c_check_overload_test.c"
 #include "c_check_overload_address_test.c"
 #include "c_types_function_abi_test.c"
@@ -4507,6 +4508,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_initializer_nesting(&test, clang);
             check_test_member_scaling(&test, clang);
             check_test_source_extensions(&test, clang);
+            check_test_record_names(&test);
             check_test_overloads(&test, clang);
             check_test_overload_sources(&test, clang);
             check_test_overload_addresses(&test, clang);

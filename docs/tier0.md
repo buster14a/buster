@@ -854,6 +854,117 @@ looks each entry's slot up, homes sort the locals, measuring counts a deferred e
 and emission builds each record field by field from the templates' specifications, not from their compiled bytes. It
 chooses with `x86_choose_forms_scalar` and applies each choice with `x86_choice_instruction`.
 
+## Validation (#569)
+
+`tier0_validate` checks the stream's rules, the compile paths' precondition: the kinds, classes and values, the
+operands and depths, the targets and the stacks there, the locals and the calls. The lowering runs it on every function
+it lowers (`check_lower_part`), so that a producer's bug is an internal compiler error rather than wrong code, as
+#440's was. It has two paths, which give the same verdict and the same rule on every stream.
+
+**The scalar validator** (`tier0_validate_scalar`, the twin and the oracle) runs the stream as a stack machine over one
+stack of classes, an entry at a time. At each target it records a hash of the stack when control first arrives and
+compares it on every other arrival. It reports the first entry that breaks a rule, and the rule. `--scalar` runs it
+alone.
+
+The selected validator uses the scalar path for nonempty streams of at most 16 entries when the local, call and
+argument tables each have at most 16 entries too. Locked 9700X size controls put the crossover between 16 and 24
+entries, both alone and after 200 ms of scalar work. Empty streams keep the vector setup path; larger tables
+keep the vector path so a small entry count does not hide substantial metadata work. The vector acceptor remains
+tested independently at these tiny sizes.
+
+**The vector path** (`tier0_validate_accepts`) takes a stream only where the scalar validator does. It leaves every
+other stream to the scalar validator, which then gives the verdict and the rule. It reads 64 entries at a time in byte
+lanes, as Tier 0's own passes do:
+
+1. **Depths.** Each entry's pops and pushes come from tables by kind; a call's operands come from a per-function table
+   of its calls, by `vpermi2b`, or by a gather past 128 calls. The depths are their prefix sums, and an entry's floor is
+   its depth after its pops.
+2. **Producers.** An operand's producer is the nearest entry before it whose floor is at or below the operand's place.
+   The parser's doubling search over the floors finds it for the top and for the one below (`tier0_scan_previous`). An
+   operand from an earlier block comes from the carried stack: the classes of the values earlier blocks left, a
+   register of 64 places, and their producers.
+3. **Rules.** Each entry's class, its top's and the one below's are checked against 16-bit masks of classes by kind,
+   or against the entry's own class, a compare's top, or CONVERT's mask by class. The top's class must be the entry
+   before's (`tier0_last_mismatch`'s rule), and the values must be within bounds by kind. A local's classes come from a
+   per-function table of masks, and every RETURN must be of one class. A call's operands are its top and the one below,
+   or for more than two, the stack's places: the carried stack below the lowest place the block reached before the
+   call, and the values the block left above it, in order.
+4. **Arrivals.** An arrival that brings only depth 0 (a statement's) sets its target's bit, which the target's block
+   checks; a backward one checks the target's stored depth at once. Any other arrival brings its depth, the producer
+   just below what it may differ in, and the class of a JUMP_VALUE's value. It is checked against the target's own
+   where the same block holds the target. Otherwise it is checked against the first forward arrival's, and the target's
+   block checks that one against its own. Code no path reaches, after a jump or a return and before a target, is at
+   depth 0.
+5. **Tables.** A plain function's locals are checked 64 at a time and each call's arguments eight at a time
+   (`tier0_scan_tables`). A function with aggregates' metadata, an incoming variadic area, or vectors' constants and
+   operations takes the scalar helpers instead.
+
+The vector path leaves these to the scalar validator:
+
+- a function with vectors;
+- a block whose pops come to more than 100 (`BUSTER_TIER0_SCAN_POPS`), so that relative depths stay within a byte;
+- a depth past 64 at a block's start (`BUSTER_TIER0_SCAN_DEPTH`), the carried stack's register;
+- a call with more than 64 total operands: a 64-argument indirect call also has its callee, which needs a 65th lane;
+- a backward arrival with values on the stack;
+- a target whose arrivals bring values of two producers, as `x ?: y`'s do, which the scalar validator compares by
+  class;
+- every stream that breaks a rule.
+
+**Why the verdicts agree.** The vector path's stack is the one the prefix sums give each entry. The scalar validator's
+stack is the same at every entry, given what the arrivals' checks establish:
+
+- every arrival at a target brings the target's stack, and code no path reaches starts at depth 0;
+- a forward arrival matches the target in depth, in the producer just below what it may differ in (so every value
+  below it is the same value), and in the class of the value a JUMP_VALUE brings;
+- a backward arrival has nothing on the stack.
+
+Every rule the vector path checks on its stack is then the scalar validator's rule on the same stack, and the hashes
+the scalar validator compares are of equal stacks. The only difference left is resources: the vector path needs no
+copies of the stacks, so it takes a valid stream where the scalar validator would run out of scratch memory.
+
+**The memory contract.** It reads the columns with masked loads, never past `count`. It loads no 16-entry quarter of a
+table wholly past the table's end: a masked load reaching untouched pages takes a slow path even though it reads none
+of them. That cost sqlite3.c's validation 7 cycles per entry until the tables' builders stopped doing it. Its scratch
+is about 10 bytes per entry, and 4 per local and per call past 128.
+Before any scalar producer lookup or class-dependent shift, the block must pass its kind, class, bounds and depth
+checks; a malformed byte depth must not reach a producer index. Arrival mismatches likewise stop dependent checks.
+The regression suite ends kinds, classes and values independently at separate inaccessible pages and combines
+underflow or invalid classes with later calls and arrivals. Direct/indirect 63/64-argument calls cross a block boundary,
+with both matching and mismatched final arguments, and the selected wrapper's exact diagnostic matches the scalar oracle.
+
+**Measurements.** On the 9700X, pinned to CPU 2, on the frozen `sqlite3.c` (sha256 `0a409f16…`) that `-c` lowers
+into 2,602 functions of 396,893 entries, every one of which the vector path takes alone:
+
+| | ns/entry | cycles/entry | instructions/entry | IPC |
+| --- | ---: | ---: | ---: | ---: |
+| `tier0_validate` (the vector path) | 1.96 to 1.98 | 10.86 to 10.96 | 29.51 | 2.69 to 2.72 |
+| `tier0_validate_scalar` | 8.35 | 46.30 | 129.52 | 2.80 |
+
+These are `benchmark-backend-source --only validate` and `--only validate-scalar`, the CI's options, three processes.
+`-c` of the same `sqlite3.c` with #136's speedtest1 options, `measure-compile --runs 21` of each build against the
+other: the `lower` stage went from 16.18 ms (main, 8ab9a208) to 13.03 ms (this change, e92fbf1d), and the whole compile
+from 148.0 ms to 144.3 ms, with the object's bytes unchanged. On the laptop's Zen 4, a function of 16 entries or fewer
+costs the vector path about 600 TSC ticks, nearly a whole block's code for its few entries, more than the scalar
+validator takes; past 32 entries the vector path is faster, and 3 times as fast past 128. Of the vector path's samples
+there, 28% are the function's tables and setup and 69% the blocks, of which the calls with more than two operands take
+15%.
+
+The completed one-binary vector/scalar/disabled campaign isolates validation from executable layout: the `lower`
+medians are 13.020, 15.662 and 12.146 ms, respectively. Vector validation therefore retains about 0.874 ms on this
+input, compared with the scalar check's 3.516 ms. Eight rotated `perf stat -r 3` rounds average 1,517.49 M user
+instructions for vector, 1,558.32 M for scalar and 1,505.60 M with checking disabled. The vector/disabled cycle ranges
+overlap; disabling validation is solely a measurement control, never a production option. Sharing a validated plan
+with Tier 0's analysis would require preserving refusal before unchecked backend consumers and a separate measured
+producer/consumer design. This PR claims the measured reduction while retaining that correctness gate.
+
+Fresh target-host size controls use three normal processes and a scalar-conditioned process. At 16 entries,
+table-free scalar/vector validation takes about 60.0/70.1 ns, and a fixture with eight locals, six calls and four
+argument records takes 100.6/116.9 ns; at 24 entries vector wins in both fixtures. Empty table-free streams favor
+vector, 11.9 ns against scalar's 14.6 ns. The 16-entry dispatch threshold follows these controls, with the metadata
+cap as a conservative guard. These synthetic controls do not establish a universal threshold or whole-corpus gain.
+The [retained campaign and review evidence](https://github.com/buster14a/buster-performance/pull/57) includes all
+samples, source and binary identities, exact commands, native/sanitizer qualification and defect-detecting mutations.
+
 ## Tests
 
 `test-tier0` (about 0.8 s, or 2.9 s with `--cross-check`, on the 9700X, before the records' shape) generates programs of
