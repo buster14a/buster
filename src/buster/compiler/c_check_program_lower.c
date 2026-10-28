@@ -2197,9 +2197,6 @@ static void check_lower_complex_conversion(CheckLowerWriter* writer, TypeId from
 // tasks' loop (check_lower_drain_body).
 static inline __attribute__((always_inline)) void check_lower_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
 {
-#if !BUSTER_HOST_VECTOR
-    check_lower_scalar_conversion(writer, from, to);
-#else
     if ((check_lower_complex(writer, from) || check_lower_complex(writer, to)) && check_lower_value_class(writer, to) != BUSTER_TYPED_CLASS_VOID)
     {
         check_lower_complex_conversion(writer, from, to);
@@ -2208,7 +2205,6 @@ static inline __attribute__((always_inline)) void check_lower_conversion(CheckLo
     {
         check_lower_scalar_conversion(writer, from, to);
     }
-#endif
 }
 
 // A long double constant's place in the function's table (CheckLowerWriter.x87_constants), its 80 bits as static data
@@ -3587,10 +3583,9 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         }
         else if (selectors && effect->selected_selector < 5)
         {
-            // A known category still retains Clang's exact evaluated selector prefix and its side effects. Clang's
-            // CodeGen evaluates the normal and subnormal selectors as two arguments of one C++ call, an order C++
-            // leaves unspecified: the approved host's GCC-built Clang 23.1.1 evaluates the subnormal one first.
-            const uint32_t order[] = { 5, 4, 0, 1, 3, 2 };
+            // A known category retains the selector prefix and its side effects in the tested Clang 23.1.4's order.
+            // C does not specify this order; Clang's own build compiler can affect its CodeGen argument order.
+            const uint32_t order[] = { 5, 4, 0, 1, 2, 3 };
             const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
             for (uint32_t i = BUSTER_ARRAY_LENGTH(order); i-- > 0;)
@@ -3619,19 +3614,18 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
                 const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
-                const uint32_t subnormal = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
+                const uint32_t normal = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
                 const uint32_t end = check_lower_label(writer);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
                 check_lower_mark(writer, end);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
-                check_lower_selector_test(writer, category, 3, end, false);
-                // Emitted in reverse: the subnormal selector runs before the normal one, as the approved host's
-                // Clang evaluates them (see the known-category order above).
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, normal);
+                check_lower_selector_test(writer, category, 2, end, false);
+                // Emitted in reverse: normal runs before subnormal, as in official Clang 23.1.4.
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                check_lower_operand(writer, node, 5, false, BUSTER_TYPE_INT);
-                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
                 check_lower_operand(writer, node, 6, false, BUSTER_TYPE_INT);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, normal);
+                check_lower_operand(writer, node, 5, false, BUSTER_TYPE_INT);
                 for (uint32_t i = 3; i-- > 0;)
                 {
                     const uint32_t operand = i == 0 ? 4 : i - 1;

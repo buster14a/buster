@@ -722,9 +722,19 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
 #define BUSTER_PREDEFINES_SSP_ON 2 // -fstack-protector
 #define BUSTER_PREDEFINES_SSP_STRONG 3 // -fstack-protector-strong
 #define BUSTER_PREDEFINES_SSP_ALL 4 // -fstack-protector-all
-// This clang's default: the distribution's build turns on -fstack-protector-strong (clang -dM -E defines
-// __SSP_STRONG__ with no option), and -fstack-protector takes the stronger of it and its own level.
+// Clang distributions can enable stack protection by default. The build uses
+// that Clang without an explicit stack-protector option, so its predefined
+// macro records the driver's default. Explicit -fstack-protector takes the
+// stronger of the driver's default and its own level.
+#if defined(__SSP_ALL__)
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_ALL
+#elif defined(__SSP_STRONG__)
 #define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_STRONG
+#elif defined(__SSP__)
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_ON
+#else
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_OFF
+#endif
 
 #define BUSTER_PREDEFINES_ON 1 // A -fX / -fno-X pair's last: -fX.
 #define BUSTER_PREDEFINES_OFF 2 // -fno-X.

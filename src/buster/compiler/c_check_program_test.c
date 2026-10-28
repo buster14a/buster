@@ -880,7 +880,7 @@ static void check_test_program_build_release(void)
     *build = (CheckTestProgramBuild){ 0 };
 }
 
-static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -899,7 +899,24 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     uint8_t* bytes = 0;
     uint64_t size = 0;
     bool same_oracle = false;
-    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size) && check_test_program_oracle(link, source, &text, &length);
+    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size);
+    if (valid && alignment_oracle)
+    {
+        // The direct temporary's stronger alignment is Buster's contract; Clang may give the aligned(1) return
+        // type a less-aligned temporary. Compare against the independently calculated result instead.
+        const char expected[] = "int oracle_tested(int n){return 11*n+52;}\n";
+        length = sizeof(expected) - 1;
+        text = malloc(length + 1);
+        valid = text != 0;
+        if (valid)
+        {
+            memcpy(text, expected, length + 1);
+        }
+    }
+    else if (valid)
+    {
+        valid = check_test_program_oracle(link, source, &text, &length);
+    }
     valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
     const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
@@ -964,6 +981,11 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         rmdir(directory);
     }
     return valid;
+}
+
+static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+{
+    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1441,8 +1463,10 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
                                   "backend consumers retain final pooled-data and external memcpy access after runtime symbol numbering");
                 arena_pop_to(&scratch, access_mark);
             }
-            snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
-            check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
+            const bool alignment_oracle = strcmp(name, "hidden-result-direct-temporary-alignment") == 0;
+            snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
+                     alignment_oracle ? "the independent alignment expectation" : clang);
+            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -2658,9 +2682,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
         "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
-        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "union wide b=external_wide(n+1);union wide c=external_wide(n+2);__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c.c[0]*5+a.c[39]+e.c[7];}"
         "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
         "hidden-result-canonical-alignment", clang);
+    // The direct member access needs a canonical-aligned return temporary too. The helper reports a misaligned
+    // hidden result in its first byte; its Buster-only expected result is independent of Clang's weaker alignment.
+    check_test_program_source(test,
+        "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
+        "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
+        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
+        "hidden-result-direct-temporary-alignment", clang);
     check_test_program_source(test,
         "struct cx{_Complex long double z;};struct cx external_complex(long double a,long double b);"
         "long double external_complex_apply(struct cx(*f)(long double,long double),long double a);"

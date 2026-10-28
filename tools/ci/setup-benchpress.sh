@@ -37,7 +37,6 @@ if [ ! -f "$destination/.complete" ] || [ ! -f "$destination/LICENSE.TXT" ]; the
         --output "$temporary/tree/LICENSE.TXT"
     printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89afee \
         "$temporary/tree/LICENSE.TXT" | sha256sum --check
-    ln -s clang "$temporary/tree/bin/cc"
     test "$("$temporary/tree/bin/clang" -dumpversion)" = "$version"
     test -f "$temporary/tree/lib/clang/23/include/immintrin.h"
     printf '%s\n' "$digest" > "$temporary/tree/.complete"
@@ -53,4 +52,8 @@ printf '%s  %s\n' 8d85c1057d742e597985c7d4e6320b015a9139385cff4cbae06ffc0ebe89af
 test "$("$destination/bin/clang" -dumpversion)" = "$version"
 test -f "$destination/lib/clang/23/include/immintrin.h"
 "$destination/bin/clang" --version
+if [ -L "$destination/bin/cc" ] && [ "$(readlink "$destination/bin/cc")" = clang ]; then
+    unlink "$destination/bin/cc"
+fi
 printf '%s\n' "$destination/bin" >> "${GITHUB_PATH:?GITHUB_PATH is required}"
+printf 'BUSTER_CLANG_RESOURCE_DIR=%s\n' "$destination/lib/clang/23" >> "${GITHUB_ENV:?GITHUB_ENV is required}"
