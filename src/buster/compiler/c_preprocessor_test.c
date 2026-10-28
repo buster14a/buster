@@ -3052,6 +3052,42 @@ static bool pp_test_directory_snapshot(const char* root)
     return result;
 }
 
+static bool pp_test_directory_budget(const char* root)
+{
+    char directory[PATH_MAX];
+    char seed[PATH_MAX];
+    char path[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/directory-budget", root);
+    snprintf(seed, sizeof(seed), "%s/value.h", directory);
+    bool result = mkdir(directory, 0700) == 0 && pp_test_write_file(seed, "header\n");
+    for (uint32_t n = 0; result && n < 160; n += 1)
+    {
+        snprintf(path, sizeof(path), "%s/entry-%03u.h", directory, n);
+        result = link(seed, path) == 0;
+    }
+    FileCache cache = { 0 };
+    if (result)
+    {
+        file_cache_list_directory(&cache, directory, (uint32_t)strlen(directory));
+        snprintf(path, sizeof(path), "%s/absent.h", directory);
+        result = cache.directory_opens == 1 && cache.directories != 0 && cache.directories->slots == 0 && cache.directory_entries == 0 &&
+                 !file_cache_directory_absent(&cache, seed) && !file_cache_directory_absent(&cache, path);
+        // The directory has over one page of getdents64 records. A partial set must never reject a later file.
+        snprintf(path, sizeof(path), "%s/entry-159.h", directory);
+        result = result && !file_cache_directory_absent(&cache, path);
+    }
+    arena_release(&cache.directory_arena);
+    for (uint32_t n = 0; n < 160; n += 1)
+    {
+        snprintf(path, sizeof(path), "%s/entry-%03u.h", directory, n);
+        unlink(path);
+    }
+    unlink(seed);
+    rmdir(directory);
+    printf("directory budget: %s (partial page rejected without false absence)\n", result ? "as expected" : "WRONG");
+    return result;
+}
+
 static bool pp_test_lookup_accounting(const char* directory)
 {
     char first[4200];
@@ -3098,7 +3134,7 @@ static bool pp_test_lookup_accounting(const char* directory)
     bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(folder, 0700) == 0 && symlink("loop.h", loop) == 0 &&
                   pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
                   link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
-    result = result && pp_test_lookup_probes(&options, missing_root) && pp_test_directory_snapshot(directory);
+    result = result && pp_test_lookup_probes(&options, missing_root) && pp_test_directory_snapshot(directory) && pp_test_directory_budget(directory);
     // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
     // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
     options.quiet = false;

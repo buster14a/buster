@@ -121,7 +121,14 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   optional directory metadata is recorded separately below.
 - **Directory snapshots for negative include candidates (#653):** on the
   first missing candidate in an explicit or standard search directory, its entry-name hashes are retained in
-  an optional arena of at most 16 MiB. An absent first path component needs
+  an optional arena of at most 16 MiB, subject to a bounded setup budget.
+  Deduplication retains each directory's `st_size` from the stat it already
+  makes; directories reporting more than 4 KiB are left on ordinary probes.
+  The hint does not prove completeness: at most one 4 KiB `getdents64` page
+  is retained, and a second read must report EOF before any absence can be
+  inferred. A nonempty second page or malformed record discards the listing.
+  This bounds speculative enumeration instead of charging large include
+  directories to a few failed queries. An absent first path component needs
   no file open. A listed component always takes the existing probe, including
   symlinks and subdirectory names; a hash collision can only retain a probe.
   Dot, dot-dot, empty and overlong components retain the probe too. Complete,
@@ -146,6 +153,9 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   Listing opens/entries are recorded in `FileCache.directory_opens` and
   `directory_entries`, separately from `FileCacheCounts`' file probes;
   `directory_skips` counts candidates omitted by the listing.
+  The raw directory-record decoder follows the documented Linux
+  [getdents64 ABI](https://man7.org/linux/man-pages/man2/getdents.2.html)
+  (man-pages 6.19); no implementation or external fixture was copied.
 - **A translation unit keeps its own state about each file:** `PPFile` (how a
   path was found, its system level) and `PPFileData`, which copies the record's
   prepared fields when the unit first enters the file and keeps `once` (`#pragma

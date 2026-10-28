@@ -1307,7 +1307,8 @@ static void files_add_probes(FilesRun* run)
             {
                 const uint32_t length = run->search->directory_lengths[d];
                 const char* directory = run->search->directories[d];
-                if (path->length > length + 1 && path->path[length] == '/' && memcmp(path->path, directory, length) == 0)
+                if (run->search->directory_bytes != 0 && run->search->directory_bytes[d] <= BUSTER_FILE_CACHE_DIRECTORY_PAGE &&
+                    path->length > length + 1 && path->path[length] == '/' && memcmp(path->path, directory, length) == 0)
                 {
                     file_cache_list_directory(cache, directory, length);
                 }

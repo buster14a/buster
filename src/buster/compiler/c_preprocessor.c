@@ -91,6 +91,7 @@
 #include <sys/stat.h>
 #include <sys/vfs.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <linux/fs.h>
 #include <linux/magic.h>
@@ -1283,6 +1284,7 @@ struct Preprocessor
     char** directories;
     uint32_t* directory_lengths;
     uint8_t* directory_system;
+    uint64_t* directory_bytes; // Optional sizes from deduplication's stat calls; only a cheap listing-cost hint.
     uint32_t directory_count;
     uint32_t angled_first; // The first directory <...> searches.
     // With --buster-headers: clang's resource directory, right after buster's (`buster_directory`, its path, as
@@ -3600,6 +3602,7 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
 #define BUSTER_FILE_CACHE_DIRECTORY_BYTES (16ull << 20)
+#define BUSTER_FILE_CACHE_DIRECTORY_PAGE BUSTER_ARENA_PAGE_BYTES
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -3834,33 +3837,44 @@ static void file_cache_list_directory(FileCache* cache, const char* path, uint32
             *directory = (FileCacheDirectory){ .next = cache->directories, .path = copy, .length = length };
             cache->directories = directory;
             const uint64_t names_mark = arena->length;
-            DIR* stream = opendir(copy);
+            const int fd = open(copy, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK);
             cache->directory_opens += 1;
-            bool complete = stream != 0 && file_cache_directory_exact(dirfd(stream));
-            uint64_t* names = 0;
+            bool complete = fd >= 0 && file_cache_directory_exact(fd);
+            uint8_t bytes[BUSTER_FILE_CACHE_DIRECTORY_PAGE];
+            uint8_t tail[BUSTER_FILE_CACHE_DIRECTORY_PAGE];
+            uint64_t names[BUSTER_FILE_CACHE_DIRECTORY_PAGE / sizeof(uint64_t)];
             uint32_t count = 0;
-            struct dirent* entry = 0;
-            while (complete)
+            const int64_t got = complete ? syscall(SYS_getdents64, fd, bytes, sizeof(bytes)) : -1;
+            complete = got >= 0 && (uint64_t)got <= sizeof(bytes);
+            if (complete && got != 0)
             {
-                errno = 0;
-                entry = readdir(stream);
-                if (entry == 0)
-                {
-                    complete = errno == 0;
-                    break;
-                }
-                uint64_t* name = arena_push_array(arena, 1, sizeof(uint64_t), _Alignof(uint64_t));
-                complete = name != 0;
+                // Prove EOF after one page; any second page is discarded and keeps ordinary probes.
+                complete = syscall(SYS_getdents64, fd, tail, sizeof(tail)) == 0;
+            }
+            for (uint32_t at = 0; complete && at < (uint64_t)got;)
+            {
+                // Linux getdents64: reclen is at byte 16 and the NUL-terminated name starts at byte 19. Decode
+                // bounded bytes rather than casting an arbitrary record address to an aligned C structure.
+                uint16_t record_bytes = 0;
+                complete = (uint64_t)got - at >= 20;
                 if (complete)
                 {
-                    names = count == 0 ? name : names;
-                    *name = intern_hash_bytes((const uint8_t*)entry->d_name, (uint32_t)strlen(entry->d_name)) | 1;
+                    memcpy(&record_bytes, bytes + at + 16, sizeof(record_bytes));
+                    complete = record_bytes >= 20 && record_bytes <= (uint64_t)got - at;
+                }
+                const uint8_t* name = complete ? bytes + at + 19 : bytes;
+                const uint8_t* end = complete ? memchr(name, 0, record_bytes - 19) : 0;
+                complete = complete && end != 0 && end != name && (uint64_t)(end - name) <= NAME_MAX && count < BUSTER_ARRAY_LENGTH(names);
+                if (complete)
+                {
+                    names[count] = intern_hash_bytes(name, (uint32_t)(end - name)) | 1;
                     count += 1;
+                    at += record_bytes;
                 }
             }
-            if (stream != 0)
+            if (fd >= 0)
             {
-                closedir(stream);
+                close(fd);
             }
             uint32_t capacity = 2;
             while (capacity < 2ull * count)
@@ -3902,7 +3916,7 @@ static void file_cache_list_directory(FileCache* cache, const char* path, uint32
 // stay in the hash set and are always probed. Hash collisions are harmless false positives.
 static bool file_cache_directory_absent(const FileCache* cache, const char* path)
 {
-    const uint32_t length = (uint32_t)strlen(path);
+    const uint32_t length = cache->directories != 0 ? (uint32_t)strlen(path) : 0;
     bool result = false;
     for (const FileCacheDirectory* directory = cache->directories; !result && directory != 0; directory = directory->next)
     {
@@ -4488,6 +4502,7 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
+            const uint64_t opens_before = pp->probes.opens;
             const uint32_t file = pp_lookup_path(pp, path, path_length, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
@@ -4495,7 +4510,8 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             // A directory earns a snapshot only after a real missing candidate. Enumerating a large -I directory
             // for a header found on its first probe would add work to a successful search. The first miss remains in
             // the path cache; the snapshot serves later names. Quoted includer directories retain ordinary probes.
-            if (directory != BUSTER_PP_NONE && error == ENOENT)
+            if (directory != BUSTER_PP_NONE && error == ENOENT && pp->probes.opens != opens_before && pp->directory_bytes != 0 &&
+                pp->directory_bytes[directory] <= BUSTER_FILE_CACHE_DIRECTORY_PAGE)
             {
                 file_cache_list_directory(pp->cache, prefix, prefix_length);
             }
@@ -17095,8 +17111,12 @@ static void pp_dedupe_directories(Preprocessor* pp)
     uint64_t* devices = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     uint64_t* inodes = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     bool* kept = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(bool), 8);
+    pp->directory_bytes = 0;
     if (devices != 0 && inodes != 0 && kept != 0)
     {
+        // Optional, in the unit's arena: the producer already pays for these stats. Consumers use the size only to
+        // reject expensive listing attempts; an absent hint keeps ordinary probes and cannot make a compile fail.
+        uint64_t* directory_bytes = count != 0 ? arena_push_array(&pp->arena, count, sizeof(uint64_t), _Alignof(uint64_t)) : 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             struct stat stats;
@@ -17107,6 +17127,10 @@ static void pp_dedupe_directories(Preprocessor* pp)
             kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
             devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
             inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
+            if (directory_bytes != 0)
+            {
+                directory_bytes[i] = kept[i] && stats.st_size >= 0 ? (uint64_t)stats.st_size : UINT64_MAX;
+            }
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
@@ -17135,12 +17159,17 @@ static void pp_dedupe_directories(Preprocessor* pp)
                 pp->directories[written] = pp->directories[i];
                 pp->directory_lengths[written] = pp->directory_lengths[i];
                 pp->directory_system[written] = pp->directory_system[i];
+                if (directory_bytes != 0)
+                {
+                    directory_bytes[written] = directory_bytes[i];
+                }
                 written += 1;
             }
         }
         pp->directory_count = written;
         pp->angled_first = angled_first;
         pp->fallback_directory = fallback;
+        pp->directory_bytes = directory_bytes;
     }
     scratch_end(scratch);
 }
