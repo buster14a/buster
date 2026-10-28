@@ -2272,6 +2272,19 @@ static __attribute__((noinline)) void check_test_program_bit_ints(CheckTest* tes
         "set13(&g13,0xe000u|(unsigned)(n*97&0x1fff));g13>>=3;r=r*29+(int)g13;set13(&g13,0x6000u|(unsigned)(n*89&0x1fff));g13%=1000;"
         "return r*31+(int)g13;}",
         "bit-int-updates-of-noncanonical-storage", clang);
+    // Of classes as wide as int and long (_BitInt(30), unsigned _BitInt(30) and _BitInt(60)): casts of locals whose bits past
+    // the width a character type set, which the batch's templates (c_check_program_batch.c) would read as the class's, and
+    // conversions to one from a type of its class, which change its bits though their classes are the same.
+    check_test_program_source(test,
+        BUSTER_CHECK_TEST_BIT_INTS
+        "typedef _BitInt(30) S30;typedef _BitInt(60) S60;\n#define U30 unsigned _BitInt(30)\n"
+        "int tested(int n){S30 d=0;unsigned char*p=(unsigned char*)&d;p[0]=(unsigned char)n;p[3]=(unsigned char)(0x80|(n&0x7f));"
+        "U30 e=0;unsigned char*q=(unsigned char*)&e;q[0]=(unsigned char)(n*3);q[3]=(unsigned char)(0xc0|(n&0x3f));"
+        "S60 f=0;unsigned char*r=(unsigned char*)&f;r[0]=(unsigned char)(n*5);r[7]=(unsigned char)(0x90|(n&0xf));"
+        "int x=(int)d;unsigned y=(unsigned)e;long z=(long)f;"
+        "long g=(long)(S30)(n*0x10000000);unsigned long h=(unsigned long)(U30)((unsigned)n*0x50000000u);long k=(long)(S60)((long)n<<58);"
+        "return (int)((x+(long)y*3+z%1000003*5+g*7+(long)(h%1000003)*11+k/(1L<<40)*13)%1000003);}",
+        "bit-int-class-wide-casts-and-conversions", clang);
 }
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
