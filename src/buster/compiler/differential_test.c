@@ -195,7 +195,13 @@ static void differential_test_campaigns(DifferentialTests* tests, const char* di
         const int result = differential_campaign(&options, &summary);
         differential_test_check(tests, result == (i == 0 ? 0 : 1), scenarios[i]);
         differential_test_check(tests, summary.passed == (i == 0) && summary.failed == (i != 0), "campaign accounting");
-        differential_test_check(tests, strcmp(summary.signature, signatures[i]) == 0, "failure class retained");
+        const bool signature_matches = strcmp(summary.signature, signatures[i]) == 0;
+        if (!signature_matches)
+        {
+            fprintf(stderr, "differential harness: scenario=%s expected signature=%s actual signature=%s; artifacts=%s\n",
+                    scenarios[i], signatures[i], summary.signature, summary.last_case);
+        }
+        differential_test_check(tests, signature_matches, "failure class retained");
         differential_test_check(tests, differential_contains(summary.directory, "summary.json", "\"campaign_passed\":0"), "fixtures cannot become compiler evidence");
         differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "literal space ' quote \\\" dollar $() ; *"), "argv quoting preserved");
         differential_test_check(tests, differential_contains(summary.last_case, "generate.json", "utf8 \xc3\xa9 byte \\ufffd"), "executed Unicode arguments remain valid JSON text");

@@ -178,15 +178,18 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int s=0;for(int i=0;i<16;i++)s+=f.copy[i];return (int)f.result*3+(int)(f.back*4)+s+(int)(f.ext*8);}",
         "asm-naked-bridge", clang);
     // x86_semantics_test_enter's shape, in Intel syntax: statics RIP-relative, a jump through one to another naked
-    // function, whose template jumps back to the first one's label, and AVX-512's moves.
+    // function, whose template jumps back to the first one's label. Execute SSE2 moves on every x86-64 host;
+    // assemble AVX-512 moves separately so the oracle can run without AVX-512.
     check_test_program_source(test,
         "static __attribute__((used)) long saved_rsp;"
         "static __attribute__((used)) long saved_arg;"
         "static __attribute__((used)) long continuation;"
         "static __attribute__((naked,noinline)) long enter(long x){__asm__(\".intel_syntax noprefix\\n\""
         "\"push rbx\\nmov qword ptr [rip + saved_rsp], rsp\\nmov qword ptr [rip + saved_arg], rdi\\nlea rbx, [rdi + 5]\\n\""
-        "\"vmovdqu64 zmm16, zmm17\\nvmovdqa64 zmm17, zmm16\\njmp qword ptr [rip + continuation]\\n\""
-        "\"enter_return:\\nmov rax, rbx\\nadd rax, qword ptr [rip + saved_arg]\\nvzeroupper\\npop rbx\\nret\\n.att_syntax prefix\\n\");}"
+        "\"movdqu xmm0, xmm1\\nmovdqa xmm1, xmm0\\njmp qword ptr [rip + continuation]\\n\""
+        "\"enter_return:\\nmov rax, rbx\\nadd rax, qword ptr [rip + saved_arg]\\npop rbx\\nret\\n.att_syntax prefix\\n\");}"
+        "static __attribute__((used,naked,noinline)) void vector_moves(void){__asm__(\".intel_syntax noprefix\\n"
+        "vmovdqu64 zmm16, zmm17\\nvmovdqa64 zmm17, zmm16\\nvzeroupper\\nret\\n.att_syntax prefix\\n\");}"
         "static __attribute__((used,naked,noinline)) void bounce(void){__asm__(\"addq $100, %rbx\\n\\tjmp enter_return\\n\");}"
         "static long bounce_address(void){long a;__asm__(\"leaq bounce(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){continuation=bounce_address();long r=enter(n);return (int)r+(saved_rsp!=0)+(int)(saved_arg-n);}",
