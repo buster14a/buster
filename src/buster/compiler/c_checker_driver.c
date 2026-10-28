@@ -636,15 +636,16 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
+                    const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     if (input->implicit_function_c99)
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token],
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
                             (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }
                     else
                     {
-                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
+                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
                                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }
                 }
