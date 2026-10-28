@@ -77,7 +77,8 @@ struct CheckInputReport
     uint32_t token;
     CheckInputMessage message;
     uint32_t pragma;
-    // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
+    // Zero uses this report's parser token, independently of an explicit pragma/naked source location.
+    // Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
     uint32_t completion;
 };
 

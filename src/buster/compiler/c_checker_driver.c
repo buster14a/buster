@@ -511,7 +511,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 const uint32_t source = requested != BUSTER_CHECK_NONE ? requested : located < count ? parser->tokens.sources[located] : BUSTER_CHECK_NONE;
                 const uint32_t node = phase == 1 ? stream->reports[index].node :
                                       phase == 2 && located < input->token_count && input->token_nodes != NULL ? input->token_nodes[located] : BUSTER_CHECK_NONE;
-                const uint32_t completion = phase == 0 ? input->reports[index].completion :
+                const uint32_t completion = phase == 0 ? (input->reports[index].completion != 0 ? input->reports[index].completion : token) :
                                             phase == 2 && extra[index].completion != 0 ? extra[index].completion :
                                             phase == 2 && extra[index].position != located ? extra[index].position :
                                             node < input->graph.count && input->graph.source_positions != NULL ? input->graph.source_positions[node] : 0;
