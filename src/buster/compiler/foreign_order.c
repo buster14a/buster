@@ -21,8 +21,11 @@ static __m512i foreign_order_digits(const uint64_t* keys, uint32_t count, uint32
 
 // Values at opaque u32 name IDs: i32 gather indices would sign-extend IDs with bit 31 set. Keep the zero-extended
 // low half of each packed key in an i64 index, including the full legal ID range and masked tails.
-static __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const uint32_t* values)
+// The standalone resolver benchmark includes this module without the conversion consumer.
+static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const uint32_t* values)
 {
+    __m512i result;
+#if BUSTER_HOST_VECTOR
     const uint32_t first = count < 8 ? count : 8;
     const uint32_t second = count > 8 ? count - 8 : 0;
     const __mmask8 a_mask = (__mmask8)_bzhi_u32(0xff, first);
@@ -32,7 +35,16 @@ static __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const 
     const __m512i high = _mm512_and_si512(_mm512_maskz_loadu_epi64(b_mask, keys + first), ids);
     const __m256i a = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), a_mask, low, values, 4);
     const __m256i b = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), b_mask, high, values, 4);
-    return _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
+    result = _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
+#else
+    uint32_t rows[16] = { 0 };
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        rows[i] = values[(uint32_t)keys[i]];
+    }
+    result = _mm512_loadu_si512(rows);
+#endif
+    return result;
 }
 
 // The high half is the complete checked first-record ordinal, the low half the opaque name ID. Stable byte radix

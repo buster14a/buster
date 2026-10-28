@@ -211,7 +211,7 @@ static bool foreign_order_test_compile(const char* directory, ForeignTestTally* 
                                     ".section fo_beta,\"aw\",@progbits\n.quad 29\n.section .note.GNU-stack,\"\",@progbits\n") > 0 && written;
             written = fclose(file) == 0 && written;
         }
-        char* arguments[] = { (char*)"cc", (char*)"-c", source, (char*)"-o", object, 0 };
+        char* arguments[] = { (char*)"cc", (char*)"-c", (char*)"-Wa,-mrelax-relocations=no", source, (char*)"-o", object, 0 };
         const bool compiled = written && object_test_run(arguments, output, errors) == 0;
         foreign_test_expect(tally, compiled, "compile original foreign-order entry fixture", source);
         result = compiled && result;
