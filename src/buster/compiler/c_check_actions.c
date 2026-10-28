@@ -67,9 +67,10 @@ typedef enum CheckFault
 // cannot use the initializer receipt. Runtime union access keeps its ordinary semantics.
 #define BUSTER_CHECK_INACTIVE_UNION_READ 0x40000u
 #define BUSTER_CHECK_INACTIVE_UNION_ADDRESS 0x80000u
-// A symbolic address remains usable after a cast, while Clang's source constant evaluator refuses a read
-// through a changed pointee type (including a void-pointer round trip). Qualifier-only casts keep the proof.
-#define BUSTER_CHECK_CONST_READ_CAST 0x100000u
+// A symbolic address can remain valid when Clang refuses a value read through its source path: a changed
+// pointee type (including a void round trip), or decay of an array without a declared bound. This evidence
+// follows the selected pointer, not unrelated/discarded operands. Qualifier-only casts keep the read proof.
+#define BUSTER_CHECK_CONST_READ_RESTRICTED 0x100000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -498,7 +499,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     {
         const TypeId from = source_pointer ? type_unqualified(type_strip_aligned(table, type_element(table, source))) : 0;
         const TypeId to = target_pointer ? type_unqualified(type_strip_aligned(table, type_element(table, destination))) : 0;
-        value->flags |= source_pointer && target_pointer && from == to ? 0 : BUSTER_CHECK_CONST_READ_CAST;
+        value->flags |= source_pointer && target_pointer && from == to ? 0 : BUSTER_CHECK_CONST_READ_RESTRICTED;
     }
     uint32_t source_width = 0;
     uint32_t target_width = 0;
@@ -682,6 +683,7 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             value.type = pointer;
             value.category = CHECK_RVALUE;
+            value.flags |= kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? BUSTER_CHECK_CONST_READ_RESTRICTED : 0;
             value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
             if (!action->constant_evaluated && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
             {
@@ -718,7 +720,7 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
                                    (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
         CheckValue loaded = { 0 };
         const bool known = action->constant_evaluated && !volatile_read && value.fault == CHECK_FAULT_NONE &&
-                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_CAST)) == 0 &&
+                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
                            (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
                            check_const_load(table, action->const_values, value.object, value.offset, value.object_bit_offset,
                                             value.bit_width, value.type, action->source_position, &loaded);
@@ -1529,7 +1531,7 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
             check_action_promote(table, &index, &result->conversions[index_slot], action->node);
             result->value.type = action->op == CHECK_OP_SUBSCRIPT ? type_element(table, pointer.type) : pointer.type;
             result->value.category = action->op == CHECK_OP_SUBSCRIPT ? CHECK_LVALUE : CHECK_RVALUE;
-            result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST);
+            result->value.flags |= pointer.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED);
             result->value.flags |= action->op == CHECK_OP_SUBSCRIPT && (pointer.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
             int64_t number = 0;
             const uint64_t stride = check_action_pointer_stride(table, pointer.type, action);
@@ -1737,7 +1739,7 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
             result->value.type = type_qualify(table, table->members.type[member], qualifiers);
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
-            result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_CAST);
+            result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED);
             result->value.flags |= arrow && (base.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
             if (!check_action_const_member(table, action, &base, record, member))
             {
