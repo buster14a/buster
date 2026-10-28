@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_REMAT_NONE 0
 #define BUSTER_TIER1_REMAT_INTEGER 1
@@ -99,6 +99,9 @@ static __attribute__((unused)) bool tier1_rematerialization_marks_scalar(const T
 
 static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1RematerializationInput* input, uint8_t* marks)
 {
+#if !BUSTER_HOST_VECTOR
+    return tier1_rematerialization_marks_scalar(input, marks);
+#else
     const bool valid = tier1_rematerialization_input_valid(input, marks);
     if (valid)
     {
@@ -129,6 +132,7 @@ static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1Rem
         }
     }
     return valid;
+#endif
 }
 
 static __attribute__((unused)) bool tier1_rematerialize(const Tier1RematerializationInput* input, uint32_t index, uint8_t destination, uint8_t frame_base, uint8_t flags_live, Tier1Rematerialized* result)

@@ -407,7 +407,8 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
             encoded = encoded && mprotect(native[0], mapping_bytes, PROT_READ | PROT_EXEC) == 0 && mprotect(native[1], mapping_bytes, PROT_READ | PROT_EXEC) == 0;
         }
         tier1_emit_test_expect(test, encoded, "both encoders agree on baseline narrow records and create executable mappings");
-        for (uint32_t encoder = 0; encoded && encoder < 2; encoder += 1)
+        const bool executable = encoded && tier1_emit_test_native(test, records, count);
+        for (uint32_t encoder = 0; executable && encoder < 2; encoder += 1)
         {
             for (uint32_t placement = 0; placement < 2; placement += 1)
             {

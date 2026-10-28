@@ -738,20 +738,24 @@ static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t t
 // Of the next 8 tokens from `first` below `end`, those with attributes: few have them. The scalar path takes them all.
 static uint32_t check_input_asm_attributed(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
 {
-    return scalar ? (uint32_t)check_input_scan_all(first, end) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, end);
+    (void)scalar;
+
+    return BUSTER_SCALAR_PATH(scalar) ? (uint32_t)check_input_scan_all(first, end) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, end);
 }
 
 // Of the next 16 tokens from `first` below `end`, those with a declaration: identifiers. The scalar path takes them all.
 static uint32_t check_input_asm_declared(const CheckInput* input, uint32_t first, uint32_t end, bool scalar)
 {
-    return scalar ? (uint32_t)check_input_scan_all(first, end) & 0xffff : check_input_scan_below(input->declarations, first, end, input->token_count);
+    (void)scalar;
+
+    return BUSTER_SCALAR_PATH(scalar) ? (uint32_t)check_input_scan_all(first, end) & 0xffff : check_input_scan_below(input->declarations, first, end, input->token_count);
 }
 
 static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     input->asm_warnings_prepared = true;
-    const bool scalar = reader->parser->options.scalar;
+    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
     const uint32_t limit = reader->expression_limit;
@@ -856,7 +860,7 @@ static void check_input_asm_finish(CheckInputReader* reader)
     check_input_asm_labels(reader);
     for (uint32_t first = 0; input->asm_capacity != 0 && first < reader->expression_limit && !input->resource; first += 8)
     {
-        for (uint32_t selected = check_input_asm_attributed(input, first, reader->expression_limit, parser->options.scalar); selected != 0 && !input->resource;
+        for (uint32_t selected = check_input_asm_attributed(input, first, reader->expression_limit, BUSTER_SCALAR_PATH(parser->options.scalar)); selected != 0 && !input->resource;
              selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);

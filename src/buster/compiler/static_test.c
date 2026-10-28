@@ -1392,12 +1392,12 @@ static bool static_test_combine(const char* object_path, const char* definitions
     return result;
 }
 
-// Whether cc's preprocessor makes `condition` true, from a file at `path` that it writes and removes.
-static bool static_test_condition(const char* path, const char* condition, const char* out, const char* err)
+// Whether the compiler's preprocessor makes `condition` true, from a file at `path` that it writes and removes.
+static bool static_test_condition(const char* compiler, const char* path, const char* condition, const char* out, const char* err)
 {
     char text[512];
     snprintf(text, sizeof(text), "#if !(%s)\n#error the condition doesn't hold\n#endif\n", condition);
-    char* arguments[] = { "cc", "-E", "-o", "/dev/null", "-x", "c", (char*)path, 0 };
+    char* arguments[] = { (char*)compiler, "-E", "-o", "/dev/null", "-x", "c", (char*)path, 0 };
     const bool result = static_test_write_text(path, text) && object_test_run(arguments, out, err) == 0;
     unlink(path);
     return result;
@@ -1608,13 +1608,15 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         {
             snprintf(paths[side], sizeof(paths[side]), "%s/%s", sides[side], program.name);
         }
-        const bool wanted = program.condition == 0 || static_test_condition(source_path, program.condition, out, err);
-        char* compile[] = { "cc", "-O2", "-c", "-o", object_path, source_path, (char*)program.option, 0 };
+        // Decimal floating point and nested functions are GCC extensions.
+        char* compiler = strcmp(program.name, "decimal") == 0 || strcmp(program.name, "nested") == 0 ? "gcc" : "cc";
+        const bool wanted = program.condition == 0 || static_test_condition(compiler, source_path, program.condition, out, err);
+        char* compile[] = { compiler, "-O2", "-c", "-o", object_path, source_path, (char*)program.option, 0 };
         const bool compiled = wanted && static_test_write_text(source_path, program.source) && object_test_run(compile, out, err) == 0 &&
                               (program.definitions == 0 || static_test_combine(object_path, program.definitions, out, err));
         static_test_expect(&tally, !wanted || compiled, program.name, s);
         const bool refusing = pie && program.pie_refused;
-        char* reference[] = { "cc", flag, "-o", paths[1], object_path, (char*)program.option, 0 };
+        char* reference[] = { compiler, flag, "-o", paths[1], object_path, (char*)program.option, 0 };
         const bool referenced = compiled && object_test_run(reference, out, err) == 0;
         static_test_expect(&tally, !compiled || referenced != refusing, refusing ? "cc -static-pie refuses it" : pie ? "cc -static-pie links it" : "cc -static links it", s);
         Scratch scratch = scratch_begin(0);
@@ -1650,7 +1652,7 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
             dynamic_static_pie_inputs(&pie_dynamic, &pie_inputs, runtime, &test.bind);
         }
         char* const pack = pie_dynamic.relr ? "-Wl,-z,pack-relative-relocs" : "-Wl,-z,nopack-relative-relocs";
-        char* lld[] = { "cc", flag, "-fuse-ld=lld", pack, "-o", paths[2], object_path, (char*)program.option, 0 };
+        char* lld[] = { compiler, flag, "-fuse-ld=lld", pack, "-o", paths[2], object_path, (char*)program.option, 0 };
         const bool lld_linked = cross_check && compiled && !refusing && object_test_run(lld, out, err) == 0;
         static_test_expect(&tally, !cross_check || !compiled || refusing || lld_linked, pie ? "lld links it with -static-pie" : "lld links it with -static", s);
         if (lld_linked && !program.lld_wrong)
@@ -1691,7 +1693,7 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         }
         if (!wanted)
         {
-            printf("  %s: skipped, cc doesn't meet %s\n", program.name, program.condition);
+            printf("  %s: skipped, %s doesn't meet %s\n", program.name, compiler, program.condition);
         }
         else if (refusing)
         {

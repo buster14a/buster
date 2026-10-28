@@ -24,6 +24,8 @@
 //
 // Layout: the counters and the report; the files; the paths and the stages; run_parser_benchmark, called by main.c.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1002,3 +1004,12 @@ int run_parser_benchmark(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+
+#else
+int run_parser_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR
