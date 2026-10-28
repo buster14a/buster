@@ -187,19 +187,12 @@ static bool parse_test_clang_spawn(const char* clang_path, const char* const* ar
     return result;
 }
 
-// Waits for a process parse_test_clang_spawn started, and reads each of its files' first error from its output into
-// `results`: one in a header the file includes counts for the file. False if clang didn't parse the files: an error
-// no file accounts for (clang's driver's, for an unknown option), or a failing exit with no file rejected.
-static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint32_t count, ParseTestClang* results)
+// Reads each of `count` files' first error from clang's output (whose wait status is `status`) into `results`: one in
+// a header the file includes counts for the file. False if clang didn't parse the files: an error no file accounts for
+// (clang's driver's, for an unknown option), or a failing exit with no file rejected.
+static bool parse_test_clang_parse(FILE* output, int status, char** paths, uint32_t count, ParseTestClang* results)
 {
-    int status = 0;
-    pid_t waited = -1;
-    do
-    {
-        waited = waitpid(child, &status, 0);
-    }
-    while (waited < 0 && errno == EINTR);
-    bool result = waited == child && fseek(output, 0, SEEK_SET) == 0;
+    bool result = fseek(output, 0, SEEK_SET) == 0;
     char line[4096];
     // The file the last "In file included from" line named, whose header the errors after it are in (clang names the
     // includes again only where they change), and whether an error came that no file accounts for.
@@ -263,6 +256,19 @@ static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint3
     return result && !ferror(output) && WIFEXITED(status) && !unaccounted && (WEXITSTATUS(status) == 0 || rejected);
 }
 
+// Waits for a process parse_test_clang_spawn started, and reads its files' first errors (parse_test_clang_parse).
+static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint32_t count, ParseTestClang* results)
+{
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = waitpid(child, &status, 0);
+    }
+    while (waited < 0 && errno == EINTR);
+    return waited == child && parse_test_clang_parse(output, status, paths, count, results);
+}
+
 // How many clang processes parse_test_clang runs its files on: at most one per CPU it may run on and one per
 // BUSTER_PARSE_TEST_CLANG_FILES files, and at most BUSTER_PARSE_TEST_CLANG_PROCESSES (#465).
 #define BUSTER_PARSE_TEST_CLANG_FILES 8
@@ -277,21 +283,100 @@ static uint32_t parse_test_clang_processes(uint32_t count)
     return result != 0 ? result : 1;
 }
 
+// parse_test_clang's runs through the oracle cache (oracle_cache.c, #542): a clang process per file, as many at once as
+// parse_test_clang_processes gives for one file per process, its dependencies listed, each one's errors read for its
+// file. A file's result is the one a process on several gives it, since clang checks each file on its own.
+static bool parse_test_clang_cached(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
+{
+    uint32_t variables = 0;
+    while (environ[variables] != 0)
+    {
+        variables += 1;
+    }
+    const uint32_t cpus = test_process_cpus();
+    const uint32_t at_once = cpus < BUSTER_PARSE_TEST_CLANG_PROCESSES ? cpus : BUSTER_PARSE_TEST_CLANG_PROCESSES;
+    const uint32_t fixed = 7;
+    char** environment = calloc((size_t)variables + 1, sizeof(char*));
+    char** argvs = calloc((size_t)at_once * (fixed + argument_count + 2), sizeof(char*));
+    OracleRun runs[BUSTER_PARSE_TEST_CLANG_PROCESSES];
+    bool result = environment != 0 && argvs != 0;
+    uint32_t kept = 0;
+    for (uint32_t v = 0; result && v < variables; v += 1)
+    {
+        // clang reads CPATH and C_INCLUDE_PATH, which the preprocessor doesn't: without them, both search alike.
+        if (strncmp(environ[v], "CPATH=", 6) != 0 && strncmp(environ[v], "C_INCLUDE_PATH=", 15) != 0)
+        {
+            environment[kept] = environ[v];
+            kept += 1;
+        }
+    }
+    uint32_t started = 0;
+    uint32_t finished = 0;
+    while (environment != 0 && argvs != 0 && finished < count)
+    {
+        if (started < count && started - finished < at_once)
+        {
+            char** argv = argvs + (size_t)(started % at_once) * (fixed + argument_count + 2);
+            uint32_t n = 0;
+            argv[n++] = (char*)clang_path;
+            argv[n++] = "-fsyntax-only";
+            argv[n++] = "-w";
+            argv[n++] = "-fdiagnostics-show-category=name";
+            argv[n++] = "-fno-caret-diagnostics";
+            argv[n++] = "-fno-color-diagnostics";
+            argv[n++] = "-ferror-limit=0";
+            for (uint32_t a = 0; a < argument_count; a += 1)
+            {
+                argv[n++] = (char*)arguments[a];
+            }
+            argv[n++] = paths[started];
+            argv[n] = 0;
+            runs[started % at_once] = (OracleRun){
+                .purpose = "parser: clang -fsyntax-only",
+                .arguments = argv,
+                .environment = environment,
+                .dependencies = true,
+            };
+            result = oracle_run_start(&runs[started % at_once]) && result;
+            started += 1;
+        }
+        else
+        {
+            OracleRun* run = &runs[finished % at_once];
+            result = oracle_run_finish(run) && result;
+            FILE* output = result ? test_process_file() : 0;
+            result = output != 0 && fwrite(run->errors, 1, run->errors_length, output) == run->errors_length &&
+                     parse_test_clang_parse(output, run->status, paths + finished, 1, results + finished) && result;
+            if (output != 0)
+            {
+                fclose(output);
+            }
+            oracle_run_release(run);
+            finished += 1;
+        }
+    }
+    free(environment);
+    free(argvs);
+    return result && environment != 0 && argvs != 0;
+}
+
 // Runs `clang -fsyntax-only` with `arguments` on `count` files, and reads each file's first error into `results`, as
-// parse_test_clang_read does. The files are split in order among parse_test_clang_processes processes that run at once,
-// each one's output read for its own files: the same results as one process on them all, since clang checks each file
-// on its own. Returns false if a process couldn't be run, or didn't parse its files.
+// parse_test_clang_parse does. With the oracle cache on, a file at a time through it (parse_test_clang_cached); else
+// the files are split in order among parse_test_clang_processes processes that run at once, each one's output read for
+// its own files: the same results as one process on them all, since clang checks each file on its own. Returns false if
+// a process couldn't be run, or didn't parse its files.
 static bool parse_test_clang(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
     for (uint32_t i = 0; i < count; i += 1)
     {
         results[i] = (ParseTestClang){ 0 };
     }
-    const uint32_t processes = parse_test_clang_processes(count);
+    const bool cached = oracle_cache_active(oracle_cache());
+    const uint32_t processes = cached ? 0 : parse_test_clang_processes(count);
     FILE* outputs[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
     pid_t children[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
     bool started[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
-    bool result = true;
+    bool result = !cached || parse_test_clang_cached(clang_path, arguments, argument_count, paths, count, results);
     for (uint32_t p = 0; p < processes; p += 1)
     {
         const uint32_t first = (uint32_t)((uint64_t)count * p / processes);
@@ -3379,6 +3464,9 @@ static uint32_t parse_test_driver(const char* directory)
 // -E's options for the files; --reports sets how many differences the checks print (200).
 static int run_parser_tests(int argument_count, char** arguments)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint32_t failures = 0;
     const char* clang = 0;
     uint64_t mutations = 0;
@@ -3507,6 +3595,8 @@ static int run_parser_tests(int argument_count, char** arguments)
     }
     else
     {
+        // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
+        OracleCache* oracle = oracle_cache();
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_k6_tables();
         failures += parse_test_check_handoff(options.language, seed);
@@ -3557,11 +3647,14 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             rmdir(directory);
         }
+        oracle_cache_report(oracle, "test-parser");
     }
     printf("test-parser: %s\n", failures == 0 ? "passed" : "FAILED");
     arena_release(&arena);
     free(rest);
     free(clang_arguments);
     free(inputs);
-    return failures == 0 ? 0 : 1;
+    const int returned = failures == 0 ? 0 : 1;
+    oracle_epoch_end(epoch);
+    return returned;
 }

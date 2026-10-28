@@ -75,6 +75,13 @@ exact rules):
 - `classes`: `BUSTER_TYPED_CLASS_*`, the machine class;
 - `values`: 64 bits each.
 
+Each function may have up to 16,777,216 entries and 16,777,216 locals, including parameters and lowering temporaries
+(`BUSTER_TIER0_MAX_ENTRIES`, `BUSTER_TIER0_MAX_LOCALS`). Local identities and homes use 32-bit indices; #622 removed
+the former 65,536-local cap. Available arena memory and representable frame displacements still bound compilation.
+The C driver names an exhausted entry or local limit separately from insufficient lowering storage. Its
+`test-checker-driver` regression compiles 32,768 blocks with 65,537 locals through both paths, compares the objects,
+and runs their code against an unsigned arithmetic loop and clang.
+
 Beside them are three tables, and optional parts for aggregates and for the symbols' access:
 
 - **Locals,** parameters first, each with a class and flags (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). Two optional columns

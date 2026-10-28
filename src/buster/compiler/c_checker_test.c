@@ -4147,6 +4147,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_overload_address_test.c"
 #include "c_types_function_abi_test.c"
 #include "c_check_constant_test.c"
+#include "c_check_generic_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
@@ -4235,6 +4236,9 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     CheckTest test = {
         .random = 133
     };
@@ -4267,6 +4271,8 @@ static int run_checker_tests(int argc, char** argv)
     }
     CheckTestTypes types = { 0 };
     check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers]");
+    // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
@@ -4306,6 +4312,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_overload_addresses(&test, clang);
             check_test_function_abis(&test, clang);
             check_test_constant_sources(&test, clang);
+            check_test_generic_index(&test);
+            check_test_generic_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);
@@ -4354,6 +4362,9 @@ static int run_checker_tests(int argc, char** argv)
         }
         check_test_types_close(&types);
     }
+    oracle_cache_report(oracle, "test-checker");
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
-    return test.failures != 0;
+    const int returned = test.failures != 0;
+    oracle_epoch_end(epoch);
+    return returned;
 }

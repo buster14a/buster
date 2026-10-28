@@ -285,7 +285,9 @@ static bool debug_test_units(void)
         functions[2].first_row = count;
         DebugOutput a = debug_test_output(a_bytes, a_addresses, 3);
         DebugOutput b = debug_test_output(b_bytes, b_addresses, 3);
-        valid &= debug_write(&unit, &a, true) == DEBUG_OK && debug_write(&unit, &b, false) == DEBUG_OK;
+        DebugPlan plan;
+        valid &= debug_write(&unit, &a, true) == DEBUG_OK && debug_prepare(&unit, b.bases, &plan, false) == DEBUG_OK && debug_emit(&plan, &b) == DEBUG_OK;
+        valid &= memcmp(a_addresses, b_addresses, sizeof(a_addresses)) == 0 && memcmp(a.fields, b.fields, sizeof(a.fields)) == 0;
         for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             valid &= a.sections[section].size == b.sections[section].size && memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
@@ -293,13 +295,13 @@ static bool debug_test_units(void)
             b.sections[section].capacity = b.sections[section].size - 1;
             memset(b_bytes, 0xa5, BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
             b_addresses[0] = UINT32_MAX;
-            valid &= debug_write(&unit, &b, false) == DEBUG_ERROR_CAPACITY && b_addresses[0] == UINT32_MAX;
+            valid &= debug_emit(&plan, &b) == DEBUG_ERROR_CAPACITY && b_addresses[0] == UINT32_MAX;
             for (uint32_t other = 0; other < BUSTER_DEBUG_SECTIONS; other += 1)
             {
                 valid &= b.sections[other].bytes[0] == 0xa5 && b.sections[other].bytes[b.sections[other].size - 1] == 0xa5;
             }
             b.sections[section].capacity = capacity;
-            valid &= debug_write(&unit, &b, false) == DEBUG_OK;
+            valid &= debug_emit(&plan, &b) == DEBUG_OK;
         }
         valid &= debug_finalize(&unit, &a, addresses) == DEBUG_OK && debug_test_decode(&unit, &a, addresses);
         const uint64_t invalid[] = { 0x401000, 0x204000, UINT64_MAX };
@@ -347,6 +349,9 @@ static bool debug_test_units(void)
         valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
         DebugUnit empty = { 0 };
         valid &= debug_write(&empty, &output, false) == DEBUG_OK && debug_finalize(&empty, &output, 0) == DEBUG_OK && debug_test_decode(&empty, &output, 0);
+        DebugPlan empty_plan;
+        valid &= debug_prepare(&empty, output.bases, &empty_plan, true) == DEBUG_OK && debug_emit(&empty_plan, &output) == DEBUG_OK &&
+                 debug_finalize(&empty, &output, 0) == DEBUG_OK && debug_test_decode(&empty, &output, 0);
         DebugUnit oversized = { .row_count = UINT32_MAX };
         valid &= debug_write(&oversized, &output, false) == DEBUG_ERROR_LIMIT;
         unit.directory = BUSTER_S8(".");
@@ -357,6 +362,119 @@ static bool debug_test_units(void)
     free(a_bytes);
     free(b_bytes);
     printf("debug units: every tail through 129, line decoding, bodies' rows, files, empty sequences, capacity, invalid input and late addresses: %s\n", valid ? "pass" : "FAIL");
+    return valid;
+}
+
+// Preparation never publishes a failed plan. Emission may publish sizes on capacity failure, but no bytes, address
+// offsets or relocation fields. Retry the same plan after allocating, with exact capacities at protected page edges.
+static bool debug_test_plans(void)
+{
+    const uint32_t offsets[] = { 0, 1, 128, 129, 1024 };
+    const uint32_t lines[] = { 1, INT32_MAX, 0, 64, 63 };
+    const String8 file = BUSTER_S8("plan.c");
+    const DebugFunction function = {
+        .name = BUSTER_S8("planned"),
+        .size = 2048,
+        .row_count = BUSTER_ARRAY_LENGTH(offsets),
+        .line = 1,
+        .prologue_end = 2,
+    };
+    const DebugUnit unit = {
+        .directory = BUSTER_S8("."),
+        .files = &file,
+        .file_count = 1,
+        .functions = &function,
+        .function_count = 1,
+        .offsets = offsets,
+        .lines = lines,
+        .row_count = BUSTER_ARRAY_LENGTH(offsets),
+    };
+    const uint64_t bases[BUSTER_DEBUG_SECTIONS] = { 1, 127, 16384, 3, 5 };
+    const long page = sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, 2 * BUSTER_DEBUG_SECTIONS * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED;
+    for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+    {
+        valid &= mprotect(mapping + 2 * section * page, page, PROT_READ | PROT_WRITE) == 0;
+    }
+    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    {
+        DebugPlan plan = { 0 };
+        valid &= debug_prepare(&unit, bases, &plan, exact != 0) == DEBUG_OK;
+        uint8_t saved[sizeof(plan)];
+        memcpy(saved, &plan, sizeof(plan));
+        DebugUnit bad = unit;
+        bad.row_count -= 1;
+        valid &= debug_prepare(&bad, bases, &plan, exact != 0) == DEBUG_ERROR_INPUT && memcmp(saved, &plan, sizeof(plan)) == 0;
+        bad = (DebugUnit){ .function_count = UINT32_MAX };
+        valid &= debug_prepare(&bad, bases, &plan, exact != 0) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
+        for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            uint64_t limit[BUSTER_DEBUG_SECTIONS];
+            memcpy(limit, bases, sizeof(limit));
+            limit[section] = BUSTER_DEBUG_DWARF32_LIMIT - plan.sizes[section];
+            valid &= debug_prepare(&unit, limit, &plan, exact != 0) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
+        }
+        // A missing/short section or address column: all variants must fail before touching any destination.
+        for (uint32_t failure = 0; valid && failure < 2 * BUSTER_DEBUG_SECTIONS + 3; failure += 1)
+        {
+            uint32_t address = UINT32_MAX;
+            DebugOutput output = { .line_addresses = &address, .address_capacity = 1 };
+            memcpy(output.bases, bases, sizeof(bases));
+            memset(output.fields, 0xa5, sizeof(output.fields));
+            for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
+            {
+                memset(mapping + 2 * section * page, 0xa5, page);
+                output.sections[section] = (DebugSection){
+                    .bytes = mapping + (2 * section + 1) * page - plan.sizes[section],
+                    .capacity = plan.sizes[section],
+                    .size = UINT64_MAX,
+                };
+            }
+            if (failure < BUSTER_DEBUG_SECTIONS)
+            {
+                output.sections[failure].capacity -= 1;
+            }
+            else if (failure < 2 * BUSTER_DEBUG_SECTIONS)
+            {
+                output.sections[failure - BUSTER_DEBUG_SECTIONS].bytes = 0;
+            }
+            else if (failure == 2 * BUSTER_DEBUG_SECTIONS)
+            {
+                output.address_capacity = 0;
+            }
+            else if (failure == 2 * BUSTER_DEBUG_SECTIONS + 1)
+            {
+                output.line_addresses = 0;
+            }
+            else
+            {
+                output.bases[DEBUG_SECTION_LINE] += 1;
+            }
+            const DebugOutput before = output;
+            const DebugError expected = failure == 2 * BUSTER_DEBUG_SECTIONS + 2 ? DEBUG_ERROR_INPUT : DEBUG_ERROR_CAPACITY;
+            valid &= debug_emit(&plan, &output) == expected && address == UINT32_MAX && memcmp(output.fields, before.fields, sizeof(output.fields)) == 0;
+            for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+            {
+                valid &= output.sections[section].size == (expected == DEBUG_ERROR_CAPACITY ? plan.sizes[section] : UINT64_MAX);
+                for (long byte = 0; valid && byte < page; byte += 1)
+                {
+                    valid &= mapping[2 * section * page + byte] == 0xa5;
+                }
+                output.sections[section].bytes = mapping + (2 * section + 1) * page - plan.sizes[section];
+                output.sections[section].capacity = plan.sizes[section];
+            }
+            memcpy(output.bases, bases, sizeof(bases));
+            output.line_addresses = &address;
+            output.address_capacity = 1;
+            valid &= debug_emit(&plan, &output) == DEBUG_OK && address < output.sections[DEBUG_SECTION_LINE].size;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, 2 * BUSTER_DEBUG_SECTIONS * page);
+    }
+    printf("debug plans: immutable preparation, limit refusals, all capacities, changed bases, exact guarded writes and retries: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
 
@@ -784,6 +902,7 @@ static int run_debug_tests(int argc, char** argv)
         valid &= debug_test_rows();
         valid &= debug_test_random_rows();
         valid &= debug_test_units();
+        valid &= debug_test_plans();
         valid &= debug_test_bases();
         valid &= debug_test_guards();
         valid &= debug_test_profile("debug_leaf\nleaf.c:5\ndebug_outer\n_start\n\n");
