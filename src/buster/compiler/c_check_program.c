@@ -102,6 +102,8 @@ struct CheckProgramOptions
     // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
     // same model's. Tier 0 lowers both arms, which -c's program keeps.
     bool folded_ifs;
+    // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
+    uint64_t* return_flow_work;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -397,7 +399,7 @@ static bool check_program_runtime_effects(const CheckProgram* program, uint32_t 
     return effects;
 }
 
-static const CheckValue* check_program_runtime_value(const CheckProgram* program, uint32_t node, uint32_t condition)
+static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckValue* value = program->stream->values + condition;
@@ -419,27 +421,23 @@ static const CheckValue* check_program_runtime_value(const CheckProgram* program
     // the environment or raise an exception, including a signaling NaN whose bits are known here.
     const bool known = available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
-                       value->fault == CHECK_FAULT_NONE;
-    return known ? value : NULL;
+                       value->fault == CHECK_FAULT_NONE &&
+                       check_action_truth(program->types, value, truth);
+    return known;
 }
 
-static bool check_program_runtime_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
-{
-    const CheckValue* value = check_program_runtime_value(program, node, condition);
-    return value != NULL && check_action_truth(program->types, value, truth);
-}
-
-static bool check_program_integer_value(const CheckProgram* program, const CheckValue* value, TypeId target, unsigned __int128* result)
+static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
 {
     uint32_t width = 0;
     uint32_t source_width = 0;
     bool sign = false;
     bool source_sign = false;
-    bool valid = check_action_integer_type(program->types, target, &width, &sign);
+    bool valid = node < program->stream->count && check_action_integer_type(program->types, target, &width, &sign);
     if (valid)
     {
+        const CheckValue* value = program->stream->values + node;
         valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
-                check_action_integer_type(program->types, value->type, &source_width, &source_sign);
+                (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_integer_type(program->types, value->type, &source_width, &source_sign);
         if (valid)
         {
             const unsigned __int128 mask = check_action_mask(source_width);
@@ -452,12 +450,6 @@ static bool check_program_integer_value(const CheckProgram* program, const Check
         }
     }
     return valid;
-}
-
-static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result)
-{
-    return node < program->stream->count && (program->stream->values[node].flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
-           check_program_integer_value(program, program->stream->values + node, target, result);
 }
 
 static unsigned __int128 check_program_case_order(const CheckProgram* program, const CheckProgramCase* item, bool upper)
@@ -1325,7 +1317,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work)
 {
     const CheckProgram* program = writer->program;
     const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
@@ -1377,22 +1369,23 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     // Clang also recognizes exhaustive enum switches. Their enumerator set is not retained here;
                     // avoid a false fall-off warning until that coverage fact is available, as for noreturn calls.
                     uint32_t source = entry->node;
-                    for (uint32_t steps = 0; source < graph->count && steps < graph->count && graph->ops[source] == CHECK_OP_CONVERT; steps += 1)
+                    for (uint32_t steps = 0; source < graph->count && steps < graph->count &&
+                         (graph->ops[source] == CHECK_OP_CONVERT || graph->ops[source] == CHECK_OP_POSITIVE); steps += 1)
                     {
                         source = graph->operand0[source];
                     }
-                    const CheckValue* value = check_program_runtime_value(program, entry->node, entry->node);
+                    unsigned __int128 value = 0;
+                    const bool known = check_program_case_value(program, entry->node, program->stream->values[entry->node].type, &value);
                     const bool enumeration = source < graph->count &&
                         type_kind(program->types, type_strip_aligned(program->types, program->stream->values[source].type)) == BUSTER_TYPE_KIND_ENUM;
-                    warning_safe &= !enumeration || (value != NULL && value->constant_kind == CHECK_CONSTANT_INTEGER);
+                    warning_safe &= !enumeration || known;
                 }
                 else if (entry->kind == CHECK_CONTROL_CASE)
                 {
                     const CheckProgramCase* item = program->cases + entry->target;
                     const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
-                    const CheckValue* value = pass != 0 ? check_program_runtime_value(program, condition, condition) : NULL;
                     CheckProgramCase selected = { .type = item->type };
-                    const bool known = value != NULL && check_program_integer_value(program, value, item->type, &selected.lower);
+                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower);
                     const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
                     const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
                                                ordered <= check_program_case_order(program, item, true);
@@ -1440,8 +1433,12 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     while (depth != 0 && warning_safe)
                     {
                         const uint32_t node = node_stack[--depth];
+                        if (work != NULL)
+                        {
+                            *work += 1;
+                        }
                         const CheckOp op = graph->ops[node];
-                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC;
+                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
                         if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
                         {
                             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
@@ -2030,6 +2027,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+    if (options.return_flow_work != NULL)
+    {
+        *options.return_flow_work = 0;
+    }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -2121,6 +2122,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
+        if (options.return_flow_work != NULL)
+        {
+            *options.return_flow_work += (uint64_t)node_count + 1;
+        }
         memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t r = input->region_count; r-- > 0;)
         {
@@ -2307,7 +2312,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body, nodes, stack);
+        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {

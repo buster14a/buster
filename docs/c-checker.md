@@ -945,10 +945,11 @@ What the lowering covers past scalars (#145's programs):
   implicit-return safeguard. A second walk selects constant conditions for
   `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
   suppression. Return warnings currently cover aggregate bodies without
-  statement-expression regions, assembly, reachable call expressions or
-  nonconstant enum selectors. Calls and enum switches retain conservative
-  handling until their noreturn and exhaustive-enumerator facts are available
-  to the control graph. Constant switch dispatch follows converted selector
+  statement-expression regions, assembly, reachable call or semantic-query
+  expressions, or nonconstant enum selectors. Calls, queries and enum switches
+  retain conservative handling until their noreturn, context-sensitive constant
+  and exhaustive-enumerator facts are available to the control graph. Constant
+  switch dispatch follows converted side-effect-free source selector
   values and signed case ranges only in the warning walk; the Tier 0 walk
   retains every dispatch edge. Source/native tests cover register and hidden
   results, branches, switch, loops, labels and defined paths through partial returns.

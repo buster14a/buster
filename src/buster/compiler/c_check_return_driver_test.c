@@ -13,6 +13,10 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
         { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;else return s;}\n", NULL, NULL },
         { "struct S{long a,b,c,d;};struct S f(int n,struct S s){if(n>0)return s;else if(n<0)return s;else return s;}\n", NULL, NULL },
         { "struct S{double a,b;};struct S f(int n,struct S s){switch(n){case 0:return s;default:return s;}}\n", NULL, NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(1){case 1:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(1){case 2:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(1){case 2:return s;default:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(-1){case -2 ... 0:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};struct S f(int n,struct S s){while(1){if(n)return s;else return s;}}\n", NULL, NULL },
         { "struct S{long a,b;};struct S f(int n,struct S s){if(n)return s;}\n", NULL, NULL },
         { "struct S{long a,b,c,d;};struct S f(int n,struct S s){if(n)return s;}\n", NULL, NULL },
@@ -38,7 +42,7 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
         { "struct S{long a,b;};struct S f(struct S s){switch(-2){case -4 ... -1:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};struct S f(struct S s){switch((unsigned)-1){case 4294967290U ... 4294967295U:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};struct S f(struct S s){int n;switch(n=1){case 1:return s;}}\n", "-Werror=return-type", NULL },
-        { "struct S{long a,b;};struct S f(struct S s){switch(__builtin_constant_p(s.a)){case 0:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(struct S s){switch(__builtin_constant_p(1)){case 1:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};enum E{A,B};struct S f(enum E e,struct S s){switch(e){case A:return s;case B:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};enum E{A,B};struct S f(struct S s){switch(A){case B:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};struct S f(_Bool n,struct S s){switch(n){case 0:return s;case 1:return s;}}\n", "-Werror=return-type", "-Wno-switch-bool" },
@@ -78,11 +82,21 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
                 const int status = check_test_driver_spawn(arguments, &actual);
                 const char* oracle_message = expected != NULL ? strstr(expected, "non-void function") : NULL;
                 const char* actual_message = actual != NULL ? strstr(actual, "non-void function") : NULL;
+                const char* oracle_line = oracle_message;
+                const char* actual_line = actual_message;
+                while (oracle_line != NULL && oracle_line > expected && oracle_line[-1] != '\n')
+                {
+                    oracle_line -= 1;
+                }
+                while (actual_line != NULL && actual_line > actual && actual_line[-1] != '\n')
+                {
+                    actual_line -= 1;
+                }
                 const bool warnings = (oracle_message != NULL) == (actual_message != NULL);
                 const bool mixed = oracle_message != NULL && strstr(oracle_message, "in all control paths") != NULL;
                 const bool same = warnings && (actual_message == NULL || ((strstr(actual_message, "in all control paths") != NULL) == mixed &&
-                                  (uint64_t)(actual_message - actual) == (uint64_t)(oracle_message - expected) &&
-                                  memcmp(actual, expected, (size_t)(actual_message - actual)) == 0));
+                                  (uint64_t)(actual_message - actual_line) == (uint64_t)(oracle_message - oracle_line) &&
+                                  memcmp(actual_line, oracle_line, (size_t)(actual_message - actual_line)) == 0));
                 char description[160];
                 snprintf(description, sizeof(description), "aggregate return case %u, %s %s: Clang status, location and warning kind", c,
                          path == 0 ? "scalar" : "vector", mode == 0 ? "syntax" : "object");
