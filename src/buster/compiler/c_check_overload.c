@@ -132,7 +132,7 @@ static TypeAnswer check_overload_signature(const TypeTable* table, TypeId left, 
     return answer;
 }
 
-static CheckOverloadResult check_overload_declare(const TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckOverloadCandidate* candidate, const CheckOverloadContext* context)
+static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckOverloadCandidate* candidate, const CheckOverloadContext* context, const uint32_t* next, const uint8_t* checked, uint32_t unmarked)
 {
     CheckOverloadResult result = check_overload_result(CHECK_OVERLOAD_OK);
     const bool valid = candidate != 0 && context != 0 && (count == 0 || candidates != 0) && (head == UINT32_MAX || head < count) &&
@@ -155,12 +155,13 @@ static CheckOverloadResult check_overload_declare(const TypeTable* table, const 
             result.status = CHECK_OVERLOAD_PROTOTYPE;
         }
         bool matched = false;
-        uint32_t unmarked = UINT32_MAX;
-        for (uint32_t current = head; result.status == CHECK_OVERLOAD_OK && current != UINT32_MAX; current = candidates[current].previous)
+        bool complete = false;
+        for (uint32_t current = head; !complete && result.status == CHECK_OVERLOAD_OK && current != UINT32_MAX; current = next != NULL ? next[current] : candidates[current].previous)
         {
             const CheckOverloadCandidate* prior = &candidates[current];
             if (!check_overload_candidate_valid(table, prior) || prior->scope != candidate->scope ||
-                (prior->previous != UINT32_MAX && prior->previous >= current))
+                (prior->previous != UINT32_MAX && prior->previous >= current) ||
+                (next != NULL && next[current] != UINT32_MAX && next[current] >= current))
             {
                 result.status = CHECK_OVERLOAD_INVALID;
             }
@@ -200,6 +201,15 @@ static CheckOverloadResult check_overload_declare(const TypeTable* table, const 
                         }
                         matched = true;
                         result.flags |= prior->flags;
+                        // A canonically identical return type has already passed every older declaration of this
+                        // signature. Its accumulated flags retain definitions and unavailable attributes. Merely
+                        // compatible returns cannot stop the walk: old-style function pointers are not transitive.
+                        if (next != NULL && checked[current])
+                        {
+                            const TypeAnswer same = type_same_canonical(table, type_return(table, candidate->type), type_return(table, prior->type));
+                            result.status = same == TYPE_ANSWER_FULL ? CHECK_OVERLOAD_FULL : CHECK_OVERLOAD_OK;
+                            complete = same == TYPE_ANSWER_YES;
+                        }
                     }
                 }
                 if ((prior->flags & BUSTER_CHECK_OVERLOADABLE) == 0)
@@ -216,6 +226,12 @@ static CheckOverloadResult check_overload_declare(const TypeTable* table, const 
     return result;
 }
 
+static __attribute__((unused)) CheckOverloadResult check_overload_declare(const TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckOverloadCandidate* candidate, const CheckOverloadContext* context)
+{
+    return check_overload_declare_chain(table, candidates, count, head, candidate, context, NULL, NULL, UINT32_MAX);
+}
+
+#include "c_check_overload_index.c"
 #include "c_check_overload_address.c"
 
 // C overloads use the standard multilevel qualification relation. A deeper qualification addition requires const

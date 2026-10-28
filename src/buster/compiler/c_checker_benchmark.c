@@ -168,7 +168,7 @@ static bool check_benchmark_generate(CheckGraph* graph, bool chain)
             valid = node != BUSTER_CHECK_NONE;
             if (valid)
             {
-                graph->leaves[node] = (CheckValue){
+                *check_graph_leaf_of(graph, node) = (CheckValue){
                     .type = BUSTER_TYPE_ULONG,
                     .category = CHECK_RVALUE,
                     .flags = BUSTER_CHECK_ICE,

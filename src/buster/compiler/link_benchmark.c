@@ -43,8 +43,11 @@
 //     wall time from posix_spawn to the wait's return, as the caller sees it: the median of the runs after a warm-up,
 //     with a pause before each, over the output of the run before. Each linker runs with its own threads, and on one
 //     (lld's --threads=1, mold's and wild's --no-threads; GNU ld has one anyway). link-foreign, this executable's own
-//     linker of other compilers' objects (#86, #394), takes the same command line as a process of its own, with
-//     --lanes=8 and --lanes=1 for its threads and one, for every kind. Then one more run, with --no-fork for
+//     linker of other compilers' objects (#86, #394), takes the same command line as a process of its own, for every
+//     kind: by default, on the lanes its objects' bytes pay for (#594), its threads; with --lanes=8, the most it takes
+//     by default; and with --lanes=1 on every CPU, as its threads run, and pinned, as one thread runs: its default runs
+//     one lane below the bytes that pay for more, and the 9700X's cores but CPU 2 run a short link up to 60% slower
+//     (LinkBenchmarkWay). Then one more run, with --no-fork for
 //     mold and wild, which otherwise fork to leave their teardown to a child, through the helper
 //     (link_benchmark_rusage): its page faults and its peak resident set. A program that does nothing, run the same way
 //     first, shows the least the helper can count.
@@ -168,9 +171,29 @@ struct LinkBenchmarkLinker
     const char* no_fork;
     // Whether its runs for an output past BUSTER_LINK_BENCHMARK_LARGE_BYTES are the slow ones.
     bool slow;
-    // The option for its own threads, or 0 if it takes them by default.
-    const char* own_threads;
+    // The option that makes it link on the most threads it takes by default, which it then takes whatever its link, or 0:
+    // link-foreign's --lanes=8, beside its default, the lanes its objects' bytes pay for (#594).
+    const char* most_threads;
+    // That way's name in the report.
+    const char* most_name;
+    // Whether it also links on one thread on every CPU this process may use, as its threads' runs place it: link-foreign,
+    // whose default runs one lane below the bytes that pay for more, wherever the scheduler puts it.
+    bool one_unpinned;
 };
+
+// The ways a linker links the objects: with its own threads, as it takes them by default; with the most it takes by
+// default (LinkBenchmarkLinker.most_threads); on one thread on every CPU this process may use (one_unpinned); and on one
+// thread pinned to the first of --cpus. On the 9700X a link of a few milliseconds on one thread takes up to 60% longer
+// placed by the scheduler than pinned to CPU 2, the one core with the performance governor (#594), so a linker's default
+// that runs one thread compares with the third.
+typedef enum LinkBenchmarkWay
+{
+    LINK_BENCHMARK_WAY_THREADS,
+    LINK_BENCHMARK_WAY_MOST,
+    LINK_BENCHMARK_WAY_ONE_UNPINNED,
+    LINK_BENCHMARK_WAY_ONE,
+    LINK_BENCHMARK_WAYS,
+} LinkBenchmarkWay;
 
 static const LinkBenchmarkLinker link_benchmark_linkers[] = {
     {
@@ -197,14 +220,16 @@ static const LinkBenchmarkLinker link_benchmark_linkers[] = {
         .no_fork = "--no-fork",
         .slow = false,
     },
-    // This executable's own foreign linker (#86, #394), as a process of its own, on a lane per core of the 9700X or on
-    // one.
+    // This executable's own foreign linker (#86, #394), as a process of its own: by default on the lanes its objects'
+    // bytes pay for, on a lane per core of the 9700X, or on one.
     {
         .name = "link-foreign",
         .one_thread = "--lanes=1",
         .no_fork = 0,
         .slow = false,
-        .own_threads = "--lanes=8",
+        .most_threads = "--lanes=8",
+        .most_name = "8 lanes",
+        .one_unpinned = true,
     },
 };
 
@@ -1305,19 +1330,19 @@ static bool link_benchmark_count(const LinkBenchmarkSettings* settings, char** c
     return result;
 }
 
-// One linker's links of the objects, with its own threads or on one: a warm-up, the runs with a pause before each, and
-// one more without forking, through the helper, which counts its page faults and its peak resident set; then its
-// output, which must print the program's output. The calling thread's CPUs are the process's, or with `one_thread` the
-// first of --cpus, while it runs them. `arguments` has room for BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS before the
-// linker's.
-static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const Runtime* runtime, const LinkBenchmarkLinker* linker, bool one_thread, char** arguments,
-                                  char* const* search, const char* const* objects, uint32_t object_count, const char* output, const uint8_t* expected,
-                                  LinkBenchmarkLinked* linked)
+// One linker's links of the objects, one way (LinkBenchmarkWay): a warm-up, the runs with a pause before each, and one
+// more without forking, through the helper, which counts its page faults and its peak resident set; then its output,
+// which must print the program's output. The calling thread's CPUs are the process's, or on one pinned thread the first
+// of --cpus, while it runs them. `arguments` has room for BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS before the linker's.
+static bool link_benchmark_linker(const LinkBenchmarkSettings* settings, const Runtime* runtime, const LinkBenchmarkLinker* linker, LinkBenchmarkWay way,
+                                  char** arguments, char* const* search, const char* const* objects, uint32_t object_count, const char* output,
+                                  const uint8_t* expected, LinkBenchmarkLinked* linked)
 {
     uint64_t pinned[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     pinned[settings->cpus[0] / 64] = 1ull << (settings->cpus[0] % 64);
-    bool result = link_benchmark_set_cpus(one_thread ? pinned : settings->allowed);
-    const char* thread_option = one_thread ? linker->one_thread : linker->own_threads;
+    bool result = link_benchmark_set_cpus(way == LINK_BENCHMARK_WAY_ONE ? pinned : settings->allowed);
+    const bool one_thread = way == LINK_BENCHMARK_WAY_ONE || way == LINK_BENCHMARK_WAY_ONE_UNPINNED;
+    const char* thread_option = one_thread ? linker->one_thread : way == LINK_BENCHMARK_WAY_MOST ? linker->most_threads : 0;
     char** command = arguments + BUSTER_LINK_BENCHMARK_HELPER_ARGUMENTS;
     link_benchmark_arguments(command, linker->name, thread_option, 0, runtime, search, objects, object_count, output);
     int status = -1;
@@ -1483,22 +1508,32 @@ static bool link_benchmark_linkers_on(const LinkBenchmarkSettings* settings, Run
         const LinkBenchmarkLinker* linker = &link_benchmark_linkers[l];
         char output[BUSTER_LINK_BENCHMARK_PATH_BYTES];
         snprintf(output, sizeof(output), "%s/%s", directory, linker->name);
-        // GNU ld links on one thread either way.
-        const uint32_t ways = linker->one_thread != 0 ? 2 : 1;
+        // The ways it has (LinkBenchmarkWay): GNU ld links on one thread either way.
+        const bool has[LINK_BENCHMARK_WAYS] = {
+            [LINK_BENCHMARK_WAY_THREADS] = linker->one_thread != 0,
+            [LINK_BENCHMARK_WAY_MOST] = linker->most_threads != 0,
+            [LINK_BENCHMARK_WAY_ONE_UNPINNED] = linker->one_unpinned,
+            [LINK_BENCHMARK_WAY_ONE] = true,
+        };
         const bool wrong = wild_wrong && strcmp(linker->name, "wild") == 0;
         if (result && (settings->linkers >> l & 1) != 0 && wrong)
         {
             printf("  %-24s not run: its %s of this program may fault, its TLS segment off its alignment\n", "wild", kind == RUNTIME_KIND_STATIC ? "static executable" : "static PIE");
         }
-        for (uint32_t way = 0; result && (settings->linkers >> l & 1) != 0 && !wrong && way < ways; way += 1)
+        for (uint32_t way = 0; result && (settings->linkers >> l & 1) != 0 && !wrong && way < LINK_BENCHMARK_WAYS; way += 1)
         {
-            const bool one_thread = way == 1 || linker->one_thread == 0;
-            result = link_benchmark_linker(settings, runtime, linker, one_thread, arguments, search, (const char* const*)paths, units, output, expected, linked);
-            if (result)
+            result = !has[way] || link_benchmark_linker(settings, runtime, linker, (LinkBenchmarkWay)way, arguments, search, (const char* const*)paths, units, output, expected, linked);
+            if (result && has[way])
             {
                 const double median = link_benchmark_median(linked->times, linked->runs);
+                const char* const names[LINK_BENCHMARK_WAYS] = {
+                    [LINK_BENCHMARK_WAY_THREADS] = "its threads",
+                    [LINK_BENCHMARK_WAY_MOST] = linker->most_name,
+                    [LINK_BENCHMARK_WAY_ONE_UNPINNED] = "1 thread, its CPUs",
+                    [LINK_BENCHMARK_WAY_ONE] = "1 thread",
+                };
                 char label[64];
-                snprintf(label, sizeof(label), "%s, %s", linker->name, one_thread ? "1 thread" : "its threads");
+                snprintf(label, sizeof(label), "%s, %s", linker->name, names[way]);
                 printf("  %-24s %12.1f us: min %.1f, max %.1f of %u runs; %llu bytes, %llu page faults, %.2f MB peak resident", label, median,
                        (double)linked->times[0] / 1e3, (double)linked->times[linked->runs - 1] / 1e3, linked->runs, (unsigned long long)linked->output_bytes,
                        (unsigned long long)linked->faults, (double)linked->peak / 1e6);

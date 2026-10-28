@@ -230,10 +230,11 @@ entries written and the tasks pushed since it last changed take it, so that
 no entry or push spends anything on them. The helpers both copies share only
 test the flag where a call or an initializer part changes the token in the
 middle of a task, and at a function's start and end. Each copy inlines the
-tasks' work and `tier0_validate` as clang inlines them into code it compiles
-once (six task functions are `always_inline`, and the lowering calls
-`tier0_validate_inline`): with a call in each copy, it left them out of line,
-and a compile without `-g` took 2% more cycles. The
+tasks' work as clang inlines it into code it compiles once (six task
+functions are `always_inline`): with a call in each copy, it left them out of
+line, and a compile without `-g` took 2% more cycles. The copies inlined the
+scalar validator too until #569, which calls `tier0_validate`'s vector path
+out of line, once per function. The
 emission reserves the raw rows and writes each function's out of line
 (`check_program_emit_reserve_rows`, `check_program_emit_body_rows`). On the
 9700X, a compile without `-g` of a generated program of 31,269 lines retired

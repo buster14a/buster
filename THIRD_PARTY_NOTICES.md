@@ -17,6 +17,12 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
+`c_check_program_copy_test.c` fixtures (#597) are original project material under
+the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream
+interfaces. System libc and Clang run externally; no external implementation,
+generated instruction data or corpus fixtures are incorporated.
+
 The text IR parser and validation consumer (`ir_parse.c`, `ir_validate.c`), interpreter family (`interpreter*.c`,
 `ir_interpreter*.c`), their test fixtures under `tests/ir/`, and
 `docs/ir-tools.md` are original project material under the default terms.
@@ -362,6 +368,11 @@ observable Clang 23.1.1 behavior, with its source references recorded there;
 no Clang or corpus implementation is copied.
 
 ## C semantic compatibility references
+
+The type-name prototype name tree and its original generated, nested-scope,
+ordering and guarded membership fixtures (#604) use the project default terms.
+Clang 23.1.1 and 23.1.4 run externally as acceptance and diagnostic oracles;
+no external implementation, data or fixtures are incorporated.
 
 Naked-function constraints in `c_check_naked_input.c` and their original
 fixtures use Clang/LLVM `llvmorg-23.1.1`'s `SemaDecl.cpp`,

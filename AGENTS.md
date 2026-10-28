@@ -845,14 +845,18 @@ designs and the compilers already built this way.
   `--startup-applies-irelative` says the program's own does. It keeps the
   inputs' DWARF (`foreign_debug.c`), which `-S` and `-s` leave out. GC, literal
   pooling and CIE pooling are off by default.
-  With `--lanes N` past 1 on the vector path, the conversion
+  It runs on the lanes its objects pay for (#594, `foreign_driver_lanes`): one,
+  and one more per 3 MB of its objects, at most 8 and one per CPU it may run
+  on, which the calling thread decides by opening the command line's first
+  inputs (`foreign_open_first`), so that a link of a few objects runs on one
+  lane and starts no thread; or with `--lanes N` on N, at most one per CPU.
+  On more than one lane on the vector path, the conversion
   (`foreign_link.c`) runs its global names, objects' maps, relocations and
   `link_check_lanes` (`link.c`) on that many lanes (`foreign_link_lanes.c`,
-  #87), into the exact path's link; the command runs at most a lane per CPU it
-  may run on, on one team of threads it starts once its options are valid
-  and its resolution, conversion and write share (#501), and `--time` reports
-  the lanes, the team's start and the resolution's, the conversion's and the
-  writer's phases.
+  #87), into the exact path's link; the command runs on one team of threads
+  its resolution, conversion and write share (#501), and `--time` reports
+  the lanes, the first inputs' opening with their objects' bytes, the team's
+  start and the resolution's, the conversion's and the writer's phases.
   [The command contract](docs/foreign-driver.md) has the details. Its tests
   (`foreign_driver*_test.c`, `foreign_copy_test.c`, `foreign_bounds_test.c`)
   run through `test-foreign --cross-check`, and `test-foreign-corpus`
@@ -991,7 +995,12 @@ designs and the compilers already built this way.
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
   expanding each template with one `vpermb`; `tier0_compile_scalar` is its
-  twin.
+  twin. `tier0_validate`, the stream's rules (the compile paths'
+  precondition, which the lowering checks on every function it lowers), runs a
+  vector path 64 entries at a time (`tier0_validate_accepts`, #569) and leaves
+  every stream it doesn't take to the scalar validator (`tier0_validate_scalar`,
+  its twin, which `--scalar` runs alone), so that a refusal and its rule are
+  always the scalar validator's.
   `tier0_generate.c` makes random programs as typed streams and as C,
   `tier0_test.c` holds `test-tier0`, `tier0_benchmark.c` provides
   `benchmark-backend` and `tier0_source_benchmark.c` `benchmark-backend-source`,
@@ -3746,8 +3755,12 @@ by the direct path and by each linker, and reports medians:
   was higher, which Linux carries over at `exec`. The helper's own floor, a
   program that does nothing, is printed first;
 - `link-foreign` (#86, #394), this executable's linker of other compilers'
-  objects, given the same command line as a process of its own, with
-  `--lanes=8` for its threads and `--lanes=1` for one, for every kind.
+  objects, given the same command line as a process of its own, for every
+  kind: by default for its threads (the lanes its objects pay for, #594),
+  with `--lanes=8`, the most its default takes, and with `--lanes=1` for one,
+  on every CPU as its threads run and pinned as one thread runs: a default
+  link of one lane runs where the scheduler puts it, on the 9700X up to 60%
+  slower than on CPU 2.
 
 Every program written must run and print what its model predicts, but wild's
 static executables and static PIEs of a program whose `.tbss` is more aligned
@@ -4813,7 +4826,9 @@ measures the synthetic index/query handoff and completeness checks; use
 `--only full-vector [--after-scalar 100]` for its vector states, under the
 9700X's per-run lock and pinned to CPU 2. `check_input` publishes the real
 source reader's retained events, declaration types, tag completion positions
-and body slots through `c_check_environment.c`; `test-checker` checks their
+and body slots through `c_check_environment.c` (the C driver's
+`check_input_compile` doesn't, as nothing in a compile reads them: #572);
+`test-checker` checks their
 scratch lifetime and scalar/vector replay. `c_check_deferred.c` is their
 consumer: the deferred reader below ("Deferred function bodies").
 [docs/c-environments.md](docs/c-environments.md) records the API and boundaries.
@@ -5404,7 +5419,25 @@ results on both stacks, masks, scratch registers, `/is4`, memory and VSIB
 operands, a row of no records), constants, frame objects of each width, DUP,
 STORE's kept value and `?:`, under live values on both stacks, every output
 byte against the check's stack machine. Its coverage must reach every VECTOR
-kind at each width it has, every row and both arms.
+kind at each width it has, every row and both arms. Then the `validation`
+check (`tier0_validate_test.c`, #569): the validation's vector path
+(`tier0_validate_accepts`) against the scalar validator, which must agree on
+every stream but where the vector path leaves one to the scalar validator by
+design (a backward arrival with values, the arrivals of `x ?: y`, its limits).
+Every kind (NONE, X86 and one past the kinds among them) of every class after
+no operand, one or two of every class, with values at its kind's bounds and
+past them, in a function of every kind of local, direct and indirect calls,
+a result object, a long double result, the access column and a label, with
+and without the memory classes (559,200 streams); joins of `?:` and `&&` at
+depths and across blocks, loops, values at the end; values carried across
+64-entry blocks at every depth to 40, calls spanning blocks, the limits, and
+more than 128 locals and calls (the gathers); each stream with its columns
+ending at a `PROT_NONE` page; each field of the locals', the calls', the
+arguments', the parameters' and the result's tables at its edges, on a plain
+function and one with a result object; and in every program above, the
+vector path must take each function, and one change of each in every fourth
+program (a kind, a class or a value, two entries swapped, one removed or
+repeated) only where the scalar validator takes it.
 
 With `--cross-check`, which needs clang (`--clang PATH`), `size`, `as` and
 `ld`, each of `--cross-count` (60) programs of the larger shape, keeping to what C defines
@@ -5427,19 +5460,23 @@ files go in a directory under `$TMPDIR` (or `/tmp`), kept with
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|scalar|sizing|encode] [--after-scalar MS]` (about 4 s) generates programs
+vector|scalar|sizing|encode|validate|validate-scalar] [--after-scalar MS]`
+(about 4 s) generates programs
 until their functions hold `--entries` typed entries (262,144), checks that both
 of Tier 0's paths give every function the same code, then reports 21-pass
 medians, per typed entry and per record, of `tier0_compile`,
-`tier0_compile_scalar`, `size_branches` on their records and `x86_encode` of the
-sized records: nanoseconds, cycles, instructions, IPC and the throttle
-(PMCx1A0's umask 0x08, #199), with the share of entries deferred. `--only` runs
-one variant alone, and `--after-scalar MS` runs the scalar path for MS ms before
-each pass of the vector one. Run it under the 9700X's lock with `taskset -c 2`.
+`tier0_compile_scalar`, `size_branches` on their records, `x86_encode` of the
+sized records, and `tier0_validate` and `tier0_validate_scalar` (#569):
+nanoseconds, cycles, instructions, IPC and the throttle
+(PMCx1A0's umask 0x08, #199), with the share of entries deferred and the
+functions the validation's vector path takes alone. `--only` runs
+one variant alone, and `--after-scalar MS` runs the scalar twin for MS ms before
+each pass of the vector path and of the validation. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
-`./build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode]
+`./build/compiler benchmark-backend-source [--only
+vector|scalar|sizing|encode|validate|validate-scalar]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted, outside the time;

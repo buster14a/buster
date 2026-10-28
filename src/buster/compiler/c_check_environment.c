@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Retained source-history handoff from the sequential checker to #113. Include after c_environment.c. A successful
-// check_input publishes this snapshot before releasing its reader scratch. It contains real declaration/use/restore
+// check_input publishes this snapshot before releasing its reader scratch (the C driver's check_input_compile doesn't,
+// as nothing in a compile reads it: #572). It contains real declaration/use/restore
 // events, declaration-specific types, tag completion positions and parser-derived body slots. It does not defer the
 // resolver or make the shared TypeTable writable by body workers. Body-local types and linkage effects still need
 // private construction and ordered reconciliation before an actual deferred checker can consume this handoff.

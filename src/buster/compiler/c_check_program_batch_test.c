@@ -107,7 +107,7 @@ static void check_test_program_batch(CheckTest* test)
     check_test_program_task_stack(test);
     for (uint32_t kind = CHECK_LOWER_EXPRESSION; kind <= CHECK_LOWER_COMPLEX_TRUTH; kind += 1)
     {
-        for (uint32_t flags = 0; flags < 8; flags += 1)
+        for (uint32_t flags = 0; flags < 16; flags += 1)
         {
             const bool full = kind == CHECK_LOWER_INSTRUCTION || kind == CHECK_LOWER_ADDRESS || kind == CHECK_LOWER_COPY || kind == CHECK_LOWER_COMPLEX;
             const CheckLowerTask original = {
@@ -118,11 +118,13 @@ static void check_test_program_batch(CheckTest* test)
                 .address = (flags & 1) != 0,
                 .initialized = (flags & 2) != 0,
                 .discard = (flags & 4) != 0,
+                .volatile_copy = (flags & 8) != 0,
             };
             const CheckLowerTask decoded = check_lower_task_unpack(check_lower_task_pack(original));
             check_test_expect(test, decoded.kind == original.kind && decoded.node == original.node && decoded.type == original.type &&
                               decoded.value == original.value && decoded.address == original.address && decoded.initialized == original.initialized &&
-                              decoded.discard == original.discard, "two-word pending tasks retain full node/type identities, payload bits and independent flags");
+                              decoded.discard == original.discard && decoded.volatile_copy == original.volatile_copy,
+                              "two-word pending tasks retain full node/type identities, payload bits and independent flags");
         }
     }
     CheckTestTypes types = { 0 };

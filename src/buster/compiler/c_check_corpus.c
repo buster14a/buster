@@ -1132,7 +1132,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, &path->output_arena, &path->scratch);
+                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, parser->options.scalar, &path->output_arena, &path->scratch);
     CheckProgramOptions options = {
         .initializers = &path->initializers,
         .asms = &path->asms,
@@ -1740,7 +1740,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         equal = equal && (graph->warning_suppressed == NULL || graph->warning_suppressed[node] == other->warning_suppressed[node]);
         if (equal && graph->ops[node] == CHECK_OP_VALUE)
         {
-            equal = check_test_value_equal(graph->leaves + node, other->leaves + node);
+            equal = check_test_value_equal(check_graph_leaf_of(graph, node), check_graph_leaf_of(other, node));
         }
     }
     equal = equal && graph->system_token_count == other->system_token_count && (graph->system_tokens == NULL) == (other->system_tokens == NULL) &&
@@ -1867,7 +1867,7 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  g->types[node] != h->types[node] ? "graph types" : g->members[node] != h->members[node] ? "graph members" :
                  g->contexts[node] != h->contexts[node] ? "graph contexts" : g->argument_offsets[node] != h->argument_offsets[node] ? "graph argument_offsets" :
                  g->argument_counts[node] != h->argument_counts[node] ? "graph argument_counts" :
-                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(g->leaves + node, h->leaves + node) ? "graph leaves" : 0;
+                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(check_graph_leaf_of(g, node), check_graph_leaf_of(h, node)) ? "graph leaves" : 0;
         index = node;
     }
     if (column == 0 && (g->argument_count != h->argument_count || g->varargs_count != h->varargs_count || g->builtin_count != h->builtin_count ||
