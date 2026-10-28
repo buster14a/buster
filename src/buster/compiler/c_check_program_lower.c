@@ -3777,7 +3777,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
         program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
-        const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value->object - 1] : 0;
+        const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
         if (selected == 0)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -4961,7 +4961,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
     const uint32_t alignment_log2 = declared_alignment > type_alignment ? declared_alignment : type_alignment;
     const uint64_t alignment = UINT64_C(1) << (alignment_log2 & 63);
-    const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
+    const bool initialized = program->initializers != 0 && check_initializers_plan_index(program->initializers, object - 1) != 0;
     if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
