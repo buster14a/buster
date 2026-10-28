@@ -243,6 +243,87 @@ does, each rule checked against clang's answers on probes of it:
 - **`#pragma STDC FP_CONTRACT`**, with `FENV_ACCESS`'s placement: at file scope
   or a compound statement's start. Its state changes nothing, since nothing
   here contracts `a * b + c` into a fused operation.
+- **`#pragma clang section`** (`c_check_section_input.c`, #619), with which
+  `main.c` puts the checker's own code in `.text.buster_checker` (#543): any
+  number of `KIND = "name"`, KIND `bss`, `data`, `rodata`, `relro` or `text`,
+  read as clang's `PragmaClangSectionHandler` reads them, adjacent ordinary
+  strings joined, an empty name clearing its kind and a line of no settings
+  doing nothing, with a setting before an error in its line kept. Its three
+  errors are at clang's places with clang's messages: a kind that isn't one
+  (also for anything after a complete setting), a missing `=`, and a name that
+  isn't an ordinary string. Then the section type conflicts, as Sema's
+  `UnifySection` takes a unit's uses of section names in order
+  (`check_input_section_conflicts`, one pass after the walk over a unit's few
+  section events): the settings, each function declaration's own `section`
+  attribute and each definition of a variable with static storage, its
+  attribute inherited from earlier declarations (a tentative one's at the
+  unit's end, at its last tentative declaration, unless the unit defines it).
+  Each section name has its first use's flags, and a use that gives it others
+  is clang's conflict, at the use, with clang's message. Refused by name rather
+  than guessed: a line with a name, where clang reads it macro-expanded (the
+  first kind and every `=`), that was a macro's anywhere in the unit (the
+  retained line keeps its tokens as written), and an error at the line's end,
+  whose place the retained line doesn't keep. A setting applies to the
+  definitions after it that have no section attribute of their own: text to
+  the functions', the others by a static-storage variable's final section
+  kind. The deferred reader leaves a unit with a setting to source order, and
+  a lane refuses a body with a section attribute.
+- **Named sections in `-c` and the direct path** (#619's part 2): a
+  definition with a `section` attribute (the first within one declaration,
+  or the latest earlier declaration's as clang passes it on), and a function a text setting places
+  go in their sections (`CheckInputSections.placements`,
+  `check_program_sections`). `-c`'s object has one section of each name and
+  flags (`ObjectOptions.atom_sections`), of the kind LLVM gives a global with
+  an explicit section: a function's text (`ax`); a variable's data (`aw`),
+  read-only (`a`), read-only after relocation (`aw`) or thread-local data
+  (`awT`), by its class, or `.bss`'s and `.tbss`'s zero fill (`NOBITS`) by
+  its name's family. A zero-filled variable in another name's section is data,
+  zeros in a section with bytes, as LLVM puts no global with an explicit
+  section in BSS, and a function in another kind's section (`.data`) is a
+  section of that name of its own, `ax`, as clang makes it. The direct path's
+  executable merges each into its class's output section, as a linker's
+  script merges `.text.*` and `.data.*`. Refused by name: conservatively, any
+  emitted static-storage definition while any bss/data/rodata/relro setting
+  is active ("a definition under active '#pragma clang section' settings"),
+  until the emission selects a variable's final section kind, which clang
+  decides through the pragmas' attributes its tentative definitions pass on:
+  a bss-only or rodata-only setting still refuses `int x = 1`, although clang
+  leaves it in ordinary `.data`, while a text-only setting and cleared object
+  settings leave static objects alone; a definition's own or inherited
+  `section` attribute takes it out of the refusal, into its section. Also
+  refused by name: a name LLVM gives another kind than the definition's (an initialized variable in a `.bss`, which clang's code
+  generation refuses too, or one not thread-local in a `.tdata`); and a name
+  ELF gives another type (`.note*`, the init and fini arrays'). The entire
+  `.llvm.*` family is conservatively refused too, including ordinary
+  PROGBITS names such as `.llvm.custom`; `.llvm_custom` is outside this
+  reserved family. The diagnostic names the unsupported ELF type or reserved
+  family without claiming every reserved name has another ELF type.
+  An empty section attribute clears inherited placement and overrides an
+  active pragma setting while preserving the default section class, including
+  BSS/TBSS zero fill. Its reader event still participates in section conflicts.
+- **File-scope `asm`** (#619's part 2), which `main.c` makes
+  `.text.buster_checker` with: its statements' templates in source order, a
+  line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
+  atoms join the unit's link before its functions', as clang emits a module's
+  `asm` first (`check_program_emit_file_asm`), each in its section in `-c`'s
+  object. Refused by name: a template the assembler doesn't take, one that
+  defines or refers to a symbol (a label, an instruction's operand, CFI),
+  which the unit's symbols don't join yet, and a section of a class C's
+  definitions don't have or of another type than its class's (an init
+  array's, a note).
+- **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
+  `on` `main.c` puts around the checker unit's own tests (#681): one
+  identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
+  with its two errors at clang's places with clang's messages (any other
+  argument, and a token after it). An `off` makes the function definitions
+  after it `optnone` and `noinline` until an `on`, which changes nothing a
+  Tier 0 compile emits, so the reader only checks the line. Refused by name: an
+  argument or a token after it that was a macro's name in the unit (clang reads
+  both expanded), and a missing argument, an error at the line's end. The 9700X
+  job checks each translation unit `build.sh` compiles, `main.c` among them,
+  with `build.sh`'s flags (#619's part 3), so that a construct the build's
+  sources take up and the checker doesn't fails the job rather than waiting
+  for the next measurement of `main.c`.
 - **`no_builtin`**, on a function's definition only: on another declaration of
   a function it is an error, and on anything else it is ignored, as clang has
   it.
@@ -1663,6 +1744,18 @@ The test command fails if the oracle cannot run. It covers:
   alike in identifiers and `#if`'s character constants (the preprocessor's
   errors) and in literals (`invalid or unsupported literal`), at their places
   (#452; `test-checker-driver`'s `check_test_driver_named_ucns`).
+- `#pragma clang section` and `#pragma clang optimize` (#619;
+  `test-checker-driver`'s `check_test_driver_section_pragmas` and
+  `check_test_driver_optimize_pragmas`, on all four routes): each line's
+  settings and errors, and the section type conflicts in clang's order, against
+  clang's first error, place and message; the refusals by name pinned; and
+  `-c` of each unit clang takes, whose object must put every function, object
+  and thread-local in a section of the name, type, flags and alignment clang
+  -O0 -c's object puts it in, and have a file-scope `asm`'s sections as
+  clang's, with their bytes (`check_test_driver_same_sections`); its
+  executable by the direct path, which must exit with 0; and `-c`'s refusals by
+  name, the conservative active-object-setting refusal and its
+  no-active-object-setting controls among them.
 - Executable programs (`c_check_program_test.c`): each source's checked
   object, from both paths, linked with clang's build of the same source (its
   oracle, each global renamed `oracle_NAME`) and a harness that runs both on

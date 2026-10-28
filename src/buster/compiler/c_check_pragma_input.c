@@ -112,6 +112,39 @@ static bool check_input_retained_pragma(const CheckInputReader* reader, uint32_t
     return valid;
 }
 
+// The name of an identifier or a keyword at output token `source`, or 0 for another token.
+static IdentId check_input_pragma_name(const CheckInputReader* reader, uint32_t source)
+{
+    const PPTokens* output = &reader->pp->output;
+    const uint8_t kind = output->kinds[source];
+    const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END);
+    return named ? output->values[source] : 0;
+}
+
+// Whether `name` was a macro's anywhere in the unit (its record stays after an #undef), from a bitset of the unit's
+// macros' names made the first time a line asks (`*names`, in scratch): a retained line keeps its tokens as written,
+// so a pragma whose handler clang reads macro-expanded can't be read where such a name is (#619).
+static bool check_input_pragma_macro(CheckInputReader* reader, uint64_t** names, IdentId name)
+{
+    const Preprocessor* pp = reader->pp;
+    const uint32_t words = (pp->table->count + 63) / 64;
+    if (*names == 0)
+    {
+        *names = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, (uint64_t)words + 1);
+        reader->output->resource |= *names == 0;
+        if (*names != 0)
+        {
+            memset(*names, 0, ((uint64_t)words + 1) * sizeof(uint64_t));
+            for (uint32_t macro = 1; macro < pp->macro_count; macro += 1)
+            {
+                const IdentId macro_name = pp->macros[macro].name;
+                (*names)[macro_name / 64] |= macro_name / 64 < words ? UINT64_C(1) << (macro_name % 64) : 0;
+            }
+        }
+    }
+    return *names == 0 || (name / 64 < words && (((*names)[name / 64] >> (name % 64)) & 1) != 0);
+}
+
 // The retained source range includes '#', 'pragma' and PRAGMA_END. All coordinates remain in the original PP and
 // parser streams, including a directive at parser token_count after the last declaration. Rejecting a shape here
 // leaves it unhandled for the caller's unsupported-pragma diagnostic; it is never an arbitrary pragma bypass.
