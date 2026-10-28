@@ -14,6 +14,7 @@
 #include <string.h>
 #include <math.h>
 #include "host_isa.h"
+#include "c_check_warning_events.c"
 
 typedef enum CheckCategory
 {
