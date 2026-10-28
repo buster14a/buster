@@ -371,8 +371,9 @@ static bool check_deferred_test_no_input(void)
 
 // The state's memory (c_check_deferred.c, check_deferred_lane_arenas): a lane's six arenas in one mapping, in order and
 // end to end with their capacities, writable to their last byte, kept with their pages when the state takes them back
-// for its next reading, and its own arena likewise; then every mapping unmapped by check_deferred_release, which leaves
-// the state as a zeroed one.
+// for its next reading, and its own arena likewise; the lanes' mappings and the state's own three arenas in base pages
+// to their last byte (check_deferred_arena); then every mapping unmapped by check_deferred_release, which leaves the
+// state as a zeroed one.
 static bool check_deferred_test_memory(void)
 {
     static CheckDeferred state;
@@ -413,6 +414,18 @@ static bool check_deferred_test_memory(void)
     valid = valid && own != 0 && arena_push(&state.memory.arena, 4096, 64) == own;
     check_deferred_arena(&state.memory.arena, UINT64_C(1) << 36);
     valid = valid && state.memory.arena.base == own && state.memory.arena.length == 0;
+    check_deferred_arena(&state.memory.top, UINT64_C(1) << 40);
+    check_deferred_arena(&state.memory.top_index, UINT64_C(1) << 34);
+    const uintptr_t firsts[] = { (uintptr_t)mappings[0], (uintptr_t)mappings[2], (uintptr_t)state.memory.arena.base, (uintptr_t)state.memory.top.base,
+                                 (uintptr_t)state.memory.top_index.base };
+    const uint64_t sizes[BUSTER_ARRAY_LENGTH(firsts)] = { BUSTER_CHECK_DEFERRED_LANE_BYTES, BUSTER_CHECK_DEFERRED_LANE_BYTES, state.memory.arena.capacity,
+                                                          state.memory.top.capacity, state.memory.top_index.capacity };
+    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(firsts); i += 1)
+    {
+        bool found = false;
+        valid = firsts[i] != 0 && sizes[i] != 0 && lane_test_vm_flag(firsts[i], "nh", &found) && found;
+        valid = valid && lane_test_vm_flag(firsts[i] + sizes[i] - 1, "nh", &found) && found && !lane_test_vm_flag(firsts[i], "hg", &found);
+    }
     check_deferred_release(&state);
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     unsigned char resident = 0;

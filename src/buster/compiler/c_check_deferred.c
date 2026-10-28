@@ -390,12 +390,17 @@ static void* check_deferred_copy(Arena* arena, const void* source, uint64_t used
 }
 
 // `arena` taken back to empty, reserved with `capacity` first if it has no memory: the state's own arena and the top
-// level's table's, which its first reading reserves on the calling thread.
+// level's table's, which its first reading reserves on the calling thread. In base pages throughout, as the lanes' are
+// (check_deferred_lane_arenas): the top level's table has the caller's capacities, each column room for every type the
+// unit could make, far apart, and the state's arena a log of the top level's linked updates with room for two a token,
+// of which a reading touches a little at each one's start. In huge pages each start's first touch cleared a 2 MB page,
+// as the driver's table's columns did (#528): on the 9700X, main's reader read sixteen bodies of 993 tokens after three
+// headers 27% faster on one lane in base pages, and 43% on eight (#697).
 static void check_deferred_arena(Arena* arena, uint64_t capacity)
 {
     if (arena->base == 0)
     {
-        *arena = arena_reserve(capacity);
+        *arena = arena_reserve_small(capacity, capacity);
     }
     arena_pop_to(arena, 0);
 }
