@@ -12,6 +12,97 @@ static uint32_t check_test_implicit_count(const char* text, const char* part)
     return count;
 }
 
+static void check_test_driver_implicit_system(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* standard;
+        const char* first;
+        const char* second;
+        bool pragma;
+        bool user;
+    } cases[] = {
+        { "-std=gnu17", NULL, NULL, false, false },
+        { "-std=gnu17", "-Wsystem-headers", NULL, false, false },
+        { "-std=gnu89", "-Wimplicit-function-declaration", NULL, false, false },
+        { "-std=gnu89", "-Wimplicit-function-declaration", "-Wsystem-headers", false, false },
+        { "-std=gnu17", "-Wsystem-headers", "-Wno-implicit-function-declaration", false, false },
+        { "-std=gnu17", "-Wsystem-headers", "-Wno-error=implicit", false, false },
+        { "-std=gnu17", "-Wsystem-headers", "-Wno-system-headers", false, false },
+        { "-std=gnu17", "-Wno-system-headers", "-Wsystem-headers", false, false },
+        { "-std=gnu23", "-Wno-implicit-function-declaration", NULL, false, false },
+        { "-std=gnu17", NULL, NULL, true, false },
+        { "-std=gnu17", "-Wsystem-headers", NULL, true, false },
+        { "-std=gnu17", NULL, NULL, false, true },
+    };
+    char header[512];
+    char source[512];
+    char objects[2][512];
+    snprintf(header, sizeof(header), "%s/implicit-system.h", directory);
+    snprintf(source, sizeof(source), "%s/implicit-system.c", directory);
+    snprintf(objects[0], sizeof(objects[0]), "%s/implicit-system-scalar.o", directory);
+    snprintf(objects[1], sizeof(objects[1]), "%s/implicit-system-vector.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        static const char ordinary[] = "int system_function(void){return system_missing(1);}\n";
+        static const char promoted[] = "#pragma clang diagnostic error \"-Wimplicit-function-declaration\"\n"
+            "int system_function(void){return system_missing(1);}\n";
+        static const char system_only[] = "#include <implicit-system.h>\n";
+        static const char user[] = "#include <implicit-system.h>\nint user_function(void){return user_missing(1);}\n";
+        const char* body = cases[c].pragma ? promoted : ordinary;
+        const char* unit = cases[c].user ? user : system_only;
+        const bool written = parse_test_write(header, body, strlen(body)) && parse_test_write(source, unit, strlen(unit));
+        check_test_expect(test, written, "implicit system-header fixture is written");
+        for (uint32_t mode = 0; written && mode < 2; mode += 1)
+        {
+            char* expected = NULL;
+            char* arguments[18] = { (char*)clang, (char*)cases[c].standard, "-fno-caret-diagnostics", mode == 0 ? "-fsyntax-only" : "-c",
+                                    source, "-o", objects[0], "-isystem", (char*)directory };
+            uint32_t count = 9;
+            if (cases[c].first != NULL)
+            {
+                arguments[count++] = (char*)cases[c].first;
+            }
+            if (cases[c].second != NULL)
+            {
+                arguments[count++] = (char*)cases[c].second;
+            }
+            const int oracle = check_test_driver_spawn(arguments, &expected);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* actual = NULL;
+                arguments[0] = (char*)executable;
+                arguments[6] = objects[scalar];
+                arguments[count] = scalar == 0 ? "--scalar" : NULL;
+                arguments[count + 1] = NULL;
+                unlink(objects[scalar]);
+                const int status = check_test_driver_spawn(arguments, &actual);
+                const bool same = expected != NULL && actual != NULL &&
+                    check_test_implicit_count(expected, ": error:") == check_test_implicit_count(actual, ": error:") &&
+                    check_test_implicit_count(expected, ": warning:") == check_test_implicit_count(actual, ": warning:") &&
+                    check_test_implicit_count(expected, "system_missing") == check_test_implicit_count(actual, "system_missing") &&
+                    check_test_implicit_count(expected, "user_missing") == check_test_implicit_count(actual, "user_missing");
+                char description[160];
+                snprintf(description, sizeof(description), "implicit system-header case %u %s %s agrees with Clang", c,
+                         scalar == 0 ? "scalar" : "vector", mode == 0 ? "syntax" : "object");
+                check_test_expect(test, oracle >= 0 && status == oracle && same, description);
+                check_test_expect(test, mode == 0 || (access(objects[scalar], F_OK) == 0) == (status == 0),
+                                  "implicit system-header policy controls object publication");
+                free(actual);
+            }
+            if (mode != 0 && oracle == 0)
+            {
+                check_test_expect(test, check_test_driver_same_files(objects[0], objects[1]), "implicit system-header objects agree byte for byte");
+            }
+            free(expected);
+            unlink(objects[0]);
+            unlink(objects[1]);
+        }
+    }
+    unlink(header);
+    unlink(source);
+}
+
 static void check_test_driver_implicit(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -154,4 +245,5 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
         unlink(objects[0]);
     }
     unlink(path);
+    check_test_driver_implicit_system(test, clang, executable, directory);
 }
