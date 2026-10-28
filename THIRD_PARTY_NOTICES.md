@@ -23,6 +23,17 @@ under the default terms. Clang is an external behavior and object-format oracle;
 cJSON is an external compile qualification input. No upstream implementation or
 fixtures are incorporated.
 
+The implicit function binding/diagnostic additions and
+`c_check_implicit_driver_test.c` (#623) are original project material under the
+default terms. Clang and the unconfigured zlib 1.3.1 tree are external
+qualification inputs; no external implementation or fixtures are imported.
+
+The aggregate return control-flow walk, warning handling and original fixtures
+in `c_check_program.c`, `c_check_program_test.c` and
+`c_check_return_driver_test.c` (#670) use the project default terms. Clang is
+an external behavior oracle. The dr_wav header used for compile qualification
+remains an external input; no upstream implementation or fixtures are imported.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

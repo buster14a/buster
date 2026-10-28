@@ -31,6 +31,17 @@ directives carry bounded syntax diagnostics, and an unmatched pop rejects the
 unit. Unknown visibility names warn and leave the stack unchanged. Ordinary
 units allocate no visibility history or object column.
 
+Before C23, a direct call of an undeclared identifier creates the compatibility
+declaration `extern int name()` in that block's source scope (#623). Repeated
+calls in the same scope share it; later prototypes use the ordinary linked
+entity compatibility rules. Arguments use the default integer and floating
+promotions until a prototype is visible. C99 and later diagnose the first call
+with its identifier and `-Wimplicit-function-declaration`, as Clang does;
+`-Wno-error=implicit-function-declaration` demotes it, while
+`-Wno-implicit-function-declaration` suppresses it. Source diagnostic pragmas
+apply too. C23 keeps an undeclared-identifier error and no implicit declaration.
+Parenthesized identifiers and non-call uses do not acquire an implicit type.
+
 The last form compiles and links an executable by the direct path (#145): the
 checked program lowered to Tier 0, bound against the C runtime's snapshot
 (`runtime_open`, `bind_begin`/`bind_end`), and written as a dynamic PIE
@@ -947,6 +958,23 @@ What the lowering covers past scalars (#145's programs):
   of a `long double`, in st0) returns its bytes' address too. Those larger than
   64 KB, or aligned past 1 GB, are refused. One aligned past 16 bytes passes on a
   stack aligned to it at the call, which realigns the caller's frame.
+- **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
+  aggregate-returning body's control graph removes unreachable transfers
+  without renumbering labels. A reachable implicit return supplies an address
+  for a register result or preserves the hidden result pointer; the value is
+  unspecified. Tier 0's aggregate-end rule remains unchanged. Its validation
+  also checks emitted unreachable statement tails, which retain the existing
+  implicit-return safeguard. A second walk selects constant conditions for
+  `-Wreturn-type`, with command-line and pragma severity, `-w` and system-header
+  suppression. Return warnings currently cover aggregate bodies without
+  statement-expression regions, assembly, reachable call or semantic-query
+  expressions, or nonconstant enum selectors. Calls, queries and enum switches
+  retain conservative handling until their noreturn, context-sensitive constant
+  and exhaustive-enumerator facts are available to the control graph. Constant
+  switch dispatch follows converted side-effect-free source selector
+  values and signed case ranges only in the warning walk; the Tier 0 walk
+  retains every dispatch edge. Source/native tests cover register and hidden
+  results, branches, switch, loops, labels and defined paths through partial returns.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first

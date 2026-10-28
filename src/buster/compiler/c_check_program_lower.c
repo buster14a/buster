@@ -3733,7 +3733,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
         program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
-        const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value->object - 1] : 0;
+        const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value->object - 1) : 0;
         if (selected == 0)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -4917,7 +4917,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint32_t type_alignment = type != 0 ? type_alignment_log2(program->types, type) : 0;
     const uint32_t alignment_log2 = declared_alignment > type_alignment ? declared_alignment : type_alignment;
     const uint64_t alignment = UINT64_C(1) << (alignment_log2 & 63);
-    const bool initialized = program->initializers != 0 && program->initializers->declaration_plans[object - 1] != 0;
+    const bool initialized = program->initializers != 0 && check_initializers_plan_index(program->initializers, object - 1) != 0;
     if (local >= writer->local_count || writer->indirect[local] == BUSTER_CHECK_LOWER_VLA_NONE)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -6099,8 +6099,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
         }
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
-        const bool falls = writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
-                                           writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN;
+        const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
+                                                                            writer->count == 0 || writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN);
         check_lower_place(writer, body.count);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.

@@ -247,6 +247,8 @@ typedef enum PPRawStrings
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
+    // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
+    uint8_t implicit_function_diagnostic;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
     FileCache* files;
@@ -19672,6 +19674,14 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     *markers = true;
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
+    // Fold this diagnostic's option mappings in source order for both possible language defaults. The final -std
+    // chooses one: disabling then enabling a default error leaves a warning, while enabling an error preserves it.
+    uint8_t implicit_before_c99 = 1;
+    uint8_t implicit_since_c99 = 3;
+    bool implicit_mapped = false;
+    bool implicit_no_error = false;
+    bool implicit_everything = false;
+    bool warning_errors = false;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
     // The -f options that change clang's keywords, lexing or -E output (pp_settle_families reads them after the loop).
@@ -19771,6 +19781,41 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             embeds[options->embed_directory_count] = argument + 12;
             options->embed_directory_count += 1;
         }
+        else if (strcmp(argument, "-Wno-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-implicit") == 0 ||
+                 strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
+        {
+            implicit_before_c99 = 1;
+            implicit_since_c99 = 1;
+            implicit_mapped = true;
+            implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
+        }
+        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0)
+        {
+            implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
+            implicit_no_error = true;
+        }
+        else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0 || strcmp(argument, "-Werror=implicit") == 0 ||
+                 strcmp(argument, "-Werror-implicit-function-declaration") == 0)
+        {
+            implicit_before_c99 = 3;
+            implicit_since_c99 = 3;
+            implicit_mapped = true;
+        }
+        else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
+        {
+            implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
+            implicit_mapped = true;
+        }
+        else if (strcmp(argument, "-Weverything") == 0)
+        {
+            implicit_everything = true;
+        }
+        else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+        {
+            warning_errors = strcmp(argument, "-Werror") == 0;
+        }
         else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
@@ -19860,6 +19905,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         fprintf(stderr, "error: invalid value '%s' in '%s'\n", mode, standard);
         result = false;
     }
+    uint8_t implicit = options->language.standard >= 1999 ? implicit_since_c99 : implicit_before_c99;
+    implicit = implicit == 1 && !implicit_mapped && implicit_everything ? 2 : implicit;
+    options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;
@@ -19879,7 +19927,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
 }
 
 // `compiler -E [options] file.c`: preprocesses the file and prints the result, as clang -E does.
-static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+static __attribute__((unused)) int run_preprocessor_command_mode(int count, char** arguments, bool release)
 {
     int result = 1;
     Arena arena = arena_reserve(1ull << 30);
@@ -19929,11 +19977,24 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
             result = preprocessed && printed ? 0 : 1;
         }
         // What a failed reservation left reserved too.
-        pp_release(&pp);
-        intern_release(&table);
+        if (release)
+        {
+            pp_release(&pp);
+            intern_release(&table);
+        }
     }
-    arena_release(&arena);
+    if (release)
+    {
+        arena_release(&arena);
+    }
     return result;
+}
+
+// Reusable command callers release all mappings. Main's terminal -E route instead lets process exit tear them down;
+// the output file has already been closed, or stdout remains open for libc to flush at exit, in either mode.
+static __attribute__((unused)) int run_preprocessor_command(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

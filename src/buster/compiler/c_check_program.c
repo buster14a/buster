@@ -70,6 +70,9 @@ struct CheckProgramBody
     uint32_t reference_first;
     uint32_t reference_count;
     bool is_main;
+    bool return_flow;
+    bool falls;
+    uint8_t return_warning;
 };
 
 typedef struct CheckProgramRegion CheckProgramRegion;
@@ -87,6 +90,8 @@ struct CheckProgramOptions
 {
     const CheckInitializers* initializers;
     const CheckAsms* asms;
+    // Completed static declarations from the same unit, when emission already prepared them.
+    const CheckDataPrepared* prepared_data;
     // Borrowed for main recognition and compatibility checks before adding target-runtime call symbols.
     const InternTable* identifiers;
     const uint32_t* initializer_references;
@@ -99,6 +104,8 @@ struct CheckProgramOptions
     // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
     // same model's. Tier 0 lowers both arms, which -c's program keeps.
     bool folded_ifs;
+    // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
+    uint64_t* return_flow_work;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -1308,6 +1315,222 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
     }
 }
 
+// Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
+// task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
+// as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
+// conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_marks, uint32_t* node_stack, uint64_t* work)
+{
+    CheckProgram* program = writer->program;
+    const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
+    const uint32_t kind = type_kind(program->types, result);
+    const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+    if (program->status == CHECK_PROGRAM_OK && aggregate && body->count != 0 && body->count == body->entry_count)
+    {
+        CheckControl* entries = writer->entries + body->first;
+        uint8_t* seen = (uint8_t*)writer->tasks;
+        uint32_t* queue = writer->labels;
+        const CheckGraph* graph = &program->input->graph;
+        // Reference epochs are body identities, below token_count < 2^29. Temporarily OR the disjoint high bit
+        // into their already initialized node marks, then restore every touched word before references consume it.
+        // This avoids clearing the whole unit's graph for each small aggregate body. The task records are dead;
+        // their suffix holds the visited IDs apart from the control marks. capacity is 8 * token_count + 16,
+        // so the u32 suffix is aligned and graph->count <= capacity bounds it within the existing allocation.
+        const uint32_t warning_mark = UINT32_C(1) << 31;
+        _Static_assert(sizeof(CheckControlTask) >= 5, "control tasks hold byte marks and a u32 visited list");
+        uint32_t* touched = (uint32_t*)((uint8_t*)writer->tasks + writer->capacity);
+        for (uint32_t pass = 0; pass < 2; pass += 1)
+        {
+            bool warning_safe = graph->count <= writer->capacity;
+            memset(seen, 0, body->count);
+            uint32_t touched_count = 0;
+            uint32_t head = 0;
+            uint32_t tail = 1;
+            queue[0] = 0;
+            seen[0] = 1;
+            bool returns = false;
+            bool labels = false;
+            while (head < tail)
+            {
+                const uint32_t index = queue[head++];
+                const CheckControl* entry = entries + index;
+                uint32_t targets[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+                bool next = entry->kind != CHECK_CONTROL_RETURN && entry->kind != CHECK_CONTROL_END;
+                returns |= entry->kind == CHECK_CONTROL_RETURN;
+                if (entry->kind >= CHECK_CONTROL_BRANCH_FALSE)
+                {
+                    bool truth = false;
+                    const bool jump = entry->kind == CHECK_CONTROL_JUMP;
+                    const bool known = pass != 0 && !jump && check_program_runtime_truth(program, entry->node, entry->node, &truth);
+                    const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
+                    targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
+                    next = !jump && (!known || !taken);
+                }
+                else if (pass != 0 && entry->kind == CHECK_CONTROL_SWITCH)
+                {
+                    // Clang also recognizes exhaustive enum switches. Their enumerator set is not retained here;
+                    // avoid a false fall-off warning until that coverage fact is available, as for noreturn calls.
+                    uint32_t source = entry->node;
+                    for (uint32_t steps = 0; source < graph->count && steps < graph->count &&
+                         (graph->ops[source] == CHECK_OP_CONVERT || graph->ops[source] == CHECK_OP_POSITIVE); steps += 1)
+                    {
+                        source = graph->operand0[source];
+                    }
+                    unsigned __int128 value = 0;
+                    const bool known = check_program_case_value(program, entry->node, program->stream->values[entry->node].type, &value);
+                    const bool enumeration = source < graph->count &&
+                        type_kind(program->types, type_strip_aligned(program->types, program->stream->values[source].type)) == BUSTER_TYPE_KIND_ENUM;
+                    warning_safe &= !enumeration || known;
+                }
+                else if (entry->kind == CHECK_CONTROL_CASE)
+                {
+                    const CheckProgramCase* item = program->cases + entry->target;
+                    const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
+                    CheckProgramCase selected = { .type = item->type };
+                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower);
+                    const unsigned __int128 ordered = known ? check_program_case_order(program, &selected, false) : 0;
+                    const bool taken = known && ordered >= check_program_case_order(program, item, false) &&
+                                               ordered <= check_program_case_order(program, item, true);
+                    targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
+                    next = !known || !taken;
+                }
+                else if (entry->kind == CHECK_CONTROL_ASM || entry->kind == CHECK_CONTROL_JUMP_INDIRECT)
+                {
+                    // An indirect jump can enter any source label; asm goto has its own explicit target table.
+                    warning_safe = false;
+                    if (entry->kind == CHECK_CONTROL_ASM)
+                    {
+                        for (uint32_t l = program->asm_offsets[entry->target]; l < program->asm_offsets[entry->target + 1]; l += 1)
+                        {
+                            const uint32_t target = program->asm_targets[l];
+                            if (target < body->count && seen[target] == 0)
+                            {
+                                seen[target] = 1;
+                                queue[tail++] = target;
+                            }
+                        }
+                    }
+                    else if (!labels)
+                    {
+                        for (uint32_t l = 0; l < body->count; l += 1)
+                        {
+                            if (entries[l].kind == CHECK_CONTROL_LABEL && seen[l] == 0)
+                            {
+                                seen[l] = 1;
+                                queue[tail++] = l;
+                            }
+                        }
+                        labels = true;
+                    }
+                    next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
+                }
+                // Calls may be declared noreturn. Query operands also affect Clang's source-flow warning even
+                // when unevaluated. Until these contracts reach controls, keep their warnings conservative.
+                if (pass != 0 && warning_safe && entry->node < graph->count && (node_marks[entry->node] & warning_mark) == 0)
+                {
+                    uint32_t depth = 1;
+                    node_stack[0] = entry->node;
+                    node_marks[entry->node] |= warning_mark;
+                    touched[touched_count++] = entry->node;
+                    while (depth != 0 && warning_safe)
+                    {
+                        const uint32_t node = node_stack[--depth];
+                        if (work != NULL)
+                        {
+                            *work += 1;
+                        }
+                        const CheckOp op = graph->ops[node];
+                        warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
+                        if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+                        {
+                            uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                            if (op == CHECK_OP_VARARGS)
+                            {
+                                const uint32_t effect = graph->argument_offsets[node];
+                                warning_safe = effect < program->stream->varargs_count && program->stream->varargs[effect].node == node;
+                                const uint32_t evaluated = warning_safe ? program->stream->varargs[effect].evaluated_operands : 0;
+                                for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                                {
+                                    operands[o] = (evaluated & (1u << o)) != 0 ? operands[o] : BUSTER_CHECK_NONE;
+                                }
+                            }
+                            bool truth = false;
+                            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
+                                check_program_runtime_truth(program, node, operands[0], &truth))
+                            {
+                                if (op == CHECK_OP_CONDITIONAL)
+                                {
+                                    operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
+                                }
+                                else if (truth == (op == CHECK_OP_LOGICAL_OR))
+                                {
+                                    operands[1] = BUSTER_CHECK_NONE;
+                                }
+                            }
+                            for (uint32_t o = 0; warning_safe && o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                            {
+                                const uint32_t operand = operands[o];
+                                if (operand < graph->count && (node_marks[operand] & warning_mark) == 0)
+                                {
+                                    node_marks[operand] |= warning_mark;
+                                    touched[touched_count++] = operand;
+                                    node_stack[depth++] = operand;
+                                }
+                            }
+                            if (warning_safe && check_graph_has_arguments(op))
+                            {
+                                const uint32_t mask = check_program_argument_mask(program, node);
+                                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+                                {
+                                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
+                                    const bool evaluated = op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0);
+                                    if (evaluated && argument < graph->count && (node_marks[argument] & warning_mark) == 0)
+                                    {
+                                        node_marks[argument] |= warning_mark;
+                                        touched[touched_count++] = argument;
+                                        node_stack[depth++] = argument;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                targets[1] = next && index + 1 < body->count ? index + 1 : BUSTER_CHECK_NONE;
+                for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+                {
+                    const uint32_t target = targets[t];
+                    if (target < body->count && seen[target] == 0)
+                    {
+                        seen[target] = 1;
+                        queue[tail++] = target;
+                    }
+                }
+            }
+            for (uint32_t t = 0; t < touched_count; t += 1)
+            {
+                node_marks[touched[t]] &= ~warning_mark;
+            }
+            const bool falls = body->count != 0 && seen[body->count - 1] != 0;
+            if (pass == 0)
+            {
+                body->return_flow = true;
+                body->falls = falls;
+                for (uint32_t i = 0; i < body->count; i += 1)
+                {
+                    if (seen[i] == 0 && entries[i].kind >= CHECK_CONTROL_BRANCH_FALSE)
+                    {
+                        entries[i].kind = CHECK_CONTROL_END;
+                    }
+                }
+            }
+            else
+            {
+                body->return_warning = falls && warning_safe ? returns ? 2 : 1 : 0;
+            }
+        }
+    }
+}
+
 // Collect actual expression edges, never all graph nodes: sizeof/alignof and statically selected generic arms do
 // not make an object referenced by an executing body. A declaration identity maps through its canonical object.
 static uint32_t check_program_reference_initializer(CheckProgram* program, const CheckInitializer* plan, uint32_t epoch,
@@ -1404,7 +1627,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
                 !program->input->static_objects[value.object - 1])
             {
-                const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value.object - 1] : 0;
+                const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
                 if (selected == 0 || selected > program->initializers->count)
                 {
                     check_program_fail(program, CHECK_PROGRAM_INVALID, value.object - 1);
@@ -1819,6 +2042,18 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
     return room;
 }
 
+// Preparation already grouped each object's declarations in their original token order. Different objects have no
+// shared state here: the last declaration, first naked spelling and needed bit are each an object's own reduction.
+static bool check_program_static_prepared(CheckProgram* program, const CheckDataPrepared* prepared, uint8_t* needed, Arena* output)
+{
+    bool room = true;
+    for (uint32_t d = 0; d < prepared->declaration_count; d += 1)
+    {
+        room = check_program_static_object(program, needed, (uint32_t)prepared->declaration_keys[d], output, room);
+    }
+    return room;
+}
+
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
 static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
@@ -1831,6 +2066,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+    if (options.return_flow_work != NULL)
+    {
+        *options.return_flow_work = 0;
+    }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -1840,7 +2079,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                  !input->visibility_error;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
-            (options.initializer_reference_count == 0 || options.initializer_references != 0);
+            (options.initializer_reference_count == 0 || options.initializer_references != 0) &&
+            (options.prepared_data == NULL || (options.prepared_data->status == CHECK_DATA_INPUT_OK &&
+             options.prepared_data->object_count == count + 1 &&
+             (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint32_t capacity = count * 8 + 16;
@@ -1923,6 +2165,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
+        if (options.return_flow_work != NULL)
+        {
+            *options.return_flow_work += (uint64_t)node_count + 1;
+        }
         memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t r = input->region_count; r-- > 0;)
         {
@@ -2109,6 +2355,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
+        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {
@@ -2166,7 +2413,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one.
-        const bool naked_room = check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
+        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output) :
+                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
         {
             const uint32_t object = options.initializer_references[i];

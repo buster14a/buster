@@ -104,6 +104,8 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
     { "visibility-extern-source-order", "int shared;\n#pragma GCC visibility push(hidden)\nint hidden;\n"
       "int f(void){extern int shared;return shared;}\nint g(void){extern int shared;return shared;}\n#pragma GCC visibility pop\n", false },
+    { "implicit-functions-source-order", "typedef __typeof__(top_missing()) T;\nint f(void){return first_missing();}\n"
+      "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },

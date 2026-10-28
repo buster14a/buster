@@ -174,6 +174,10 @@ struct CheckInput
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
+    uint32_t* implicit_function_tokens;
+    uint32_t implicit_function_count;
+    uint8_t implicit_function_diagnostic;
+    bool implicit_function_c99;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
@@ -185,6 +189,9 @@ struct CheckInput
     uint8_t* thread_local;
     uint8_t* compound_objects;
     CheckInputAttributes** attributes;
+    // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
+    uint32_t ignored_asm_count;
+    bool asm_warnings_prepared;
     uint8_t* linkage;
     uint8_t* defined;
     uint8_t* tentative;
@@ -196,6 +203,8 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     uint8_t* constant_warnings;
+    uint32_t constant_warning_count;
+    bool constant_warnings_prepared;
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
     uint32_t* declaration_bodies;
@@ -215,6 +224,7 @@ struct CheckInput
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
+    // Zero-default token IDs; null when the parsed unit has no asm statement groups. Read through check_input_asm_id.
     uint32_t* asm_ids;
     CheckInitString* strings;
     // Literal index by token, including every part of an adjacent literal sequence; NONE for other tokens.
@@ -237,6 +247,11 @@ struct CheckInput
     bool diagnostic_graph;
     bool resource;
 };
+
+static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
+{
+    return input->asm_ids != NULL ? input->asm_ids[token] : 0;
+}
 
 // What check_input_resolve_range tests a token for by its syntax alone, as CheckInputReader.syntax keeps it: bits of the
 // tests it would make of the token's name and kind, each a function of the token (and its successor) alone.
@@ -446,6 +461,7 @@ struct CheckInputReader
     uint32_t specifier_owner;
     uint32_t specifier_query_depth;
     bool specifier_pending;
+    uint32_t implicit_function_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
@@ -3275,6 +3291,60 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+// The C90 compatibility rule is a declaration at the first direct call's source point, with block scope and
+// external linkage. Reuse the ordinary declaration/binding path so later prototypes share its entity while calls
+// made before a prototype keep default argument promotions. C23 removed this rule even when its warning is off.
+static void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t callee = token;
+    const uint32_t parent = parser->tree.parents[callee];
+    const bool call = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CALL &&
+                      callee + 1 < parent && parser->tree.roles[callee + 1] == PARSE_ROLE_OPEN_CALL;
+    const uint32_t name = parser->tokens.names[token];
+    const bool builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
+    const bool missing = call && !builtin && reader->pp->options.language.standard < 2023 &&
+                         c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
+    check_input_lane_refuse(reader, reader->lane && missing, "an implicit function declaration needs source-order linkage");
+    if (missing && !reader->lane)
+    {
+        const TypeId type = check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0));
+        CheckInput* input = reader->output;
+        if (input->implicit_function_count == reader->implicit_function_capacity)
+        {
+            const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
+                                      reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
+            uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+            if (tokens == NULL)
+            {
+                input->resource = true;
+            }
+            else
+            {
+                if (input->implicit_function_count != 0)
+                {
+                    memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
+                }
+                input->implicit_function_tokens = tokens;
+                reader->implicit_function_capacity = capacity;
+            }
+        }
+        if (!input->resource && type != 0)
+        {
+            input->implicit_function_tokens[input->implicit_function_count++] = token;
+            input->declarations[token] = token;
+            reader->declared_types[token] = type;
+            reader->declaration_kinds[token] = C_BINDING_FUNCTION;
+            reader->objects[token] = token + 1;
+            reader->static_objects[token] = true;
+            reader->linkage[token] = 2;
+            input->declaration_bodies[token] = reader->function_body;
+            check_input_bind(reader, token, token);
+        }
+    }
+}
+
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
@@ -3763,6 +3833,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
             {
                 const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
+                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
+                {
+                    check_input_implicit_function(reader, i);
+                }
                 if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
                 {
                     const uint32_t close = parser->tree.parents[i];
@@ -3782,7 +3856,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         }
                     }
                 }
-                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
+                         c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
                 {
                     reader->output->resource = true;
                 }
@@ -3976,7 +4051,7 @@ static bool check_input_expression_sparse(const CheckInputReader* reader, uint32
 {
     const CheckInput* input = reader->output;
     return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
-           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || input->asm_ids[token] != 0;
+           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
 }
 
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
@@ -4053,7 +4128,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const __m512i varargs = _mm512_maskz_loadu_epi32(parts, reader->vararg_calls + at);
             const __m512i designators = _mm512_maskz_loadu_epi32(parts, reader->designator_tokens + at);
             const __m512i bounds = _mm512_maskz_loadu_epi32(parts, reader->vla_ends + at);
-            const __m512i statements = _mm512_maskz_loadu_epi32(parts, input->asm_ids + at);
+            const __m512i statements = input->asm_ids != NULL ? _mm512_maskz_loadu_epi32(parts, input->asm_ids + at) : _mm512_setzero_si512();
             const __m512i entries = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(regions, constants), _mm512_or_si512(varargs, designators)),
                                                     _mm512_or_si512(bounds, statements));
             const __mmask16 selected = _mm512_mask_cmplt_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->selected_tokens + at), _mm512_set1_epi32((int32_t)count));
@@ -4218,7 +4293,7 @@ static void check_input_expressions(CheckInputReader* reader)
         {
             node = check_input_vla_capture(reader, token);
         }
-        else if (sparse && reader->output->asm_ids[token] != 0)
+        else if (sparse && check_input_asm_id(reader->output, token) != 0)
         {
             if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
             {
@@ -4998,6 +5073,8 @@ struct CheckInputTokenCounts
     // `[`, `asm` and `sizeof` (with _Alignof's, of the same kind) tokens, and `.` as a member operator.
     uint32_t subscripts;
     uint32_t asms;
+    // An asm statement's opening parenthesis, unlike an asm keyword on a declaration's linkage label.
+    uint32_t asm_groups;
     uint32_t size_queries;
     uint32_t vector_members;
     // The operands, and the closing parentheses of calls and function declarators: the overloads' room.
@@ -5065,6 +5142,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         const __m512i role = roles != 0 ? _mm512_maskz_loadu_epi8(lanes, roles + token) : _mm512_setzero_si512();
         result.subscripts += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)));
         result.asms += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_ASM)));
+        result.asm_groups += roles != NULL ? (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ASM))) : 0;
         result.size_queries += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_SIZEOF)));
         if (roles != 0)
         {
@@ -5147,6 +5225,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     {
         result.subscripts += kinds[token] == PARSE_KIND_L_SQUARE;
         result.asms += kinds[token] == PARSE_KIND_ASM;
+        result.asm_groups += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ASM;
         result.size_queries += kinds[token] == PARSE_KIND_SIZEOF;
         result.vector_members += roles != 0 && roles[token] == PARSE_ROLE_MEMBER_OPERATOR && kinds[token] == PARSE_KIND_PERIOD;
         result.operands += roles != 0 && roles[token] == PARSE_ROLE_OPERAND;
@@ -5188,7 +5267,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred, bool environment)
 {
-    *input = (CheckInput){ 0 };
+    *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
+                                                        pp->options.language.standard >= 1999 ? 3 : 1,
+                         .implicit_function_c99 = pp->options.language.standard >= 1999 };
     // Plain char's signedness, which every phase after the reader reads from the table too.
     types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
@@ -5321,7 +5402,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(case_ranges, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(regions, CheckInputRegion);
     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
+    // Declaration asm labels need no statement IDs. Keep the scalar path's dense column as an exact oracle, and
+    // the old allocation when a handbuilt parser supplies no roles to prove that the column is empty.
+    if (parser->options.scalar || counts.asm_groups != 0 || (parser->tree.roles == NULL && counts.asms != 0))
+    {
+        BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
+    }
     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
     BUSTER_CHECK_OUTPUT_ARRAY(string_ids, uint32_t);
 #undef BUSTER_CHECK_OUTPUT_ARRAY
@@ -5528,6 +5614,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
+        input->constant_warnings_prepared = true;
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)
         {
@@ -5548,7 +5635,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->function_flags, 0, (uint64_t)count + 1);
         memset(input->explicit_abis, 0, (uint64_t)count + 1);
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (input->asm_ids != NULL)
+        {
+            memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
         memset(reader.linkage, 0, (uint64_t)count + 1);
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
