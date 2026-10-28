@@ -407,7 +407,9 @@ walk, 8.6% of the compile's samples, is the per-token semantic work every reader
 
 ### The decision
 
-The tree-less checker isn't built: it can't pay at this checker's contract, by the counts and the bound above.
+The tree-less checker isn't built: the measured fragment implementation cannot pay at this checker's present
+contract, by the counts and the bound above. This is a decision about that producer and those consumers, not a lower
+bound for every redesigned tree-free checker.
 
 Where the tree did cost, the parser and the reader now derive the traversal once:
 - the parser's five passes and the reader's two (and three fills) became three passes;

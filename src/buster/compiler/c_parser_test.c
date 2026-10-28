@@ -1172,9 +1172,66 @@ static uint32_t parse_test_check_columns(const uint32_t* parents, uint32_t count
 
 // The check of the postorders on trees of its own: `a = b * c;` as the parser builds it passes, with its sizes; the
 // same with a parent that makes a subtree two runs, and with a cycle, fails.
+// Each helper column has exactly its documented logical extent before an unreadable page, including the sentinel.
+// Empty forests, chains and roots exercise every count through 200 independently of the parser's padded arrays.
+static uint32_t parse_test_columns_guarded(void)
+{
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[10] = { 0 };
+    bool ready = true;
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        mappings[column] = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
+    }
+    uint32_t failures = !ready;
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint32_t* columns[10];
+        for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+        {
+            const uint32_t length = column == 0 ? count : count + 1;
+            columns[column] = (uint32_t*)(mappings[column] + page) - length;
+            memset(columns[column], 0xa5, length * sizeof(uint32_t));
+        }
+        for (uint32_t shape = 0; shape < 2; shape += 1)
+        {
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                columns[0][token] = shape == 0 && token + 1 < count ? token + 1 : BUSTER_PARSE_NONE;
+            }
+            for (uint32_t sizes = 0; sizes < 2; sizes += 1)
+            {
+                parse_tree_columns(columns[0], count, columns[1], columns[2], columns[3], columns[4], columns[5], columns[6], columns[7],
+                                   sizes != 0 ? columns[8] : NULL, sizes != 0 ? columns[9] : NULL);
+                for (uint32_t token = 0; token <= count; token += 1)
+                {
+                    const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
+                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
+                    failures += token < count && (columns[3][token] != token || (sizes != 0 && columns[9][token] != (shape == 0 ? token + 1 : 1)));
+                }
+                parse_tree_links(columns[0], columns[3], count, columns[4], columns[5], columns[6], columns[7]);
+                for (uint32_t token = 0; token <= count; token += 1)
+                {
+                    const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
+                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
+                }
+            }
+        }
+    }
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+    return failures;
+}
+
 static uint32_t parse_test_check_postorder_self(Arena* scratch)
 {
-    uint32_t failures = 0;
+    uint32_t failures = parse_test_columns_guarded();
     // a = b * c ;  ->  ; <- = <- (a, * <- (b, c))
     const uint32_t good[] = { 1, 5, 3, 1, 3, BUSTER_PARSE_NONE };
     const uint32_t postorder[] = { 0, 2, 4, 3, 1, 5 };
