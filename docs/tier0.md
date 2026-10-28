@@ -35,7 +35,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Conversions between U64 and the floating classes** (#136's item 5), which SSE has no instruction for before
   AVX-512 ("Conversions between U64 and floating values", below).
 - **Values past the depth tables** (#136's item 6): more than 15 integer (14 with a frame pointer) or 16 floating
-  values at once, among them calls of up to 64 arguments, in frame slots ("Deep values", below).
+  values at once, among them calls of at least 127 arguments and calls with aggregate arguments, in frame slots
+  ("Deep values", below).
 - **The interfaces to the existing modules:**
   - calls through #137's locations;
   - branch columns for #144's `size_branches`;
@@ -52,8 +53,14 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
   - `LinkReference`s for `link_add_code_fixups`;
   - the immediates' shortest forms through #221's `x86_choose_forms`.
 - **`test-tier0`,** with a cross-check against clang -O0.
-- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on the functions `-c` compiles
+- **`benchmark-backend`,** on generated programs, and **`benchmark-backend-source`,** on checked functions' typed streams
   of C files, `sqlite3.c`'s among them ("Measurements", below).
+  The source benchmark admits the reachable functions through typed emission.
+  Static-data publication and object-section placement, including assembled
+  file-scope atoms' section descriptors, are outside its validation scope.
+  For example, a valid function stream under a named `.note.*` section can be
+  measured even when whole-object publication explicitly refuses that section.
+  The driver and corpus object checks establish whole-object eligibility.
 
 - **c-testsuite (#145):** all 220 of its programs compile through #133's producer and Tier 0, link by the direct path
   and run right, with both paths' executables the same bytes and every record passing `x86_validate`
@@ -78,6 +85,13 @@ exact rules):
 Each function may have up to 16,777,216 entries and 16,777,216 locals, including parameters and lowering temporaries
 (`BUSTER_TIER0_MAX_ENTRIES`, `BUSTER_TIER0_MAX_LOCALS`). Local identities and homes use 32-bit indices; #622 removed
 the former 65,536-local cap. Available arena memory and representable frame displacements still bound compilation.
+Per-entry instruction counts use 32 bits, including a call's complete aggregate copies. Both paths accumulate the
+prologue/body/epilogue total in 64 bits and refuse output before allocation when its record identities, including
+emission padding, cannot fit 32 bits. Available arena memory remains a separate bound.
+Calls permit up to 239 arguments (`BUSTER_TIER0_MAX_CALL_ARGUMENTS`), within the 240-depth storage bound. An indirect
+call also holds its callee, so 238 simple arguments fit that bound; expressions inside arguments can need additional
+live values. Named, variadic and indirect calls of 127 mixed scalar/aggregate arguments are covered by native and
+Clang cross-checks. Beyond the argument bound, the C driver names the 239-argument limit.
 The C driver names an exhausted entry or local limit separately from insufficient lowering storage. Its
 `test-checker-driver` regression compiles 32,768 blocks with 65,537 locals through both paths, compares the objects,
 and runs their code against an unsigned arithmetic loop and clang.
@@ -549,13 +563,22 @@ copies each argument on the stack from its slot through rax into the outgoing ar
 from its slot (after the stack ones), its callee into r11, makes the call as `tier0_emit_call` does (al, the hidden
 pointer, the result object), stores the result into its slot and loads back the stacks within the tables. Nothing below
 its arguments needs saving: it is in the slots.
+The compact stack effects are byte deltas modulo 256, so deep exit depths use the same byte arithmetic as the
+depth columns. In particular a call with more than 128 arguments still reloads a live prefix and its result.
+
+For an aggregate argument, its saved value is the address of its bytes. Before populating ABI registers, the deep
+call copies whole stack arguments, SPLIT stack parts and odd-size temporary parts through RAX with R10/XMM0 scratch.
+Then it reloads each aggregate address and loads its GP/XMM register parts. The indirect callee, hidden result pointer
+and variadic vector count are installed after this setup. These scratch registers cannot overwrite a live stack
+value, which is already in its slot. Guarded native fixtures run every hand-made aggregate location with both stacks
+past their tables, through both encoders, including hidden results and an indirect callee.
 
 A deep function's deep code takes the depth registers below the tables, which its depths reach anyway: no other
 register, and never a frame pointer's rbp.
 
 **Refused** (`TIER0_ERROR_DEPTH`, now its meaning): a function with values of the memory classes (long double's and the
-128-bit integers') whose stacks pass the tables, since such a value's slot is its integer depth's; a call with aggregate arguments where its copies' scratch registers
-are past the tables; and a stack deeper than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
+128-bit integers') whose stacks pass the tables, since such a value's slot is its integer depth's; and a stack deeper
+than `BUSTER_TIER0_MAX_DEPTH`, 240, which the depth columns' bytes would wrap
 past (a stack rises by one entry at a time at most, so it shows there first).
 
 **Cost.** Deep code is longer: each deep entry's loads and stores, and the registers' stores and loads where an entry
@@ -1535,10 +1558,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
 
 ## Follow-ups
 
-- **Deep values' refusals:** a function with values of the memory classes past the depth tables, and a call with
-  aggregate arguments there (`TIER0_ERROR_DEPTH`). The memory classes' would take their slots by true depth in the deep
-  emitters; the
-  aggregates', their copies through a deep scratch register. And deep code that hovers around the tables' edge stores
+- **Deep values' refusals:** a function with values of the memory classes past the depth tables (`TIER0_ERROR_DEPTH`).
+  The memory classes would take their slots by true depth in the deep emitters. Deep code that hovers around the tables' edge stores
   and loads every register at each crossing: a stack of 15 integer values that takes and drops one a few times pays
   about 30 records each time, where storing and loading the one register the entry needs would do.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:

@@ -41,8 +41,8 @@
 
 #define BUSTER_TIER0_GENERATE_MAX_FUNCTIONS 64
 #define BUSTER_TIER0_GENERATE_MAX_GLOBALS 64
-#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 32
-#define BUSTER_TIER0_GENERATE_MAX_LOCALS 64
+#define BUSTER_TIER0_GENERATE_MAX_PARAMETERS 128
+#define BUSTER_TIER0_GENERATE_MAX_LOCALS 256
 #define BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS 16
 #define BUSTER_TIER0_GENERATE_EXPRESSION_NODES 128
 #define BUSTER_TIER0_GENERATE_NESTING 4
@@ -2462,7 +2462,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
         state.record_temporaries[r] = UINT32_MAX;
     }
     // The signature: up to 6 parameters mostly, and 7 to 12 one time in five, past the argument registers (with the
-    // `deep` option, 13 to 32 one time in four before that, past the depth tables). With the
+    // `deep` option, 65 to 127 one time in four before that, past the old call bound and the depth tables). With the
     // `indirect` option, now and then an earlier function's, so that a pointer to a function can hold either. With
     // records (but for the entry), now and then a record's result, and parameters that are records, up to
     // BUSTER_TIER0_GENERATE_RECORD_PARAMETERS: objects in the scope. A record returned through a hidden pointer makes
@@ -2473,7 +2473,7 @@ static void tier0_generate_function(Tier0Program* program, uint32_t index, uint6
     const uint32_t model_first = model != 0 ? model->first_local + (model->hidden ? 1u : 0u) : 0;
     const uint32_t parameters = model != 0 ? model->parameter_count - (model->hidden ? 1u : 0u)
                                 : entry   ? 3
-                                : options->deep && tier0_generate_chance(random, 25) ? 13 + tier0_generate_below(random, 20)
+                                : options->deep && tier0_generate_chance(random, 25) ? 65 + tier0_generate_below(random, 63)
                                 : tier0_generate_chance(random, 20)                  ? 7 + tier0_generate_below(random, 6)
                                                                                      : tier0_generate_below(random, 7);
     function->result_class = (uint8_t)(model != 0 ? model->result_class

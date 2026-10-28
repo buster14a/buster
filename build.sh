@@ -18,6 +18,8 @@
 # SOURCE (a source's file name), a multiple of its .text's alignment: its code and what the linker places after it move
 # by SHIFT, the same instructions at other addresses. The same code ran up to 2% faster or slower so on the 9700X
 # (#509), so time-runs compares builds over several placements.
+# print-compile-flags and print-sources print expanded compile arguments and source paths as NUL-delimited argv,
+# without building. Consumers read arrays rather than reevaluating shell text from this script.
 set -e
 sources=(src/buster/compiler/main.c src/buster/compiler/main_unit_x86.c src/buster/compiler/main_unit_frontend.c src/buster/compiler/main_unit_assembler.c src/buster/compiler/main_unit_link.c src/buster/compiler/main_unit_executable.c src/buster/compiler/main_unit_dynamic.c src/buster/compiler/main_unit_types.c src/buster/compiler/main_unit_checker.c src/buster/compiler/main_unit_check_builtins.c src/buster/compiler/main_unit_backend.c src/buster/compiler/c_lexer_benchmark.c src/buster/compiler/x86_64_encoder_benchmark.c src/buster/compiler/lane_benchmark.c src/buster/compiler/dataflow_benchmark.c src/buster/compiler/dominators_benchmark.c src/buster/compiler/tier1_allocate_benchmark.c src/buster/compiler/object_writer_benchmark.c src/buster/compiler/executable_benchmark.c src/buster/compiler/import_benchmark.c src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/bind_benchmark.c src/buster/compiler/c_refine_benchmark.c src/buster/compiler/c_preprocessor_benchmark.c src/buster/compiler/c_files_benchmark.c src/buster/compiler/c_parser_benchmark.c src/buster/compiler/c_types_benchmark.c src/buster/compiler/c_builtin_benchmark.c src/buster/compiler/c_checker_benchmark.c src/buster/compiler/calling_convention_benchmark.c src/buster/compiler/tier1_frame_benchmark.c src/buster/compiler/snapshot_benchmark.c src/buster/compiler/link_benchmark.c src/buster/compiler/foreign_benchmark.c src/buster/compiler/floors_benchmark.c src/buster/compiler/x86_64_disassembler_benchmark.c src/buster/compiler/x86_semantics_benchmark.c src/buster/compiler/tier0_benchmark.c src/buster/compiler/tier1_schedule_benchmark.c src/buster/compiler/tier1_select_benchmark.c src/buster/compiler/tier1_model_measure.c)
 flags=(-march="${BUSTER_HOST_ARCH:-native}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror)
@@ -263,7 +265,11 @@ select_linker()
     echo "build.sh: stage 1 linker: ${linker:-system default}" >&2
 }
 defines=()
-if [ "$1" = check-call-graph ]; then
+if [ "$1" = print-compile-flags ]; then
+    printf '%s\0' "${debug[@]}" "${flags[@]}" "$optimization" "${defines[@]}"
+elif [ "$1" = print-sources ]; then
+    printf '%s\0' "${sources[@]}"
+elif [ "$1" = check-call-graph ]; then
     test -x build/compiler || { echo "build.sh check-call-graph: build/compiler is missing; run ./build.sh first" >&2; exit 1; }
     jobs="$(cores)"
     [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { echo "build.sh check-call-graph: couldn't determine a positive CPU budget" >&2; exit 1; }

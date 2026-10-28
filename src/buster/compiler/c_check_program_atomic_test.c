@@ -99,6 +99,131 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "for(int i=0;i<4;i++){h=fold(h,table.cells[i].half);h=fold(h,table.cells[i].word);h=fold(h,table.cells[i].wide);}"
             "for(int i=0;i<8;i++){h=fold(h,(unsigned long long)words[i]);}return (int)h;}",
         },
+        {
+            "c11-atomic-builtins",
+            "static _Atomic int a;static _Atomic unsigned short b;static _Atomic signed char c;static _Atomic unsigned long wide;"
+            "static _Atomic float f;static int array[32];static _Atomic(int*)p;"
+            "int tested(int n){unsigned h=2166136261u;__c11_atomic_init(&a,n);__c11_atomic_init(&b,(unsigned short)(n*73));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_add(&a,3,0));h=fold(h,(unsigned)__c11_atomic_fetch_sub(&a,2,5));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_and(&a,31,5));h=fold(h,(unsigned)__c11_atomic_fetch_or(&a,4,5));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_xor(&a,7,5));h=fold(h,__c11_atomic_fetch_add(&b,(unsigned short)n,5));"
+            "__c11_atomic_init(&c,(signed char)n);h=fold(h,(unsigned)__c11_atomic_fetch_min(&c,3,5));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_max(&c,7,5));h=fold(h,(unsigned)__c11_atomic_fetch_nand(&c,5,5));"
+            "__c11_atomic_init(&wide,(unsigned long)n<<40);h=fold(h,__c11_atomic_fetch_add(&wide,17,5));"
+            "h=fold(h,__c11_atomic_fetch_max(&wide,29,5));h=fold(h,__c11_atomic_fetch_min(&wide,31,5));"
+            "int e=__c11_atomic_load(&a,2);h=fold(h,__c11_atomic_compare_exchange_strong(&a,&e,n*2,5,0));"
+            "e=999;h=fold(h,__c11_atomic_compare_exchange_weak(&a,&e,n,5,0));h=fold(h,(unsigned)e);"
+            "h=fold(h,(unsigned)__c11_atomic_exchange(&a,n+9,5));__c11_atomic_store(&a,n+3,3);h=fold(h,(unsigned)__c11_atomic_load(&a,2));"
+            "__c11_atomic_init(&f,(float)n+0.5f);h=fold(h,(unsigned)__c11_atomic_exchange(&f,(float)n+2.0f,5));"
+            "float ef=(float)n+2.0f;h=fold(h,__c11_atomic_compare_exchange_strong(&f,&ef,(float)n+3.0f,5,5));"
+            "h=fold(h,(unsigned)(int)__c11_atomic_fetch_add(&f,2.0f,5));h=fold(h,(unsigned)(int)__c11_atomic_fetch_sub(&f,1.0f,5));"
+            "h=fold(h,(unsigned)(int)__c11_atomic_fetch_min(&f,4.0f,5));h=fold(h,(unsigned)(int)__c11_atomic_fetch_max(&f,6.0f,5));"
+            "__c11_atomic_init(&p,array);h=fold(h,(unsigned long)(__c11_atomic_fetch_add(&p,3,5)-array));"
+            "h=fold(h,(unsigned long)(__c11_atomic_fetch_sub(&p,2,5)-array));h=fold(h,(unsigned long)(__c11_atomic_load(&p,5)-array));"
+            "__c11_atomic_thread_fence(5);__c11_atomic_signal_fence(5);return (int)h;}",
+        },
+        {
+            "c11-atomic-strict-floating-min-max",
+            "#pragma STDC FENV_ACCESS ON\n"
+            "int change_daz(int);int clear_fp(void);int fp_state(void);unsigned fp_bitsf(float);unsigned long fp_bits(double);"
+            "static _Atomic float f;static _Atomic double d;static int addresses,rhs_calls,orders;"
+            "static _Atomic float*af(void){addresses++;return &f;}static _Atomic double*ad(void){addresses++;return &d;}"
+            "static float rf(float x){rhs_calls++;return x;}static double rd(double x){rhs_calls++;return x;}"
+            "static int order(void){orders++;return 5;}"
+            "int tested(int n){const unsigned fs[]={1,0x80000001u,0x3f800000u,0xbf800000u,0};"
+            "const unsigned long ds[]={1,0x8000000000000001ul,0x3ff0000000000000ul,0xbff0000000000000ul,0};"
+            "union{unsigned u;float f;}fv={fs[(unsigned)n%5]};union{unsigned long u;double d;}dv={ds[(unsigned)n%5]};"
+            "unsigned h=2166136261u;int old_daz=change_daz(n);addresses=rhs_calls=orders=0;"
+            "__c11_atomic_init(&f,fv.f);clear_fp();float a=__c11_atomic_fetch_min(af(),rf(1.0f),order());"
+            "h=fold(h,fp_state());h=fold(h,fp_bitsf(a));h=fold(h,fp_bitsf(__c11_atomic_load(&f,5)));"
+            "__c11_atomic_init(&f,fv.f);clear_fp();a=__c11_atomic_fetch_max(af(),rf(-1.0f),order());"
+            "h=fold(h,fp_state());h=fold(h,fp_bitsf(a));h=fold(h,fp_bitsf(__c11_atomic_load(&f,5)));"
+            "__c11_atomic_init(&d,dv.d);clear_fp();double b=__c11_atomic_fetch_min(ad(),rd(1.0),order());"
+            "h=fold(h,fp_state());h=fold(h,fp_bits(b));h=fold(h,fp_bits(__c11_atomic_load(&d,5)));"
+            "__c11_atomic_init(&d,dv.d);clear_fp();b=__c11_atomic_fetch_max(ad(),rd(-1.0),order());"
+            "h=fold(h,fp_state());h=fold(h,fp_bits(b));h=fold(h,fp_bits(__c11_atomic_load(&d,5)));"
+            "h=fold(h,addresses);h=fold(h,rhs_calls);h=fold(h,orders);change_daz(old_daz);return (int)h;}",
+        },
+        {
+            "c11-atomic-strict-floating-min-max-exceptions",
+            "#pragma STDC FENV_ACCESS ON\n"
+            "int clear_fp(void);int fp_state(void);unsigned fp_bitsf(float);unsigned long fp_bits(double);"
+            "int tested(int n){union{unsigned u;float f;}fv={(n&1)?0x7f800001u:0x7fc00001u};"
+            "union{unsigned long u;double d;}dv={(n&1)?0x7ff0000000000001ul:0x7ff8000000000001ul};"
+            "_Atomic float f;_Atomic double d;unsigned h=2166136261u;float a;double b;"
+            "__c11_atomic_init(&f,fv.f);clear_fp();a=__c11_atomic_fetch_min(&f,1.0f,5);"
+            "h=fold(h,fp_state());h=fold(h,fp_bitsf(a));h=fold(h,fp_bitsf(__c11_atomic_load(&f,5)));"
+            "__c11_atomic_init(&f,1.0f);clear_fp();a=__c11_atomic_fetch_max(&f,fv.f,5);"
+            "h=fold(h,fp_state());h=fold(h,fp_bitsf(a));h=fold(h,fp_bitsf(__c11_atomic_load(&f,5)));"
+            "__c11_atomic_init(&d,dv.d);clear_fp();b=__c11_atomic_fetch_min(&d,1.0,5);"
+            "h=fold(h,fp_state());h=fold(h,fp_bits(b));h=fold(h,fp_bits(__c11_atomic_load(&d,5)));"
+            "__c11_atomic_init(&d,1.0);clear_fp();b=__c11_atomic_fetch_max(&d,dv.d,5);"
+            "h=fold(h,fp_state());h=fold(h,fp_bits(b));h=fold(h,fp_bits(__c11_atomic_load(&d,5)));return (int)h;}",
+        },
+        {
+            "atomic-language-operations",
+            "static _Atomic int a[4];static _Atomic signed char byte;static _Atomic unsigned short half;static _Atomic float f;"
+            "static _Atomic int*last;static int calls;static _Atomic int*address(void){calls++;return last;}"
+            "int tested(int n){unsigned h=2166136261u;_Atomic int local=n;last=&local;calls=0;"
+            "h=fold(h,(unsigned)(*address()+=3));h=fold(h,(unsigned)(*address())++);h=fold(h,(unsigned)++*address());"
+            "h=fold(h,(unsigned)(*address()-=2));h=fold(h,(unsigned)(*address())--);h=fold(h,(unsigned)--*address());"
+            "h=fold(h,(unsigned)(*address()*=2));h=fold(h,(unsigned)(*address()^=n));h=fold(h,(unsigned)(*address()/=2));"
+            "h=fold(h,(unsigned)(*address()%=7));h=fold(h,(unsigned)(*address()<<=1));h=fold(h,(unsigned)(*address()>>=1));"
+            "h=fold(h,(unsigned)(*address()&=15));h=fold(h,(unsigned)(*address()|=2));h=fold(h,(unsigned)calls);"
+            "byte=(signed char)n;half=(unsigned short)(n*19);h=fold(h,(unsigned)++byte);h=fold(h,(unsigned)half++);"
+            "f=(float)n+0.5f;h=fold(h,(unsigned)(f+=1.5f));h=fold(h,(unsigned)(f*=2.0f));"
+            "for(int i=0;i<4;i++){a[i]=n+i;h=fold(h,(unsigned)++a[i]);}return (int)h;}",
+        },
+        {
+            "atomic-variable-stride-pointer",
+            "int tested(int n){int k=(unsigned)n%5+1;int values[3][k];_Atomic(int(*)[k]) pointer=values;"
+            "++pointer;++pointer;return (int)(((char*)pointer-(char*)values)/(k*sizeof(int)));}",
+        },
+        {
+            "atomic-function-values",
+            "struct Bytes{unsigned char a,b,c;};struct Floats{float a,b;};"
+            "static int bytes(_Atomic(struct Bytes) x){struct Bytes v=x;return v.a+v.b*3+v.c*7;}"
+            "static int floats(_Atomic(struct Floats) x){struct Floats v=x;return (int)(v.a*3+v.b*7);}"
+            "static int complex_parameter(_Atomic(_Complex double) x){_Complex double v=x;return (int)(__real__ v*3+__imag__ v*7);}"
+            "static _Atomic(struct Bytes) make(struct Bytes x){return x;}"
+            "static _Atomic(struct Bytes) forward(struct Bytes x){return make(x);}"
+            "static _Atomic(struct Bytes) choose(int n,struct Bytes x){if(n)return x;else return x;}"
+            "static _Atomic int scalar(int n){return n;}"
+            "int tested(int n){unsigned h=2166136261u;struct Bytes v={(unsigned char)n,5,7};struct Floats f={(float)n+0.5f,2.0f};"
+            "_Atomic(struct Bytes) a=make(v);a=forward(v);a=choose(n,v);struct Bytes b=a;h=fold(h,b.a+b.c*11u);"
+            "h=fold(h,(unsigned)bytes(v));h=fold(h,(unsigned)bytes(make(v)));h=fold(h,(unsigned)floats(f));"
+            "h=fold(h,(unsigned)complex_parameter((double)n+2.0i));_Atomic int q=scalar(n);q=scalar(n+1);h=fold(h,(unsigned)q);"
+            "unsigned __int128 k=(unsigned)n&3;_Atomic unsigned long word=8;word<<=k;h=fold(h,word);word>>=k;h=fold(h,word);"
+            "_Atomic unsigned __int128 wide=3;wide<<=k;h=fold(h,(unsigned)wide);return (int)h;}",
+        },
+        {
+            "atomic-representation-classes",
+            "struct Tiny{unsigned char a,b,c;};struct Big{unsigned long a,b,c;};"
+            "static _Atomic(struct Tiny) tiny=(struct Tiny){1,2,3};static _Atomic(struct Big) big;"
+            "static _Atomic(unsigned __int128) wide;static _Atomic long double extended;static _Atomic(_Complex double) z;"
+            "static _Atomic double real;static _Atomic _Bool bit;"
+            "struct __attribute__((packed)) Packed{char tag;_Atomic short x;};static struct Packed packed;"
+            "_Static_assert(__c11_atomic_is_lock_free(0),\"zero size query\");"
+            "_Static_assert(__c11_atomic_is_lock_free(4),\"native word query\");"
+            "static int parameter(_Atomic int x){x+=2;return x;}"
+            "int tested(int n){unsigned h=2166136261u;struct Tiny a={(unsigned char)n,5,7},b={(unsigned char)(n+1),9,10};"
+            "tiny=a;a=tiny;h=fold(h,a.a+a.b*3u+a.c*11u);a=__c11_atomic_exchange(&tiny,b,5);h=fold(h,a.a+a.b*13u);"
+            "a=b;h=fold(h,__c11_atomic_compare_exchange_strong(&tiny,&a,b,5,5));a.a=99;"
+            "h=fold(h,__c11_atomic_compare_exchange_weak(&tiny,&a,b,5,0));h=fold(h,a.a+a.c*17u);"
+            "struct Big first={(unsigned)n,7,8},second={9,(unsigned)n,10};__c11_atomic_init(&big,first);"
+            "second=__c11_atomic_exchange(&big,second,5);h=fold(h,second.a+second.b*19+second.c*23);"
+            "wide=((unsigned __int128)(unsigned)n<<80)+123;h=fold(h,(unsigned)__c11_atomic_fetch_add(&wide,31,5));"
+            "h=fold(h,(unsigned)++wide);wide/=3;wide%=17;h=fold(h,(unsigned)wide);"
+            "extended=(long double)n+0.5L;h=fold(h,(unsigned)(int)(extended+=2.5L));"
+            "h=fold(h,(unsigned)(int)__c11_atomic_exchange(&extended,(long double)n*2.0L,5));"
+            "volatile _Complex double rhs=2.0+1.0i;z=(double)n+2.0i;z+=rhs;z*=rhs;_Complex double q=z;"
+            "h=fold(h,(unsigned)(int)(__real__ q*13+__imag__ q*7));real=n;real+=rhs;h=fold(h,(unsigned)(int)real);"
+            "packed.x=(short)n;h=fold(h,(unsigned)__c11_atomic_fetch_add(&packed.x,1,5));h=fold(h,(unsigned)packed.x);"
+            "bit=0;for(int i=0;i<300;i++){h=fold(h,__c11_atomic_fetch_add(&bit,1,5));}h=fold(h,bit);"
+            "bit=0;__c11_atomic_fetch_add(&bit,1,5);__c11_atomic_fetch_add(&bit,1,5);__c11_atomic_fetch_max(&bit,0,5);"
+            "for(int i=0;i<254;i++){__c11_atomic_fetch_add(&bit,1,5);}h=fold(h,bit);"
+            "h=fold(h,__c11_atomic_is_lock_free(0));h=fold(h,__c11_atomic_is_lock_free(4));h=fold(h,(unsigned)parameter(n));return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

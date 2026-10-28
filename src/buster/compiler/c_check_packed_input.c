@@ -655,7 +655,10 @@ static void check_input_packed_members(CheckInputReader* reader)
                 while (!reader->output->resource && addresses != 0)
                 {
                     const uint32_t address = token + (uint32_t)__builtin_ctzll(addresses);
-                    check_input_packed_address(reader, address, chain, &names, &contexts);
+                    if (reader->ends[address] < check_input_expression_limit(reader, address))
+                    {
+                        check_input_packed_address(reader, address, chain, &names, &contexts);
+                    }
                     addresses &= addresses - 1;
                 }
             }
