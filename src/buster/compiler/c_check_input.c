@@ -534,15 +534,20 @@ struct CheckInputReader
     TypeId* tag_types;
     uint32_t* tag_ends;
     unsigned __int128* enum_values;
-    uint32_t* postorder_positions;
+    // The tree's traversal (#186, #544): the postorder and the tree's columns (Parser.positions, ends, first_children
+    // and next_siblings: each token's position in the postorder, its subtree's last token, its first child and its next
+    // sibling). The parser's where it derived them; otherwise the reader's own, which check_input_run derives into its
+    // scratch: the C driver parses ParseOptions.tree_only, so that nothing derives them twice.
+    const uint32_t* postorder;
+    const uint32_t* postorder_positions;
     uint32_t* tag_completions;
     // Per tag: whether an enum has a fixed underlying type (C23's `enum E : T`), which completes it at its base, and
     // whether its enumerators were listed yet (BUSTER_CHECK_ENUM_*).
     uint8_t* enum_fixed;
     uint32_t* transparent_unions;
-    uint32_t* ends;
-    uint32_t* first_child;
-    uint32_t* next_child;
+    const uint32_t* ends;
+    const uint32_t* first_child;
+    const uint32_t* next_child;
     uint32_t* first_value;
     uint32_t* last_value;
     // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
@@ -4012,7 +4017,7 @@ static void check_input_expressions(CheckInputReader* reader)
     reader->output->expression_visits = scalar ? parser->tokens.count : acts;
     for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
     {
-        const uint32_t token = parser->postorder[order];
+        const uint32_t token = reader->postorder[order];
         const uint8_t classes = reader->visits[token];
         if (!scalar && (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
         {
@@ -5174,7 +5179,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     {
         reader.predefined_positions[i] = BUSTER_CHECK_NONE;
     }
-    bool valid = visits != 0 && arena != scratch && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && (parser->postorder != 0 || count == 0) &&
+    bool valid = visits != 0 && arena != scratch && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE && (parser->tree.parents != 0 || count == 0) &&
                  count < UINT32_MAX / 4 && graph_capacity <= UINT32_MAX && original_end <= count;
     const char* const builtin_members[] =
     {
@@ -5313,10 +5318,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(tag_types, TypeId);
     BUSTER_CHECK_INPUT_ARRAY(tag_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(enum_values, unsigned __int128);
-    BUSTER_CHECK_INPUT_ARRAY(postorder_positions, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(ends, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(first_child, uint32_t);
-    BUSTER_CHECK_INPUT_ARRAY(next_child, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(first_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
@@ -5324,6 +5325,18 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(scope_ends, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(scope_openings, uint32_t);
 #undef BUSTER_CHECK_INPUT_ARRAY
+    // The tree's traversal: the parser's where it derived it (parse_tree_columns), else the reader's own, in its scratch,
+    // derived below once the columns are reserved: five columns with room for parse_tree_columns' sentinel, and the
+    // passes' two temporaries, pushed last.
+    const bool derived = parser->postorder != 0 && parser->positions != 0 && parser->ends != 0 && parser->first_children != 0 && parser->next_siblings != 0;
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* traversal = derived || !valid ? 0 : arena_push_array(scratch, 5 * slots, sizeof(uint32_t), 64);
+    valid &= derived || traversal != 0;
+    reader.postorder = derived ? parser->postorder : parser->postorder != 0 ? parser->postorder : traversal;
+    reader.postorder_positions = derived ? parser->positions : traversal != 0 ? traversal + slots : 0;
+    reader.ends = derived ? parser->ends : traversal != 0 ? traversal + 2 * slots : 0;
+    reader.first_child = derived ? parser->first_children : traversal != 0 ? traversal + 3 * slots : 0;
+    reader.next_child = derived ? parser->next_siblings : traversal != 0 ? traversal + 4 * slots : 0;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
     valid &= reader.value_next != 0;
     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
@@ -5376,6 +5389,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
     }
     valid &= c_bindings_initialize(&reader.bindings, scratch, pp->table->count, count * 4 + 1);
+    // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
+    // their pages.
+    const uint64_t traversal_mark = scratch->length;
+    uint32_t* const temporaries = traversal != 0 && valid ? arena_push_array(scratch, 2 * slots, sizeof(uint32_t), 64) : 0;
+    valid &= traversal == 0 || temporaries != 0;
     if (valid)
     {
         memset(reader.declared_types, 0, ((uint64_t)count + 1) * sizeof(TypeId));
@@ -5464,36 +5482,34 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             reader.selected_tokens[i] = BUSTER_CHECK_NONE;
             reader.activate[i] = BUSTER_CHECK_NONE;
             reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.first_child[i] = BUSTER_CHECK_NONE;
-            reader.next_child[i] = BUSTER_CHECK_NONE;
             reader.first_value[i] = BUSTER_CHECK_NONE;
             reader.last_value[i] = BUSTER_CHECK_NONE;
-            reader.ends[i] = i;
         }
-        for (uint32_t i = count; i-- > 0;)
+        if (traversal != 0)
         {
-            const uint32_t parent = parser->tree.parents[i];
-            if (parent < count)
+            // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it, as
+            // with --scalar from the walk's (parse_tree_columns' twins); otherwise, the C driver's tree_only parse, all
+            // of it in parse_tree_columns' three passes.
+            if (parser->postorder != 0 || parser->options.scalar)
             {
-                reader.next_child[i] = reader.first_child[parent];
-                reader.first_child[parent] = i;
+                if (parser->postorder == 0)
+                {
+                    parse_postorder(parser->tree.parents, count, temporaries, traversal);
+                }
+                parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
+            }
+            else
+            {
+                parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
+                                   traversal + 3 * slots, traversal + 4 * slots, 0, 0);
             }
         }
-        for (uint32_t k = 0; k < count; k += 1)
-        {
-            const uint32_t token = parser->postorder[k];
-            reader.postorder_positions[token] = k;
-            const uint32_t parent = parser->tree.parents[token];
-            if (parent < count && reader.ends[parent] < reader.ends[token])
-            {
-                reader.ends[parent] = reader.ends[token];
-            }
-        }
+        arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
         // expression commas from call/declaration separators; reverse postorder passes that fact down once.
         for (uint32_t k = count; k-- > 0;)
         {
-            const uint32_t token = parser->postorder[k];
+            const uint32_t token = reader.postorder[k];
             const uint32_t parent = parser->tree.parents[token];
             const uint8_t role = parser->tree.roles[token];
             reader.expression_commas[token] = role == PARSE_ROLE_SEPARATOR && parent < count ? reader.expression_commas[parent] :
