@@ -1815,6 +1815,25 @@ they do per token where little of it was per declaration or expression:
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
   instructions fewer, about 70 a token. The scalar path computes each bit with
   the walk's own tests (`check_input_syntax_of`).
+- **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
+  roles at a time, then visits only separators and statement terminators.
+  Non-separators' contexts depend directly on their roles; separators inherit
+  a parent's context. Reverse source order completes later parents first. An
+  earlier parent with a fixed context is computed directly; an earlier
+  separator parent asks the unchanged reverse-postorder scalar pass to replay
+  the whole view. This keeps dependency order for nonidentity traversals
+  without another retained column, allocation or ancestor walk. Loads and
+  stores are masked at the logical token count. The count is the parser
+  view's complete token count: a prefix has its own complete postorder, and
+  a repair includes its synthetic closers even beyond `original_end`, which
+  limits later publication. The scalar host and `--scalar` use the original
+  pass. Guard-page tests cover every tail through 257 tokens, shuffled
+  dependency orders, deep chains and unknown role bytes; real prefix and
+  repair views compare every output byte with the scalar oracle. This is a
+  bounded residual of #529; general literal preparation and graph
+  construction remain separate work. It does not repeat #646's sparse walks,
+  #640's traversal derivation, #628's retained parser buffers, #658's compact
+  integer tables or #641's post-check work.
 - **Scans for few tokens.** The passes that act on few tokens test 64 of them
   at once (16 or 8, by the column's width) and visit only those
   (`check_input_scan_*`): the constant contexts (static objects, static
