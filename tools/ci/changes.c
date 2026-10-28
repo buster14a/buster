@@ -341,7 +341,7 @@ static const ChangesModule changes_modules[] = {
     // that changes how it is timed. The daily run measures main.
     {
         .name = "compile_time",
-        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|compile_measure",
+        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|compile_measure",
     },
 };
 
@@ -1574,6 +1574,16 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the emission's stage marks",
         .files = "src/buster/compiler/c_check_program_emit.c",
         .outputs_true = "code compile_time check_debug",
+    },
+    {
+        .name = "the expression templates' lowering time",
+        .files = "src/buster/compiler/c_check_program_batch.c",
+        .outputs_true = "code compile_time",
+    },
+    {
+        .name = "the scalar lowering twin's time",
+        .files = "src/buster/compiler/c_check_program_lower.c",
+        .outputs_true = "code compile_time",
     },
     {
         .name = "the compiler's code outside the attribution's sources",

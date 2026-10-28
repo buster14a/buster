@@ -530,11 +530,43 @@ copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
 and replaces the old definition either way.
 
+Complete empty and one-name parameter lists take a direct definition path;
+variadics and malformed lists keep the ordered reader. Parameter validation
+keeps a bounded source-list scan for up to 16 names (#615). The seventeenth
+parameter materializes a temporary name-to-ordinal
+index, with a geometrically grown, half-full hash table in scratch memory.
+Its descriptor also lives in scratch memory, so ordinary macros carry no
+inline index arrays in their stack frame.
+Duplicate checks stay in source order, and the same index validates every
+`#parameter` in a large replacement list. The count stays 32-bit until the
+4,096-parameter limit has been checked, including malformed longer lists.
+Allocation failure is fatal and releases the temporary index.
+
 A function-like macro is compiled at its first expansion (`pp_compile_macro`)
 into body items: tokens, parameters (by index), `#` with its parameter, `##`,
 and `__VA_OPT__` with its content. Each parameter gets a bit saying whether it
 is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
+
+That first expansion stores the parameter ids as before. Small lists look
+them up in place through a cached id view and count: 0--4 names use a bounded
+scalar lookup, and 5--16 a masked AVX-512 comparison with its scalar twin.
+Larger lists rebuild the temporary
+index to resolve replacement identifiers and stringizing operands. The
+implicit `__VA_ARGS__` keeps an earlier explicit parameter's ordinal;
+GNU named variadics use their own name. The index is released after each
+definition or first expansion. Unused definitions retain no extra table, and
+later invocations consume the already compiled parameter ordinals.
+
+The [locked 9700X qualification](https://github.com/buster14a/buster-performance/blob/e062c126339b017b5bec5d24f7413eec3a0d9708/docs/measurements/macro-parameters-615-2026-10-27/README.md)
+compares `92c025e7` with implementation `ef1300a3` over six frontend code
+placements and fresh executable copies. At 4,000 parameters, invoked macros
+take 5.399 to 0.980 ms and 161.32 to 8.32 million instructions; unused
+definitions take 3.613 to 0.691 ms and 115.84 to 2.40 million instructions.
+The 10,000 four-parameter macro control retains a 0.032 ms wall cost (+0.88%)
+and +1.60% user cycles. Empty/one-name instruction counts stay near baseline;
+SQLite does not establish a whole-compiler timing gain. The record retains
+all samples, memory observations, comparison floors and earlier candidates.
 
 The producer `pp_compile_macro` also records literal runs for the consumer
 `pp_substitute`. A `PP_ITEM_TOKEN` uses its otherwise unused 16-bit
