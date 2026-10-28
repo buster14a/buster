@@ -214,8 +214,56 @@ static void check_test_diagnostic_sources(CheckTest* test)
                       "fatal promotion participates in the same earliest-error selection");
 }
 
+static void check_test_warning_policy_prefix(CheckTest* test)
+{
+    static const struct
+    {
+        uint32_t id;
+        const char* first;
+        const char* second;
+        CheckWarningSeverity expected;
+    } cases[] = {
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Wno-deprecated-non-prototype", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_NON_PROTOTYPE_CALL, "-Werror=deprecated-non-prototype", NULL, CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_TOO_FEW, "-Wno-deprecated-non-prototype", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_KR_TOO_MANY, "-Werror", NULL, CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Werror", "-Wno-error=deprecated-non-prototype", CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Wno-error=deprecated-non-prototype", "-Werror", CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Werror=deprecated-non-prototype", "-Wno-error", CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Werror=deprecated-non-prototype", "-Wno-deprecated-non-prototype", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Wno-deprecated-non-prototype", "-Werror=deprecated-non-prototype", CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-pedantic-errors", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-w", "-Werror=deprecated-non-prototype", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_KR_TOO_FEW, "-Wno-everything", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-pragmas", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-visibility", NULL, CHECK_WARNING_WARNING },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    {
+        const char* options[] = { cases[i].first, cases[i].second };
+        const PPOptions command = { .semantic_warning_options = options, .semantic_warning_option_count = cases[i].second != NULL ? 2 : 1 };
+        check_test_expect(test, check_warning_command_line(&command, cases[i].id, false).severity == cases[i].expected,
+                          "shared warning policy preserves the independently observed Clang group and promotion rules");
+    }
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    char* ordered[] = { "-Wno-everything", "-include", "-Werror=deprecated-non-prototype", "-Wdeprecated-non-prototype", "source.c", "-o", "-Werror", "-pedantic-errors" };
+    const char* input = NULL;
+    const char* output = NULL;
+    bool markers = false;
+    PPOptions parsed = { 0 };
+    const bool ready = pp_parse_options(BUSTER_ARRAY_LENGTH(ordered), ordered, &parsed, &arena, &input, &output, &markers);
+    check_test_expect(test, ready && parsed.semantic_warning_option_count == 3 &&
+                           strcmp(parsed.semantic_warning_options[0], "-Wno-everything") == 0 &&
+                           strcmp(parsed.semantic_warning_options[1], "-Wdeprecated-non-prototype") == 0 &&
+                           strcmp(parsed.semantic_warning_options[2], "-pedantic-errors") == 0 &&
+                           check_warning_command_line(&parsed, CHECK_WARNING_ID_KR_DEFINITION, false).severity == CHECK_WARNING_WARNING,
+                      "shared CLI capture preserves option order and excludes include/output filenames");
+    arena_release(&arena);
+}
+
 static __attribute__((noinline)) void check_test_diagnostic_policy(CheckTest* test)
 {
+    check_test_warning_policy_prefix(test);
     check_test_diagnostic_replay(test);
     check_test_diagnostic_sources(test);
 }
