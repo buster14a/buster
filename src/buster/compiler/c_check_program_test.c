@@ -2132,6 +2132,132 @@ static void check_test_program_return_marks(CheckTest* test)
 #include "c_check_program_batch_test.c"
 #include "c_check_literal_table_test.c"
 
+static void check_test_program_many_arguments(CheckTest* test, const char* clang)
+{
+    static const uint32_t counts[] = { 65, 127, 130, 238, 239 };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "large call source has a bounded output stream");
+        if (text != NULL)
+        {
+            fprintf(text, "long many(");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%slong a%u", a != 0 ? "," : "", a);
+            }
+            fprintf(text, "){return ");
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                fprintf(text, "%sa%u*%u", a != 0 ? "+" : "", a, a + 1);
+            }
+            fprintf(text, ";}int tested(int n){");
+            if (counts[c] <= 238)
+            {
+                // Keep the direct result in a local: holding it on the value stack would exhaust the indirect limit.
+                fprintf(text, "__typeof__(many)*volatile p=many;long direct=many(");
+            }
+            else
+            {
+                fprintf(text, "return (int)(many(");
+            }
+            for (uint32_t a = 0; a < counts[c]; a += 1)
+            {
+                if (counts[c] <= 127)
+                {
+                    fprintf(text, "%s(long)n+%u", a != 0 ? "," : "", a);
+                }
+                else
+                {
+                    fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                }
+            }
+            if (counts[c] <= 238)
+            {
+                fprintf(text, ");long indirect=p(");
+                for (uint32_t a = 0; a < counts[c]; a += 1)
+                {
+                    if (counts[c] <= 127)
+                    {
+                        fprintf(text, "%s(long)n-%u", a != 0 ? "," : "", a);
+                    }
+                    else
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                }
+                fprintf(text, ");");
+                if (counts[c] >= 130)
+                {
+                    // A wide call must refill the live prefix, even when its compact negative stack effect wraps.
+                    fprintf(text, "long held=(long)n-many(");
+                    for (uint32_t a = 0; a < counts[c]; a += 1)
+                    {
+                        fprintf(text, "%s(long)n", a != 0 ? "," : "");
+                    }
+                    fprintf(text, ");return (int)((direct+indirect+held)%%1000003);}");
+                }
+                else
+                {
+                    fprintf(text, "return (int)((direct+indirect)%%1000003);}");
+                }
+            }
+            else
+            {
+                fprintf(text, ")%%1000003);}");
+            }
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "large call source completes without truncation");
+            if (written)
+            {
+                char name[80];
+                snprintf(name, sizeof(name), "calls-of-%u-arguments", counts[c]);
+                check_test_program_source(test, source, name, clang);
+            }
+        }
+        free(source);
+    }
+    char* variadic = NULL;
+    size_t variadic_length = 0;
+    FILE* text = open_memstream(&variadic, &variadic_length);
+    check_test_expect(test, text != NULL, "127-argument variadic source has output storage");
+    if (text != NULL)
+    {
+        fputs("struct P{float a,b,c,d;};long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;"
+              "for(int i=0;i<count;i++){r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);"
+              "struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}__builtin_va_end(ap);return r;}"
+              "int tested(int n){struct P p={n,n+1,n+2,n+3};return (int)(var(42", text);
+        for (uint32_t a = 0; a < 42; a += 1)
+        {
+            fprintf(text, ",(long)n+%u,(double)n*0.25+%u,p", a, a);
+        }
+        fputs(")%1000003);}", text);
+        const bool written = fclose(text) == 0;
+        check_test_expect(test, written, "127-argument variadic source completes without truncation");
+        if (written)
+        {
+            check_test_program_source(test, variadic, "variadic-127-mixed-aggregate-arguments", clang);
+        }
+    }
+    free(variadic);
+    check_test_program_source(test,
+        "struct P{float a,b,c,d;};struct Q{long a;double b;};struct B{long a,b,c,d;};"
+        "long mixed(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,"
+        "struct P x,struct Q y,struct B z,double r,double s){return a+b+c+d+e+f+g+h+i+j+k+l+m+o+p+q+(long)(x.a+x.b+x.c+x.d+y.b+r+s)+y.a+z.a+z.b+z.c+z.d;}"
+        "struct B hidden(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long o,long p,long q,struct P x)"
+        "{struct B r={a+b+c+d,e+f+g+h,i+j+k+l,m+o+p+q+(long)x.d};return r;}"
+        "long var(int count,...){__builtin_va_list ap;__builtin_va_start(ap,count);long r=0;for(int i=0;i<count;i++){"
+        "r+=__builtin_va_arg(ap,long);r+=(long)__builtin_va_arg(ap,double);struct P p=__builtin_va_arg(ap,struct P);r+=(long)(p.a+p.b+p.c+p.d);}"
+        "__builtin_va_end(ap);return r;}"
+        "int tested(int n){struct P p={n,n+1,n+2,n+3};struct Q q={n,n+0.5};struct B b={n,n+1,n+2,n+3};"
+        "struct B r=hidden(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p);"
+        "return (int)(mixed(n,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,p,q,b,2.5,3.5)+r.a+r.b+r.c+r.d+"
+        "var(7,(long)n,1.0,p,2L,3.0,p,4L,5.0,p,6L,7.0,p,8L,9.0,p,10L,11.0,p,12L,13.0,p));}",
+        "deep-aggregate-mixed-and-variadic-calls", clang);
+}
+
 static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
 {
     for (uint32_t bodies = 64; bodies <= 128; bodies *= 2)
@@ -2165,6 +2291,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
+    check_test_program_many_arguments(test, clang);
     check_test_program_many_aggregate_returns(test, clang);
     check_test_program_source(test,
         "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"

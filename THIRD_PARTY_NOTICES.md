@@ -41,6 +41,13 @@ default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
 and Clang runs externally as an independent oracle. No external implementation
 or fixture is copied.
 
+The deep aggregate-call setup, argument bound and extended generated/guarded
+native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
+`tier0_validate_test.c` and `c_check_program_test.c` (#668/#663) are original
+project material under the default terms. Clang is an external ABI oracle;
+the Nuklear header used for compile qualification is an external input and is
+not imported into this repository.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream
