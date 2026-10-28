@@ -447,6 +447,9 @@ struct CheckStream
     CheckDiagnostic* diagnostics;
     // The operand each diagnostic names, as CheckActionResult.diagnostic_operand has it (a CALL's argument i is 1 + i).
     uint32_t* diagnostic_operands;
+    // A MEMBER or ARROW node's member's offset in bits from its record's start (CheckActionResult.member_offset), which
+    // the lowering takes rather than looking the member up again (#591); 0 for every other node.
+    uint64_t* member_offsets;
     uint32_t* warnings;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
@@ -1237,6 +1240,7 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
     stream->diagnostics[node] = result->diagnostic;
     stream->diagnostic_operands[node] = result->diagnostic_operand;
     stream->warnings[node] = result->warnings;
+    stream->member_offsets[node] = result->member_offset;
 }
 
 // check_graph_run's marks for the vector scheduler, in its `pure` column: a node a region may reorder (check_graph_pure),
@@ -1264,6 +1268,7 @@ static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, Ch
     stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
     stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
     stream->warnings[node] = 0;
+    stream->member_offsets[node] = 0;
     stream->statistics.vector_nodes += 1;
 }
 
@@ -1921,6 +1926,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
+    action.scalar = scalar;
     // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
     // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
     const bool overloads = graph->overload_candidate_count != 0;
@@ -2433,6 +2439,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
         stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->member_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count);
         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
@@ -2449,7 +2456,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->overloads = graph->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadEffect, graph->overload_count) : 0;
         const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
-        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->warnings != 0 &&
+        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
+                 stream->warnings != 0 &&
                  stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&

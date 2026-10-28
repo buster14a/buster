@@ -1677,19 +1677,12 @@ static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint3
            field->class != BUSTER_TYPED_CLASS_VOID;
 }
 
-// The place of the bit-field that MEMBER or ARROW node `node` designates.
+// The place of the bit-field that MEMBER or ARROW node `node` designates: at the offset the checker found it at.
 static bool check_lower_bit_member(const CheckProgram* program, uint32_t node, CheckLowerBitField* field)
 {
-    const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
-    TypeId record = stream->values[graph->operand0[node]].type;
-    if (graph->ops[node] == CHECK_OP_ARROW)
-    {
-        record = type_element(program->types, stream->conversions[node].operands[0].type);
-    }
-    uint64_t offset = 0;
-    const uint32_t member = type_find_member(program->types, record, graph->members[node], &offset);
-    return member != 0 && check_lower_bit_place(program->types, offset, stream->values[node].bit_width, stream->values[node].type, field);
+    return stream->diagnostics[node] == CHECK_DIAG_NONE &&
+           check_lower_bit_place(program->types, stream->member_offsets[node], stream->values[node].bit_width, stream->values[node].type, field);
 }
 
 // The MEMBER or ARROW node of the bit-field that a store's destination `node` designates, through _Generic's
@@ -3946,17 +3939,16 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
     {
-        TypeId record = stream->values[a].type;
-        if (op == CHECK_OP_ARROW)
-        {
-            record = type_element(types, type_a);
-        }
-        uint64_t offset = 0;
-        const uint32_t member = type_find_member(types, record, graph->members[node], &offset);
-        // A bit-field's address, which only its stores ask for, is its first byte's.
+        // A struct's or union's member, at the offset the checker found it at (CheckStream.member_offsets), for a node it
+        // checked without a diagnostic; not a vector's elements (`v.y`), which share the operator. A bit-field's address,
+        // which only its stores ask for, is its first byte's.
+        const TypeId record = op == CHECK_OP_ARROW ? type_element(types, type_a) : stream->values[a].type;
+        const uint8_t record_kind = check_action_kind(types, record);
+        const uint64_t offset = stream->member_offsets[node];
         const bool bit_field = (value->flags & BUSTER_CHECK_BIT_FIELD) != 0;
         CheckLowerBitField field = { 0 };
-        if (member == 0 || (!bit_field && offset % 8 != 0))
+        if (stream->diagnostics[node] != CHECK_DIAG_NONE || (record_kind != BUSTER_TYPE_KIND_STRUCT && record_kind != BUSTER_TYPE_KIND_UNION) ||
+            (!bit_field && offset % 8 != 0))
         {
             check_lower_unsupported(writer, "this member access");
         }

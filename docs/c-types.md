@@ -168,9 +168,81 @@ the order in which tags are completed, from 1, for #113's deferred bodies. An
 enum gets its underlying type when complete: fixed, or as clang chooses it from
 the enumerators' values (`type_enum_value_bits` and `type_enum_underlying`,
 `packed` included). `type_find_member` looks into anonymous members as C does,
-with an explicit stack, and returns 0 for no member (member record 0 is
-reserved, as tag record 0 is), and `type_builtin_va_list` makes x86-64's
-`__builtin_va_list`.
+through each record's lookup ("Member lookup" below), and returns 0 for no
+member (member record 0 is reserved, as tag record 0 is), and
+`type_builtin_va_list` makes x86-64's `__builtin_va_list`.
+
+### Member lookup
+
+Every `.` and `->` the checker reads finds its member by name (about 60,000 in
+`sqlite3.c`), through anonymous members, as clang's lookup does: the first
+member with the name in declaration order, depth first. Designated initializers
+and `-Waddress-of-packed-member` look members up too, and before #591 the
+lowering looked each access's member up again. The checker's lookup pushed and
+cleared a byte per type of the table at every access (3,434 types in
+`sqlite3.c`, about 200 MB of `memset` a compile), to guard against records that
+hold one anonymous record more than once, and then compared the record's names
+one at a time. Now each record's lookup is decided when its members are written
+(`type_record_define`). Ordinary scans and indexed probes avoid the whole-table
+clear and the linear member search. Their worst case still depends on collision
+chains and anonymous-record depth; the capacity fallback below walks members.
+
+- **A scan**, for a record of at most 16 members (`BUSTER_TYPE_LOOKUP_SCAN`),
+  none of them an anonymous struct or union: its names, contiguous in the
+  members' column, compared with one masked 512-bit compare, which reads
+  nothing past them.
+- **An index**, for any other (`TypeLookup`): a hash table of every name the
+  record's lookup finds, its anonymous members' records' names among them,
+  each with the first of the record's own members, in declaration order, that
+  finds it: the named member, or the anonymous member the name is in, whose
+  record's lookup goes on from there. Buckets of 8 names and their members, a
+  cache line each, compared at once; at most half full, so a probe reads one
+  bucket, or a few. A lookup goes down one record per anonymous member on the
+  way and never back, so records that hold one another many times cost it
+  nothing (a union that holds the one before it twice, 64 levels deep, is a
+  tree of 2^64 leaves).
+- **A walk**, for a record whose index the table's buckets can't hold
+  (`TypeCapacity.lookups`, one a member by default, which only anonymous
+  members nested deeply outgrow), or one of whose anonymous members' records
+  walks: depth first through the members, entering each record once, by a
+  sparse set over type indices that nothing clears.
+
+`type_lookup_member` takes the scan and the probe in vectors;
+`type_lookup_member_scalar`, its twin, compares one name at a time over the
+same indices, and the checker's scalar graph-action path takes it (`CheckAction.scalar`), so
+that comparisons of those graph actions check both kernels. Other callers,
+including atomic-alignment helpers, keep the vector wrapper. The index is built once a record, scalar, one
+insertion a name: it is the lookups that every access runs. The checker keeps
+each access's offset in its stream (`CheckStream.member_offsets`), which the
+lowering reads instead of looking the member up again.
+
+**Measured together with the consumers.** On the locked 9700X, CPU 2, main
+`92c025e7` against `7a0597bf`, eight alternating `perf stat -r 3` rounds of
+the frozen SQLite `-c` configuration give median task clock 147.135 →
+145.660 ms (paired median −0.94%), user cycles 695.423 → 686.176 M and
+instructions 1,552.459 → 1,534.564 M. Objects are byte-identical.
+Fifteen alternating stage runs give lowering 15.974 → 15.034 ms and
+check-expressions 15.799 → 15.381 ms. The full [record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/member-591-2026-10-27)
+retains every run, source/binary/input identity, scaling units and commands.
+
+This trades memory for work: median peak RSS rises 512,908 → 516,968 KB
+(+4,060 KB, +0.79%). Default lookup capacity reserves one 64-byte bucket
+per member capacity, and `member_offsets` reserves eight bytes per graph-node
+capacity, including non-member nodes. Fallback and modifiability sparse sets
+reserve storage indexed by the table even though they clear only visited
+records. These reservations are distinct from written/resident pages; this
+PR claims no memory reduction and does not offset them against #572's
+separately measured savings.
+
+The target lookup benchmark at `3e0070f2` gives 9.91–9.92 ns per access,
+18.92–18.94 for its scalar twin, 36.03 for the old walk, and 3.25–3.26 ns
+per member to build the indices. All construction/consumer costs remain in
+the complete compile above. A 2,500 → 40,000-member source compiles in
+5.29 → 51.39 ms, against baseline's 10.10 → 1,282.43 ms; the record retains
+the intermediate points and many-record case. The test suite also requires
+the graph-action finder to succeed with no remaining scratch after 512
+unrelated types, detecting restoration of the old per-access allocation
+independently of its generous timing bounds.
 
 ### clang's layout
 
@@ -372,6 +444,22 @@ location (it prints `(unnamed)` where clang names the file and line).
   `type_layout_records` in another: identical offsets, sizes, alignments and
   completion order. Member lookup finds the first member of a fresh table,
   directly and through an anonymous member.
+- **Member lookup** (`c_types_lookup_test.c`): the lookup, its twin, the walk
+  and `type_find_member` against an oracle that lists a record's named members
+  depth first through its anonymous members and takes the first with the name
+  (member, offset and qualifiers): on random worlds of structs and unions of 0
+  to 459 members (named ones, bit-fields named and not, members of record types,
+  and anonymous members of earlier records, qualified, aligned and held by
+  several), by every name and absent ones, through each record, qualified and
+  aligned, with the default room for indices (no record may walk) and with room
+  for 48 buckets (some must); the scan's limit (16 members, then 17, with and
+  without an anonymous member), a name an anonymous member finds before a named
+  member has it, and 24 names in one bucket of eight, whose probes go on and
+  wrap around; a copy, a view taken back and a tag withdrawn and restored; the
+  64 levels of unions of 2^64 leaves; one record of 100,000 members, every name
+  found, through an index of no more buckets than its names ask for; the walk
+  with every amount of room to 16 KB left in its scratch arena; and the scan's
+  load at every count to 16 of names that end at a `PROT_NONE` page.
 - **Conversions:** every pair of codes through both kernels and the scalar twin,
   at every length to 200 and ending at a `PROT_NONE` page; the TypeId batch
   against `type_usual_arithmetic` on enums, `_BitInt`s, aligned and atomic types;

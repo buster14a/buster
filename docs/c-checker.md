@@ -513,6 +513,11 @@ columns without renumbering or expanding the graph:
   arithmetic, assignment, explicit-cast or null-pointer conversion flags.
 - `argument_conversions` contains one record for each call-argument slot,
   including prototype conversions and default argument promotions.
+- `member_offsets` stores a `MEMBER` or `ARROW` node's member's offset in bits
+  from its record's start, through anonymous members, as the action's lookup
+  found it (`docs/c-types.md`, "Member lookup"), and 0 for every other node:
+  the lowering takes its member accesses' places from it rather than looking
+  the members up again (#591).
 - `diagnostics` stores the node's constraint diagnostic. `reports` is the
   compact diagnostic list, sorted stably by source token; `report_count` is its
   logical length and never exceeds the node count.
