@@ -8,32 +8,26 @@ test corpus is imported.
 
 ## Status and consumers
 
-The current producers are `ir_lower_typed` / `ir_lower_typed_scalar`, the
-handwritten IR fixtures and the synthetic benchmark. Consumers are the two
-verifiers, CFG and use-list builders, printer, and the lowering tests' independent
-executor. The default `compiler file.c` driver remains the parser's driver.
-The merged `check` command produces checked expression graphs and supported
-scalar static data, but it does not yet produce executable per-function streams.
-This IR currently consumes the generated or explicitly constructed
-`Tier0Function` contract.
+The producers are `ir_lower_typed` / `ir_lower_typed_scalar`, which take the C
+driver's typed streams (`check_program_emit`'s `Tier0Function`s, #133), the
+handwritten fixtures, `ir_parse.c` (#175) and the synthetic benchmarks. The
+consumers are the two verifiers, the CFG and use-list builders, the printer,
+`ssa_ir.c`'s promotion (#134), the optimizer passes (#139), the interpreters
+(#176) and Tier 1's selection (#138).
 
-The remaining acceptance of #131 is explicit:
+The IR lowered from every function of the corpora verifies (#131): `test-ir-source`
+lowers every function `-c` compiles of a set of C files by both paths, which must
+agree column for column and verify, and promotes each by both of `ssa_ir.c`'s
+paths, whose results verify with dominance checked ("Tests and measurements"
+below). Every function of the frozen `sqlite3.c` (2,602), c-testsuite's subset
+(430 of its 220 programs) and the 12 Lua 5.4.8 files `-c` compiles (368) passes.
+`benchmark-ir-source` measures the IR's bytes per source token on `sqlite3.c`
+("Bytes per source token" below).
 
-- Complete the executable source-function handoff from #129/#133 to this IR.
-  The merged checker retains checked expression graphs, explicit conversions,
-  declaration/object identities and function prototypes. Per-function body
-  membership, ordered parameters and locals, executable control-flow targets,
-  and backend call descriptors still require integration. Lowering every corpus
-  function, including SQLite, also needs the required frontend language coverage.
-- #134 and #138 must use the verifier/printer after SSA construction and Tier 1
-  passes. They can consume the columns below without an instruction-list adapter.
-- #174 must provide dominator-tree intervals for complete cross-block SSA
-  verification. Same-block ordering is checked today, and the optional interval
-  interface is exercised by independently specified graph fixtures.
-- SQLite's **IR bytes per source token**, including `sqlite3VdbeExec`, still
-  needs that complete frontend path and an approved 9700X run. Synthetic bytes
-  per IR instruction or per typed entry are different measurements.
-- The stable printer exists; parsing its output remains #175.
+The adapter refuses what no function of those corpora has: vector values
+(`VECTOR`, `IR_ERROR_TYPE`) and #136's machine operations (`X86` rows,
+`IR_ERROR_OPCODE`), which have no IR type or operation. The stable printer's text
+is read back by `ir_parse.c` (#175).
 
 ## Lifetime and stage contract
 
@@ -109,21 +103,23 @@ column comparisons deterministic.
 | `address` | `a:ptr`, optional `b:i64`, `c` indexes `addresses` |
 | `load` | `a:ptr`; result is the loaded type |
 | `store` | `a:ptr`, `b` is the stored value; result is `void` |
-| `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls` |
+| `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
 | `cbr` | `a:i1`, `b` true block, `c` false block |
 | `switch` | `a` integer value, `b` extra-word offset, `c` case count; words are `default_block, constant_id, target, ...` |
 | `ret` | Optional value in `a`, matching the function result; the instruction itself is `void` |
 | `unreachable` | No operands; a terminator |
+| `br_indirect` | `a:ptr`, a label's address; a terminator whose successors are the function's labels |
 
 Constants preserve exact low/high bits, including NaNs, negative zero and x87
 payloads. Unused bits above the type's width must be zero. The printer uses fixed
 hexadecimal payloads, independent of locale or decimal rounding.
 
 `IrSlot` records size, power-of-two alignment, optional scalar type, and flags for
-address-taken, volatile or temporary storage. A `void` slot is untyped memory;
-scalar slots must be large enough for their type. `IrAddress` holds a signed
+address-taken, volatile or temporary storage, or for one of a variadic
+definition's two anchors (below). A `void` slot is untyped memory; scalar slots
+must be large enough for their type. `IrAddress` holds a signed
 64-bit displacement and scale 1, 2, 4 or 8. Other scales lower into a multiply
 and an address with scale 1. The IR does not promise that every displacement
 fits an x86 immediate; selection must materialize larger ones.
@@ -134,9 +130,70 @@ than assigned ABI registers or stack offsets. Actual value types must match
 fixed parameters; additional variadic arguments must be nonvoid. `symbol_count`
 is an exclusive bound supplied by the translation unit; `UINT32_MAX` permits any
 nonzero, nonsentinel link ID. Zero is reserved by `link.c` and is rejected for
-both direct calls and symbol addresses. Complete C aggregate/prototype lowering belongs to the
-checker/backend integration; this adapter's existing stream only exposes scalar
-classes and loses the named/variadic parameter boundary, as described below.
+both direct calls and symbol addresses. A call that passes or returns an
+aggregate by value has ABI records (`IrCall.abi`, below); the typed stream loses
+the named/variadic parameter boundary, as described below.
+
+### Labels and `br_indirect`
+
+GNU C's labels as values and the producer's jump tables (#133's
+`JUMP_INDIRECT`) are the function's labels: `labels[k]` is label `k`'s block, at
+whose code the producer defines its `k`-th label symbol, as it defines it at
+`Tier0Code.label_records[k]` for Tier 0. `br_indirect` goes to the label whose
+address its operand holds; its CFG successors are every label's block, one edge
+per distinct block, in label order. A function with `br_indirect` must give every
+label a block; in one without, a label may have none (`BUSTER_IR_NONE`): no jump
+reaches it, and a backend defines its symbol anywhere in the function. A pass that
+removes a label's block (SSA promotion's unreachable blocks, the optimizer's dead
+ones) leaves the label none; one that threads a block's jump moves the label to
+its target. A jump table's dispatch can only reach its own table's labels, but the
+IR takes the conservative edges of GNU C's rule: any label of the function.
+
+### By-value aggregates' ABI records
+
+The IR has no aggregate types, so a struct or union passed or returned by value
+(and #136's other objects that cross calls: a long double parameter, an
+`__int128` argument, parameter or result) carries the producer's calling-convention
+assignment, which no IR type can give a backend. These records are trusted, as
+`IrDominance` is: the verifier checks the IR's own rules, not the convention's.
+
+- `IrPassed { AbiLocation location; uint32_t size; }`: an argument's or a
+  parameter's location, and its size, nonzero for an aggregate, whose IR value is
+  a `ptr` to its bytes. The callee receives its own copy of them.
+- `IrAbiCall { AbiCall call; uint32_t passed; uint32_t result_size; }`: a call's
+  totals and result, its arguments' records (`passed[passed..+argument_count)`)
+  and, nonzero, an aggregate result's bytes, which the call writes where its
+  instruction's `c` operand (a `ptr`, the call's destination) points; the call's
+  own result type is then `void`. `IrCall.abi` is 1 plus the record's index in
+  `abi_calls`, or 0 for a call of C values alone. The destination is a use at
+  position 2, so promotion and the optimizer treat its slot as escaping.
+- The function's own, when `parameter_passed` isn't 0: its parameters' records,
+  `passed[parameter_passed - 1..+parameter_count)` (an aggregate's `PARAM` is a
+  `ptr` to the callee's copy), its result as the convention returns it
+  (`result_abi`) and, nonzero, `result_size`: an aggregate returned in registers,
+  whose bytes the function returns from the address its `ret` operand holds (its
+  result type is then `ptr`). A result through a hidden pointer (`result_abi`'s
+  kind `MEMORY`) keeps the stream's form: parameter 0 is the pointer, which the
+  function writes and returns; a call of it passes its destination there.
+
+The verifier checks each record's slice, the destination's presence and type
+against the call's result size, and that each aggregate argument and parameter is
+a `ptr`. A backend that compiles a call or a function with records takes their
+locations as they are; one that doesn't (Tier 1 today) refuses them.
+
+### A variadic definition's incoming frame
+
+#148's `va_start` and `va_arg` are the front end's: they read and write a
+`va_list`'s fields and the incoming frame through two anchors. With `variadic`,
+the function has its frame: `incoming`, its named arguments' assignment
+(`Tier0Function.incoming_variadic`: the overflow area starts `stack_bytes` past
+the incoming stack arguments). The anchors are slots, address-taken and untyped,
+at most one of each, aligned to at least 16:
+`BUSTER_IR_SLOT_REGISTER_SAVE_AREA` (`BUSTER_ABI_SAVE_AREA_BYTES` bytes, which
+hold at entry the argument registers as the psABI lays them out: rdi to r9, then
+xmm0 to xmm7 from byte 48) and `BUSTER_IR_SLOT_OVERFLOW_AREA` (no bytes of its
+own: its address is where the incoming stack arguments past the named ones
+start). A `va_list` is an ordinary slot of its 24 bytes.
 
 ## Blocks, CFG and use lists
 
@@ -202,12 +259,41 @@ dominator tree: #174 owns that analysis.
 `ir_lower_typed(input, result_type, symbol_count, output, scratch, result)` and
 its scalar twin accept the current `Tier0Function` contract after validating it.
 The semantic result type is explicit because the stream's `AbiReturn` describes
-locations, not its source type. The adapter doesn't model #148's incoming
-variadic frames: a non-null `incoming_variadic` (compared, never read) and a
-local flag other than `ADDRESS_TAKEN` (`BUSTER_TYPED_LOCAL_ADDRESS_ONLY`'s
-anchors and `va_list` objects) are refused with `IR_ERROR_METADATA`, the local
-in `detail` (`BUSTER_IR_NONE` for the frame), after the count and column checks
-and before validation or allocation, rather than lowered as ordinary slots.
+locations, not its source type: it is the RETURN entries' class, which for an
+aggregate is its address's (U64, `i64`). A source producer takes it from the
+RETURNs, or for a function none leaves from its declared result
+(`ir_source_result`).
+
+An indirect call (a calls table's target 0) pops, under its arguments, the
+address it calls: it becomes a `ptr` (`inttoptr`) for `call_indirect`.
+
+#148's incoming variadic frame becomes the IR's (`variadic`, `incoming`), and its
+roles' locals slots: a `va_list` (`BUSTER_TYPED_LOCAL_VA_LIST`) its 24 bytes
+(aligned to 8), the register save area and the overflow area the two anchors.
+tier0_validate checks the roles' rules first (a role on a parameter, two roles,
+an anchor without the frame, a role without `ADDRESS_TAKEN` or on a class other
+than U64 is a structural error).
+
+#137's aggregates by value get their ABI records (above). An aggregate argument's
+address becomes a `ptr`, with its size and location; a call with a result object
+(`call_result_objects`) gets the object's slot address as its destination and the
+object's size as its `result_size`; an object parameter is a `ptr` whose bytes the
+preheader copies into its object, as `COPY` copies (below); a result in
+registers (`result_size`) returns `inttoptr` of its RETURN's address, and the
+IR's result type is `ptr`. A function with an object parameter or an aggregate
+result, in registers or through a hidden pointer, has its own records; a call that
+passes or returns one has its call's.
+
+Long double (`F80`) and the 128-bit integers (`I128`, `U128`) are `f80` and
+`i128` values, which Tier 0 keeps in frame slots. A constant of `F80` is its
+`x87_constants` pair (the significand, then the sign and exponent); one of `I128`
+sign-extends its 64 bits, of `U128` zero-extends them. Their locals are objects of
+at least 16 bytes, which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` read and write as
+their first 10 or 16 bytes. The expression slots that carry stack values across
+blocks are 16 bytes, aligned to 16, in a function with values of these classes,
+and 8 otherwise. The classification's signedness and floating tables (one byte
+per class, which both paths read) take `I128` as signed and `F80` as floating,
+which Tier 0's own predicates leave apart.
 
 #136's frame objects (a local with a size in `local_sizes`: an array, a struct
 or a union, of class VOID, address-taken) each get a slot of their own: the
@@ -238,9 +324,12 @@ produce i64. The existing local and expression-edge slots carry these bits
 through branches and loops without moving their effects. This adds no planning
 arrays, instruction columns or input traversals for ordinary functions.
 
-#133's computed gotos aren't lowered yet: `JUMP_INDIRECT` is refused with
-`IR_ERROR_OPCODE` at its entry, after validation and before anything is
-allocated. `BUSTER_TYPED_JUMP_INDIRECT` is the last typed kind; a static
+#133's labels (`label_entries`) each start a block, and the IR's labels are
+those blocks. `JUMP_INDIRECT` pops a label's address at statement level: the plan
+arrives at every label with the stacks empty, and the emitter lowers it to
+`inttoptr` and `br_indirect`. `VECTOR` values and `X86` rows are refused with
+`IR_ERROR_TYPE` and `IR_ERROR_OPCODE` at their entry, after validation and before
+anything is allocated. `BUSTER_TYPED_X86` is the last typed kind; a static
 assertion makes a later kind fail to build until this adapter lowers or refuses
 it, since the plan and the emitter would take an unnamed kind for a binary
 operation.
@@ -361,10 +450,10 @@ comparisons produce `i1`, explicitly extended to the stream's `i32` result.
 The typed endpoint becomes a void return for a void function and an `undef`
 return for nonvoid fallthrough, whose value the existing stream leaves unspecified.
 The caller must diagnose source-language constraints before lowering. The adapter
-handles all currently defined typed kinds and classes; it does not invent missing
-i128/f80, indirect-call, volatile, aggregate or prototype information. In particular,
-the legacy stream provides argument classes and a variadic bit but no
-named-parameter count: this compatibility adapter checks all supplied classes as
+handles all currently defined typed kinds and classes but vectors and `X86` rows;
+it does not invent missing volatile or prototype information. In particular,
+the stream provides argument classes and a variadic bit but no
+named-parameter count: this adapter checks all supplied classes as
 fixed parameters. A source producer must preserve the effective call-site
 prototype and conversions already retained by the checker when constructing
 `IrCall` descriptors.
@@ -383,6 +472,8 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler benchmark-ir --only vector --after-scalar 200
 ./build/compiler benchmark-ir-lowering
 ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
+./build/compiler test-ir-source [--print NAME] [preprocessor options] file...
+./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
 
 `test-ir` has independently expected CFG/use lists and rejection fixtures,
@@ -390,7 +481,19 @@ conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random
 integer DAG mutations. Agreement alone is insufficient: malformed fixtures must
-be rejected by both paths.
+be rejected by both paths. A labels fixture (`ir_test_labels`) checks
+`br_indirect`'s successors (three labels, two distinct blocks: two edges), a
+label's phi, and the refusals of a label without a block beside an indirect
+branch, a label past the blocks, a branch through an integer and a missing label
+column. An aggregates fixture (`ir_test_aggregates`) checks a variadic
+definition's anchors and a call's ABI records and destination, which its use list
+has at position 2, and refuses each break: records past their tables, a result
+without its destination or into an integer, a destination without a result, an
+aggregate argument or parameter that isn't a `ptr`, an aggregate result without
+the function's records, anchors outside a variadic definition, of other sizes,
+typed, not address-taken, two of one, both at once and aligned below 16.
+`tests/ir/labels.ir` and `tests/ir/aggregates.ir` are their canonical text, which
+`test-ir-parse` reads, prints back byte for byte and requires of every opcode.
 
 `test-ir-lowering` lowers generated typed programs through both paths, verifies
 every function, compares their columns, and executes the resulting IR in a
@@ -399,10 +502,17 @@ Calls and global-memory effects are compared, with targeted fixtures for values
 across conditional joins, backedges to entry zero, narrow shifts and wide pointer
 scales. This is adapter testing, not the production interpreter of #176.
 
-It generates two sets of programs from the same seeds: values only, which give
-the same streams as before objects existed, and with the generator's `objects`
+It generates sets of programs from the same seeds: values only, which give
+the same streams as before objects existed; with the generator's `objects`
 option (local arrays and structs, pointers into them, copies between twins,
-some aligned to 16; no indirect calls, which the adapter refuses). Each program
+some aligned to 16); with calls through pointers to functions (`indirect`); and
+with the catalog's records passed and returned by value (`records`: structs and
+unions in registers, on the stack and through hidden pointers), whose IR the
+executor runs as the ABI records say: a callee's own copy of each aggregate
+argument, a hidden pointer's destination as parameter 0, and a result's bytes
+copied to the call's destination before the callee's frame goes. Each set must
+reach what it is for (indirect calls; calls with records, aggregate parameters and
+both kinds of result). Each program
 is also compiled by Tier 0 and run natively in a child process
 (`test-tier0`'s harness), and its result and global bytes must equal the IR
 executor's, besides the typed interpreter's. The executor bounds every access
@@ -424,6 +534,24 @@ and must never take an object's. The two paths may order their output
 differently, so their columns aren't compared here; `test-ssa-ir` checks their
 semantics by execution. A promotion that shrank an object's slot by a byte
 fails this check.
+
+`ir_lower_test_wide` runs Tier 0's own random programs of long double and of the
+128-bit integers (`tier0_x87_test.c`, `tier0_int128_test.c`, 128 of each by
+default) through both lowerings and promotion, then through the shared IR's
+interpreter (#176) on random inputs, every output slot compared with their stack
+machines': the x87 programs' calls of C functions through their addresses (as the
+interpreter's natives), NaNs alike, and the wide integers' arithmetic, shifts,
+compares and conversions. Fixtures check a computed goto through a `?:` of two
+labels' addresses (executed, and promoted with both labels kept), a variadic
+definition whose result is its register save area's first unnamed argument (its
+anchors' sizes, alignments and flags, its frame, five breaks of the roles' rules
+refused), and a function that takes, passes and returns a struct by value (its
+own and its call's records, exactly the stream's). Each of these was checked by
+mutation when added: an `__int128` constant's lost sign extension, `I128` taken
+as unsigned, a long double constant's halves swapped, a parameter's copy a byte
+short, a call's result room a byte short, the labels in the wrong order, an
+indirect call through its first argument and a register save area of 168 bytes
+each fail the command.
 The current generator can still produce out-of-range floating-to-integer
 conversions with its `defined` option. For those undefined results only, the
 test executor chooses the existing Tier 0 interpreter's CVTT convention; its

@@ -1038,19 +1038,27 @@ designs and the compilers already built this way.
   9700X measurements.
 - `src/buster/compiler/ir.c` supplies Tier 1's per-function arena-backed instruction
   columns, scalar and 16-wide verifiers, compact CFG/use arrays and stable printer
-  (#131). `ir_lower.c` lowers the existing `Tier0Function` stream into the
-  all-in-memory form for SSA promotion, frame objects as address-taken slots of
-  their size and alignment and `COPY` as integer load/store pieces; it refuses
-  variable-length arrays' stack entries (`ALLOCA`, `STACK_SAVE`,
-  `STACK_RESTORE`). `test-ir`
-  checks independent fixtures, guarded columns, malformed inputs and allocation
-  rollback; `test-ir-lowering` also executes generated IR, with and without
-  objects, against the typed-stream interpreter and Tier 0's native code,
-  including calls and global-memory effects. `benchmark-ir` measures verification and
-  derived-array rebuilding on synthetic functions. `benchmark-ir-lowering`
-  measures the available typed-stream producer through output verification.
-  [The IR guide](docs/ir.md) records the producer/consumer contract and the
-  source-corpus, SSA/Tier 1 and SQLite bytes/token acceptance still pending.
+  (#131), with labels (`br_indirect`), by-value aggregates' ABI records (the
+  producer's locations, which the IR's types can't give) and a variadic
+  definition's frame and anchors. `ir_lower.c` lowers the `Tier0Function` stream
+  into the all-in-memory form for SSA promotion: frame objects as address-taken
+  slots of their size and alignment, `COPY` as integer load/store pieces, the
+  dynamic stack's operations, indirect calls, labels and `JUMP_INDIRECT`,
+  aggregates by value, variadic frames, long double and `__int128`; it refuses
+  vectors and `X86` rows, which no corpus function has. `test-ir` checks
+  independent fixtures, guarded columns, malformed inputs and allocation
+  rollback; `test-ir-lowering` also executes generated IR (values, objects,
+  indirect calls, records by value, the dynamic stack) against the typed-stream
+  interpreter and Tier 0's native code, and Tier 0's long double and `__int128`
+  programs through the shared IR's interpreter against their stack machines.
+  `test-ir-source` lowers, compares and promotes every function `-c` compiles of
+  real C files (`ir_source_test.c`), and `benchmark-ir-source` reports their IR's
+  bytes per source token and the largest functions' shares, and times lowering,
+  verification and promotion on them (`ir_source_benchmark.c`). `benchmark-ir`
+  measures verification and derived-array rebuilding on synthetic functions.
+  `benchmark-ir-lowering` measures the typed-stream producer through output
+  verification on generated programs. [The IR guide](docs/ir.md) records the
+  producer/consumer contract and the corpora's results.
 - `src/buster/compiler/call_graph.c` is the call graph check, the coding
   style's rule against recursion checked mechanically: `check-call-graph`
   reads the LLVM IR of the translation units `build.sh` compiles, builds their
@@ -5664,12 +5672,43 @@ typed programs through both paths, compares every column and verifies each
 function. A test-only executor with explicit call frames compares results and
 global-memory effects with the existing typed-stream interpreter and with Tier
 0's native code of the same streams, run in a child process. It runs `--count`
-programs of values and as many with frame objects and copies. Targeted
-fixtures exercise conditional joins, entry-zero backedges, narrow shifts, wide
-pointer scales, objects' slots, `COPY` of every size from 1 to 256, guarded
-source tails and transactional failures. Every lowered function is also
-promoted by both SSA paths, verified, and must keep its objects' slots. The
-default count is 32 programs. It does not supply the production interpreter of #176.
+programs of values and as many each with frame objects and copies, with calls
+through pointers to functions and with records passed and returned by value,
+whose IR the executor runs as its ABI records say. Targeted fixtures exercise
+conditional joins, entry-zero backedges, narrow shifts, wide pointer scales,
+objects' slots, `COPY` of every size from 1 to 256, labels and a computed goto,
+a variadic definition's frame, a struct by value's records, guarded source tails
+and transactional failures. Every lowered function is also promoted by both SSA
+paths, verified, and must keep its objects' slots. Tier 0's random long double
+and `__int128` programs (four times the count) run through the shared IR's
+interpreter (#176) against their stack machines. The default count is 32
+programs.
+
+`./build/compiler test-ir-source [--print NAME] [preprocessor options] file...`
+(`ir_source_test.c`) is #131's acceptance on real C: each file checked, selected
+and emitted as `-c` compiles it (`ir_source_prepare`, as benchmark-backend-source
+prepares its files), then every function's typed stream lowered by both paths,
+which must agree column for column and verify, and promoted by both of
+`ssa_ir.c`'s paths, whose results verify with dominance. A function's semantic
+result type is its RETURNs' class, or its declared result's
+(`ir_source_result`). A file the checker rejects, or whose program or emission
+refuses a feature by name, is left out with its reason; any other failure, and
+any function refused, lowered apart or unpromoted, fails the command, naming the
+function and the first error. `--print NAME` prints that function's IR as lowered
+and as promoted. The 9700X job runs it on c-testsuite's subset and the frozen
+`sqlite3.c`.
+
+`./build/compiler benchmark-ir-source [--only lower|lower-scalar|verify|
+verify-scalar|promote|promote-scalar] [--after-scalar MS] [preprocessor options]
+file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
+does, lowers and promotes each once outside the time, and reports the IR's bytes
+(each function's arena, alignment gaps and all, as an arena of its own) per
+source token (the parser's), per typed entry and per instruction, lowered and
+promoted, and the ten largest functions with their shares; then 21-pass medians
+per typed entry and per IR instruction of each variant over every function, each
+pair's paths taking turns first. Any file or function that fails fails it. Run it
+under the 9700X's lock with `taskset -c 2`; the 9700X job runs it on the frozen
+`sqlite3.c` where the IR or its lowering changes.
 
 `./build/compiler benchmark-ir [--instructions N] [--passes N] [--only
 scalar|vector|uses|cfg] [--after-scalar MS]` measures the verifier and derived
@@ -5683,4 +5722,4 @@ labeled separately from core cycles. The 9700X workflow runs the tests and
 pins each benchmark to one allowed CPU; it adds the runs after 200 ms of scalar
 work before each vector sample where the pull request changes the module
 ("Sharing the 9700X"). [The guide](docs/ir.md) records
-interfaces, measurement scope and outstanding source-corpus acceptance.
+interfaces, measurement scope and the corpora's results.

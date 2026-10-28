@@ -691,19 +691,8 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
     else if ((input->count != 0 && (input->kinds == 0 || input->classes == 0 || input->values == 0)) ||
              (input->local_count != 0 && (input->local_classes == 0 || input->local_flags == 0)) ||
              (input->parameter_count != 0 && input->parameters == 0) ||
-             (input->call_count != 0 && (input->call_targets == 0 || input->call_first == 0 || input->call_argument_counts == 0 || input->call_variadic == 0)) ||
-             (input->argument_count != 0 && input->argument_classes == 0))
-    {
-        check.error = IR_ERROR_STRUCTURE;
-    }
-    // The optional frame and aggregate columns, which tier0_validate reads where they are present, must each be there with
-    // its parts: an incoming variadic frame (its anchors' roles), by-value aggregates (their sizes and locations), objects.
-    bool aggregates = check.error == IR_OK && input->result_size != 0;
-    for (uint32_t c = 0; check.error == IR_OK && c < input->call_count; c += 1)
-    {
-        aggregates |= ir_typed_aggregate_call(input, c);
-    }
-    if (check.error == IR_OK && ((aggregates && (input->calls == 0 || input->argument_locations == 0)) || (input->parameter_count != 0 && input->parameters == 0)))
+             (input->call_count != 0 && (input->call_targets == 0 || input->call_first == 0 || input->call_argument_counts == 0 || input->call_variadic == 0 || input->calls == 0)) ||
+             (input->argument_count != 0 && (input->argument_classes == 0 || input->argument_locations == 0)))
     {
         check.error = IR_ERROR_STRUCTURE;
     }

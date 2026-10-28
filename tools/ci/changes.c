@@ -521,6 +521,16 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|lane",
     },
     {
+        // The IR of the functions -c compiles of real C (#131): their preparation's, as benchmark-backend-source's,
+        // which decides the typed streams it lowers, and the IR's lowering, verification and promotion.
+        .name = "ir-source",
+        .sources = "ir|ir_validate|ir_lower[a-z0-9_]*|ir_source[a-z0-9_]*|ssa|ssa_ir|dominators|c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|"
+                   "c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|"
+                   "c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|"
+                   "tier0[a-z0-9_]*|calling_convention|branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|"
+                   "x86_semantics|x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
+    },
+    {
         .name = "lanes",
         .unit = "lane_benchmark.c",
     },
@@ -1600,6 +1610,13 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the shared IR",
         .files = "src/buster/compiler/ir.c",
         .outputs_true = "ir ir_lowering ir_optimize",
+        .measured = "ir ir-lowering ir-source",
+    },
+    {
+        .name = "the IR of real C's functions",
+        .files = "src/buster/compiler/ir_source_benchmark.c",
+        .measured = "ir-source",
+        .unmeasured = "ir ir-lowering backend-source",
     },
     {
         .name = "the per-file jobs",

@@ -244,6 +244,14 @@ clang -std=c17 -O2 -Wall -Wextra -Werror tests/differential/lifecycle.c -o build
 ./build/compiler measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
 == Test shared IR local promotion and typed-stream semantics
 ./build/compiler test-ssa-ir
+== Lower every function of c-testsuite's programs and the frozen sqlite3.c into the IR
+# #131: each function -c compiles lowered by both paths, which must agree and verify, then promoted by both of
+# ssa_ir.c's paths, whose results verify with dominance. sqlite3.c with benchmark-backend-source's options.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+./build/compiler test-ir-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+./build/compiler test-ir-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Check the frozen SQLite source against Clang
 # --deferred 8 also reads its bodies apart on 8 lanes (#113), whose result must be the vector path's. --symbols
 # compares -c's functions and objects with clang -O0 -c's where the backend lowers the file (#129), which it

@@ -13,7 +13,8 @@
 // paths, which must agree, into the IR the verifier and promotion variants read, and promoted once by both, outside
 // the time. Any file that fails or is left out, and any function either path refuses, fails the benchmark, which then
 // reports no time: its corpus would be less than the files'. The bytes are the function arenas' (IrFunction.arena_bytes:
-// every column and side table, with their alignment gaps), lowered and promoted; the tokens the parser's. Each variant's
+// every column and side table, with their alignment gaps, each function in an arena of its own), lowered and promoted;
+// the tokens the parser's. Each variant's
 // run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each
 // pair runs first; --only times one alone, back to back, and --after-scalar MS runs a vector variant's scalar twin, untimed,
 // for MS ms before each of its passes. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
@@ -52,9 +53,19 @@ struct IrSourceCorpus
     uint64_t bytes;
     uint64_t promoted_instructions;
     uint64_t promoted_bytes;
+    // The lowered IR's bytes of its side tables, without the alignment gaps (ir_source_payload).
+    uint64_t tables;
     // Functions a path refused or the paths lowered apart, and files that failed or were left out.
     uint64_t failures;
 };
+
+// A function's bytes but its instruction columns' and its alignment gaps: its blocks', side tables' and records'.
+static uint64_t ir_source_tables(const IrFunction* f)
+{
+    return ((uint64_t)f->block_count + 1) * 4 + (uint64_t)f->extra_count * 4 + (uint64_t)f->constant_count * sizeof(IrConstant) +
+           (uint64_t)f->slot_count * sizeof(IrSlot) + (uint64_t)f->address_count * sizeof(IrAddress) + (uint64_t)f->call_count * sizeof(IrCall) + f->call_type_count +
+           f->parameter_count + (uint64_t)f->label_count * 4 + (uint64_t)f->abi_call_count * sizeof(IrAbiCall) + (uint64_t)f->passed_count * sizeof(IrPassed);
+}
 
 // One run of `variant` over the corpus, its output put back after each function; `failures` counts the functions it
 // refused.
@@ -110,10 +121,18 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         IrFunction promoted = { 0 };
         IrFunction promoted_twin = { 0 };
         const uint64_t mark = output->length;
-        const bool lowers = ir_lower_typed(source->function, source->result_type, source->symbol_count, kept, scratch, vector).error == IR_OK &&
+        // Each function starts its kept columns at a 64-byte boundary, as in an arena of its own (#131's one per
+        // function), so that its bytes, alignment gaps and all, don't depend on the functions before it.
+        const uint64_t padding = (64 - (kept->length & 63)) & 63;
+        bool lowers = padding == 0 || arena_push(kept, padding, 1) != 0;
+        lowers = lowers && ir_lower_typed(source->function, source->result_type, source->symbol_count, kept, scratch, vector).error == IR_OK &&
                             ir_lower_typed_scalar(source->function, source->result_type, source->symbol_count, output, scratch, &scalar).error == IR_OK &&
                             ir_lower_test_equal(vector, &scalar);
+        // Each promotion from the same mark, an arena of its own's start, as test-ir-source's are.
+        arena_pop_to(output, mark);
         const IrCheck promotion = lowers ? ssa_ir_promote(vector, output, scratch, &promoted) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+        const uint64_t promoted_bytes = promoted.arena_bytes;
+        arena_pop_to(output, mark);
         const IrCheck promotion_twin = lowers ? ssa_ir_promote_scalar(vector, output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
         joined = promotion.error == IR_OK && promotion_twin.error == IR_OK;
         if (joined)
@@ -123,8 +142,9 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
             corpus->entries += source->function->count;
             corpus->instructions += vector->instruction_count;
             corpus->bytes += vector->arena_bytes;
+            corpus->tables += ir_source_tables(vector);
             corpus->promoted_instructions += promoted.instruction_count;
-            corpus->promoted_bytes += promoted.arena_bytes;
+            corpus->promoted_bytes += promoted_bytes;
             bytes += vector->arena_bytes;
             instructions += vector->instruction_count;
         }
@@ -156,10 +176,13 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
     const double tokens = (double)corpus->tokens;
     printf("benchmark-ir-source: %u functions of %" PRIu64 " files, %" PRIu64 " source tokens, %" PRIu64 " typed entries (%.3f per token)\n", corpus->count, corpus->files,
            corpus->tokens, corpus->entries, (double)corpus->entries / tokens);
-    printf("benchmark-ir-source: lowered IR: %" PRIu64 " instructions (%.3f per token, %.3f per entry), %" PRIu64 " bytes: %.2f per token, %.2f per entry, %.2f per instruction; "
-           "the columns %.2f per token\n",
+    printf("benchmark-ir-source: lowered IR: %" PRIu64 " instructions (%.3f per token, %.3f per entry), %" PRIu64 " bytes: %.2f per token, %.2f per entry, %.2f per instruction\n",
            corpus->instructions, (double)corpus->instructions / tokens, (double)corpus->instructions / (double)corpus->entries, corpus->bytes, (double)corpus->bytes / tokens,
-           (double)corpus->bytes / (double)corpus->entries, (double)corpus->bytes / (double)corpus->instructions, 16.0 * (double)corpus->instructions / tokens);
+           (double)corpus->bytes / (double)corpus->entries, (double)corpus->bytes / (double)corpus->instructions);
+    const uint64_t columns = 16 * corpus->instructions;
+    const uint64_t gaps = corpus->bytes - columns - corpus->tables;
+    printf("benchmark-ir-source: lowered IR's bytes per token: %.2f the instruction columns', %.2f the blocks' and side tables', %.2f the 64-byte alignment gaps\n",
+           (double)columns / tokens, (double)corpus->tables / tokens, (double)gaps / tokens);
     printf("benchmark-ir-source: promoted IR: %" PRIu64 " instructions (%.3f per token), %" PRIu64 " bytes: %.2f per token\n", corpus->promoted_instructions,
            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
