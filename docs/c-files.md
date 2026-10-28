@@ -130,8 +130,10 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   the existing search. Include order, `#include_next`, and each file's path
   and system-header level are still decided by `pp_include_candidate`.
   The preprocessor fills listings lazily, so a unit with no includes makes
-  none. A run-ahead fills its shared search directories before lanes start;
-  the probes on lanes only read the snapshots. The scalar and vector paths
+  none. A run-ahead fills its shared search directories on lane 0 before the
+  first wave of include probes, inside the measured walk; the probes on
+  lanes only read the snapshots. Flat walks and files with no literal
+  includes need no listing. The scalar and vector paths
   share this syscall filter; the entry-name hash table is scalar, since its
   purpose is to eliminate OS calls rather than token-processing work.
   As with cached files and negative paths, the filesystem is a snapshot for
