@@ -17,6 +17,14 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The system-header warning policy, retained pragma completion and `_Pragma`
+diagnostic-source changes (#666/#662), including their original fixtures in
+`c_preprocessor_system_warning_test.c` and `c_check_pragma_test.c`, use the
+project default terms. LLVM/Clang 23.1.4 diagnostic metadata and engine sources
+provide behavior facts, and Clang runs externally as an oracle. Miniz 3.0.2 is an
+external compile/runtime corpus with its original license retained outside the
+source tree; no implementation or corpus fixtures are copied into this project.
+
 The large aggregate-copy lowering in `c_check_program_lower.c` and its focused
 `c_check_program_copy_test.c` fixtures (#597) are original project material under
 the default terms. They reuse the existing runtime-symbol, SysV ABI and typed-stream

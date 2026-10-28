@@ -351,6 +351,14 @@ Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
 
+Preprocessor-completed `#pragma message`, `#pragma GCC warning`, `#pragma GCC
+error`, `#ident` and `#sccs` records are accepted without another semantic action
+or diagnostic (#662). The checker recognizes their bounded canonical shapes;
+unrelated or malformed records retain their own handler/refusal. A GCC error
+still rejects the unit during preprocessing. `#sccs` is canonicalized to `#ident`.
+The strings from `#ident` and `#sccs` are deliberately omitted from object
+`.comment` sections; they affect neither program behavior nor source acceptance.
+
 The action layer is broader than that adapter. It can check enum promotions,
 bit-field restrictions, compatible record assignment, nested const members,
 pointer qualification, function calls and their parameter conversions.
