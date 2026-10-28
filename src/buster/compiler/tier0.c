@@ -75,7 +75,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The typed stream
@@ -3764,6 +3764,8 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
 // `order` (local_count) is scratch for the locals by them (tier0_order_locals).
 static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
 {
+    (void)vector;
+
     const uint32_t locals = function->local_count;
     // The registers parameters arrive in: no other local takes one, so the prologue's moves never overwrite a source. An
     // aggregate's parts arrive in both of a location's registers (a SPLIT one's in one of them).
@@ -3809,7 +3811,7 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     }
     // The rest by references, most first (`order`, tier0_order_locals'); for the vector path and up to 64 locals, by their
     // ranks (tier0_assign_registers_vector).
-    const bool ranked = vector && locals <= 64;
+    const bool ranked = BUSTER_VECTOR_PATH(vector) && locals <= 64;
     if (ranked)
     {
         frame->saved |= tier0_assign_registers_vector(function, homes, references, taken);
@@ -3965,6 +3967,8 @@ static uint64_t tier0_frame_objects_vector(const Tier0Function* function, const 
 
 static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
 {
+    (void)vector;
+
     const bool object_parameters = frame->object_parameters;
     uint64_t outgoing = 0;
     for (uint32_t c = 0; c < function->call_count; c += 1)
@@ -4001,7 +4005,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         frame->variadic_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_ABI_SAVE_AREA_BYTES;
     }
-    for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
+    for (uint32_t l = 0; l < function->local_count && !BUSTER_VECTOR_PATH(vector); l += 1)
     {
         const bool address_taken = (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
         const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
@@ -4017,7 +4021,7 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         }
     }
     bool aligned = false;
-    for (uint32_t l = 0; l < function->local_count && !vector; l += 1)
+    for (uint32_t l = 0; l < function->local_count && !BUSTER_VECTOR_PATH(vector); l += 1)
     {
         const bool in_place = object_parameters && l < function->parameter_count && tier0_parameter_in_place(function, l);
         if (tier0_is_object(function, l) && !in_place)
@@ -4033,8 +4037,8 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         }
     }
     bool objects = false;
-    offset = vector ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
-    offset = vector && objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
+    offset = BUSTER_VECTOR_PATH(vector) ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
+    offset = BUSTER_VECTOR_PATH(vector) && objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
     // frame pointer, under which every allocation keeps it so. A realigned frame's rsp is rounded down to its alignment
     // after the reservation instead, which keeps it so too.
@@ -7537,6 +7541,8 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 // columns' bytes would wrap past.
 static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
 {
+    (void)vector;
+
     const uint32_t count = function->count;
     const uint32_t limits[2] = { (uint32_t)frame->depth_count, BUSTER_TIER0_FLOATING_DEPTHS };
     const uint8_t window_flags[2] = { BUSTER_TIER0_DEEP_INTEGER, BUSTER_TIER0_DEEP_FLOATING };
@@ -7619,7 +7625,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
             entries->deep_floating_depths[i] = (uint8_t)before[1];
             entries->depths[i] = (flags & BUSTER_TIER0_DEEP_INTEGER) != 0 ? (uint8_t)window[0] : entries->depths[i];
             entries->floating_depths[i] = (flags & BUSTER_TIER0_DEEP_FLOATING) != 0 ? (uint8_t)window[1] : entries->floating_depths[i];
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 entries->words[i] |= BUSTER_TIER0_WORD_DEFERRED;
             }
@@ -8040,15 +8046,17 @@ static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choic
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
 static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code, bool vector)
 {
+    (void)vector;
+
     Tier0Frame frame;
     memset(&frame, 0, sizeof(frame));
     Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
-    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(vector ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
-    const uint32_t unsupported = error == TIER0_OK ? (vector ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
+    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
+    const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
     {
-        error = tier0_select_deep(function, entries, &frame, scratch, vector, &code->deep);
+        error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
     }
     // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
     // and the vectors'.
@@ -8073,7 +8081,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     memset(&choices, 0, sizeof(choices));
     if (error == TIER0_OK)
     {
-        if (vector)
+        if (BUSTER_VECTOR_PATH(vector))
         {
             tier0_count_references_vector(function, references);
         }
@@ -8082,14 +8090,14 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
             tier0_count_references(function, references);
         }
         frame.object_parameters = tier0_object_parameters(function);
-        tier0_assign_homes(function, &frame, homes, references, order, vector);
-        error = tier0_layout_frame(function, &frame, homes, references, vector) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+        tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
+        error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
     }
     if (error == TIER0_OK)
     {
         Tier0Counts counts;
         uint32_t epilogue = 0;
-        if (vector)
+        if (BUSTER_VECTOR_PATH(vector))
         {
             counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references), frame.memory);
             epilogue = tier0_count_epilogue(function, &frame);
@@ -8119,7 +8127,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
     }
     if (error == TIER0_OK)
     {
-        if (vector)
+        if (BUSTER_VECTOR_PATH(vector))
         {
             tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
@@ -8129,7 +8137,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
             tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
             x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
-        if (vector)
+        if (BUSTER_VECTOR_PATH(vector))
         {
             tier0_apply_choices_vector(code->records, &choices);
         }
@@ -10374,6 +10382,9 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
+#if !BUSTER_HOST_VECTOR
+    return tier0_compile_scalar(function, output);
+#else
     Tier0Code code;
     memset(&code, 0, sizeof(code));
     const uint64_t output_length = output->length;
@@ -10415,6 +10426,7 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
     return code;
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

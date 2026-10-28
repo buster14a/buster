@@ -14,7 +14,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_X86_COST_UNKNOWN UINT16_MAX
 #define BUSTER_X86_COST_SCALE 256
@@ -228,6 +228,9 @@ static __attribute__((noinline)) void x86_zen5_lookup_scalar(const uint8_t* rest
 
 static __attribute__((noinline)) void x86_zen5_lookup(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
 {
+#if !BUSTER_HOST_VECTOR
+    x86_zen5_lookup_scalar(ids, count, column, output);
+#else
     const __m512i low = _mm512_load_si512(x86_zen5_columns[column]);
     const __m512i high = _mm512_load_si512(x86_zen5_columns[column] + 32);
     const uint64_t full = count & ~UINT64_C(31);
@@ -249,6 +252,7 @@ static __attribute__((noinline)) void x86_zen5_lookup(const uint8_t* restrict id
         const __m512i values = _mm512_permutex2var_epi16(low, keys, high);
         _mm512_mask_storeu_epi16(output + full, active, _mm512_mask_mov_epi16(_mm512_set1_epi16(-1), known, values));
     }
+#endif
 }
 
 // A consumer's manifest is tested explicitly, never inferred from this model's own cases. An unknown requested

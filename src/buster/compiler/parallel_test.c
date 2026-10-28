@@ -1024,10 +1024,14 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_path(test, errors, sizeof(errors), "command.err");
     char stuck[600];
     char stuck_pid[600];
+    char stuck_temp[600];
     parallel_test_path(test, stuck, sizeof(stuck), "stuck.list");
     parallel_test_path(test, stuck_pid, sizeof(stuck_pid), "piped");
+    parallel_test_path(test, stuck_temp, sizeof(stuck_temp), "piped.tmp");
     char stuck_text[BUSTER_PARALLEL_TEST_TEXT_BYTES];
-    snprintf(stuck_text, sizeof(stuck_text), "== stuck\necho $$ > '%s'\nexec sleep 30\n", stuck_pid);
+    // Publish the PID only after the complete line is written. The runner can kill the shell between opening and
+    // writing a redirected file, in which case a visible but empty PID file would not name a process to check.
+    snprintf(stuck_text, sizeof(stuck_text), "== stuck\necho $$ > '%s' && mv -- '%s' '%s'\nexec sleep 30\n", stuck_temp, stuck_temp, stuck_pid);
     bool ready = parallel_test_write(passing, parallel_test_string("# A list that passes.\n== first\necho one\n== second\necho two >&2\n")) &&
                  parallel_test_write(failing, parallel_test_string("== fails\nexit 2\n")) && parallel_test_write(invalid, parallel_test_string("== a\n")) &&
                  parallel_test_write(stuck, parallel_test_string(stuck_text));
@@ -1075,6 +1079,7 @@ static void parallel_test_command_line(ParallelTest* test)
         struct sigaction pipe_action = { .sa_handler = ignored != 0 ? SIG_IGN : SIG_DFL };
         sigaction(SIGPIPE, &pipe_action, 0);
         unlink(stuck_pid);
+        unlink(stuck_temp);
         int pipe_ends[2] = {
             -1,
             -1,
@@ -1095,8 +1100,13 @@ static void parallel_test_command_line(ParallelTest* test)
         // The command may have been killed before it wrote its pid; if it did, the process must be gone.
         struct stat pid_stat;
         const bool wrote_pid = stat(stuck_pid, &pid_stat) == 0;
+        const bool gone = !wrote_pid || parallel_test_gone(test, "piped");
+        char details[256];
+        const int detail_length = snprintf(details, sizeof(details), "pipe=%d status=%d elapsed_ns=%llu pid_file=%d pid_bytes=%lld gone=%d\n", piped, status,
+                                           (unsigned long long)pipe_time, wrote_pid, wrote_pid ? (long long)pid_stat.st_size : 0, gone);
+        const String8 observed = { .pointer = details, .length = detail_length > 0 && (size_t)detail_length < sizeof(details) ? (uint64_t)detail_length : 0 };
         parallel_test_check(test, ignored != 0 ? "the command, a report with no reader, SIGPIPE ignored" : "the command, a report with no reader",
-                            piped && status == 1 && pipe_time < 10 * BUSTER_PARALLEL_NANOSECONDS && (!wrote_pid || parallel_test_gone(test, "piped")), (String8){ 0 }, 0);
+                            piped && status == 1 && pipe_time < 10 * BUSTER_PARALLEL_NANOSECONDS && gone, observed, 0);
         test->arena.length = 0;
     }
     sigaction(SIGPIPE, &pipe_original, 0);
@@ -1209,6 +1219,7 @@ static void parallel_test_command_line(ParallelTest* test)
     unlink(invalid);
     unlink(stuck);
     unlink(stuck_pid);
+    unlink(stuck_temp);
     unlink(output);
     unlink(errors);
 }

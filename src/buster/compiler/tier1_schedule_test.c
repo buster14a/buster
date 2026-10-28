@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Original dependency, fusion, cost-coverage, permutation and guarded-slice tests for the experimental scheduler.
+// Original dependency, fusion, cost-coverage, permutation, guarded-slice and generated-execution tests for the experimental scheduler.
 // Include after tier1_schedule.c. These are machine-record fixtures, not source/corpus compilation evidence.
 
 #include <errno.h>
@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include "buster/compiler/tier1_schedule_fixture.c"
 
 typedef struct Tier1ScheduleTest Tier1ScheduleTest;
 struct Tier1ScheduleTest
@@ -279,6 +280,20 @@ static void tier1_schedule_test_guards(Tier1ScheduleTest* test, Tier1ScheduleGra
     }
 }
 
+static void tier1_schedule_test_execution(Tier1ScheduleTest* test, Tier1ScheduleGraph* scalar, Tier1ScheduleGraph* vector)
+{
+    for (uint32_t path = 0; path < 2; path += 1)
+    {
+        Tier1ScheduleFixture fixture = { 0 };
+        uint16_t order[BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS];
+        const bool ready = tier1_schedule_fixture_open(&fixture, path == 0 ? scalar : vector, order, path != 0);
+        tier1_schedule_test_expect(test, ready && tier1_schedule_fixture_check(&fixture),
+                                   path == 0 ? "scalar schedule and both encoders execute 64 independent integer inputs" :
+                                               "requested vector schedule and both encoders execute 64 independent integer inputs");
+        tier1_schedule_fixture_close(&fixture);
+    }
+}
+
 static int run_tier1_schedule_tests(int argc, char** argv)
 {
     Tier1ScheduleTest test = { .seed = 172 };
@@ -307,6 +322,7 @@ static int run_tier1_schedule_tests(int argc, char** argv)
     {
         tier1_schedule_test_examples(&test, scalar, vector);
         tier1_schedule_test_guards(&test, scalar, vector);
+        tier1_schedule_test_execution(&test, scalar, vector);
         X86Instruction records[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
         uint8_t pins[BUSTER_TIER1_SCHEDULE_MAX_RECORDS];
         uint32_t state = test.seed;
