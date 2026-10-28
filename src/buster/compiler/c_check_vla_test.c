@@ -75,6 +75,91 @@ static void check_test_vla_metadata(CheckTest* test)
     }
 }
 
+// The issue #611 shapes exercise the complete source reader, with exact owners and captures at every size. Their
+// measured driver instruction growth lives in buster-performance; this correctness check has no timing threshold.
+static void check_test_vla_scaling(CheckTest* test)
+{
+    static const uint32_t counts[] = { 2000, 4000, 8000, 16000, 32000 };
+    for (uint32_t sample = 0; sample < BUSTER_ARRAY_LENGTH(counts); sample += 1)
+    {
+        const uint32_t count = counts[sample];
+        const uint32_t capacity = count * 32 + 128;
+        char* source = malloc(capacity);
+        bool written = source != 0;
+        uint32_t length = written ? (uint32_t)snprintf(source, capacity, "int f(int n) {\n") : 0;
+        for (uint32_t i = 0; written && i < count; i += 1)
+        {
+            const int added = snprintf(source + length, capacity - length, "typedef int A%u[n];\n", i);
+            written = added > 0 && (uint32_t)added < capacity - length;
+            length += written ? (uint32_t)added : 0;
+        }
+        if (written)
+        {
+            const int added = snprintf(source + length, capacity - length, "return n; }\n");
+            written = added > 0 && (uint32_t)added < capacity - length;
+            length += written ? (uint32_t)added : 0;
+        }
+        check_test_expect(test, written, "VLA scaling source allocation and generation");
+        for (uint32_t scalar = 0; written && scalar < 2; scalar += 1)
+        {
+            static InternTable identifiers;
+            static Preprocessor pp;
+            static Parser parser;
+            const PPOptions options =
+            {
+                .language = { .standard = 2017, .gnu = true },
+                .no_standard_includes = true,
+            };
+            const ParseOptions parse_options = { .scalar = scalar != 0 };
+            const TypeCapacity type_capacity =
+            {
+                .types = count + 4096,
+                .parameters = 8192,
+                .tags = 512,
+                .members = 4096,
+            };
+            CheckTestTypes types = { 0 };
+            types.arena = arena_reserve(type_capacity_bytes(type_capacity));
+            types.index = arena_reserve(type_index_capacity_bytes(type_capacity));
+            Arena storage = arena_reserve(UINT64_C(1) << 30);
+            Arena scratch = arena_reserve(UINT64_C(1) << 30);
+            bool ready = storage.base != 0 && scratch.base != 0 && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                         parse_initialize(&parser, &parse_options, options.language) && type_initialize(&types.table, &types.arena, &types.index, type_capacity) &&
+                         pp_run_source(&pp, "vla-scaling.c", (const uint8_t*)source, length);
+            CheckInput input = { 0 };
+            if (ready)
+            {
+                parse_translation_unit(&parser, &pp);
+                ready = parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE && check_input(&input, &parser, &pp, &types.table, &storage, &scratch);
+            }
+            char description[128];
+            snprintf(description, sizeof(description), "VLA scaling %u declarations, %s reader", count, scalar ? "scalar" : "vector");
+            check_test_expect(test, ready && input.vla_count == count, description);
+            bool exact = ready && input.vla_count == count;
+            for (uint32_t i = 0; exact && i < count; i += 1)
+            {
+                const CheckInputVla* vla = input.vlas + i;
+                char name[24];
+                const uint32_t name_length = (uint32_t)snprintf(name, sizeof(name), "A%u", i);
+                const uint32_t identifier = vla->declaration < parser.tokens.count ? parser.tokens.names[vla->declaration] : 0;
+                exact = identifier != 0 && intern_length(&identifiers, identifier) == name_length &&
+                        memcmp(intern_bytes(&identifiers, identifier), name, name_length) == 0 && vla->evaluated &&
+                        vla->body < parser.tokens.count && parser.tree.roles[vla->body] == PARSE_ROLE_OPEN_BODY &&
+                        vla->scope_begin == vla->declaration + 4 && vla->scope_end > vla->scope_begin &&
+                        vla->bound_node < input.graph.count && input.graph.ops[vla->bound_node] == CHECK_OP_VLA_BOUND && input.graph.members[vla->bound_node] == i + 1;
+            }
+            check_test_expect(test, exact, "VLA scaling retains every declaration's owner, scope and unique bound capture");
+            check_test_types_close(&types);
+            arena_release(&storage);
+            arena_release(&scratch);
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+        }
+        free(source);
+    }
+}
+
 static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, const char* clang)
 {
     char repeated_size[8192];
@@ -114,6 +199,10 @@ static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, co
         {
             .name = "typeof variable typedef retains original extent",
             .source = "unsigned long f(int n) { typedef int A[n++]; __typeof__(A) a; __typeof__(int[n++]) b; return sizeof a+sizeof b; }\n",
+        },
+        {
+            .name = "suspended typeof retains nested VLA owner",
+            .source = "unsigned long f(int n) { __typeof__(({ int (*p)[n]; p; })) q; return sizeof *q; }\n",
         },
         {
             .name = "typeof variable type preserves later asm diagnostic",
@@ -311,6 +400,7 @@ static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, co
         rmdir(directory);
     }
     check_test_vla_metadata(test);
+    check_test_vla_scaling(test);
 }
 
 #endif

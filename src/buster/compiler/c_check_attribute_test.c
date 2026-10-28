@@ -36,7 +36,7 @@ struct CheckAttributeFixture
 
 static void check_test_attribute_storage(CheckTest* test)
 {
-    Arena storage = arena_reserve(UINT64_C(1) << 16);
+    Arena storage = arena_reserve(UINT64_C(1) << 17);
     CheckInputReport reports[8];
     CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
     CheckInputReader reader = { .output = &input, .arena = &storage };
@@ -75,6 +75,94 @@ static void check_test_attribute_storage(CheckTest* test)
                       unavailable.error == CHECK_ATTRIBUTE_ERROR_RESOURCE && unavailable.error_first == 70,
                       "attribute allocation exhaustion fails explicitly without publishing a record");
     arena_release(&storage);
+}
+
+static void check_test_attribute_arguments(CheckTest* test)
+{
+    enum { ARGUMENTS = 8192, TOKENS_PER_ARGUMENT = 8 };
+    Arena tokens = arena_reserve(UINT64_C(1) << 20);
+    Arena storage = arena_reserve(UINT64_C(1) << 20);
+    Parser parser = { 0 };
+    parser.tokens.kinds = arena_push_array(&tokens, ARGUMENTS * TOKENS_PER_ARGUMENT, 1, 1);
+    parser.tree.parents = arena_push_array(&tokens, ARGUMENTS * TOKENS_PER_ARGUMENT, sizeof(uint32_t), 4);
+    const bool ready = parser.tokens.kinds != 0 && parser.tree.parents != 0 && storage.base != 0;
+    check_test_expect(test, ready, "attribute boundary fixture storage");
+    if (ready)
+    {
+        const uint8_t opens[] = { PARSE_KIND_L_PAREN, PARSE_KIND_L_SQUARE, PARSE_KIND_L_BRACE };
+        const uint8_t closes[] = { PARSE_KIND_R_PAREN, PARSE_KIND_R_SQUARE, PARSE_KIND_R_BRACE };
+        for (uint32_t a = 0; a < ARGUMENTS; a += 1)
+        {
+            const uint32_t first = a * TOKENS_PER_ARGUMENT;
+            const uint8_t kinds[] = { opens[a % 3], PARSE_KIND_L_PAREN, PARSE_KIND_NUMBER, PARSE_KIND_COMMA,
+                                      PARSE_KIND_NUMBER, PARSE_KIND_R_PAREN, closes[a % 3], PARSE_KIND_COMMA };
+            memcpy(parser.tokens.kinds + first, kinds, sizeof(kinds));
+            parser.tree.parents[first] = first + 6;
+            parser.tree.parents[first + 1] = first + 5;
+        }
+        const uint32_t counts[] = { 0, 1, 2, 15, 16, 17, 63, 64, 65, 255, 256, 257, ARGUMENTS };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+        {
+            const uint32_t count = counts[c];
+            storage.length = 0;
+            CheckInputReport reports[4];
+            CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
+            CheckInputReader reader = { .output = &input, .parser = &parser, .arena = &storage };
+            CheckInputAttribute attribute =
+            {
+                .argument_end = count != 0 ? count * TOKENS_PER_ARGUMENT - 1 : 0,
+                .kind = CHECK_ATTRIBUTE_NONNULL,
+                .schema = CHECK_ATTRIBUTE_INTEGER_LIST,
+            };
+            CheckInputAttributes attributes = { .records = &attribute, .count = 1 };
+            const bool valid = check_input_attribute_validate(&reader, &attributes, &attribute, 0, 255);
+            check_test_expect(test, valid && attribute.argument_count == count && !input.resource &&
+                              storage.length == (count > 1 ? (uint64_t)(count - 1) * sizeof(uint32_t) : 0) &&
+                              (attribute.argument_ends != 0) == (count > 1),
+                              "unlimited attribute list stores one u32 per separator and allocates nothing for zero/single arguments");
+            for (uint32_t a = count; valid && a != 0; a -= 1)
+            {
+                uint32_t first = UINT32_MAX;
+                uint32_t end = UINT32_MAX;
+                check_test_expect(test, check_input_attribute_argument(&attribute, a - 1, &first, &end) &&
+                                  first == (a - 1) * TOKENS_PER_ARGUMENT && end == first + 7,
+                                  "reverse argument access retains exact spans and skips commas in all bracket groups");
+            }
+            uint32_t first = 0;
+            uint32_t end = 0;
+            check_test_expect(test, !check_input_attribute_argument(&attribute, count, &first, &end) &&
+                              !check_input_attribute_argument(&attribute, UINT32_MAX, &first, &end),
+                              "out-of-range argument access is bounded");
+            if (valid && count > 1)
+            {
+                CheckInputAttributes copied = { 0 };
+                check_test_expect(test, check_input_attribute_copy(&reader, &attributes, &copied) && copied.records != &attribute &&
+                                  copied.records[0].argument_ends == attribute.argument_ends,
+                                  "attribute copies share immutable arena-owned boundaries");
+                check_test_expect(test, !check_input_attribute_argument_value(&reader, &attributes, 0, count - 1, 0) &&
+                                  attributes.error == CHECK_ATTRIBUTE_ERROR_INTEGER && attributes.error_first == (count - 1) * TOKENS_PER_ARGUMENT &&
+                                  attributes.error_end == count * TOKENS_PER_ARGUMENT - 1,
+                                  "late invalid numeric argument preserves its exact full grouped range");
+                check_input_attribute_argument_value(&reader, &attributes, 0, 0, 0);
+                check_test_expect(test, attributes.error_first == (count - 1) * TOKENS_PER_ARGUMENT,
+                                  "later attribute failures preserve the first diagnostic");
+            }
+        }
+        storage.length = 0;
+        storage.capacity = sizeof(uint32_t) - 1;
+        CheckInputReport report;
+        CheckInput input = { .reports = &report, .report_capacity = 1 };
+        CheckInputReader reader = { .output = &input, .parser = &parser, .arena = &storage };
+        CheckInputAttribute attribute = { .argument_end = 15, .end = 16, .schema = CHECK_ATTRIBUTE_INTEGER_LIST };
+        CheckInputAttributes attributes = { 0 };
+        check_test_expect(test, !check_input_attribute_validate(&reader, &attributes, &attribute, 0, 255) && input.resource &&
+                          attributes.error == CHECK_ATTRIBUTE_ERROR_RESOURCE && attributes.error_first == 0 && attributes.error_end == 16 &&
+                          attributes.count == 0 && storage.length == 0,
+                          "boundary table exhaustion reports the original attribute range without publishing a record");
+        storage.capacity = UINT64_C(1) << 20;
+    }
+    arena_release(&storage);
+    arena_release(&tokens);
 }
 
 static void check_test_attribute_abis(CheckTest* test)
@@ -244,7 +332,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
                 {
                     uint32_t first = 0;
                     uint32_t end = 0;
-                    check_test_expect(test, check_input_attribute_argument(&parser, attribute, argument, &first, &end) && first < end,
+                    check_test_expect(test, check_input_attribute_argument(attribute, argument, &first, &end) && first < end,
                                       "numeric attribute argument retains its exact source range");
                     valid = numeric < BUSTER_ARRAY_LENGTH(fixture->values) && check_input_attribute_argument_value(&reader, &attributes, i, argument, fixture->values[numeric]);
                     numeric += 1;
@@ -323,6 +411,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
 static __attribute__((noinline)) void check_test_attributes(CheckTest* test, const char* clang)
 {
     check_test_attribute_storage(test);
+    check_test_attribute_arguments(test);
     check_test_attribute_abis(test);
     const CheckAttributeFixture fixtures[] =
     {
@@ -1017,8 +1106,67 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
     }
 }
 
+static void check_test_attribute_lists(CheckTest* test, const char* clang)
+{
+    const struct
+    {
+        const char* name;
+        const char* prefix;
+        const char* item;
+        const char* suffix;
+        uint32_t count;
+        bool rejected;
+    } fixtures[] =
+    {
+        { "8192 repeated nonnull indices", "void f(void*) __attribute__((nonnull(", "1", ")));\n", 8192, false },
+        { "grouped attribute expressions with brackets", "void f(void*) __attribute__((nonnull(", "((sizeof(int[2]) == 2*sizeof(int)))", ")));\n", 257, false },
+        { "long concatenated string attribute list", "void f(void*) __attribute__((no_sanitize(", "\"ad\" \"dress\"", ")));\n", 257, false },
+        { "raw constant-reader attribute list", "struct S {int x;}; enum { N=sizeof(struct __attribute__((nonnull(", "1", "))) S) }; _Static_assert(N==sizeof(struct S),\"tag attributes\");\n", 257, false },
+        { "late zero nonnull index", "void f(void*) __attribute__((nonnull(", "1", ",0)));\n", 257, true },
+        { "late nonnull parameter past prototype", "void f(void*) __attribute__((nonnull(", "1", ",2)));\n", 257, true },
+        { "late nonconstant nonnull argument", "int n; void f(void*) __attribute__((nonnull(\n", "1", ",\nn)));\n", 257, true },
+        { "late non-string attribute argument", "void f(void*) __attribute__((no_sanitize(", "\"address\"", ",3)));\n", 257, true },
+        { "attribute trailing comma", "void f(void*) __attribute__((nonnull(", "1", ",)));\n", 257, true },
+        { "attribute empty middle argument", "void f(void*) __attribute__((nonnull(", "1", ",,1)));\n", 257, true },
+        { "attribute leading comma", "void f(void*) __attribute__((nonnull(,", "1", ")));\n", 257, true },
+    };
+    char directory[] = "/tmp/buster-attribute-list-XXXXXX";
+    const bool directory_ready = mkdtemp(directory) != 0;
+    check_test_expect(test, directory_ready, "attribute list oracle directory");
+    for (uint32_t i = 0; directory_ready && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[32768];
+        uint32_t length = (uint32_t)snprintf(source, sizeof(source), "%s", fixtures[i].prefix);
+        for (uint32_t a = 0; a < fixtures[i].count; a += 1)
+        {
+            length += (uint32_t)snprintf(source + length, sizeof(source) - length, "%s%s", a != 0 ? "," : "", fixtures[i].item);
+        }
+        snprintf(source + length, sizeof(source) - length, "%s", fixtures[i].suffix);
+        char path[160];
+        snprintf(path, sizeof(path), "%s/%u.c", directory, i);
+        char* paths[] = { path };
+        ParseTestClang outcome;
+        const char* arguments[] = { "-std=gnu17" };
+        const bool ready = parse_test_write(path, source, strlen(source)) &&
+                           parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome);
+        check_test_expect(test, ready, "long attribute list Clang oracle");
+        if (ready)
+        {
+            check_test_expect(test, outcome.rejected == fixtures[i].rejected, fixtures[i].name);
+            const CheckSourceFixture fixture = { .name = fixtures[i].name, .source = source, .rejected = fixtures[i].rejected };
+            check_test_source(test, &fixture, path, &outcome);
+        }
+        unlink(path);
+    }
+    if (directory_ready)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_attribute_sources(CheckTest* test, const char* clang)
 {
+    check_test_attribute_lists(test, clang);
     const CheckSourceFixture fixtures[] =
     {
         {
