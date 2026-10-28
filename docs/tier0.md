@@ -859,6 +859,12 @@ stack of classes, an entry at a time. At each target it records a hash of the st
 compares it on every other arrival. It reports the first entry that breaks a rule, and the rule. `--scalar` runs it
 alone.
 
+The selected validator uses the scalar path for nonempty streams of at most 16 entries when the local, call and
+argument tables each have at most 16 entries too. Locked 9700X size controls put the crossover between 16 and 24
+entries, both alone and after 200 ms of scalar work. Empty streams keep the vector setup path; larger tables
+keep the vector path so a small entry count does not hide substantial metadata work. The vector acceptor remains
+tested independently at these tiny sizes.
+
 **The vector path** (`tier0_validate_accepts`) takes a stream only where the scalar validator does. It leaves every
 other stream to the scalar validator, which then gives the verdict and the rule. It reads 64 entries at a time in byte
 lanes, as Tier 0's own passes do:
@@ -891,6 +897,7 @@ The vector path leaves these to the scalar validator:
 - a function with vectors;
 - a block whose pops come to more than 100 (`BUSTER_TIER0_SCAN_POPS`), so that relative depths stay within a byte;
 - a depth past 64 at a block's start (`BUSTER_TIER0_SCAN_DEPTH`), the carried stack's register;
+- a call with more than 64 total operands: a 64-argument indirect call also has its callee, which needs a 65th lane;
 - a backward arrival with values on the stack;
 - a target whose arrivals bring values of two producers, as `x ?: y`'s do, which the scalar validator compares by
   class;
@@ -912,6 +919,11 @@ copies of the stacks, so it takes a valid stream where the scalar validator woul
 table wholly past the table's end: a masked load reaching untouched pages takes a slow path even though it reads none
 of them. That cost sqlite3.c's validation 7 cycles per entry until the tables' builders stopped doing it. Its scratch
 is about 10 bytes per entry, and 4 per local and per call past 128.
+Before any scalar producer lookup or class-dependent shift, the block must pass its kind, class, bounds and depth
+checks; a malformed byte depth must not reach a producer index. Arrival mismatches likewise stop dependent checks.
+The regression suite ends kinds, classes and values independently at separate inaccessible pages and combines
+underflow or invalid classes with later calls and arrivals. Direct/indirect 63/64-argument calls cross a block boundary,
+with both matching and mismatched final arguments, and the selected wrapper's exact diagnostic matches the scalar oracle.
 
 **Measurements.** On the 9700X, pinned to CPU 2, on the frozen `sqlite3.c` (sha256 `0a409f16…`) that `-c` lowers
 into 2,602 functions of 396,893 entries, every one of which the vector path takes alone:
@@ -929,6 +941,22 @@ costs the vector path about 600 TSC ticks, nearly a whole block's code for its f
 validator takes; past 32 entries the vector path is faster, and 3 times as fast past 128. Of the vector path's samples
 there, 28% are the function's tables and setup and 69% the blocks, of which the calls with more than two operands take
 15%.
+
+The completed one-binary vector/scalar/disabled campaign isolates validation from executable layout: the `lower`
+medians are 13.020, 15.662 and 12.146 ms, respectively. Vector validation therefore retains about 0.874 ms on this
+input, compared with the scalar check's 3.516 ms. Eight rotated `perf stat -r 3` rounds average 1,517.49 M user
+instructions for vector, 1,558.32 M for scalar and 1,505.60 M with checking disabled. The vector/disabled cycle ranges
+overlap; disabling validation is solely a measurement control, never a production option. Sharing a validated plan
+with Tier 0's analysis would require preserving refusal before unchecked backend consumers and a separate measured
+producer/consumer design. This PR claims the measured reduction while retaining that correctness gate.
+
+Fresh target-host size controls use three normal processes and a scalar-conditioned process. At 16 entries,
+table-free scalar/vector validation takes about 60.0/70.1 ns, and a fixture with eight locals, six calls and four
+argument records takes 100.6/116.9 ns; at 24 entries vector wins in both fixtures. Empty table-free streams favor
+vector, 11.9 ns against scalar's 14.6 ns. The 16-entry dispatch threshold follows these controls, with the metadata
+cap as a conservative guard. These synthetic controls do not establish a universal threshold or whole-corpus gain.
+The [retained campaign and review evidence](https://github.com/buster14a/buster-performance/pull/57) includes all
+samples, source and binary identities, exact commands, native/sanitizer qualification and defect-detecting mutations.
 
 ## Tests
 
