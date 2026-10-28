@@ -104,7 +104,8 @@
 // X86Effects.memory: what a memory operand (in rm) is, and the memory the form reaches without one.
 //   - ADDRESS: rm's address is computed (from its base and index) but not accessed: lea.
 //   - ALIGNED: a memory operand must be aligned to its size or the instruction faults (legacy SSE's 16-byte operands).
-//   - STACK_READ and STACK_WRITE: reads [rsp] (pop, ret; leave's [rbp]) or writes [rsp - 8] (push, call).
+//   - STACK_READ and STACK_WRITE: reads [rsp] (pop, ret; leave's [rbp]) or writes below it (push and call's [rsp - 8],
+//     pushw's [rsp - 2]).
 //   - ATOMIC: a memory operand is read and written in one locked access (lock, xchg with memory), which orders every
 //     memory access around it.
 //   - FENCE: orders memory accesses, without an operand (mfence).
@@ -121,13 +122,15 @@
 // X86Effects.properties:
 //   - FAULT: can fault without a memory operand: a divide error (div, idiv), #UD (ud2), #BP (int3). (Any memory access
 //     can fault too.)
-//   - ZERO_IDIOM: with the same register in reg and rm, the result is zero whatever the register held, so it reads
-//     nothing of what it writes (xor, sub and their vector kin; for a general register only where the write leaves no
-//     old bits). A legacy SSE one keeps its register's bits above 127 (KEEP_UPPER), which its resolved effects read.
+//   - ZERO_IDIOM: with the same register in its two sources (reg and rm; a VEX or EVEX form's vvvv and rm, which write
+//     reg), the result is zero whatever the register held, so it reads nothing of what it writes (xor, sub and their
+//     vector kin; for a general register only where the write leaves no old bits). A legacy SSE one keeps its
+//     register's bits above 127 (KEEP_UPPER), which its resolved effects read.
 //   - KEEP_UPPER: a legacy SSE form: a vector register it writes keeps its bits above 127. It is the top bit, bit 63 of
 //     the record's first 8 bytes, which x86_instructions_effects spreads over a lane with one arithmetic shift.
 //   - MXCSR: reads MXCSR's controls (rounding, DAZ and FTZ).
-//   - FP_EXCEPTION: may raise floating-point exceptions (setting MXCSR's status flags, or trapping if unmasked).
+//   - FP_EXCEPTION: may raise floating-point exceptions (setting MXCSR's status flags, or an x87 form's in its status
+//     word, or trapping if unmasked).
 //   - COUNT: a shift or rotate by a count (CL, or an immediate that x86_instruction_flags reads): a count of zero (after
 //     masking) leaves the flags as they were, and one other than 1 leaves OF undefined. X86Effects describes any count,
 //     so it reads the flags it may keep and leaves undefined those it may change; those are kept for a count of zero, so
@@ -135,6 +138,13 @@
 //   - ZERO_SOURCE: bsf and bsr: with a zero source the destination is undefined (Intel) or kept (AMD), so it is read.
 //   - CONDITIONAL: writes its destination (cmov), or rm and RAX (cmpxchg), only under a condition; cmov's 32-bit form
 //     zeroes the upper half either way, and cmpxchg's RAX keeps all of its bits when it isn't written.
+//   - X87: an x87 form: reads and writes the x87's state (its registers, the stack's top and tags, and its status word,
+//     whose condition codes every x87 instruction may change) and reads its control word (precision and rounding). An
+//     x87 register operand (ST(i)) is part of that state, not a role. X87_CONTROL: writes the control word too (fldcw).
+//   - ZERO_UPPER: zeroes the bits above 127 of ZMM0 to ZMM15 and keeps the rest (vzeroupper): reads and writes them.
+//   - EVEX: an EVEX form (the build sets it from the form table), whose record may name an opmask
+//     (BUSTER_X86_DECORATION_MASK): masked, it merges or zeroes its destination's elements by a mask register, which the
+//     resolved effects have no resource for, so that they are everything then.
 #define BUSTER_X86_EFFECT_FAULT 0x0001
 #define BUSTER_X86_EFFECT_ZERO_IDIOM 0x0002
 #define BUSTER_X86_EFFECT_MXCSR 0x0008
@@ -142,6 +152,10 @@
 #define BUSTER_X86_EFFECT_COUNT 0x0020
 #define BUSTER_X86_EFFECT_ZERO_SOURCE 0x0040
 #define BUSTER_X86_EFFECT_CONDITIONAL 0x0080
+#define BUSTER_X86_EFFECT_X87 0x0100
+#define BUSTER_X86_EFFECT_X87_CONTROL 0x0200
+#define BUSTER_X86_EFFECT_ZERO_UPPER 0x0400
+#define BUSTER_X86_EFFECT_EVEX 0x0800
 #define BUSTER_X86_EFFECT_KEEP_UPPER 0x8000
 
 // How the form's immediate becomes a value (X86Effects.kinds's low nibble; NONE without an immediate):
@@ -255,6 +269,21 @@ typedef enum X86Operation
     X86_OPERATION_VECTOR_ANDN,
     X86_OPERATION_VECTOR_OR,
     X86_OPERATION_VECTOR_XOR,
+    X86_OPERATION_SHLD,
+    X86_OPERATION_SHRD,
+    // vzeroupper.
+    X86_OPERATION_ZERO_UPPER,
+    // stmxcsr.
+    X86_OPERATION_STORE_MXCSR,
+    // The x87: fld, fild and the constants (fldz, fld1); fst, fstp, fist and fistp; the arithmetic (fadd, fsub, fsubr,
+    // fmul, fdiv and fdivr, with a pop or without, fchs and fabs); fcmovcc; fcomi, fcomip, fucomi and fucomip, which
+    // set EFLAGS; and fldcw and fnstcw.
+    X86_OPERATION_X87_LOAD,
+    X86_OPERATION_X87_STORE,
+    X86_OPERATION_X87_ARITHMETIC,
+    X86_OPERATION_X87_CMOVCC,
+    X86_OPERATION_X87_COMPARE,
+    X86_OPERATION_X87_CONTROL,
     X86_OPERATION_COUNT,
 } X86Operation;
 
@@ -302,8 +331,8 @@ typedef enum X86Pattern
     X86_PATTERN_SWAP,
 } X86Pattern;
 
-// A vector destination's write in an effects row: the rest's kind (BUSTER_X86_REST_*) and the bytes defined.
-#define BUSTER_X86_VECTOR_WRITE(rest, bytes) ((BUSTER_X86_REST_##rest) << 5 | (bytes))
+// A vector destination's write in an effects row: the rest's kind (BUSTER_X86_REST_*) and the bytes defined (to 64).
+#define BUSTER_X86_VECTOR_WRITE(rest, bytes) ((BUSTER_X86_REST_##rest) << 8 | (bytes))
 
 #define BUSTER_X86_SHIFT_EFFECTS(X, N, written_1, undefined_1, affected) \
     X(N##_RM8_1, N##_RM64_1, N, MODIFY, 0, 0, 0, written_1, undefined_1, 0, 0, 0, NONE, NONE, 0) \
@@ -315,6 +344,14 @@ typedef enum X86Pattern
     X(J##CC##_REL8, J##CC##_REL32, JCC, NONE, 0, 0, flags, 0, 0, 0, 0, 0, NONE, BRANCH, 0) \
     X(SET##CC##_RM8, SET##CC##_RM8, SETCC, MOVE, 0, 0, flags, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(CMOV##CC##_R16_RM16, CMOV##CC##_R64_RM64, CMOVCC, MODIFY, 0, 0, flags, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_CONDITIONAL)
+
+// An x87 conditional move, fcmovcc ST(0), ST(i), reading the flags its condition tests.
+#define BUSTER_X86_X87_FCMOV_EFFECTS(X, CC, flags) \
+    X(FCMOV##CC##_ST0_ST, FCMOV##CC##_ST0_ST, X87_CMOVCC, NONE, 0, 0, flags, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS)
+
+// An x87 form that may raise an x87 exception: one that computes, converts, compares, or loads or stores a register of
+// the stack, whose underflow or overflow is one (but fnstcw and fldcw).
+#define BUSTER_X86_X87_EXCEPTIONS (BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_FP_EXCEPTION)
 
 // The locked arithmetic on memory: the unlocked group's effects, atomic.
 #define BUSTER_X86_LOCKED_EFFECTS(X, N, read, written, undefined) \
@@ -382,6 +419,7 @@ typedef enum X86Pattern
     X(PUSH_RM64, PUSH_RM64, PUSH, READ, 8, 0, 0, 0, 0, BUSTER_X86_GPR(RSP), BUSTER_X86_GPR(RSP), BUSTER_X86_MEMORY_EFFECT_STACK_WRITE, NONE, NONE, 0) \
     X(POP_RM64, POP_RM64, POP, MOVE, 8, 0, 0, 0, 0, BUSTER_X86_GPR(RSP), BUSTER_X86_GPR(RSP), BUSTER_X86_MEMORY_EFFECT_STACK_READ, NONE, NONE, 0) \
     X(PUSH_IMM8, PUSH_IMM32, PUSH, READ, 8, 0, 0, 0, 0, BUSTER_X86_GPR(RSP), BUSTER_X86_GPR(RSP), BUSTER_X86_MEMORY_EFFECT_STACK_WRITE, VALUE, NONE, 0) \
+    X(PUSHW_IMM16, PUSHW_IMM8, PUSH, READ, 2, 0, 0, 0, 0, BUSTER_X86_GPR(RSP), BUSTER_X86_GPR(RSP), BUSTER_X86_MEMORY_EFFECT_STACK_WRITE, VALUE, NONE, 0) \
     X(CALL_REL32, CALL_RM64, CALL, READ, 8, 0, 0, 0, 0, BUSTER_X86_GPR(RSP), BUSTER_X86_GPR(RSP), BUSTER_X86_MEMORY_EFFECT_STACK_WRITE, NONE, CALL, 0) \
     X(JMP_REL8, JMP_RM64, JMP, READ, 8, 0, 0, 0, 0, 0, 0, 0, NONE, JUMP, 0) \
     BUSTER_X86_CONDITION_EFFECTS(X, O, BUSTER_X86_FLAG_OF) \
@@ -493,7 +531,39 @@ typedef enum X86Pattern
     X(CMPSS_X_XM32_IMM8, CMPSS_X_XM32_IMM8, FCOMPARE_MASK, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(MERGE, 4), 0, 0, 0, 0, 0, 0, CONTROL, NONE, \
       BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION | BUSTER_X86_EFFECT_KEEP_UPPER) \
     X(CMPSD_X_XM64_IMM8, CMPSD_X_XM64_IMM8, FCOMPARE_MASK, MODIFY, 0, BUSTER_X86_VECTOR_WRITE(MERGE, 8), 0, 0, 0, 0, 0, 0, CONTROL, NONE, \
-      BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION | BUSTER_X86_EFFECT_KEEP_UPPER)
+      BUSTER_X86_EFFECT_MXCSR | BUSTER_X86_EFFECT_FP_EXCEPTION | BUSTER_X86_EFFECT_KEEP_UPPER) \
+    X(STMXCSR_M32, STMXCSR_M32, STORE_MXCSR, MOVE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_MXCSR) \
+    X(SHLD_RM32_R32_IMM8, SHLD_RM64_R64_IMM8, SHLD, MODIFY, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, COUNT, NONE, BUSTER_X86_EFFECT_COUNT) \
+    X(SHLD_RM32_R32_CL, SHLD_RM64_R64_CL, SHLD, MODIFY, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_COUNT) \
+    X(SHRD_RM32_R32_IMM8, SHRD_RM64_R64_IMM8, SHRD, MODIFY, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, COUNT, NONE, BUSTER_X86_EFFECT_COUNT) \
+    X(SHRD_RM32_R32_CL, SHRD_RM64_R64_CL, SHRD, MODIFY, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_COUNT) \
+    X(VMOVDQU_X_XM128, VMOVDQU_XM128_X, VECTOR_MOVE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VMOVDQU_Y_YM256, VMOVDQU_YM256_Y, VECTOR_MOVE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VZEROUPPER, VZEROUPPER, ZERO_UPPER, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_ZERO_UPPER) \
+    X(VMOVDQU64_Z_ZM512, VMOVDQU64_ZM512_Z, VECTOR_MOVE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VMOVDQU64_X_XM128, VMOVDQU64_XM128_X, VECTOR_MOVE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VMOVDQU64_Y_YM256, VMOVDQU64_YM256_Y, VECTOR_MOVE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VPXORD_Z_Z_ZM512, VPXORD_Z_Z_M32BCST, VECTOR_XOR, MOVE, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_ZERO_IDIOM) \
+    X(VPXORD_X_X_XM128, VPXORD_X_X_M32BCST, VECTOR_XOR, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_ZERO_IDIOM) \
+    X(VPXORD_Y_Y_YM256, VPXORD_Y_Y_M32BCST, VECTOR_XOR, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_ZERO_IDIOM) \
+    X(FADD_M32, FDIVRP_ST_ST0, X87_ARITHMETIC, READ, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FLD_M32, FLD_ST, X87_LOAD, READ, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FST_M32, FSTP_ST, X87_STORE, MOVE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FILD_M16, FILD_M64, X87_LOAD, READ, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FIST_M16, FISTP_M64, X87_STORE, MOVE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, B, BUSTER_X86_FLAG_CF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, E, BUSTER_X86_FLAG_ZF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, BE, BUSTER_X86_FLAG_CF | BUSTER_X86_FLAG_ZF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, U, BUSTER_X86_FLAG_PF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, NB, BUSTER_X86_FLAG_CF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, NE, BUSTER_X86_FLAG_ZF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, NBE, BUSTER_X86_FLAG_CF | BUSTER_X86_FLAG_ZF) \
+    BUSTER_X86_X87_FCMOV_EFFECTS(X, NU, BUSTER_X86_FLAG_PF) \
+    X(FCOMI_ST0_ST, FUCOMIP_ST0_ST, X87_COMPARE, NONE, 0, 0, 0, BUSTER_X86_FLAGS_STATUS, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FLDCW_M16, FLDCW_M16, X87_CONTROL, READ, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL) \
+    X(FNSTCW_M16, FNSTCW_M16, X87_CONTROL, MOVE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_EFFECT_X87) \
+    X(FCHS, FABS, X87_ARITHMETIC, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS) \
+    X(FLD1, FLDZ, X87_LOAD, NONE, 0, 0, 0, 0, 0, 0, 0, 0, NONE, NONE, BUSTER_X86_X87_EXCEPTIONS)
 
 // An effects row, as the initialization reads it.
 typedef struct X86EffectsRow X86EffectsRow;
@@ -504,10 +574,10 @@ struct X86EffectsRow
     uint16_t implicit_reads;
     uint16_t implicit_writes;
     uint16_t properties;
+    uint16_t vector;
     uint8_t operation;
     uint8_t pattern;
     uint8_t width;
-    uint8_t vector;
     uint8_t flags_read;
     uint8_t flags_written;
     uint8_t flags_undefined;
@@ -518,7 +588,7 @@ struct X86EffectsRow
 
 #define BUSTER_X86_EFFECT_ROW(first, last, operation, pattern, width, vector, read, written, undefined, implicit_reads, implicit_writes, memory, \
                               immediate, control, properties) \
-    { X86_FORM_##first, X86_FORM_##last, implicit_reads, implicit_writes, properties, X86_OPERATION_##operation, X86_PATTERN_##pattern, width, vector, \
+    { X86_FORM_##first, X86_FORM_##last, implicit_reads, implicit_writes, properties, vector, X86_OPERATION_##operation, X86_PATTERN_##pattern, width, \
       read, written, undefined, memory, BUSTER_X86_IMMEDIATE_##immediate, BUSTER_X86_CONTROL_##control },
 static const X86EffectsRow x86_effects_rows[] = { BUSTER_X86_EFFECT_ROWS(BUSTER_X86_EFFECT_ROW) };
 #undef BUSTER_X86_EFFECT_ROW
@@ -529,6 +599,9 @@ static const X86EffectsRow x86_effects_rows[] = { BUSTER_X86_EFFECT_ROWS(BUSTER_
 static X86Effects x86_effects_records[BUSTER_X86_EFFECTS_CAPACITY] __attribute__((aligned(64)));
 static uint16_t x86_effects_index[X86_FORM_COUNT] __attribute__((aligned(64)));
 static uint32_t x86_effects_count;
+// Whether x86_semantics_initialize has built the tables, for the consumers that build theirs from them on demand (the
+// assembler's matcher, x86_match.c).
+static bool x86_semantics_initialized;
 
 // The record of an uncovered form: it may read and write every register, flag and byte of memory, fault, and go anywhere.
 #define BUSTER_X86_UNKNOWN_ROLE (BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE | BUSTER_X86_REST_MERGE << BUSTER_X86_ROLE_REST_SHIFT)
@@ -803,7 +876,8 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
 // write keeps bits 511 to 128, so it reads its register too), the flags (BUSTER_X86_FLAG_*'s bits from bit 48: CF
 // to OF, then DF), MXCSR's controls (read), memory (any byte: alias analysis is the consumer's), and in the write set,
 // control (the record can leave the block: a branch, call, return or trap) and a call (whose callee clobbers what the
-// calling convention says, #137). An uncovered form reads and writes every resource.
+// calling convention says, #137); and the x87's state (its registers, the stack's top and tags, and its status word)
+// and its control word, which an x87 form reads, and fldcw writes. An uncovered form reads and writes every resource.
 #define BUSTER_X86_RESOURCE_GPR(number) (1ull << (number))
 #define BUSTER_X86_RESOURCE_GPRS 0xffffull
 #define BUSTER_X86_RESOURCE_VECTOR_SHIFT 16
@@ -816,6 +890,10 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
 #define BUSTER_X86_RESOURCE_MEMORY (1ull << 56)
 #define BUSTER_X86_RESOURCE_CONTROL (1ull << 57)
 #define BUSTER_X86_RESOURCE_CALL (1ull << 58)
+#define BUSTER_X86_RESOURCE_X87 (1ull << 59)
+#define BUSTER_X86_RESOURCE_X87_CONTROL (1ull << 60)
+// What vzeroupper reads and writes: ZMM0 to ZMM15.
+#define BUSTER_X86_RESOURCE_LOWER_VECTORS (0xffffull << BUSTER_X86_RESOURCE_VECTOR_SHIFT)
 #define BUSTER_X86_RESOURCE_ALL (~0ull)
 
 // A register operand's resource: a general register (AH to BH are RAX to RBX's) or a vector one. The covered forms take
@@ -830,13 +908,16 @@ static uint64_t x86_register_resource(uint8_t value, bool vector)
 // memory operand's base and index (read, as lea's are) and the memory read or written; a narrower write's register (which
 // keeps the rest, so it is read), and a legacy SSE write's vector register (which keeps its bits above 127); a zero
 // idiom's register not read (but a legacy SSE one's, whose upper bits still pass through); a shift's flags by its
-// immediate count (x86_instruction_flags); the stack and fences as memory; control.
+// immediate count (x86_instruction_flags); the stack and fences as memory; control; the x87's state and control word,
+// and vzeroupper's vector registers. An EVEX record with an opmask merges or zeroes its destination's elements by a mask
+// register, which the sets have no resource for: it reads and writes everything, as an uncovered form does.
 static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes)
 {
     const X86Effects* effects = x86_effects(instruction->form);
     uint64_t read = BUSTER_X86_RESOURCE_ALL;
     uint64_t write = BUSTER_X86_RESOURCE_ALL;
-    if (effects->operation != X86_OPERATION_NONE)
+    const bool masked = (effects->properties & BUSTER_X86_EFFECT_EVEX) && (instruction->decorations & BUSTER_X86_DECORATION_MASK) != 0;
+    if (effects->operation != X86_OPERATION_NONE && !masked)
     {
         const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
         uint8_t flags_read;
@@ -846,6 +927,11 @@ static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Inst
         read = effects->implicit_reads | (uint64_t)flags_read << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
         write = effects->implicit_writes | (uint64_t)(flags_written | flags_undefined) << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
         read |= (effects->properties & BUSTER_X86_EFFECT_MXCSR) ? BUSTER_X86_RESOURCE_MXCSR : 0;
+        read |= (effects->properties & BUSTER_X86_EFFECT_X87) ? BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL : 0;
+        write |= (effects->properties & BUSTER_X86_EFFECT_X87) ? BUSTER_X86_RESOURCE_X87 : 0;
+        write |= (effects->properties & BUSTER_X86_EFFECT_X87_CONTROL) ? BUSTER_X86_RESOURCE_X87_CONTROL : 0;
+        read |= (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0;
+        write |= (effects->properties & BUSTER_X86_EFFECT_ZERO_UPPER) ? BUSTER_X86_RESOURCE_LOWER_VECTORS : 0;
         const uint8_t values[BUSTER_X86_ROLES] = { instruction->reg, instruction->rm, instruction->vvvv };
         for (uint32_t role = 0; role < BUSTER_X86_ROLES; role += 1)
         {
@@ -871,10 +957,13 @@ static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Inst
                 write |= (bits & BUSTER_X86_ROLE_WRITE) ? resource : 0;
             }
         }
-        if ((effects->properties & BUSTER_X86_EFFECT_ZERO_IDIOM) && !memory && instruction->reg == instruction->rm)
+        // A zero idiom's sources (reg and rm, or vvvv and rm) are one register, which it doesn't read.
+        const bool three = (x86_effects_role(effects, BUSTER_X86_ROLE_VVVV) & BUSTER_X86_ROLE_READ) != 0;
+        const uint8_t source = three ? instruction->vvvv : instruction->reg;
+        if ((effects->properties & BUSTER_X86_EFFECT_ZERO_IDIOM) && !memory && source == instruction->rm)
         {
-            const uint32_t bits = x86_effects_role(effects, BUSTER_X86_ROLE_REG);
-            read &= ~x86_register_resource(instruction->reg, (bits & BUSTER_X86_ROLE_VECTOR) != 0);
+            const uint32_t bits = x86_effects_role(effects, BUSTER_X86_ROLE_RM);
+            read &= ~x86_register_resource(instruction->rm, (bits & BUSTER_X86_ROLE_VECTOR) != 0);
         }
         // A legacy SSE write keeps its vector register's bits above 127, so the form reads every vector register it writes,
         // a zero idiom's too (only explicit operands write vector registers).
@@ -901,7 +990,10 @@ static __attribute__((unused)) void x86_instructions_effects_scalar(const X86Ins
 // The same 8 records at a time (one per 64-bit lane), the records and the outputs read and written with masked loads and
 // stores (so nothing past either array is touched). Each record's form gives its effects record by a scalar lookup (its
 // index, then its 16 bytes into a quarter of a ZMM register: Zen 5's gathers cost more than these loads), and then every
-// lane computes as x86_instruction_effects_scalar does, with masks for its branches.
+// lane computes as x86_instruction_effects_scalar does, with masks for its branches. The records of the forms code
+// generators emit rarely, an x87 form's, vzeroupper's, a VEX form's with an operand in vvvv and an EVEX form's (which may
+// have an opmask), are that function's: one test finds them, and it overwrites their lanes, so that the common lane pays
+// nothing more.
 static __attribute__((unused)) void x86_instructions_effects(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes)
 {
 #if !BUSTER_HOST_VECTOR
@@ -1034,6 +1126,17 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
         write = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, write);
         _mm512_mask_storeu_epi64(reads + first, live, read);
         _mm512_mask_storeu_epi64(writes + first, live, write);
+        // The rare records: a covered form's x87, vzeroupper, EVEX or vvvv bits (its properties and operands, in the
+        // facts' upper half).
+        const uint64_t rare_facts = (uint64_t)(BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_ZERO_UPPER | BUSTER_X86_EFFECT_EVEX) << 48 |
+                                    (uint64_t)((1u << BUSTER_X86_ROLE_BITS) - 1) << (32 + BUSTER_X86_ROLE_VVVV * BUSTER_X86_ROLE_BITS);
+        uint32_t rare = _mm512_test_epi64_mask(facts, _mm512_set1_epi64((int64_t)rare_facts)) & known;
+        while (rare != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(rare);
+            rare &= rare - 1;
+            x86_instruction_effects_scalar(&instructions[first + lane], &reads[first + lane], &writes[first + lane]);
+        }
     }
 #endif
 }
@@ -1502,6 +1605,35 @@ static uint32_t x86_effects_slots(uint8_t syntax, uint8_t* slots)
         slots[2] = BUSTER_X86_SLOT_OTHER;
         count = 3;
         break;
+    case X86_SYNTAX_RM_REG_IMM:
+        slots[0] = BUSTER_X86_SLOT_RM;
+        slots[1] = BUSTER_X86_SLOT_REG;
+        slots[2] = BUSTER_X86_SLOT_OTHER;
+        count = 3;
+        break;
+    case X86_SYNTAX_RM_REG_CL:
+        slots[0] = BUSTER_X86_SLOT_RM;
+        slots[1] = BUSTER_X86_SLOT_REG;
+        slots[2] = BUSTER_X86_SLOT_CL;
+        count = 3;
+        break;
+    case X86_SYNTAX_REG_VVVV_RM:
+        slots[0] = BUSTER_X86_SLOT_REG;
+        slots[1] = BUSTER_X86_SLOT_VVVV;
+        slots[2] = BUSTER_X86_SLOT_RM;
+        count = 3;
+        break;
+    // The x87's two register operands, ST(0) implicit in the encoding.
+    case X86_SYNTAX_ST_RM:
+        slots[0] = BUSTER_X86_SLOT_OTHER;
+        slots[1] = BUSTER_X86_SLOT_RM;
+        count = 2;
+        break;
+    case X86_SYNTAX_RM_ST:
+        slots[0] = BUSTER_X86_SLOT_RM;
+        slots[1] = BUSTER_X86_SLOT_OTHER;
+        count = 2;
+        break;
     default:
         break;
     }
@@ -1509,9 +1641,10 @@ static uint32_t x86_effects_slots(uint8_t syntax, uint8_t* slots)
 }
 
 // A form's record from its row and the form table: the pattern's accesses by role (the syntax's ACC and CL as RAX and
-// RCX), each register role's class (vector or general) and, for a destination, what its write does to the rest (a
-// general register's by its size; a vector one's from the row), the width, and the row's flags, memory, immediate,
-// control and properties. Returns false for a row that doesn't fit its form (an access to an operand the form lacks, a
+// RCX; an x87 row's ST(i), part of the x87's state, none), each register role's class (vector or general) and, for a
+// destination, what its write does to the rest (a general register's by its size; a vector one's from the row), the
+// width, and the row's flags, memory, immediate, control and properties. Returns false for a row that doesn't fit its
+// form (an access to an operand the form lacks, a register of another class, an x87 register outside an x87 row, a
 // vector destination without the row's write, a syntax the slots don't know).
 static bool x86_effects_build(uint32_t form, const X86EffectsRow* row, X86Effects* effects)
 {
@@ -1577,6 +1710,7 @@ static bool x86_effects_build(uint32_t form, const X86EffectsRow* row, X86Effect
         const bool registers = (descriptor & BUSTER_X86_OPERAND_REGISTER) != 0;
         const bool general = registers && class >= BUSTER_X86_CLASS_GPR8 && class <= BUSTER_X86_CLASS_GPR64;
         const bool vector = registers && class >= BUSTER_X86_CLASS_XMM && class <= BUSTER_X86_CLASS_ZMM;
+        bits = registers && class == BUSTER_X86_CLASS_ST && (row->properties & BUSTER_X86_EFFECT_X87) ? 0 : bits;
         valid &= bits == 0 || descriptor != BUSTER_X86_OPERAND_NONE;
         valid &= bits == 0 || !registers || general || vector;
         bits |= vector ? BUSTER_X86_ROLE_VECTOR : 0;
@@ -1591,8 +1725,8 @@ static bool x86_effects_build(uint32_t form, const X86EffectsRow* row, X86Effect
         else if ((bits & BUSTER_X86_ROLE_WRITE) && vector)
         {
             valid &= row->vector != 0;
-            destination_rest = row->vector >> 5;
-            write_bytes = row->vector & 0x1f;
+            destination_rest = row->vector >> 8;
+            write_bytes = row->vector & 0xff;
             bits |= destination_rest << BUSTER_X86_ROLE_REST_SHIFT;
         }
         operands |= bits << (role * BUSTER_X86_ROLE_BITS);
@@ -1600,8 +1734,10 @@ static bool x86_effects_build(uint32_t form, const X86EffectsRow* row, X86Effect
     width = width != 0 ? width : description->operand_bytes;
     // An implicit write narrower than 4 bytes keeps the rest of the register: it reads the register too.
     implicit_reads |= width != 0 && width < 4 ? implicit_writes : 0;
-    uint32_t properties = row->properties;
-    const bool both_registers = (description->reg & BUSTER_X86_OPERAND_REGISTER) && (description->rm & BUSTER_X86_OPERAND_REGISTER);
+    uint32_t properties = row->properties | (description->family == BUSTER_X86_FAMILY_EVEX ? BUSTER_X86_EFFECT_EVEX : 0);
+    // A zero idiom's sources: reg and rm, or a VEX or EVEX form's vvvv and rm.
+    const uint16_t first_source = (access[BUSTER_X86_ROLE_VVVV] & BUSTER_X86_ROLE_READ) ? description->vvvv : description->reg;
+    const bool both_registers = (first_source & BUSTER_X86_OPERAND_REGISTER) && (description->rm & BUSTER_X86_OPERAND_REGISTER);
     if (!both_registers || destination_rest == BUSTER_X86_REST_MERGE)
     {
         properties &= ~BUSTER_X86_EFFECT_ZERO_IDIOM;
@@ -1733,5 +1869,6 @@ static bool x86_semantics_initialize(void)
         }
     }
     valid = valid && x86_choice_build();
+    x86_semantics_initialized = valid;
     return valid;
 }

@@ -301,6 +301,13 @@ int run_floors_benchmark(int argc, char** argv);
 #include "buster/compiler/branch_sizing_test.c"
 int run_branch_sizing_benchmark(int argc, char** argv);
 
+// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
+// and the value-preserving form choice), before the assembler's matcher, which takes its values' immediates from it.
+// Its tests, for the test-x86-semantics command, follow the assembler's (they take the encoder's tests' printer and
+// branch sizing's tests' runner, and check x86_match.c against the shared rule). Its benchmark is another translation
+// unit.
+#include "buster/compiler/x86_semantics.c"
+
 #include "buster/compiler/x86_match.c"
 #include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
@@ -308,11 +315,6 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/assembler_test.c"
 #include "buster/compiler/assembler_benchmark.c"
 
-// What the x86 forms a code generator emits mean (their effects, the immediate's contract, the operand-resolved effects
-// and the value-preserving form choice) and its tests, for the test-x86-semantics command (which takes the encoder's
-// tests' printer and branch sizing's tests' runner, and checks x86_match.c's ranges). Its benchmark is another
-// translation unit.
-#include "buster/compiler/x86_semantics.c"
 #include "buster/compiler/x86_semantics_test.c"
 int run_x86_semantics_benchmark(int argc, char** argv);
 

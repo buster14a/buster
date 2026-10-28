@@ -404,7 +404,9 @@ struct Tier0Operation
 // defines the symbol whose GLOBAL_ADDRESS is the label's address.
 //
 // entry_records asks for each entry's first record in the code (Tier0Code.entry_records), for source rows (#395); a
-// compile without it allocates and copies nothing for them.
+// compile without it allocates and copies nothing for them. choice_requests asks, the same way, for the immediates'
+// requests to the form choice (Tier0Code.choice_records and the rest), for measuring the choice on real functions
+// (#221, benchmark-backend-source).
 typedef struct Tier0Function Tier0Function;
 struct Tier0Function
 {
@@ -451,6 +453,7 @@ struct Tier0Function
     const uint32_t* label_entries;
     uint32_t label_count;
     bool entry_records;
+    bool choice_requests;
 };
 
 // Whether local `local` is an object in the frame (Tier0Function.local_sizes).
@@ -517,7 +520,10 @@ typedef enum Tier0Error
 // `entry_records` is each of the function's `entry_count` typed entries' first record, and one more, the epilogue's:
 // ascending, an entry that emits no record (a leaf fused into its consumer) at the next entry's; with branch sizing's
 // offsets, where each entry's code starts in bytes, which source rows give a debugger (debug.c, #395). Without it,
-// entry_records is null and entry_count 0. `deferred` counts the entries the vector path left to tier0_emit_deferred
+// entry_records is null and entry_count 0. With Tier0Function.choice_requests, the `choice_count` requests the form
+// choice took (x86_choose_forms's): each one's record before the choice (its template's form, the row's widest
+// immediate), and its row, value and context; without it they are null and 0. `deferred` counts the entries the vector
+// path left to tier0_emit_deferred
 // (the scalar path counts the same ones), and `deep` those among them whose values went to the deep slots
 // (tier0_select_deep). `label_records` has a record index for each of Tier0Function.label_entries, label_count of them
 // in their order (0 for a function without them): the label's first record. The frame is the one tier0_emit_prologue
@@ -541,6 +547,11 @@ struct Tier0Code
     uint32_t reference_count;
     uint32_t* entry_records;
     uint32_t entry_count;
+    X86Instruction* choice_records;
+    uint16_t* choice_rows;
+    int64_t* choice_values;
+    uint16_t* choice_contexts;
+    uint32_t choice_count;
     uint32_t* label_records;
     uint32_t label_count;
     uint32_t deferred;
@@ -4387,6 +4398,14 @@ static X86Instruction tier0_instruction(uint32_t form, uint8_t reg, uint8_t rm, 
     return record;
 }
 
+// Of an operation's imm8 and imm32 forms, the imm8's where its immediate keeps `value` (#221's rule,
+// x86_immediate_encodes), as the emitter's own records with a constant take them: the frame's reservation, its
+// realignment and ALLOCA's rounding.
+static uint32_t tier0_immediate_form(uint32_t imm8, uint32_t imm32, int64_t value)
+{
+    return x86_immediate_encodes(imm8, value) ? imm8 : imm32;
+}
+
 // mov [rsp + offset], reg and back (from rbp with a frame pointer: Tier0Frame's base and bias), 64-bit (a general
 // register) or as a double (an XMM one, BUSTER_TIER0_XMM's).
 static void tier0_spill(Tier0Writer* writer, const Tier0Frame* frame, uint32_t reg, uint32_t offset, bool load)
@@ -5278,8 +5297,10 @@ static void tier0_emit_stack(const Tier0Entries* entries, const Tier0Frame* fram
         const uint8_t count = tier0_integer_depths[depth - 1];
         const uint32_t log2 = frame->alignment_log2 != 0 ? frame->alignment_log2 : BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
         const int32_t alignment = (int32_t)(UINT32_C(1) << log2);
-        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, alignment - 1));
-        tier0_put(writer, tier0_instruction(log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32, 0, count, BUSTER_X86_REGISTER_DIRECT, 0, -alignment));
+        tier0_put(writer, tier0_instruction(tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, alignment - 1), 0, count, BUSTER_X86_REGISTER_DIRECT, 0,
+                                            alignment - 1));
+        tier0_put(writer, tier0_instruction(tier0_immediate_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, -alignment), 0, count, BUSTER_X86_REGISTER_DIRECT, 0,
+                                            -alignment));
         tier0_put(writer, tier0_instruction(X86_FORM_SUB_RM64_R64, count, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, 0));
         if (frame->outgoing != 0)
         {
@@ -5892,7 +5913,7 @@ static uint32_t tier0_vector_store(uint32_t bytes)
 // mov dword.
 static bool tier0_vector_word_fits(const Tier0Function* function, uint64_t k, uint32_t w)
 {
-    return tier0_fits_int32((int64_t)function->vector_constants[8 * k + w]);
+    return x86_immediate_encodes(X86_FORM_MOV_RM64_IMM32, (int64_t)function->vector_constants[8 * k + w]);
 }
 
 // Whether constant k is all zeros up to its bytes, which vpxord and one store make.
@@ -7135,8 +7156,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
 // 128 bytes.
 static X86Instruction tier0_realignment(uint32_t alignment_log2)
 {
-    const uint32_t form = alignment_log2 <= 7 ? X86_FORM_AND_RM64_IMM8 : X86_FORM_AND_RM64_IMM32;
-    return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)-(int64_t)(UINT64_C(1) << alignment_log2));
+    const int64_t mask = -(int64_t)(UINT64_C(1) << alignment_log2);
+    const uint32_t form = tier0_immediate_form(X86_FORM_AND_RM64_IMM8, X86_FORM_AND_RM64_IMM32, mask);
+    return tier0_instruction(form, 0, X86_REGISTER_RSP, BUSTER_X86_REGISTER_DIRECT, 0, (int32_t)mask);
 }
 
 // A realigned frame's records after its reservation: rsp rounded down to its alignment, and with entries that move rsp
@@ -7170,7 +7192,7 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     }
     if (frame->size != 0)
     {
-        const uint32_t form = frame->size <= 127 ? X86_FORM_SUB_RM64_IMM8 : X86_FORM_SUB_RM64_IMM32;
+        const uint32_t form = tier0_immediate_form(X86_FORM_SUB_RM64_IMM8, X86_FORM_SUB_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
     if (frame->alignment_log2 != 0)
@@ -7373,7 +7395,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     }
     else if (frame->size != 0)
     {
-        const uint32_t form = frame->size <= 127 ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_ADD_RM64_IMM32;
+        const uint32_t form = tier0_immediate_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, frame->size);
         tier0_put(writer, tier0_instruction(form, 0, X86_REGISTER_RSP, 0, 0, (int32_t)frame->size));
     }
     for (uint32_t c = BUSTER_TIER0_CALLEE_SAVED; c > 0; c -= 1)
@@ -7937,6 +7959,30 @@ static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t va
     }
 }
 
+// Tier0Function.choice_requests: the requests copied into the code (from `output`), each with its record before the
+// choice rewrites it. Returns false without room. Out of line and cold: a compile without the request runs none of it.
+static __attribute__((cold, noinline)) bool tier0_copy_choices(Tier0Code* code, Arena* output, const Tier0Choices* choices)
+{
+    const uint32_t count = choices->count;
+    code->choice_records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)count + 1);
+    code->choice_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint16_t, (uint64_t)count + 1);
+    code->choice_values = BUSTER_ARENA_PUSH_ARRAY(output, int64_t, (uint64_t)count + 1);
+    code->choice_contexts = BUSTER_ARENA_PUSH_ARRAY(output, uint16_t, (uint64_t)count + 1);
+    const bool room = code->choice_records != 0 && code->choice_rows != 0 && code->choice_values != 0 && code->choice_contexts != 0;
+    for (uint32_t q = 0; room && q < count; q += 1)
+    {
+        code->choice_records[q] = code->records[choices->records[q]];
+    }
+    if (room)
+    {
+        memcpy(code->choice_rows, choices->rows, (uint64_t)count * sizeof(uint16_t));
+        memcpy(code->choice_values, choices->values, (uint64_t)count * sizeof(int64_t));
+        memcpy(code->choice_contexts, choices->contexts, (uint64_t)count * sizeof(uint16_t));
+        code->choice_count = count;
+    }
+    return room;
+}
+
 // Every form's shape (BUSTER_TIER0_SHAPE_*). Returns false for an immediate past 8 bytes.
 static bool tier0_build_choice_shapes(void)
 {
@@ -8209,11 +8255,13 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
         if (BUSTER_VECTOR_PATH(vector))
         {
             tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
+            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         else
         {
             tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
+            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
             x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
         }
         if (BUSTER_VECTOR_PATH(vector))

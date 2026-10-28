@@ -1119,8 +1119,11 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                          Tier0Error allowed, Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
-    const Tier0Code vector = tier0_compile(function, arena);
+    // With the entries' first records, which tier0_test_covered needs to leave the rows' records out.
+    Tier0Function wanted = *function;
+    wanted.entry_records = true;
+    const Tier0Code scalar = tier0_compile_scalar(&wanted, arena);
+    const Tier0Code vector = tier0_compile(&wanted, arena);
     *error = scalar.error;
     bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "vectors", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)",
                                    name, check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
@@ -1131,6 +1134,7 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                                   branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "vectors", "%s: an invalid record or an invalid branch column", name);
+    ready = ready && tier0_test_covered(tally, "vectors", name, function, &scalar);
     uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
