@@ -1223,7 +1223,7 @@ warnings (`-w`) do not enter the counts. The final line gives the published
 warning and error totals with Clang's singular/plural spelling; clean units print
 no summary, and explicit `-fno-caret-diagnostics` suppresses the summary as it
 does in Clang. Both output paths share the publication gate, including deferred
-preprocessor-history replay. This bounds reporting rather than the semantic
+preprocessor-history replay and the standalone `-E` command. This bounds reporting rather than the semantic
 graph's construction.
 
 Collection still has two pre-existing recovery boundaries: a preprocessing

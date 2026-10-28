@@ -171,6 +171,73 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
             }
         }
     }
+    // #684's explicit notes use a third diagnostic entry point. Conditional invocations keep these fixtures wholly
+    // in preprocessing, avoiding the independently documented cross-stage recovery boundary (#698).
+    const char* noted_sources[] =
+    {
+        "#define ONE(x) x\n#if ONE(1,2)\n#endif\n#if ONE(1,2)\n#endif\n#if ONE(1,2)\n#endif\n",
+        "#define BAD0(...) __VA_OPT__(\n#define BAD1(...) __VA_OPT__(\n#define BAD2(...) __VA_OPT__(\n",
+    };
+    const char* noted_limits[] = { NULL, "-ferror-limit=1", "-ferror-limit=0" };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(noted_sources); fixture += 1)
+    {
+        const bool made = parse_test_write(source, noted_sources[fixture], strlen(noted_sources[fixture]));
+        check_test_expect(test, made, "attached-note limit fixture can be written");
+        for (uint32_t limit = 0; made && limit < BUSTER_ARRAY_LENGTH(noted_limits); limit += 1)
+        {
+            for (uint32_t route = 0; route < 6; route += 1)
+            {
+                char* arguments[12] = { (char*)clang, "-std=gnu17", route < 4 ? "-fsyntax-only" : "-E", "-fno-color-diagnostics" };
+                uint32_t count = 4;
+                if (noted_limits[limit] != NULL)
+                {
+                    arguments[count++] = (char*)noted_limits[limit];
+                }
+                arguments[count++] = source;
+                char* text = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &text);
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
+                free(text);
+                char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe") };
+                uint32_t used = 1;
+                // The standalone preprocessor command is selected by its leading -E.
+                if (route >= 4)
+                {
+                    checked[used++] = "-E";
+                }
+                checked[used++] = "-std=gnu17";
+                if ((route & 1) != 0)
+                {
+                    checked[used++] = "--scalar";
+                }
+                if (route < 2)
+                {
+                    checked[used++] = "-fsyntax-only";
+                }
+                else if (route < 4)
+                {
+                    checked[used++] = "-c";
+                    checked[used++] = "-o";
+                    checked[used++] = object;
+                }
+                if (noted_limits[limit] != NULL)
+                {
+                    checked[used++] = (char*)noted_limits[limit];
+                }
+                checked[used++] = source;
+                text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                char description[160];
+                snprintf(description, sizeof(description), "attached-note cutoff, totals and group order fixture=%u limit=%u route=%u", fixture, limit, route);
+                check_test_expect(test, oracle == 1 && status == oracle && actual.errors == expected.errors && actual.fatal == expected.fatal &&
+                                  actual.warnings == expected.warnings && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
+                                  !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0, description);
+                free(text);
+                unlink(object);
+            }
+        }
+    }
     const char* values[] = { "", "-1", "+1", "word", "1x", "4294967296", "08", "0x", "0b", "0o" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(values); i += 1)
     {
