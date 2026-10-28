@@ -1917,6 +1917,42 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     }
 }
 
+// Exact-capacity warning sinks end at an unreadable page. Scalar scans also visit the non-warning tokens after
+// their last output, which must never write a speculative token beyond the sink's logical extent.
+static void check_test_driver_warning_order(CheckTest* test)
+{
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* memory = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "warning-order exact-capacity guard pages are available");
+    if (ready)
+    {
+        uint8_t seen[200] = { 0 };
+        uint32_t* tokens = (uint32_t*)(memory + page) - 2;
+        bool same = true;
+        for (uint32_t count = 2; count <= BUSTER_ARRAY_LENGTH(seen); count += 1)
+        {
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                memset(seen, 0, sizeof(seen));
+                seen[0] = 2;
+                seen[1] = 1;
+                tokens[0] = 0;
+                tokens[1] = UINT32_MAX;
+                CheckInitWarningSink sink = { .tokens = tokens, .capacity = 2, .count = 2 };
+                CheckInitWarningCollector collector = { .sink = &sink, .seen = seen, .token_count = count };
+                check_init_warning_order(&collector, 1, scalar != 0);
+                same &= sink.count == 2 && tokens[0] == 0 && tokens[1] == 1;
+            }
+        }
+        check_test_expect(test, same, "warning ordering preserves prior entries and never writes beyond an exactly full sink on either path");
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, page * 2);
+    }
+}
+
 static void check_test_driver_diagnostic_capacity(CheckTest* test)
 {
     Arena scratch = arena_reserve(64);
@@ -2123,7 +2159,15 @@ static uint32_t check_test_driver_random_token(uint64_t* state, uint32_t count, 
 // quiet and not. The texts, the counts of warnings and errors, the fatal flag and the outcome must be the oracle's.
 static void check_test_driver_reports(CheckTest* test)
 {
-    static const char* const sources[] = {
+    char wide_source[8192];
+    uint32_t wide_length = 0;
+    for (uint32_t token = 0; token < 256; token += 1)
+    {
+        wide_length += (uint32_t)snprintf(wide_source + wide_length, sizeof(wide_source) - wide_length, "int padding%u;\n", token);
+    }
+    snprintf(wide_source + wide_length, sizeof(wide_source) - wide_length,
+             "enum { W = 2147483647 + 1 }; int wide[1] = { 1, 2 }; int f(int x) { return x << 40; }\n");
+    const char* const sources[] = {
         "#pragma STDC FENV_ACCESS MAYBE\n"
         "enum { A = 2147483647 + 1 };\n"
         "struct __attribute__((packed)) P { char c; int i; };\n"
@@ -2137,6 +2181,7 @@ static void check_test_driver_reports(CheckTest* test)
         "#pragma clang diagnostic fatal \"-Wpointer-sign\"\n"
         "void g(char* c) { unsigned char* u = c; (void)u; }\n"
         "int b[2] = { 1, 2, 3 };\n",
+        wide_source,
     };
     uint64_t state = 0x592;
     uint32_t compared = 0;
@@ -2163,6 +2208,10 @@ static void check_test_driver_reports(CheckTest* test)
                            check_graph_run(&types.table, &input.graph, &retained, &scratch, &checking, &stream);
         check_test_expect(test, ready && parser.tokens.count != 0 && stream.count != 0, "a unit with warnings checks, for the reports' walk");
         const uint32_t count = ready ? parser.tokens.count : 0;
+        if (s == 2)
+        {
+            check_test_expect(test, count > 256, "the reports' ordering oracle exercises multi-byte token keys");
+        }
         const CheckInput checked = input;
         const CheckStream streamed = stream;
         const uint32_t errors = pp.errors;
@@ -2637,6 +2686,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     check_test_expect(&test, options, "driver test options are recognized");
+    check_test_driver_warning_order(&test);
     check_test_driver_diagnostic_capacity(&test);
     check_test_driver_reports(&test);
     const CheckDriverFixture fixtures[] =

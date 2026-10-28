@@ -1137,7 +1137,7 @@ conversions are distinguished from source conversions: `__builtin_assume_aligned
 retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
 can cancel it. The existing diagnostic pragma history controls suppression and
 promotion, and `-w` silences the diagnostic. Source records remain ordered and
-the driver consumes them sparsely without widening its dense warning columns.
+the driver merges them with its sparse warning and report keys.
 
 The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
 `llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation

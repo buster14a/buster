@@ -1064,7 +1064,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
     result->function_atoms = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, count) : 0;
-    // The declaring tokens again, for the attributes' passes (one vector pass: cheaper than holding them through the
+    // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
     const uint64_t attributes_mark = scratch->length;
     uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
@@ -1100,7 +1100,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
             const uint32_t object = program->input->objects[token];
-            if (attributes != 0 && object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count)
             {
                 const SymbolId symbol = program->object_symbols[object];
                 alignments[symbol] = attributes->alignment_log2 > alignments[symbol] ? attributes->alignment_log2 : alignments[symbol];

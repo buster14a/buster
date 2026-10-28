@@ -63,7 +63,7 @@ static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput*
     for (uint32_t d = 0; d < declaration_count; d += 1)
     {
         const uint32_t token = declarations[d];
-        count += token < cutoff && check_init_object_candidate(input, types, token) && input->initializer_ends[token] <= cutoff;
+        count += check_init_object_candidate(input, types, token) && input->initializer_ends[token] <= cutoff;
     }
     uint64_t capacity = count != 0 ? 1 : 0;
     while (capacity < (uint64_t)count * 2)
@@ -218,8 +218,11 @@ static void check_init_warning_order(CheckInitWarningCollector* collector, uint3
             for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t warned = token + (uint32_t)__builtin_ctzll(selected);
-                collector->sink->tokens[at] = warned;
-                at += collector->seen[warned] == 1;
+                if (collector->seen[warned] == 1)
+                {
+                    collector->sink->tokens[at] = warned;
+                    at += 1;
+                }
             }
         }
     }

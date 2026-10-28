@@ -59,9 +59,9 @@ static uint32_t check_program_attribute_roots(const CheckInputAttributes* attrib
 
 // The tokens a unit's post-checking stages visit for its declarations: those that declare (`declarations[t] == t`), and
 // with `nodes`, those whose nodes[t] is below `limit` too (the lowering's initializers), in token order into `tokens`,
-// which has room for `count` + 16: how many. The selection, the emission and the lowering visit these rather than every
-// token of the unit, most of which (a header's) declare nothing they emit (#442). The scalar path is the vector path's
-// exact twin.
+// which has room for `count` + 16: how many. The emission's attributes and the lowering's initializer pass visit these
+// rather than every token of the unit (#442). The selection reads check_data_prepare's static declarations instead
+// (#592). The scalar path is the vector path's exact twin.
 static uint32_t check_program_declaring_scalar(const uint32_t* declarations, const uint32_t* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
     uint32_t written = 0;
@@ -272,19 +272,16 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             {
                 group += 1;
             }
-            if (group < data->declared_count && data->declared_objects[group] == object)
+            const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
+            bool gnu_inline = false;
+            roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
+            inline_rules[group] |= gnu_inline ? 2 : 0;
+            if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
             {
-                const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
-                bool gnu_inline = false;
-                roots[group] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
-                inline_rules[group] |= gnu_inline ? 2 : 0;
-                if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE)
+                const uint8_t spelling = input->function_flags != 0 ? input->function_flags[token] : 0;
+                if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
                 {
-                    const uint8_t spelling = input->function_flags != 0 ? input->function_flags[token] : 0;
-                    if ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0)
-                    {
-                        inline_rules[group] &= (uint8_t)~1u;
-                    }
+                    inline_rules[group] &= (uint8_t)~1u;
                 }
             }
         }

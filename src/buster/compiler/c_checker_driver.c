@@ -215,8 +215,8 @@ static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, con
 // of packed members it takes, and its first report (the reader's, then the expressions', then the driver's own). Few
 // tokens have any (#592), so the walk visits only those, from the token after the last it visited: the next warning's,
 // the next report's, the next pragma's (unless the walk has passed it: then, as a walk of every token would, it never
-// reports it) and the next packed member's address, or that token itself for a member whose address the walk has passed
-// (which it then consumes without a report, as a walk of every token would). The warnings are gathered as keys
+// reports it) and the next packed member's address. Packed records behind that address are consumed in the same
+// iteration without a report, as a walk of every token would. The warnings are gathered as keys
 // (check_driver_warning_key) from the tokens' attributes 8 at a time, their constants' warnings 64 at a time and the
 // expressions' nodes 16 at a time, where they have any (the scalar path, parser->options.scalar's, takes every token
 // and node), and from the initializers' excess elements; then sorted by token (c_bindings_sort) and combined. The
@@ -229,6 +229,8 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const uint64_t mark = scratch->length;
     const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
+    // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
+    const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
     const uint32_t scanned = count < input->token_count ? count : input->token_count;
     const uint32_t nodes = stream != NULL ? stream->count : 0;
@@ -246,14 +248,12 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     if (ready)
     {
         uint32_t report_total = 0;
-        uint32_t report_varying = 0;
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
             const uint32_t token = input->reports[i].token < count ? input->reports[i].token : count;
             if (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | i;
-                report_varying |= token;
             }
         }
         for (uint32_t i = 0; i < stream_reports; i += 1)
@@ -262,16 +262,14 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             if (repair == NULL || check_repair_graph_report(repair, &input->graph, stream->reports + i))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + i);
-                report_varying |= token;
             }
         }
         for (uint32_t i = 0; i < extra_count; i += 1)
         {
             const uint32_t token = extra[i].position < count ? extra[i].position : count;
             report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
-            report_varying |= token;
         }
-        uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, report_varying) : NULL;
+        uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
         {
@@ -285,7 +283,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             firsts[first_count] = UINT64_MAX;
         }
         uint32_t warning_total = 0;
-        uint32_t warning_varying = 0;
         for (uint32_t first = 0; show_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
             const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, scanned) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, scanned);
@@ -296,7 +293,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 if (flags != 0)
                 {
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags);
-                    warning_varying |= token;
                 }
             }
         }
@@ -311,7 +307,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 if (flags != 0)
                 {
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
-                    warning_varying |= token;
                 }
             }
         }
@@ -327,7 +322,6 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 {
                     const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(token, flags, flags & ~ignored);
-                    warning_varying |= token;
                 }
             }
         }
@@ -336,10 +330,9 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             if (excess_tokens[i] < count)
             {
                 warning_keys[warning_total++] = check_driver_warning_key(excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS, CHECK_WARNING_EXCESS_INITIALIZERS);
-                warning_varying |= excess_tokens[i];
             }
         }
-        uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, warning_varying) : NULL;
+        uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
         uint32_t warning_count = 0;
         for (uint32_t i = 0; i < warning_total; i += 1)
         {
@@ -373,7 +366,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             }
             if (packed < input->packed_member_count)
             {
-                const uint64_t address = input->packed_members[packed].address > position ? input->packed_members[packed].address : position;
+                const uint64_t address = input->packed_members[packed].address;
                 next = address < next ? address : next;
             }
             walking = next <= count;

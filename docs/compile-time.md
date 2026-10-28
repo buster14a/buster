@@ -489,8 +489,11 @@ every token) and visits only them:
   attributes of every declaring token, to find those that have any.
 - **Dense maps.** `declaration_plans` (by declaration token), and the
   selection's `object_definitions`, `needed` and `object_symbols` (by object)
-  stay token-sized: the lowering and the emission read them at arbitrary
-  tokens. Their clearing is the rest of the selection's cost.
+  remain dense in this change. The selection owns `object_definitions` and
+  `needed` as scratch; the lowering and emission also use `object_symbols`.
+  `declaration_plans` has only a few readers, indexed by declaring token.
+  Compacting these maps and changing those readers together is tracked in
+  [#641](https://github.com/buster14a/buster/issues/641).
 
 ## Linking is not in the 194.8 ms
 
