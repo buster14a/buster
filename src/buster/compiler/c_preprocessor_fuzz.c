@@ -123,12 +123,14 @@ static const char* pp_fuzz_difference_name(PreprocessorFuzzDifference difference
 // expansion starts, since the kernels' check prints them with line markers too.
 static PPOptions pp_fuzz_options(bool c23, bool scalar, bool quiet)
 {
+    (void)scalar;
+
     const PPOptions result = {
         .language = {
             .standard = c23 ? 2023 : 2017,
             .gnu = false,
         },
-        .scalar = scalar,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
         .no_standard_includes = true,
         .expansion_starts = true,
         .trigraphs = !c23,

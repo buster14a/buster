@@ -472,6 +472,7 @@ static uint32_t tier1_call_helper(const Tier1CallFixture* fixture, uint32_t help
 static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fixture, Tier1EmitResult* emitted, Tier1CallObserved* observed, uint8_t* mapping)
 {
     Tier1SelectCode* code = &emitted->code;
+    bool native = tier1_emit_test_native(test, code->records, code->count);
     const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     uint32_t* offsets = calloc((uint64_t)code->count + 1, sizeof(uint32_t));
     uint32_t* ends = calloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(emitted->reference_count), sizeof(uint32_t));
@@ -504,6 +505,7 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     {
         X86Instruction records[BUSTER_TIER1_CALL_RECORDS];
         const uint32_t count = tier1_call_helper(fixture, helper, observed, records);
+        native &= count <= BUSTER_TIER1_CALL_RECORDS && tier1_emit_test_native(test, records, count);
         ready = count <= BUSTER_TIER1_CALL_RECORDS && x86_target_validate(test->allowed, records, count) == count;
         const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         ready = ready && used <= helper_limit && helper_capacity <= helper_limit - used;
@@ -566,7 +568,7 @@ static uint8_t* tier1_call_load(Tier1EmitTest* test, const Tier1CallFixture* fix
     free(twin_ends);
     free(ends);
     free(offsets);
-    return ready ? entry : 0;
+    return ready && native ? entry : 0;
 }
 
 static __attribute__((no_sanitize("function"))) uint64_t tier1_call_invoke(const uint8_t* entry, const uint64_t* arguments)
@@ -975,7 +977,12 @@ static void tier1_call_tests(Tier1EmitTest* test)
         alarm(60);
         const uint64_t checks = test->checks;
         const uint64_t failures = test->failures;
+        const uint64_t native_skipped = test->native_skipped;
         tier1_call_cases(test);
+        if (test->native_skipped != native_skipped)
+        {
+            printf("tier1 calls: %llu native-code groups unavailable on host (execution skipped)\n", (unsigned long long)(test->native_skipped - native_skipped));
+        }
         report[0] = test->checks - checks;
         report[1] = test->failures - failures;
         report[2] = UINT64_C(0xcafec001d15ea5ed);

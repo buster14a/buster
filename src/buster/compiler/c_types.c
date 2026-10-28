@@ -69,7 +69,7 @@
 #include <string.h>
 
 // CPU architecture dependent includes
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -2435,6 +2435,12 @@ static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 // entry for it, made before its tag was completed, which is stale.
 static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, TypeId* results)
 {
+#if !BUSTER_HOST_VECTOR
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        results[i] = type_derive(table, keys.kinds[i], keys.flags[i], keys.bases[i], keys.extents[i]);
+    }
+#else
     // A view's lookups pass its hidden types over, which the vector lookup doesn't: its requests go one at a time.
     const uint32_t vector_count = table->hidden_end != 0 ? 0 : count;
     for (uint32_t i = vector_count; i < count; i += 1)
@@ -2507,6 +2513,7 @@ static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, T
             }
         }
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2697,6 +2704,9 @@ static uint32_t type_lookup_probe_scalar(const TypeLookupBucket* buckets, uint32
 // probe takes one bucket, or a few: never more than the index has.
 static uint32_t type_lookup_probe(const TypeLookupBucket* buckets, uint32_t first, uint32_t log2, uint32_t name)
 {
+#if !BUSTER_HOST_VECTOR
+    return type_lookup_probe_scalar(buckets, first, log2, name);
+#else
     const uint32_t mask = (1u << log2) - 1;
     const __m256i target = _mm256_set1_epi32((int)name);
     uint32_t bucket = type_lookup_bucket(name, log2);
@@ -2712,6 +2722,7 @@ static uint32_t type_lookup_probe(const TypeLookupBucket* buckets, uint32_t firs
         bucket = (bucket + 1) & mask;
     }
     return result;
+#endif
 }
 
 // Gives `name` the member `member` in an index, unless an earlier member has it already: the index keeps the first
@@ -3086,7 +3097,7 @@ static inline __attribute__((always_inline)) uint32_t type_lookup_member_with(co
 
 static uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
 {
-    return type_lookup_member_with(table, record, name, offset, qualifiers, false);
+    return type_lookup_member_with(table, record, name, offset, qualifiers, BUSTER_SCALAR_PATH(false));
 }
 
 static uint32_t type_lookup_member_scalar(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
@@ -4256,6 +4267,9 @@ static void type_promote_codes_scalar(const uint8_t* codes, uint64_t count, uint
 // 64 codes at a time, with a masked load and store for the last ones: one vpermb each.
 static void type_promote_codes(const uint8_t* codes, uint64_t count, uint8_t* results)
 {
+#if !BUSTER_HOST_VECTOR
+    type_promote_codes_scalar(codes, count, results);
+#else
     const __m512i table = _mm512_load_si512(type_promotion_codes);
     for (uint64_t i = 0; i < count; i += BUSTER_TYPE_CODE_COUNT)
     {
@@ -4263,6 +4277,7 @@ static void type_promote_codes(const uint8_t* codes, uint64_t count, uint8_t* re
         const __m512i input = _mm512_maskz_loadu_epi8(lanes, codes + i);
         _mm512_mask_storeu_epi8(results + i, lanes, _mm512_permutexvar_epi8(input, table));
     }
+#endif
 }
 
 // What a code is, from its ranges (the scalar twin's, independent of type_code_classes).
@@ -4430,7 +4445,11 @@ static void type_usual_arithmetic_codes_variant(const uint8_t* left, const uint8
 // The kernel the benchmark chose (docs/c-types.md, "Conversions"); type_usual_arithmetic_codes_pairs is the other.
 static void type_usual_arithmetic_codes(const uint8_t* left, const uint8_t* right, uint64_t count, uint8_t* results)
 {
+#if !BUSTER_HOST_VECTOR
+    type_usual_arithmetic_codes_scalar(left, right, count, results);
+#else
     type_usual_arithmetic_codes_variant(left, right, count, results, false);
+#endif
 }
 
 static __attribute__((unused)) void type_usual_arithmetic_codes_pairs(const uint8_t* left, const uint8_t* right, uint64_t count, uint8_t* results)

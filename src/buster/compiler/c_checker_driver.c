@@ -614,6 +614,8 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
                                  bool scalar, bool verify, bool dump_static, bool debug, bool unwind, CheckProgramLanes* lanes, Arena* scratch,
                                  CheckClock* stage_clock)
 {
+    (void)scalar;
+
     Arena output = arena_reserve(UINT64_C(1) << 34);
     Arena bytes = arena_reserve(UINT64_C(1) << 34);
     const uint64_t mark = scratch->length;
@@ -623,7 +625,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     CheckDebug dwarf = { 0 };
     check_clock_mark(stage_clock, CHECK_STAGE_EMIT_SETUP);
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, NULL, debug ? &rows : NULL,
+                 check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, NULL, debug ? &rows : NULL,
                                           unwind, verify, lanes, stage_clock);
     check_driver_lower_report(&code, stage_clock);
     if (!valid)
@@ -632,7 +634,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
     }
     if (valid && debug)
     {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
         if (!valid)
         {
             fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -850,6 +852,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                                      Preprocessor* pp, TypeTable* types, const char* output_path, bool scalar, bool verify, bool debug,
                                      bool unwind, const CheckDriverLibraries* libraries, CheckProgramLanes* lanes, Arena* scratch, CheckClock* stage_clock)
 {
+    (void)scalar;
+
     char cache[PATH_MAX];
     const bool cached = snapshot_directory(cache, sizeof(cache));
     bool valid = false;
@@ -872,7 +876,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         CheckProgramBinding binding = {
             .runtime = &runtime,
             .bind = &bind,
-            .path = scalar ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
+            .path = BUSTER_SCALAR_PATH(scalar) ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
             .arena = &arena,
             .data_objects = data->objects,
             .data_count = data->count,
@@ -896,7 +900,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             fprintf(stderr, "fatal error: can't reserve linker memory\n");
         }
         check_clock_mark(stage_clock, CHECK_STAGE_EXECUTABLE);
-        if (valid && !check_program_emit_timed(&code, program, parser, pp->table, data->capacity, scalar, &output, &bytes, scratch, &binding,
+        if (valid && !check_program_emit_timed(&code, program, parser, pp->table, data->capacity, BUSTER_SCALAR_PATH(scalar), &output, &bytes, scratch, &binding,
                                                debug ? &rows : NULL, unwind, verify, lanes, stage_clock))
         {
             valid = false;
@@ -913,7 +917,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         check_driver_lower_report(&code, stage_clock);
         if (valid && debug)
         {
-            valid = check_debug_build(&dwarf, program, &rows, parser, pp, scalar, &output, scratch);
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
             if (!valid)
             {
                 fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -1021,7 +1025,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .entry = dynamic_global(&runtime, &bind, "_start"),
                     .dynamic = &dynamic,
                     .debug = debug ? &dwarf.attach : NULL,
-                    .exact = scalar,
+                    .exact = BUSTER_SCALAR_PATH(scalar),
                 },
             };
             valid = lane_run(1, check_driver_write_main, &write, 0) && write.succeeded;
@@ -1097,8 +1101,10 @@ static const char* check_driver_object_name(Arena* arena, const char* source)
 
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise.
-static int run_check_command(int count, char** arguments, bool executable)
+// Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
+static int run_check_command_mode(int count, char** arguments, bool executable, bool release)
 {
+    WorkerBudget worker_budget;
     // --time-stages's clock (c_check_clock.c), started first so that its span covers the whole command, and only with the
     // option: a compile without it reads neither the clocks nor its resource use. A value that spells the option (`-o
     // --time-stages`) starts the clock too, which the arguments' loop below doesn't then hand to the stages.
@@ -1113,6 +1119,7 @@ static int run_check_command(int count, char** arguments, bool executable)
         check_clock_start(&clock_storage);
     }
     time_stages = false;
+    worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
     Arena arena = arena_reserve(1ull << 36);
     Arena scratch = arena_reserve(1ull << 36);
@@ -1144,6 +1151,9 @@ static int run_check_command(int count, char** arguments, bool executable)
     // The lanes the functions compile on (#151, check_program_emit_lanes): by default up to one per CPU the process may
     // run on, as many as the bodies' tokens pay for; --lanes N runs N, as long as there are bodies for them.
     CheckProgramLanes lanes = { .lanes = check_driver_cpus() };
+    // The caller is one worker. A build system can cap this process explicitly; GNU make supplies shared ownership
+    // of additional workers at emission time. No external budget changes the body's profitability decision itself.
+    lanes.budget = &worker_budget;
     bool invalid_lanes = false;
     for (int i = 0; filtered != 0 && libraries.names != 0 && libraries.directories != 0 && i < count; i += 1)
     {
@@ -1190,6 +1200,14 @@ static int run_check_command(int count, char** arguments, bool executable)
             invalid_lanes |= value == 0 || end == value || *end != 0 || lane_count == 0 || lane_count > BUSTER_CHECK_EMIT_MAX_LANES;
             lanes.lanes = (uint32_t)lane_count;
             lanes.every_lane = true;
+        }
+        else if (strcmp(arguments[i], "--worker-budget") == 0 || strncmp(arguments[i], "--worker-budget=", 16) == 0)
+        {
+            const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
+            char* end = NULL;
+            const unsigned long workers = value != NULL ? strtoul(value, &end, 10) : 0;
+            invalid_lanes |= value == NULL || end == value || *end != 0 || workers == 0 || workers > BUSTER_CHECK_EMIT_MAX_LANES;
+            worker_budget.maximum = (uint32_t)workers;
         }
         else if (strcmp(arguments[i], "-flazy-system-headers") == 0)
         {
@@ -1250,10 +1268,14 @@ static int run_check_command(int count, char** arguments, bool executable)
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
     options.defer_history = !lazy_system_headers && !scalar && !source_rows;
-    if (!parsed)
+    if (worker_budget.dry_run)
+    {
+        result = 0;
+    }
+    else if (!parsed)
     {
         fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--dump-typed] [--dump-static] [-flazy-system-headers] [--lower-all] [--lanes N] "
-                        "[--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
+                        "[--worker-budget N] [--time-stages] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c\n");
     }
     else if (!check_input_target_supported(&options))
     {
@@ -1578,19 +1600,41 @@ static int run_check_command(int count, char** arguments, bool executable)
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
-        parse_release(&parser);
-        pp_release(&pp);
-        intern_release(&identifiers);
+        if (release)
+        {
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+        }
     }
-    arena_release(&index_arena);
-    arena_release(&type_arena);
-    arena_release(&output_arena);
-    arena_release(&scratch);
-    arena_release(&arena);
+    if (release)
+    {
+        arena_release(&index_arena);
+        arena_release(&type_arena);
+        arena_release(&output_arena);
+        arena_release(&scratch);
+        arena_release(&arena);
+    }
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     if (stage_clock != NULL)
     {
         check_clock_report(stage_clock, pp_ticks, PP_PHASE_COUNT, stderr);
+        if (worker_budget.requested != 0)
+        {
+            const char* mode = worker_budget.mode == WORKER_BUDGET_JOBSERVER ? "jobserver" :
+                               worker_budget.mode == WORKER_BUDGET_UNAVAILABLE ? "unavailable" : "none";
+            fprintf(stderr, "worker-budget\tmode=%s\tlimit=%u\trequested=%u\tgranted=%u\tactive=%u\tfallback=%u\n", mode,
+                    worker_budget.maximum, worker_budget.requested, worker_budget.granted, lanes.active, (uint32_t)lanes.again);
+        }
     }
+    worker_budget_close(&worker_budget);
     return result;
+}
+
+// Tests and other reusable callers release all owned mappings before returning. Only main's terminal source
+// commands select the other mode: the kernel tears their mappings down once when the process exits, after the
+// stage report and stdio flush, rather than through each subsystem's individual munmap calls first.
+static int run_check_command(int count, char** arguments, bool executable)
+{
+    return run_check_command_mode(count, arguments, executable, true);
 }
