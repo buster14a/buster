@@ -9,7 +9,7 @@
 // So is an error at the line's end, whose place the retained line doesn't keep.
 //
 // A setting names a section for the definitions after it: text the functions', and bss, data, rodata and relro those
-// of variables with static storage, each without a section attribute of its own (or inherited). The lowering refuses
+// of variables with static storage, each without a section attribute of its own (or inherited). The emission refuses
 // such a definition by name until it publishes sections (CheckInputSections.definitions).
 //
 // Sema's UnifySection gives each section name one set of flags, its first use's: a setting, or a section attribute of a
@@ -95,7 +95,7 @@ struct CheckInputSections
     CheckInputSectionDiagnostic* diagnostics;
     uint32_t diagnostic_count;
     uint32_t diagnostic_capacity;
-    // The definitions a setting places, their names' tokens ascending: the lowering refuses them by name.
+    // The definitions a setting places, their names' tokens ascending: the emission refuses the first it emits, by name.
     uint32_t* definitions;
     uint32_t definition_count;
 };
@@ -677,7 +677,7 @@ static void check_input_section_conflicts(CheckInputReader* reader)
                                               BUSTER_CHECK_NONE, last);
                 }
             }
-            // The walk's events are in source order; keep the tokens ascending for the lowering's search anyway.
+            // The walk's events are in source order; keep the tokens ascending anyway: the emission refuses the first it emits.
             for (uint32_t i = 1; i < count; i += 1)
             {
                 const uint32_t token = placed[i];
@@ -693,20 +693,6 @@ static void check_input_section_conflicts(CheckInputReader* reader)
         }
         reader->scratch->length = mark;
     }
-}
-
-// Whether the definition whose name is token `token` is one a setting places (CheckInputSections.definitions).
-static bool check_input_section_placed(const CheckInputSections* sections, uint32_t token)
-{
-    uint32_t low = 0;
-    uint32_t high = sections != NULL ? sections->definition_count : 0;
-    while (low < high)
-    {
-        const uint32_t middle = low + (high - low) / 2;
-        low = sections->definitions[middle] < token ? middle + 1 : low;
-        high = sections->definitions[middle] < token ? high : middle;
-    }
-    return sections != NULL && low < sections->definition_count && sections->definitions[low] == token;
 }
 
 // The diagnostic of an input report of a line or a declaration (CHECK_INPUT_SECTION), or NULL: of a line's, the first in

@@ -1097,7 +1097,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t d = 0; valid && d < attributed; d += 1)
+        // The first emitted definition a #pragma clang section setting places, or BUSTER_CHECK_NONE (#619).
+        const CheckInputSections* sections = program->input->sections;
+        uint32_t placed = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; sections != NULL && placed == BUSTER_CHECK_NONE && i < sections->definition_count; i += 1)
+        {
+            const uint32_t token = sections->definitions[i];
+            const uint32_t object = token < program->input->token_count ? program->input->objects[token] : 0;
+            placed = object != 0 && object < program->object_count && program->object_symbols[object] != 0 ? token : placed;
+        }
+        for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
         {
             const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
@@ -1143,15 +1152,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     }
                 }
             }
-            // A definition a #pragma clang section setting places (#619) is refused as a section attribute is.
-            if (valid && program->input->sections != 0 && object != 0 && object < program->object_count && program->object_symbols[object] != 0 &&
-                check_input_section_placed(program->input->sections, token))
-            {
-                result->status = CHECK_PROGRAM_UNSUPPORTED;
-                result->reason = "a definition '#pragma clang section' places in a section";
-                result->token = token;
-                valid = false;
-            }
+        }
+        // A definition a #pragma clang section setting places (#619) is refused as a section attribute is, where no
+        // attribute's refusal comes before it: the loop above stops at its token. Such a definition needn't have an
+        // attribute at all (a section attribute of its own keeps it out), so the settings list them (CheckInputSections).
+        if (valid && placed != BUSTER_CHECK_NONE)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a definition '#pragma clang section' places in a section";
+            result->token = placed;
+            valid = false;
         }
     }
     arena_pop_to(scratch, attributes_mark);
