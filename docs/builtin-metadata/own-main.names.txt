@@ -325,6 +325,7 @@ __builtin_ia32_fxrstor
 __builtin_ia32_fxrstor64
 __builtin_ia32_fxsave
 __builtin_ia32_fxsave64
+__builtin_ia32_gatherdiv16si
 __builtin_ia32_gatherdiv8di
 __builtin_ia32_gathersiv16si
 __builtin_ia32_gathersiv8di

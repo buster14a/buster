@@ -89,7 +89,7 @@ static bool builtin_intrinsic_catalog_test_record_equal(const BuiltinIntrinsicIn
 
 static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest* test)
 {
-    builtin_intrinsic_catalog_test_expect(test, BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT == 1535, "frozen own-main scope contains exactly 1,535 requested names");
+    builtin_intrinsic_catalog_test_expect(test, BUSTER_BUILTIN_INTRINSIC_OWN_MAIN_COUNT == 1536, "frozen own-main scope contains exactly 1,536 requested names");
     uint32_t x86 = 0;
     uint32_t generic = 0;
     uint32_t gaps = 0;
@@ -126,8 +126,8 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
                 "only bit-cast syntax and va-list type gaps remain explicit non-prototypes outside the x86 scope");
         }
     }
-    builtin_intrinsic_catalog_test_expect(test, x86 == 1484 && generic == 49 && gaps == 2,
-        "own-main attestation is exactly 1,484 target records, 49 generic records and two explicit gaps");
+    builtin_intrinsic_catalog_test_expect(test, x86 == 1485 && generic == 49 && gaps == 2,
+        "own-main attestation is exactly 1,485 target records, 49 generic records and two explicit gaps");
 
     // A merge join supplies independent membership expectations for every full-catalog row, including rows that
     // share the ia32 spelling prefix but never appeared in the frozen workload's requested-name inventory.
@@ -153,8 +153,19 @@ static void builtin_intrinsic_catalog_test_own_main(BuiltinIntrinsicCatalogTest*
             builtin_intrinsic_own_main_x86_in_scope(full->name, full->name_length) == (expected != NULL && target),
             "full-catalog lookup never admits a target name absent from the exact frozen scope join");
     }
-    builtin_intrinsic_catalog_test_expect(test, joined_targets == 1484 && outside_targets != 0 && full_ia32 == 2029,
-        "1,484 attested target names remain narrower than the full catalogue's 2,029 ia32 spellings");
+    builtin_intrinsic_catalog_test_expect(test, joined_targets == 1485 && outside_targets != 0 && full_ia32 == 2029,
+        "1,485 attested target names remain narrower than the full catalogue's 2,029 ia32 spellings");
+
+    const char gather[] = "__builtin_ia32_gatherdiv16si";
+    const BuiltinIntrinsicInfo* gather_info = builtin_intrinsic_own_main_lookup(gather, sizeof(gather) - 1);
+    builtin_intrinsic_catalog_test_expect(test, gather_info != NULL &&
+        builtin_intrinsic_catalog_test_record_equal(gather_info, builtin_intrinsic_lookup(gather, sizeof(gather) - 1)) &&
+        strcmp(gather_info->encoding, "V8iV8ivC*V8OiUcIi") == 0 &&
+        builtin_intrinsic_own_main_prototype_in_scope(gather, sizeof(gather) - 1),
+        "unsigned-ID gather keeps its exact pinned eight-i32 result and eight-i64 index prototype");
+    builtin_intrinsic_catalog_test_expect(test, builtin_intrinsic_own_main_lookup(gather, sizeof(gather) - 2) == NULL &&
+        builtin_intrinsic_own_main_lookup(gather, sizeof(gather)) == NULL,
+        "gather admission rejects a truncated name and a name slice including its NUL");
 
     const char positive[] = "__builtin_ia32_enqcmd";
     const char positive64[] = "__builtin_ia32_prefetchi";

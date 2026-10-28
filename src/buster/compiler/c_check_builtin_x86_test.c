@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #148's x86 post-prototype immediate-constraint actions. Original expected rule facts below were independently
-// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 209 fact rows,
+// audited from llvmorg-23.1.1 SemaX86.cpp, not inferred from the production table. They exercise all 210 fact rows,
 // exact-name joins, both rules of rndscale, producer ICE proofs, context-sensitive diagnostic events and exact
 // guarded slices. External Clang sources separately qualify actual builtin prototypes and diagnostic behavior.
 // This action-layer qualification establishes no feature availability, source dispatcher or runtime lowering.
@@ -221,6 +221,7 @@ static const CheckBuiltinX86TestFact check_builtin_x86_test_facts[] =
     { "__builtin_ia32_alignd512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 844 },
     { "__builtin_ia32_alignq512", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 2, 0, 255, 0, 843 },
     { "__builtin_ia32_extracti64x4_mask", CHECK_BUILTIN_X86_CONSTRAINT_RANGE, 1, 0, 1, 0, 566 },
+    { "__builtin_ia32_gatherdiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 392 },
     { "__builtin_ia32_gatherdiv8di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 391 },
     { "__builtin_ia32_gathersiv16si", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 390 },
     { "__builtin_ia32_gathersiv8di", CHECK_BUILTIN_X86_CONSTRAINT_SCALE, 4, 0, 0, 278, 389 },
@@ -306,7 +307,7 @@ static CheckBuiltinX86Action check_builtin_x86_test_input(const char* name, cons
 
 static void check_builtin_x86_test_facts_run(CheckBuiltinX86Test* test, const TypeTable* table)
 {
-    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 209, "independent primary fact count", 0);
+    check_builtin_x86_test_expect(test, BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts) == 210, "independent primary fact count", 0);
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(check_builtin_x86_test_facts); f += 1)
     {
         const CheckBuiltinX86TestFact fact = check_builtin_x86_test_facts[f];
@@ -713,6 +714,12 @@ static void check_builtin_x86_test_clang(CheckBuiltinX86Test* test, const char* 
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned long f(I16 i,const void* p){return sizeof(__builtin_ia32_gathersiv16si(i,p,i,65535,3));}\n", 0, true, "scale argument must be 1, 2, 4, or 8", NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned short f(I16 a){return __builtin_ia32_ucmpd512_mask(a,a,7,65535);}\n", 0, false, NULL, NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned short f(I16 a){return __builtin_ia32_ucmpd512_mask(a,a,8,65535);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },
+        // #734's unsigned-ID gather: the i64-index form returns eight i32 lanes and keeps its scale hard in every context.
+        { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef long long L8 __attribute__((vector_size(64)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "I8 f(I8 old,L8 ids,const void* p){return __builtin_ia32_gatherdiv16si(old,p,ids,255,4);}\n", 0, false, NULL, NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef long long L8 __attribute__((vector_size(64)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "I8 f(I8 old,L8 ids,const void* p){return __builtin_ia32_gatherdiv16si(old,p,ids,255,3);}\n", 0, true, "scale argument must be 1, 2, 4, or 8", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef long long L8 __attribute__((vector_size(64)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "I8 f(I8 old,L8 ids,const void* p){if(0)return __builtin_ia32_gatherdiv16si(old,p,ids,255,3);return old;}\n", 0, true, "scale argument must be 1, 2, 4, or 8", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef long long L8 __attribute__((vector_size(64)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned long f(I8 old,L8 ids,const void* p){return sizeof(__builtin_ia32_gatherdiv16si(old,p,ids,255,3));}\n", 0, true, "scale argument must be 1, 2, 4, or 8", NULL },
+        { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef long long L8 __attribute__((vector_size(64)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "I8 f(I8 old,L8 ids,const void* p,int scale){return __builtin_ia32_gatherdiv16si(old,p,ids,255,scale);}\n", 0, true, "must be a constant integer", NULL },
         // #619's: _mm_cmp_epu32_mask's builtin, which c_check_program_batch.c reaches through _mm_cmplt_epu32_mask.
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef int I4 __attribute__((vector_size(16)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned char f(I4 a){return __builtin_ia32_ucmpd128_mask(a,a,1,255);}\n", 0, false, NULL, NULL },
         { BUSTER_CHECK_BUILTIN_X86_TEST_TYPES "typedef int I4 __attribute__((vector_size(16)));\n" BUSTER_CHECK_BUILTIN_X86_TEST_TARGET "unsigned char f(I4 a){return __builtin_ia32_ucmpd128_mask(a,a,8,255);}\n", 0, true, "error: argument value 8 is outside the valid range", NULL },

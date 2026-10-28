@@ -7,8 +7,8 @@
 # input-x86-sha256=821ca469485d5079920df9d695781a8bdad6576739be0d3ad8fb52c6bca91b03
 # input-x86_64-sha256=bc85a6cefc1bb94b25f73a2158cbe3ddc1c3d3ce82c9d170e5ca2becd8818628
 # input-version-sha256=2cf74bd66f8958e1936307158bec163fac911e30f4534bab376dd2dff067d5fd
-# input-names-sha256=61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21
-# rows=1535
+# input-names-sha256=ed344416f82024b507ca400cee127f21e8a086ba74abd05f9cc4310bb7b6f45a
+# rows=1536
 name	type_encoding	attributes	features	header_token	language_token	shard	source_line	source_ordinal	custom_typechecking	constant_evaluable	record_kind	semantic_constraints
 __builtin_add_overflow	b.	ntE		NO_HEADER	ALL_LANGUAGES	generic	4013	126	1	1	table-record	unmodeled
 __builtin_assume	vb	nE		NO_HEADER	ALL_LANGUAGES	generic	4048	161	0	1	table-record	unmodeled
@@ -337,6 +337,7 @@ __builtin_ia32_fxrstor	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86	5234	421	0	0	table
 __builtin_ia32_fxrstor64	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86_64	533	31	0	0	table-record	unmodeled
 __builtin_ia32_fxsave	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86	5235	422	0	0	table-record	unmodeled
 __builtin_ia32_fxsave64	vv*	n	fxsr	NO_HEADER	ALL_LANGUAGES	x86_64	534	32	0	0	table-record	unmodeled
+__builtin_ia32_gatherdiv16si	V8iV8ivC*V8OiUcIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5263	450	0	0	table-record	unmodeled
 __builtin_ia32_gatherdiv8di	V8OiV8OivC*V8OiUcIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5261	448	0	0	table-record	unmodeled
 __builtin_ia32_gathersiv16si	V16iV16ivC*V16iUsIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5275	462	0	0	table-record	unmodeled
 __builtin_ia32_gathersiv8di	V8OiV8OivC*V8iUcIi	nV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	5273	460	0	0	table-record	unmodeled

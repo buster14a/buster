@@ -3367,6 +3367,24 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            "the unsigned-ID gather's exact prototype",
+            "typedef int I8 __attribute__((vector_size(32)));\ntypedef long long L8 __attribute__((vector_size(64)));\nI8 f(I8 old, L8 ids, const void* p) { return __builtin_ia32_gatherdiv16si(old, p, ids, 255, 4); }\n",
+            false,
+            false
+        },
+        {
+            "the unsigned-ID gather's scale refused",
+            "typedef int I8 __attribute__((vector_size(32)));\ntypedef long long L8 __attribute__((vector_size(64)));\nI8 f(I8 old, L8 ids, const void* p) { return __builtin_ia32_gatherdiv16si(old, p, ids, 255, 3); }\n",
+            true,
+            false
+        },
+        {
+            "the unsigned-ID gather's nonconstant scale refused",
+            "typedef int I8 __attribute__((vector_size(32)));\ntypedef long long L8 __attribute__((vector_size(64)));\nI8 f(I8 old, L8 ids, const void* p, int scale) { return __builtin_ia32_gatherdiv16si(old, p, ids, 255, scale); }\n",
+            true,
+            false
+        },
+        {
             "a scatter's scale refused",
             "typedef long long L8 __attribute__((vector_size(64)));\ntypedef int I8 __attribute__((vector_size(32)));\nvoid f(L8 q, I8 e, void* o) { __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 16); }\n",
             true,
