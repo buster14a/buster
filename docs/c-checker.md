@@ -411,8 +411,11 @@ void check_actions(TypeTable* types, const CheckAction* actions,
                     CheckActionResult* results, uint32_t count);
 ```
 
-The parser must retain its complete tree and postorder; `tree_only` mode is not
-enough. Parser tokens and the preprocessor's interned identifiers remain alive
+The parser must retain its tokens and complete tree; `tree_only` mode is
+sufficient. The adapter borrows published traversal columns when available,
+otherwise deriving postorder, subtree ends, child links and sizes in its
+temporary scratch. The C driver requests this mode and reuses the parser's
+temporary pages for checking. Parser tokens and the preprocessor's interned identifiers remain alive
 while adapting and diagnosing that source. The adapter puts its graph,
 declaration identities and reports in the supplied output arena, and releases
 its temporary scratch allocations before returning. `CheckInput.resource`
