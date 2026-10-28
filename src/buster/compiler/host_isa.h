@@ -4,6 +4,8 @@
 #ifndef BUSTER_HOST_ISA_H
 #define BUSTER_HOST_ISA_H
 
+// Select host ISA kernels here. Keep callers' algorithm choices and resource
+// contracts independent: a batch algorithm can use portable scalar operations.
 #if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__) && defined(__AVX512CD__) && \
     defined(__AVX512VBMI__) && defined(__AVX512VBMI2__) && defined(__AVX512VPOPCNTDQ__) && defined(__AVX512BITALG__) && \
     defined(__AVX512VNNI__) && defined(__GFNI__) && defined(__VAES__) && defined(__AES__) && defined(__BMI__) && \

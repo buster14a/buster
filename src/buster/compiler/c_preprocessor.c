@@ -17323,12 +17323,15 @@ static bool pp_buster_headers_directory(char* path, uint32_t capacity, uint64_t*
     return result;
 }
 
-// The highest version's directory of clang's own headers (clang searches its resource directory first), if any.
+// An explicitly selected Clang resource directory, or the highest installed
+// version's headers (Clang searches its resource directory first), if any.
 // Optionally counts its explicit stat attempt, not the directory enumeration's libc-internal system calls.
 static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t* stat_count)
 {
     bool result = false;
-    DIR* directory = opendir("/usr/lib/clang");
+    const char* selected = getenv("BUSTER_CLANG_RESOURCE_DIR");
+    const bool configured = selected != 0 && selected[0] != 0;
+    DIR* directory = configured ? 0 : opendir("/usr/lib/clang");
     uint32_t best = 0;
     if (directory != 0)
     {
@@ -17345,6 +17348,20 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t*
         if (best != 0)
         {
             snprintf(path, capacity, "/usr/lib/clang/%u/include", best);
+            struct stat stats;
+            if (stat_count != 0)
+            {
+                *stat_count += 1;
+            }
+            result = stat(path, &stats) == 0 && S_ISDIR(stats.st_mode);
+        }
+    }
+    if (configured)
+    {
+        const int length = snprintf(path, capacity, "%s/include", selected);
+        result = length >= 0 && (uint32_t)length < capacity;
+        if (result)
+        {
             struct stat stats;
             if (stat_count != 0)
             {

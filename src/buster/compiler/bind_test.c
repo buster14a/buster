@@ -4790,7 +4790,8 @@ static const BindTestStaticSource bind_test_shared_sources[] = {
     {
         .name = "atexit",
         .source = "#include <stdlib.h>\n"
-                  "static void buster_handler(void) {}\n"
+                  "static volatile int buster_finished;\n"
+                  "static void buster_handler(void) { buster_finished = 1; }\n"
                   "int buster_register(void) { return atexit(buster_handler); }\n",
     },
 };

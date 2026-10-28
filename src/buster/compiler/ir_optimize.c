@@ -1179,7 +1179,7 @@ static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
     }
     if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0)
     {
-        if (BUSTER_SCALAR_PATH(options.scalar))
+        if (options.scalar)
         {
             ir_optimize_dce_worklist(work);
         }
@@ -1559,7 +1559,7 @@ static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scr
         }
         if ((options.passes & BUSTER_IR_OPTIMIZE_SCCP) != 0)
         {
-            if (BUSTER_SCALAR_PATH(options.scalar))
+            if (options.scalar)
             {
                 ir_optimize_sccp_worklist(&work);
             }

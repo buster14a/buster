@@ -3,9 +3,9 @@
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
-packages from LLVM's Clang 23 release branch, including the matching C++ pragma
-oracle, LLVM object/DWARF tools and lld. The installer runs only on disposable
-hosted runners.
+official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
+LLVM object/DWARF tools and lld. The installer runs only on disposable hosted
+runners. GCC remains the `cc` oracle for fixtures that require GNU C extensions.
 
 The baseline build runs on x86-64 without AVX-512. Native builds select the
 existing scalar twins when the compiler's host target lacks the full SIMD
@@ -22,6 +22,8 @@ That leg links generic Ubuntu startup objects, libc and compiler support routine
 from checksum-pinned packages in a private directory (`BUSTER_HOST_RUNTIME`).
 It uses their loader explicitly for emulation: a hosted VM's installed startup
 objects and libraries can require a newer ISA independently of `-march=x86-64`.
+`BUSTER_CLANG_RESOURCE_DIR` selects the matching Clang builtin headers, preserving
+their paths in line markers even when Clang is staged outside `/usr/lib/clang`.
 
 The hosted tests fetch the frozen corpus from the
 [input release](https://github.com/buster14a/buster-performance/releases/tag/ci-corpora-preprocessor-391e729af658).

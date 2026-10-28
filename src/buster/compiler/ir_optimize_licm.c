@@ -211,9 +211,9 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                 work->available[i] = !inside && dominators_dominates(&work->loops, work->destination[i], preheader);
             }
             // AVX-512 dword gather indices are signed. Larger value spaces use the exact worklist path.
-            if (BUSTER_SCALAR_PATH(options.scalar) || f->instruction_count > INT32_MAX)
+            if (options.scalar || f->instruction_count > INT32_MAX)
             {
-                work->statistics.fallback = work->statistics.fallback || !BUSTER_SCALAR_PATH(options.scalar);
+                work->statistics.fallback = work->statistics.fallback || !options.scalar;
                 ir_licm_worklist(work);
             }
             else

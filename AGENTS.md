@@ -1240,8 +1240,8 @@ preprocessor's predefines give as clang's do for the same options
 
 ## Sharing the 9700X
 
-Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the current Clang 23
-release-branch packages, in baseline x86-64 and native host builds. Non-AVX-512
+Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
+Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Non-AVX-512
 CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
 hosted variants pass on the same triggering revision. Failed, cancelled or
 skipped tests cannot start the benchmark job. The existing required check name

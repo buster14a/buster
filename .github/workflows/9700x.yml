@@ -144,7 +144,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - name: Install current Clang 23 and test tools
+      - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
 
       - name: Fetch generic baseline startup objects and runtime for emulation
