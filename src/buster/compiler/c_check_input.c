@@ -197,6 +197,7 @@ struct CheckInput
     // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
+    CheckWarningEvents warning_events;
     uint8_t* constant_warnings;
     uint32_t constant_warning_count;
     bool constant_warnings_prepared;
@@ -448,6 +449,8 @@ struct CheckInputReader
     TypeTable* types;
     Arena* arena;
     Arena* scratch;
+    // This reader's append-only warning suffix. Lanes reset it rather than append into the top level's buffer.
+    CheckWarningBuffer warning_events;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -615,6 +618,28 @@ struct CheckInputReader
     bool lane;
     bool lane_unsupported;
 };
+
+static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* reader, const CheckWarningEvent* event,
+                                                            const CheckWarningNote* notes, uint32_t note_count)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    bool valid = event != NULL && event->token < count &&
+                 (event->source == BUSTER_CHECK_WARNING_NO_SOURCE || event->source < reader->pp->output.count) &&
+                 (event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ||
+                  (event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN ? event->completion <= count : event->completion < count));
+    for (uint32_t i = 0; valid && i < note_count; i += 1)
+    {
+        valid = notes != NULL && notes[i].token < count &&
+                (notes[i].source == BUSTER_CHECK_WARNING_NO_SOURCE || notes[i].source < reader->pp->output.count);
+    }
+    valid = valid && check_warning_append(&reader->warning_events, event, notes, note_count);
+    reader->output->resource |= !valid;
+    if (valid)
+    {
+        reader->output->warning_events = check_warning_view(&reader->warning_events);
+    }
+    return valid;
+}
 
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
 static void check_input_lane_refuse(CheckInputReader* reader, bool refused, const char* reason)
@@ -5526,6 +5551,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .types = types,
         .arena = arena,
         .scratch = scratch,
+        .warning_events = { .arena = arena },
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
