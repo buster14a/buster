@@ -1492,14 +1492,18 @@ same), at 64 bytes the vectors
 the producer lowers with AVX-512 (#717: GNU's of 16, 32 and 64 bytes of
 `char`, `short`, `int`, `long`, `_Float16`, `float` and `double` elements, and
 clang's extended ones of those sizes in clang's runs, `AbiTestWorld.vectors`),
+in clang's runs `_Atomic`s of integers of up to 8 bytes, enums, pointers,
+`float`, `double`, structs and unions (#720's lowering of C11's atomics,
+`abi_test_compiled_atomic`), which the signatures pass as the record runs' do:
+records holding them and aligned typedefs of them, never an `_Atomic` itself,
 and the structs, unions, arrays and aligned typedefs made of
 them, aligned as the clang worlds' are (to 64: Tier 0 realigns a frame for an
 object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
 no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
-`__int128` or complex `_BitInt`, or `_Atomic` type, and none of the record runs'
-directed records, whose bit-fields span more than 8 bytes, but a directed record
+`__int128` or complex `_BitInt`, `_Atomic` of another type, and none of the
+record runs' directed records, whose bit-fields span more than 8 bytes, but a directed record
 of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
@@ -1520,7 +1524,10 @@ and the others pass their 21 named and 6 unnamed arguments as drawn. A
 `_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
 as it loads (the convention leaves the bits past it unspecified), through
 128-bit shifts whose count takes the depth above it, one more than a
-128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
+128-bit integer's value takes. An aligned typedef of an `_Atomic` is never
+past the 8th: it loads atomically as it passes, an exchange of 16 bytes in
+rax, rdx, rbx and rcx or a call of libatomic's for an odd size, which takes up
+to four depths more. Our side is C (`abi_test_write_ours`): per signature, a callee
 that writes each parameter's bytes from the signature's data, the last first
 (a parameter kept in a slot shorter than its object would overwrite the
 parameters after it), then stores them, its unnamed ones read with `va_arg`,
