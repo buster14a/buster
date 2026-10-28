@@ -5311,13 +5311,17 @@ worlds' are, with C23's
 enums of a fixed underlying type, structs whose only named member is a
 flexible array member and bit-fields' attributes after their widths), and
 signatures with long doubles, 128-bit integers or vectors within Tier 0's
-depths (12 integer arguments, a realigned frame's rbp past them, and 15
-floating ones), and the others past them, in its deep slots (#712); our
-caller and callee per signature as C, which this executable (or `--buster
-PATH`) compiles for the run's target with `--verify -c` and with `--scalar`
-into the same bytes, and the C side checks every argument and result both
-ways (the al and the hidden pointer, which C doesn't name, are the record
-runs' checks); the 64-byte runs execute where the host has x86-64-v4's
+depths (12 integer arguments, a `_BitInt` of 65 to 127 bits never the 12th,
+a realigned frame's rbp past them, and 15 floating ones), and the others past
+them, in its deep slots (#712), the
+first against clang `(nullptr_t, long × 5, U, long)` for a union U whose high
+eightbyte is padding, which passes in one 8-byte stack slot before the last
+`long`; our caller and callee per signature as C, which this executable (or
+`--buster PATH`) compiles for the run's target with `--verify -c` and with
+`--scalar` into the same bytes, our callee writing each parameter back from
+the data, the last first, before it stores them, and the C side checks every
+argument and result both ways (the al and the hidden pointer, which C doesn't
+name, are the record runs' checks); the 64-byte runs execute where the host has x86-64-v4's
 features, and elsewhere compile and link. Two
 extension runs (#475's review), with plain char signed and with it unsigned
 (`-funsigned-char`, `TypeTable.char_unsigned`), pass and return the types clang
