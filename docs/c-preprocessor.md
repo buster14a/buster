@@ -733,6 +733,40 @@ macro's expansion, an argument being expanded, or a directive's line):
   collection goes on past an included file's end into the includer (#109's
   seed 2106). If collection leaves the file where an expansion started, -E
   replays that exit before printing the expansion, as clang does (#370).
+- **Nested raw argument slices** (#616). During an argument's prescan,
+  `pp_collect_argument_slice` lets a nested invocation name slices of the same
+  `pp->arguments` buffer. Its argument barrier retains the owning invocation's
+  tokens until substitution; the nested invocation saves the current stack
+  count and frees only what it appends. Kinds, flags, locations and origins
+  remain unchanged. A call crossing a context boundary keeps the ordinary
+  collectors, including their handling of disabled macros and directives.
+  Prescan, substitution, rescan and expansion-history recording use the
+  existing invocation and capture machinery.
+
+  At 128 remaining tokens, `pp_index_arguments` lazily reserves one 32-bit
+  delimiter-link column. It classifies 64 kinds with bounded masked loads
+  (one-at-a-time classification in the scalar twin). Openers and commas form
+  an explicit stack within that column; closing a level reverses its comma
+  links once, recording its closer and separators. Each newly appended token
+  is indexed once. Writes after a stack rewind invalidate the overwritten
+  suffix; live contexts retain bounded, unchanged prefixes. Allocation failure
+  is fatal. Small buffers retain the existing collectors until indexed.
+
+  Each indexed suffix comes from a completed argument collection; it is not a
+  continuation of an unmatched opener in an earlier suffix. Collection closes
+  before its argument barrier is prescanned. Rewinding keeps the live owner's
+  complete prefix, and later collections append separate complete segments.
+  The pairing stack therefore starts empty at each appended segment. Only
+  complete invocations within the consuming context can be borrowed, even if
+  other argument tokens contain unmatched delimiters.
+
+  An identity nest consequently retains one outer argument copy and a linear
+  number of invocation records, without scanning or copying each suffix.
+  `c_preprocessor_arguments_test.c` checks depths through 8,000 with a linear
+  raw-token budget, real token-limit failures, partial stack reuse with a live
+  owner prefix, allocation failure through `pp_invoke`,
+  protected tails, independent delimiter pairing and semantic fixtures against
+  Clang, both kernels and deferred history replay.
 - **Nothing nests through calls.** An argument that names an enabled macro is
   expanded before substitution by pushing it as a barrier context with a
   capture. The main loop fills the capture until the barrier ends, and then

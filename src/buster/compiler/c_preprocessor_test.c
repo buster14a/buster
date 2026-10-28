@@ -7368,6 +7368,7 @@ static bool predefines_test_refused(void);
 #include "c_preprocessor_batch_test.c"
 #include "c_preprocessor_semantic_test.c"
 #include "c_preprocessor_windows_test.c"
+#include "c_preprocessor_arguments_test.c"
 
 // A semantic consumer diagnoses an original pragma operand after preprocessing has discarded its temporary
 // buffers. Test that boundary directly, including argument prescan and distinct presumed definition/use files.
@@ -7678,6 +7679,9 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_named_ucn_boundaries(directory);
         passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_direct_argument_failures();
+        passed_all &= pp_test_nested_arguments();
+        passed_all &= pp_test_argument_links();
+        passed_all &= pp_test_argument_slice_semantics(directory, with_clang);
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {
