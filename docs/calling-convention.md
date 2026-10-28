@@ -34,7 +34,7 @@ Data, not instructions:
 - **Classes, per `TypeId`, in a column.** `abi_initialize` pushes the table's
   columns from an arena, sized for the type table's capacity
   (`abi_capacity_bytes`: 42 bytes a type, and 448 for the columns' alignment),
-  and classifies the builtin types; it fails, leaving the arena as it was, if
+  and copies the immutable builtin ABI facts; it fails, leaving the arena as it was, if
   the arena can't hold them. `abi_classify_all` then classifies every complete
   type the table has that isn't classified yet. Each type gets its row of
   classes, its pass bits, its stack slot's size, its canonical alignment, its
@@ -1219,6 +1219,10 @@ files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
+- **Builtin projection:** independently recomputed scalar rows and all metadata
+  at each supported width and both char modes, including zero and partial
+  builtin prefixes, reserved holes, small/requested capacities and refusals,
+  poisoned padding and tails, and the first derived type's ordinary scheduling.
 - **Fixtures** (3,158 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
@@ -1752,13 +1756,65 @@ are implemented; source-to-function construction is still an integration.
 
 The ABI table is caller-owned arena storage tied to the same live TypeTable;
 IDs from another table are invalid. `abi_initialize` sizes columns from type
-capacity, classifies builtins and accepts vector widths 16, 32 or 64 bytes;
+capacity, seeds builtins and accepts vector widths 16, 32 or 64 bytes;
 failure restores its arena. Rows and metadata include u8 class/alignment/storage,
 u32 pass/stack bytes, u64 layout and `AbiReturn` records. One writer classifies;
 readers cannot race classification or tag completion. `abi_assign` is a trusted
 consumer: all referenced types must already be classified, pass must not have
 `BUSTER_ABI_PASS_UNSUPPORTED` set, and stack bytes must not be `UINT32_MAX`. Its producer
 must reject unsupported types before assignment.
+
+### Immutable builtin facts (#442)
+
+`calling_convention_builtins.c` is an original projection of this project's
+builtin type and ABI rules, not a cache of another unit's TypeIds. Its 64 reserved
+indices contain 42 present builtin types and zeroed holes. Initialization copies
+all seven columns (classes, pass bits, stack bytes, canonical alignment, storage,
+layout and results) and the class-merge table. Plain char's signedness is the one
+builtin configuration choice: unsigned-char mode patches its pass extension and
+result flags. The builtins contain no vector kinds, so these facts are the same
+at vector widths 16, 32 and 64; the chosen width still governs derived types.
+
+Copies are bounded by the logical type count, including a zero or partial builtin
+prefix. Existing capacity and width validation runs before any copy. Pass, storage
+and layout remain zero through the requested capacity, while other unclassified
+tails remain untouched. No derived row is shared: incomplete tags, dependency
+levels, completion and the larger/rare summaries retain their caller-owned rules.
+There is no mutable global initialization, lock or TypeTable lifetime assumption.
+
+The facts were first projected from `e7f89091648f68940b595aadd648841c1ffc3ec5`'s
+`c_types.c` and `calling_convention.c`. `tools/generate_builtin_abi.c` recomputes
+the facts from those modules' current scalar rules before writing them. It includes
+the existing projection while compiling, so build the generator first, write to a
+temporary file, check its status, and then compare or replace the source. Never
+redirect its compiler command onto the included source. From the repository root:
+
+```sh
+clang -O3 -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing \
+  -Wno-unused-function -pthread tools/generate_builtin_abi.c -o build/generate-builtin-abi
+./build/generate-builtin-abi > build/calling-convention-builtins.c
+cmp src/buster/compiler/calling_convention_builtins.c build/calling-convention-builtins.c
+```
+
+Run each command only after the preceding command succeeds. A nonzero generator
+status leaves the tracked projection untouched. When rules deliberately change,
+review the generated difference, replace the tracked file with the completed
+temporary output, and run `test-calling-convention`. Its builtin test clears all
+seven columns and recomputes every present row by the scalar classifier and
+finisher. It checks both char modes, all supported widths, reserved holes,
+zero/small prefixes, capacities below and around 64, rejected widths/capacities,
+poisoned padding/tails and the first derived type's unchanged scheduling.
+
+The [frozen #442 record](https://github.com/buster14a/buster-performance/tree/d8adf0e6e8cd7eb0c33f49c3df03fced471cb0e7/docs/measurements/builtin-abi-init-442-2026-10-28)
+compares `73b6ba60` with `e7f89091` on the locked 9700X: repeated 64-row
+initialization takes 486.55–503.23 ns before and 18.18–19.42 ns after, excluding
+allocation, type construction and the rest of compilation. The local ELF has
+five 2,752-byte copies, 13,760 bytes of read-only data in total. This trades
+repeated computation for static data and a maintained projection/oracle pair.
+The whole-process controls establish neither a general CLI speedup nor neutral
+equivalence; their mismatched local screens and first-image faults are retained.
+These frozen results do not qualify later main compositions or a demand-driven
+classifier.
 
 Natural typed-column strides and explicit counts/capacities apply;
 assignment's masked tails do not require caller padding. Its padded internal
