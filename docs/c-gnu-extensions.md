@@ -6,14 +6,12 @@ follow Clang, with GNU17 as the default and the selected standard's keyword rule
 
 ## Current boundary
 
-The parser accepts GNU syntax, records its tree, and can now supply structured
-GNU attribute and asm-label metadata. `type_machine_mode` supplies the missing
-machine-mode type action beside the existing layout and vector actions.
-**These are frontend building blocks, not completed source-language semantics.**
-The normal driver on this revision preprocesses and parses; it does not type
-check or generate an object from C. Issue #147 must stay open until the source
-checker and lowering actually consume these constructs and its corpus/runtime
-acceptance conditions pass.
+The parser accepts GNU syntax, records its tree, and can supply structured
+GNU attribute and asm-label metadata. `type_machine_mode` supplies the
+machine-mode type action beside the layout and vector actions. The checker
+([its guide](c-checker.md)) gives the constructs below their meaning, and `-c`
+and the direct path lower them, or refuse by name what isn't lowered yet.
+Issue #147 stays open until the rows that say so are done.
 
 | Construct | Implemented here or already available | Remaining source integration |
 | --- | --- | --- |
@@ -25,7 +23,8 @@ acceptance conditions pass.
 | `typeof`, statement expressions, GNU `?:`, range designators | Existing parser grammar, with additional regression fixtures | Types, value categories, evaluation order and lowering |
 | Alternate keywords, `__int128`, zero-length arrays, local labels | Existing keyword/parser/type support as applicable | The remaining checker and control-flow rules |
 | `__extension__` | Parser accepts expression/declaration forms | Pedantic-diagnostic suppression through semantic checking |
-| `transparent_union`, `gnu_inline`, `cleanup`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
+| `cleanup` | Checked as clang checks it, its scopes' jumps too, and called at each exit from its variable's scope, the named return value's after the return's cleanups as clang's NRVO has it ([the checker guide](c-checker.md)) | A function of a parameter other than a pointer, or whose result returns in memory, as a 128-bit integer or as a vector, is refused by name |
+| `transparent_union`, `gnu_inline`, `returns_twice` | Parsed and retained | Checking, ABI or control-flow/emission effects |
 | `always_inline`, `noinline`, `used`, `may_alias` | Parsed and retained | Propagation to the actual backend/optimizer |
 | `weak`, `alias`, `visibility`, constructors/destructors | Parsed and retained; link representation has relevant primitives | Source-to-symbol/atom creation, init/fini entries and execution tests |
 | `section` | Parsed and retained | Custom named-section representation and source emission |

@@ -450,6 +450,12 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "static int kept(int n) __attribute__((used));static int kept(int n){return n+1;}static int kept_data __attribute__((used))=3;"
         "int tested(int n){return n;}",
         "used-function-and-object-roots", 2, 1, clang, true);
+    // A cleanup's function (#147), which its variable's body references, and the one of a body nothing references.
+    check_test_program_selection_case(test,
+        "static int seen;static void released(int*p){seen+=*p;}static void unused_cleanup(int*p){seen-=*p;}"
+        "static void from_dead(int*p){seen*=*p;}static int dead(int n){int a __attribute__((cleanup(from_dead)))=n;return a;}"
+        "int tested(int n){{int a __attribute__((cleanup(released)))=n;}return seen;}",
+        "cleanup-functions-of-emitted-and-unreferenced-bodies", 2, 1, clang, true);
     // Asm labels that end as a made name's suffix does, beside two statics of one name: each label is exact, the
     // second static's suffix past the one a label spells, and a wrong label, or a made name without its suffix,
     // must differ from clang's object.

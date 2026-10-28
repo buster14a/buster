@@ -30,6 +30,15 @@ typedef enum CheckInputMessage
     CHECK_INPUT_LOOP_PARENTHESIS,
     CHECK_INPUT_NAKED_STATEMENT,
     CHECK_INPUT_NAKED_PARAMETER,
+    // A goto, a switch's case and a computed goto that enter a variable-length array's or a cleanup's scope, or for a
+    // computed goto leave a cleanup's, as clang's JumpScopeChecker reports them.
+    CHECK_INPUT_JUMP_GOTO,
+    CHECK_INPUT_JUMP_SWITCH,
+    CHECK_INPUT_JUMP_INDIRECT,
+    // GNU's cleanup attribute's argument and function (c_check_cleanup_input.c).
+    CHECK_INPUT_CLEANUP_FUNCTION,
+    CHECK_INPUT_CLEANUP_PARAMETERS,
+    CHECK_INPUT_CLEANUP_TYPE,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =
@@ -51,6 +60,12 @@ static const char* const check_input_messages[] =
     "unroll pragma's count unclosed",
     "non-ASM statement in naked function is not supported",
     "parameter references not allowed in naked functions",
+    "cannot jump from this goto statement to its label",
+    "cannot jump from switch statement to this case label",
+    "cannot jump from this indirect goto statement to one of its possible targets",
+    "'cleanup' argument is not a function",
+    "'cleanup' function must take 1 parameter",
+    "'cleanup' function's parameter has a type incompatible with the variable's address",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -154,6 +169,19 @@ struct CheckInputRegion
     uint32_t final_statement;
 };
 
+// A variable with GNU's cleanup attribute (c_check_cleanup_input.c): its declaration (its name's token), the declaration
+// of the function the attribute's argument names, the argument's token, its scope's opening (its block's brace, or its
+// for statement's parenthesis) and the token after the scope's last.
+typedef struct CheckInputCleanup CheckInputCleanup;
+struct CheckInputCleanup
+{
+    uint32_t declaration;
+    uint32_t function;
+    uint32_t argument;
+    uint32_t scope;
+    uint32_t end;
+};
+
 struct CheckInput
 {
     CheckGraph graph;
@@ -224,6 +252,10 @@ struct CheckInput
     CheckInputVla* vlas;
     uint32_t vla_count;
     uint32_t vla_capacity;
+    // The variables with GNU's cleanup attribute, in source order: none in a unit without one.
+    CheckInputCleanup* cleanups;
+    uint32_t cleanup_count;
+    uint32_t cleanup_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -608,6 +640,9 @@ struct CheckInputReader
     uint32_t function_end;
     uint32_t function_body;
     bool naked_functions;
+    // Whether the unit has read a cleanup attribute, which only then each declarator's attributes are looked through for
+    // (check_input_cleanup_declaration).
+    bool cleanup_attributes;
     uint32_t resolve_limit;
     uint32_t resolve_pragma;
     uint32_t resolve_diagnostic_token;
@@ -1668,6 +1703,7 @@ static uint32_t check_input_range_root(const CheckInputReader* reader, uint32_t 
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
+#include "c_check_cleanup_input.c"
 #include "c_check_overload_input.c"
 
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
@@ -3310,6 +3346,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            if (valid && reader->cleanup_attributes && attributes != 0)
+            {
+                // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
+                // ignores.
+                const bool automatic = !file && !is_typedef && !function && !is_static && !thread_local && storage != C_NAME_EXTERN;
+                valid = check_input_cleanup_declaration(reader, attributes, name, type, automatic);
+            }
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {

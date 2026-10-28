@@ -67,6 +67,12 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
         case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
         case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
+        case CHECK_INPUT_JUMP_GOTO: result = "cannot jump from this goto statement to its label"; break;
+        case CHECK_INPUT_JUMP_SWITCH: result = "cannot jump from switch statement to this case label"; break;
+        case CHECK_INPUT_JUMP_INDIRECT: result = "cannot jump from this indirect goto statement to one of its possible targets"; break;
+        case CHECK_INPUT_CLEANUP_FUNCTION: result = "'cleanup' argument is not a function"; break;
+        case CHECK_INPUT_CLEANUP_PARAMETERS: result = "'cleanup' function must take 1 parameter"; break;
+        case CHECK_INPUT_CLEANUP_TYPE: result = "'cleanup' function's parameter has a type incompatible with the variable's address"; break;
     }
     return result;
 }

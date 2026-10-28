@@ -1379,6 +1379,58 @@ What the lowering covers past scalars (#145's programs):
   exact attribution of #431's older 13.3-million-instruction delta. The
   [paired measurements, causal diagnostic, commands and validation](https://github.com/buster14a/buster-performance/blob/e46965d5ca1a609cec54345ac5ea1f38902560aa/docs/measurements/label-address-cost-449-2026-10-26/README.md)
   retain the limits and raw evidence for #449.
+- **GNU's `cleanup` attribute** (#147, `c_check_cleanup_input.c`). As clang
+  23's `handleCleanupAttr` checks it: on a block-scope variable of automatic
+  storage (on any other declaration clang warns and ignores it, and so does
+  the checker), the argument is looked up as an expression's name where it is,
+  so the variable isn't visible in its own attribute and an undeclared name is
+  an error. It must name a function (not an object, a function pointer, a type
+  or a parenthesized name: "'cleanup' argument is not a function") of a
+  prototype with one parameter ("must take 1 parameter"), to which the
+  variable's address converts as clang's `IsAssignConvertCompatible` takes
+  it: `void *`, `_Bool`, or a pointer to a compatible type whatever either's
+  qualifiers. A pointer of another signedness or to a pointer of other
+  qualifiers, which an assignment only warns about, is an error here. The
+  last of a declaration's cleanup attributes applies. Each applied one is a
+  `CheckInputCleanup` (`CheckInput.cleanups`, in source order: none in a unit
+  without one, which reads no declarator's attributes for it), with its
+  variable's scope: its block's, or its `for` statement's, to the token after
+  the scope's last. A goto or a case must not enter that scope, as a
+  variable-length array's (`check_input_vla_finish`), and a computed goto
+  must neither enter nor leave it: its labels' first and last must be inside
+  the innermost cleanup's scope that holds the goto. The jumps' errors are
+  clang's messages, for variable-length arrays too. A body read on a lane
+  that declares such a variable leaves the unit to source order.
+  The control stream calls the function at each exit from the scope
+  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
+  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
+  switch's token stands for where a break or a continue goes, so that a `for`
+  statement's own variables' cleanups run once, after its end's label), the
+  function's end, and a statement expression's end, after its value is kept
+  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
+  or for a struct or union its bytes copied into a frame object of their own
+  or where the hidden pointer points), then the cleanups, then returns it
+  (`RETURN` of target `BUSTER_CHECK_CONTROL_KEPT`). But a named return value,
+  which clang's code builds in the return slot (Sema's NRVO), is returned
+  after the cleanups, which may write it: a struct or union variable of the
+  function's result type, automatic, neither volatile nor aligned past its
+  type, named alone (in parentheses or not), with every return after its
+  declaration in its scope naming it too (`check_control_named`: what
+  `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
+  lowering's call (`check_lower_cleanup`) takes the variable's address,
+  which makes its local a frame slot, and drops the result. A function of a
+  parameter other than a pointer is refused by name (clang's code bit-casts
+  the address to the `_Bool`, invalid IR that leaves the address's low bit),
+  and so is one whose result returns in memory, as a 128-bit integer or as a
+  vector. The body's selection references the function. `test-checker`'s
+  sections (`c_check_cleanup_test.c`) compare 50 fixtures' acceptance and
+  first errors with clang's, and run programs of each exit, each class of
+  returned value, the named return value's cases, statement expressions,
+  switches and the functions' kinds natively against clang -O0's build on
+  both paths; the deferred reader's fixtures and the selection's take a
+  cleanup too.
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one

@@ -808,6 +808,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         {
             attribute.kind = rule->kind;
             attribute.schema = rule->schema;
+            reader->cleanup_attributes |= rule->kind == CHECK_ATTRIBUTE_CLEANUP;
             valid = check_input_attribute_validate(reader, attributes, &attribute, rule->minimum, rule->maximum);
         }
         else if (valid)
