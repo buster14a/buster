@@ -7493,6 +7493,11 @@ static bool pp_new_argument(Preprocessor* pp)
 // explicit backwards stack. Closing a level reverses its commas once, so all pairing work is linear. An unmatched
 // opener retains a backwards link, which cannot be mistaken for a matching closer. Delimiter masks batch the scan;
 // only delimiters need ordered pairing, with exactly the same pairing on the scalar path.
+// Each appended segment is a complete argument collection, not a continuation of an unmatched indexed opener:
+// pp_invoke calls this only after collection has closed, while prescanning its retained argument buffer. A rewind
+// keeps a live owner's complete prefix and later collections append complete segments after it. Restarting previous
+// at NONE therefore never needs to connect a new closer to an opener before argument_indexed. Unmatched delimiters
+// may occur in an argument's tokens, but only complete invocations inside its own context are borrowed.
 static bool pp_index_arguments(Preprocessor* pp)
 {
     if (pp->argument_links == 0)

@@ -4,6 +4,100 @@
 
 #include <sys/resource.h>
 
+// Keep a complete owner prefix alive, rewind only its appended tail, then borrow both an owner invocation and a
+// nested invocation from that prefix after indexing the replacement tail. Every delimiter link is checked exactly.
+static bool pp_test_argument_partial_rewind(bool vectorized)
+{
+    uint8_t kinds[32] = { C_TOKEN_L_PAREN, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_COMMA, C_TOKEN_L_PAREN,
+                          C_TOKEN_RAW_IDENTIFIER, C_TOKEN_COMMA, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_R_PAREN,
+                          C_TOKEN_R_PAREN, C_TOKEN_L_PAREN, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_R_PAREN };
+    uint8_t flags[32] = { 0 };
+    uint32_t values[32] = { 0 };
+    uint32_t locations[32] = { 0 };
+    uint32_t origins[32] = { 0 };
+    PPArgument records[8] = { 0 };
+    PPContext context = { .kind = BUSTER_PP_CONTEXT_BUFFER, .barrier = true, .end = 9 };
+    PPCapture capture = { .kind = BUSTER_PP_CAPTURE_ARGUMENT };
+    Preprocessor pp = {
+        .vectorized = vectorized,
+        .arguments = { .kinds = kinds, .flags = flags, .values = values, .locations = locations, .origins = origins, .count = 12, .capacity = 32 },
+        .argument_records = records,
+        .contexts = &context,
+        .context_count = 1,
+        .capture_frames = &capture,
+        .capture_count = 1,
+    };
+    context.tokens = &pp.arguments;
+    bool result = pp_index_arguments(&pp);
+    uint32_t retained[9];
+    if (result)
+    {
+        memcpy(retained, pp.argument_links, sizeof(retained));
+        pp.arguments.count = 9;
+        result = pp_room(&pp, &pp.arguments, 5) && pp.argument_indexed == 9;
+        static const uint8_t replacement[] = { C_TOKEN_L_PAREN, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_COMMA, C_TOKEN_RAW_IDENTIFIER, C_TOKEN_R_PAREN };
+        memcpy(kinds + 9, replacement, sizeof(replacement));
+        pp.arguments.count = 14;
+        result = result && pp_index_arguments(&pp) && memcmp(retained, pp.argument_links, sizeof(retained)) == 0;
+        result = result && pp.argument_links[9] == 13 && pp.argument_links[13] == 11 && pp.argument_links[11] == 13;
+    }
+    PPInvocation invocation = { 0 };
+    result = result && pp_new_argument(&pp) && pp_collect_argument_slice(&pp, &invocation, false, 2);
+    result = result && context.position == 9 && pp.argument_record_count == 2 && records[0].raw_begin == 1 && records[0].raw_end == 2 &&
+             records[1].raw_begin == 3 && records[1].raw_end == 8;
+    context.position = 3;
+    context.end = 8;
+    result = result && pp_new_argument(&pp) && pp_collect_argument_slice(&pp, &invocation, false, 2);
+    result = result && context.position == 8 && pp.argument_record_count == 4 && records[2].raw_begin == 4 && records[2].raw_end == 5 &&
+             records[3].raw_begin == 6 && records[3].raw_end == 7;
+    arena_release(&pp.argument_link_arena);
+    return result;
+}
+
+// A real invocation attempts the lazy index allocation. The initialized argument/context storage needs no allocation
+// after the child's address-space limit is lowered; failure must remain fatal instead of producing fallback output.
+static bool pp_test_argument_invoke_failure(bool vectorized)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        uint8_t kinds[130] = { C_TOKEN_L_PAREN };
+        uint8_t flags[130] = { 0 };
+        uint32_t values[130] = { 0 };
+        uint32_t locations[130] = { 0 };
+        uint32_t origins[130] = { 0 };
+        kinds[129] = C_TOKEN_R_PAREN;
+        PPArgument record;
+        PPInvocation invocation;
+        PPMacro macro = { .flags = BUSTER_PP_MACRO_COMPILED | BUSTER_PP_MACRO_FUNCTION, .parameter_count = 1 };
+        PPContext context = { .kind = BUSTER_PP_CONTEXT_BUFFER, .barrier = true, .end = 130 };
+        PPCapture capture = { .kind = BUSTER_PP_CAPTURE_ARGUMENT };
+        Preprocessor pp = {
+            .options = { .quiet = true, .no_history = true },
+            .vectorized = vectorized,
+            .arguments = { .kinds = kinds, .flags = flags, .values = values, .locations = locations, .origins = origins, .count = 130, .capacity = 130 },
+            .argument_records = &record,
+            .invocations = &invocation,
+            .macros = &macro,
+            .contexts = &context,
+            .context_count = 1,
+            .capture_frames = &capture,
+            .capture_count = 1,
+        };
+        context.tokens = &pp.arguments;
+        const struct rlimit limit = { 0, 0 };
+        const bool limited = setrlimit(RLIMIT_AS, &limit) == 0;
+        if (limited)
+        {
+            pp_invoke(&pp, 0, (PPToken){ .kind = C_TOKEN_RAW_IDENTIFIER });
+        }
+        _exit(limited && pp.fatal && pp.errors == 1 && pp.output.count == 0 && pp.argument_links == 0 && pp.arguments.count == 130 ? 0 : 1);
+    }
+    int status = 0;
+    const bool result = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    return result;
+}
+
 // An independent depth walk checks every indexed opener and comma, including unbalanced streams and protected
 // tails. Rewinding and rewriting the stack between runs must invalidate its old links before the new scan.
 static bool pp_test_argument_links(void)
@@ -16,6 +110,7 @@ static bool pp_test_argument_links(void)
     for (uint32_t mode = 0; result && mode < 2; mode += 1)
     {
         pp.vectorized = mode == 0;
+        result = pp_test_argument_partial_rewind(pp.vectorized) && pp_test_argument_invoke_failure(pp.vectorized);
         for (uint32_t n = 0; result && n <= 130; n += 1)
         {
             const uint32_t count = n == 130 ? page : n;
