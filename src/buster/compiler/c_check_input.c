@@ -5208,6 +5208,30 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
+// Retained uint32 output columns all use UINT32_MAX as their empty value. Fill one bounded column at a time so
+// libc's vector stores replace the aliasing token-wise stores (#628). Dirty and borrowed output storage is cleared
+// explicitly; the scalar reader below retains its original interleaved initialization as the independent twin.
+// The caller has proved all these mandatory reservations. Even count zero owns one sentinel; optional zero-default
+// columns (notably asm_ids) are excluded and keep their existing guarded initialization.
+static void check_input_output_none(CheckInput* input, uint32_t count)
+{
+    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE output columns use all-one bytes");
+    const uint64_t bytes = ((uint64_t)count + 1) * sizeof(uint32_t);
+    memset(input->declarations, 0xff, bytes);
+    memset(input->initializer_nodes, 0xff, bytes);
+    memset(input->initializer_begins, 0xff, bytes);
+    memset(input->initializer_ends, 0xff, bytes);
+    memset(input->token_nodes, 0xff, bytes);
+    memset(input->body_declarations, 0xff, bytes);
+    memset(input->declaration_bodies, 0xff, bytes);
+    memset(input->parameter_next, 0xff, bytes);
+    memset(input->control_owners, 0xff, bytes);
+    memset(input->label_targets, 0xff, bytes);
+    memset(input->case_ranges, 0xff, bytes);
+    memset(input->string_ids, 0xff, bytes);
+    memset(input->parameters, 0xff, bytes);
+}
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
@@ -5596,27 +5620,45 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
-        for (uint32_t i = 0; i <= count; i += 1)
+        if (parser->options.scalar)
         {
-            input->declarations[i] = BUSTER_CHECK_NONE;
-            input->initializer_nodes[i] = BUSTER_CHECK_NONE;
-            input->initializer_begins[i] = BUSTER_CHECK_NONE;
-            input->initializer_ends[i] = BUSTER_CHECK_NONE;
-            input->token_nodes[i] = BUSTER_CHECK_NONE;
-            input->body_declarations[i] = BUSTER_CHECK_NONE;
-            input->declaration_bodies[i] = BUSTER_CHECK_NONE;
-            input->parameter_next[i] = BUSTER_CHECK_NONE;
-            input->control_owners[i] = BUSTER_CHECK_NONE;
-            input->label_targets[i] = BUSTER_CHECK_NONE;
-            input->case_ranges[i] = BUSTER_CHECK_NONE;
-            reader.string_ids[i] = BUSTER_CHECK_NONE;
-            reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-            reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-            reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-            reader.activate[i] = BUSTER_CHECK_NONE;
-            reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.first_value[i] = BUSTER_CHECK_NONE;
-            reader.last_value[i] = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                input->declarations[i] = BUSTER_CHECK_NONE;
+                input->initializer_nodes[i] = BUSTER_CHECK_NONE;
+                input->initializer_begins[i] = BUSTER_CHECK_NONE;
+                input->initializer_ends[i] = BUSTER_CHECK_NONE;
+                input->token_nodes[i] = BUSTER_CHECK_NONE;
+                input->body_declarations[i] = BUSTER_CHECK_NONE;
+                input->declaration_bodies[i] = BUSTER_CHECK_NONE;
+                input->parameter_next[i] = BUSTER_CHECK_NONE;
+                input->control_owners[i] = BUSTER_CHECK_NONE;
+                input->label_targets[i] = BUSTER_CHECK_NONE;
+                input->case_ranges[i] = BUSTER_CHECK_NONE;
+                reader.string_ids[i] = BUSTER_CHECK_NONE;
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.parameters[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
+        }
+        else
+        {
+            check_input_output_none(input, count);
+            // Reader-internal columns keep their token-wise initialization and ownership. Only retained output
+            // columns change their fill order; no reader arena format or walk is changed.
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
         }
         if (traversal != 0)
         {
