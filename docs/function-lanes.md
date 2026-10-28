@@ -58,6 +58,16 @@ and masks are preserved. The implicit slot is never returned. Failed guardian
 setup, descriptor or process limits leave the
 compiler on one lane; failure to return owned slots refuses output.
 
+A full Linux pipe can lack append space even after a partial read frees logical
+bytes. The guardian reserves recovery storage before borrowing. If a return
+hits that page-buffer limit, it drains available opaque bytes into this storage
+and restores every pending byte, retaining any unwritten suffix. This compacts
+the pipe without requiring another recipe to read it; an I/O error never
+discards held slots. GNU make fills the initial pipe before starting jobs, so
+its capacity bounds the total available and borrowed explicit tokens. The
+recovery storage is private to the clean guardian and is released before its
+acknowledgement completes.
+
 The lease and team size stay fixed for the emission phase. Tokens which another
 file returns after dispatch cannot enlarge an already running team. In an uneven
 build, two large files can receive seven lanes and one lane; when the first team

@@ -26,6 +26,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE 1031 // Linux F_SETPIPE_SZ, including callers without _GNU_SOURCE.
+
 typedef struct WorkerBudgetTest WorkerBudgetTest;
 struct WorkerBudgetTest
 {
@@ -90,7 +92,7 @@ static int worker_budget_test_available(int fd)
 
 static bool worker_budget_test_tokens(int fd, const uint8_t* expected, uint32_t count)
 {
-    uint8_t received[64];
+    uint8_t received[4096];
     uint32_t wanted[256] = { 0 };
     uint32_t actual[256] = { 0 };
     bool valid = count <= sizeof(received) && worker_budget_test_read(fd, received, count);
@@ -399,12 +401,66 @@ static void worker_budget_test_limits(WorkerBudgetTest* test)
     }
 }
 
-static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termination)
+// Linux can have every page buffer occupied despite a partial read freeing logical bytes. Returning a lease then
+// needs compaction, even when there is no other client to make further progress. Keep a full multiset oracle.
+static void worker_budget_test_full_pipe(WorkerBudgetTest* test)
 {
-    const uint8_t tokens[] = { 's', 0, 'g' };
+    uint8_t tokens[4096];
+    for (uint32_t i = 0; i < sizeof(tokens); i += 1)
+    {
+        tokens[i] = (uint8_t)(i * 71);
+    }
+    int fds[2] = { -1, -1 };
+    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 &&
+                       fcntl(fds[0], BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE, sizeof(tokens)) == sizeof(tokens);
+    worker_budget_test_expect(test, ready, "a one-page full-pipe recovery fixture is available");
+    if (ready)
+    {
+        char flags[128];
+        snprintf(flags, sizeof(flags), " --jobserver-auth=%d,%d", fds[0], fds[1]);
+        WorkerBudget budget;
+        worker_budget_initialize(&budget, flags, 64);
+        for (uint32_t mode = 0; mode < 3; mode += 1)
+        {
+            WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+            const uint32_t requested = mode == 0 ? 2 : 64;
+            const bool supplied = write(fds[1], tokens, sizeof(tokens)) == sizeof(tokens);
+            const uint32_t granted = supplied ? worker_budget_acquire(&budget, requested, &lease) : 0;
+            worker_budget_test_expect(test, granted == requested &&
+                                           worker_budget_test_available(fds[0]) == (int)(sizeof(tokens) - requested + 1),
+                                      "a full pipe grants only the requested extra credits");
+            const uint8_t unexpected = 1;
+            const bool corrupted = mode != 2 || (granted > 1 && write(lease.control, &unexpected, 1) == 1);
+            const bool released = worker_budget_release(&lease);
+            worker_budget_test_expect(test, corrupted && released == (mode != 2) && budget.return_failed == (mode == 2),
+                                      "full-pipe completion preserves the positive or negative guardian acknowledgement");
+            worker_budget_test_expect(test, worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
+                                      "compaction returns every full-pipe opaque byte exactly once");
+        }
+        worker_budget_close(&budget);
+    }
+    for (uint32_t end = 0; end < 2; end += 1)
+    {
+        if (fds[end] >= 0)
+        {
+            close(fds[end]);
+        }
+    }
+}
+
+static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termination, bool full)
+{
+    uint8_t tokens[4096] = { 's', 0, 'g' };
+    const uint32_t count = full ? sizeof(tokens) : 3;
+    for (uint32_t i = 3; i < count; i += 1)
+    {
+        tokens[i] = (uint8_t)(i * 71);
+    }
     int fds[2] = { -1, -1 };
     int ready_pipe[2] = { -1, -1 };
-    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 && worker_budget_test_pipe_open(ready_pipe, O_CLOEXEC) == 0 && write(fds[1], tokens, sizeof(tokens)) == sizeof(tokens);
+    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 &&
+                       (!full || fcntl(fds[0], BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE, sizeof(tokens)) == sizeof(tokens)) &&
+                       worker_budget_test_pipe_open(ready_pipe, O_CLOEXEC) == 0 && write(fds[1], tokens, count) == count;
     worker_budget_test_expect(test, ready, "termination test pipes are available");
     const pid_t child = ready ? fork() : -1;
     if (child == 0)
@@ -419,12 +475,12 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
         char flags[128];
         snprintf(flags, sizeof(flags), " --jobserver-auth=%d,%d", fds[0], fds[1]);
         WorkerBudget budget;
-        worker_budget_initialize(&budget, flags, 8);
+        worker_budget_initialize(&budget, flags, 64);
         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
-        const uint8_t granted = isolated ? (uint8_t)worker_budget_acquire(&budget, 8, &lease) : 0;
+        const uint8_t granted = isolated ? (uint8_t)worker_budget_acquire(&budget, 64, &lease) : 0;
         const bool reported = write(ready_pipe[1], &granted, 1) == 1;
         close(ready_pipe[1]);
-        while (reported && granted == 4)
+        while (reported && granted == (full ? 64 : 4))
         {
             pause();
         }
@@ -437,7 +493,7 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
         close(ready_pipe[1]);
     }
     uint8_t granted = 0;
-    const bool acquired = child > 0 && worker_budget_test_read(ready_pipe[0], &granted, 1) && granted == 4;
+    const bool acquired = child > 0 && worker_budget_test_read(ready_pipe[0], &granted, 1) && granted == (full ? 64 : 4);
     worker_budget_test_expect(test, acquired, "isolated compiler acquired credits before termination");
     if (child > 0)
     {
@@ -447,7 +503,7 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
         const bool waited = worker_budget_test_wait(child, acquired ? termination : SIGKILL);
         worker_budget_test_expect(test, signalled == 0 && waited, "termination keeps the compiler's ordinary signal behavior");
     }
-    worker_budget_test_expect(test, ready && worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
+    worker_budget_test_expect(test, ready && worker_budget_test_tokens(fds[0], tokens, count),
                               "a process-group termination returns every extra credit through guardian EOF");
     if (ready_pipe[0] >= 0)
     {
@@ -684,8 +740,11 @@ static bool worker_budget_test(void)
     worker_budget_test_flags(&test);
     worker_budget_test_fifo(&test);
     worker_budget_test_limits(&test);
-    worker_budget_test_termination_one(&test, SIGTERM);
-    worker_budget_test_termination_one(&test, SIGKILL);
+    worker_budget_test_full_pipe(&test);
+    worker_budget_test_termination_one(&test, SIGTERM, false);
+    worker_budget_test_termination_one(&test, SIGKILL, false);
+    worker_budget_test_termination_one(&test, SIGTERM, true);
+    worker_budget_test_termination_one(&test, SIGKILL, true);
     worker_budget_test_child_modes(&test);
     worker_budget_test_reused_descriptors(&test);
     worker_budget_test_dry_run(&test);

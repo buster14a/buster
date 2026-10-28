@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -29,6 +31,8 @@
 #define BUSTER_WORKER_BUDGET_MAX 64u
 // Linux's O_DIRECT flag on a pipe selects packet mode (asm-generic/fcntl.h). The protocol requires byte-stream IO.
 #define BUSTER_WORKER_BUDGET_PACKET_FLAG 040000
+// Linux F_GETPIPE_SZ, also available when the caller does not enable GNU libc extensions.
+#define BUSTER_WORKER_BUDGET_GETPIPE_SIZE 1032
 
 extern char** environ;
 
@@ -268,13 +272,68 @@ static bool worker_budget_child_fds(int read_fd, int write_fd, int control, int 
     return result;
 }
 
+// A partial read from a full Linux pipe may leave its first page occupied and its last page without append space.
+// Merely waiting for POLLOUT would deadlock a build with no other recipe to drain it. Compact the available bytes
+// through storage reserved before borrowing: GNU make initializes at most the pipe capacity before starting jobs.
+// Additional bytes taken here do no work and are returned with the original lease; every partial write keeps its
+// unwritten suffix. A temporary IO failure must retain ownership, never turn an error acknowledgement into lost slots.
+static void worker_budget_return(int read_fd, int write_fd, uint8_t* tokens, uint32_t count, uint32_t capacity)
+{
+    while (count != 0)
+    {
+        const ssize_t returned = write(write_fd, tokens, count);
+        if (returned > 0)
+        {
+            count -= (uint32_t)returned;
+            memmove(tokens, tokens + returned, count);
+        }
+        else if (returned < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        else if (returned < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        {
+            bool reading = true;
+            bool progress = false;
+            while (reading && count < capacity)
+            {
+                const ssize_t taken = read(read_fd, tokens + count, capacity - count);
+                count += taken > 0 ? (uint32_t)taken : 0;
+                progress |= taken > 0;
+                reading = taken > 0 || (taken < 0 && errno == EINTR);
+            }
+            if (!progress)
+            {
+                struct pollfd descriptors[] = {
+                    { .fd = read_fd, .events = count < capacity ? POLLIN : 0 },
+                    { .fd = write_fd, .events = POLLOUT },
+                };
+                poll(descriptors, 2, 100);
+            }
+        }
+        else
+        {
+            // The private validated endpoints remain open. Retain their bytes through a transient resource failure.
+            poll(NULL, 0, 100);
+        }
+    }
+}
+
 static void worker_budget_guardian(int read_fd, int write_fd, int control, int reply, uint32_t maximum)
 {
-    uint8_t tokens[BUSTER_WORKER_BUDGET_MAX - 1];
     uint32_t count = 0;
     // A runner may kill the compiler's whole process group, even with SIGKILL. Leave it before taking a token;
     // before this succeeds a dead child owns nothing, and afterward parent exit closes the control pipe.
-    const bool prepared = syscall(SYS_setsid) >= 0 && worker_budget_child_fds(read_fd, write_fd, control, reply);
+    const bool isolated = syscall(SYS_setsid) >= 0 && worker_budget_child_fds(read_fd, write_fd, control, reply);
+    const int pipe_capacity = isolated ? fcntl(read_fd, BUSTER_WORKER_BUDGET_GETPIPE_SIZE) : -1;
+    const uint32_t token_capacity = pipe_capacity > 0 ? (uint32_t)pipe_capacity : 0;
+    uint8_t* tokens = token_capacity != 0 ? mmap(NULL, token_capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    if (tokens != MAP_FAILED)
+    {
+        // Fault the recovery pages while no byte is owned, rather than first demanding physical memory on return.
+        memset(tokens, 0, token_capacity);
+    }
+    const bool prepared = tokens != MAP_FAILED;
     bool valid = true;
     bool reading = prepared;
     while (reading && count < maximum)
@@ -301,16 +360,15 @@ static void worker_budget_guardian(int read_fd, int write_fd, int control, int r
         while (finished < 0 && errno == EINTR);
         valid = valid && finished == 0;
     }
-    ssize_t returned = 0;
     if (count != 0)
     {
-        do
-        {
-            returned = write(write_fd, tokens, count);
-        }
-        while (returned < 0 && errno == EINTR);
+        worker_budget_return(read_fd, write_fd, tokens, count, token_capacity);
     }
-    const uint8_t acknowledged = valid && returned == count;
+    if (tokens != MAP_FAILED)
+    {
+        munmap(tokens, token_capacity);
+    }
+    const uint8_t acknowledged = valid;
     do
     {
         sent = write(reply, &acknowledged, 1);
