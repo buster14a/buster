@@ -15,6 +15,7 @@
 #define CHECK_WARNING_VISIBILITY_PRAGMA 0x100000u
 
 #include "c_check_packed_diagnostic.c"
+#include "c_check_warning_ids.c"
 
 typedef enum CheckWarningSeverity
 {

@@ -331,15 +331,87 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
     {
         result->status = CHECK_PROGRAM_INVALID;
     }
+    uint32_t implicit_widths = 0;
+    uint32_t implicit_node = 0;
+    bool atomic_types = false;
+    for (uint32_t t = 0; valid && program->types != NULL && !atomic_types && t < program->types->types.count; t += 1)
+    {
+        atomic_types = program->types->types.kind[t] == BUSTER_TYPE_KIND_ATOMIC;
+    }
+    const CheckGraph* graph = valid ? &program->input->graph : NULL;
+    for (uint32_t n = 0; atomic_types && n < graph->count; n += 1)
+    {
+        const CheckValue* value = program->stream->values + n;
+        const TypeId type = type_strip_aligned(program->types, value->type);
+        if (value->category == CHECK_LVALUE && type_kind(program->types, type) == BUSTER_TYPE_KIND_ATOMIC &&
+            program->parser != NULL && check_program_token_body(program, graph->tokens[n]) != 0)
+        {
+            const uint64_t bytes = type_size(program->types, type);
+            const TypeId plain = type_conversion_operand(program->types, type);
+            if (check_builtin_atomic_c11_native(program->types, CBUILTIN_C11_ATOMIC_LOAD, plain, bytes, true))
+            {
+                implicit_widths |= 1u << (bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3);
+                implicit_node = n;
+            }
+        }
+    }
+    for (uint32_t a = 0; valid && a < program->stream->atomic_count; a += 1)
+    {
+        const CheckBuiltinAtomicEffect* effect = program->stream->atomics + a;
+        const CBuiltinId id = (CBuiltinId)graph->members[effect->node];
+        if (check_builtin_atomic_c11(id) && effect->object_type != 0 &&
+            check_builtin_atomic_c11_native(program->types, CBUILTIN_C11_ATOMIC_LOAD, effect->value_type, effect->object_size,
+                                            effect->alignment_known && effect->minimum_alignment >= effect->object_size))
+        {
+            const uint64_t bytes = effect->object_size;
+            implicit_widths |= 1u << (bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3);
+            implicit_node = effect->node;
+        }
+    }
     uint32_t keys[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
     // At most a signature per builtin node, and per key.
-    const uint32_t signatures = valid && program->builtin_count < BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES ? program->builtin_count : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES;
+    const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths) * 4 : 0;
+    const uint32_t signatures = candidates < BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES ? (uint32_t)candidates : BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES;
     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
-    CheckProgramHelper* planned = uses != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
+    CheckProgramHelper* planned = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
     uint32_t* first_nodes = planned != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, signatures) : 0;
-    if (valid && program->builtin_count != 0 && first_nodes == 0)
+    if (valid && ((program->builtin_count != 0 && uses == NULL) || (signatures != 0 && first_nodes == NULL)))
     {
         result->status = CHECK_PROGRAM_RESOURCE;
+    }
+    // Ordinary _Atomic expressions have no explicit builtin node. Reserve the existing raw-bit leaves once per
+    // represented width; their object accesses use these same unknown-effect call boundaries as explicit builtins.
+    const CBuiltinId implicit_ids[] = { CBUILTIN_ATOMIC_LOAD_N, CBUILTIN_ATOMIC_STORE_N, CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N, CBUILTIN_ATOMIC_EXCHANGE_N };
+    for (uint32_t w = 0; result->status == CHECK_PROGRAM_OK && w < 4; w += 1)
+    {
+        for (uint32_t operation = 0; (implicit_widths & (1u << w)) != 0 && operation < BUSTER_ARRAY_LENGTH(implicit_ids); operation += 1)
+        {
+            const CBuiltinId id = implicit_ids[operation];
+            const bool compare = operation == 2;
+            const bool rmw = operation >= 2;
+            const uint32_t key = check_program_helper_key(id, 1u << w, rmw, CBUILTIN_ATOMIC_RMW_INTEGER_BITS);
+            if (keys[key] == 0)
+            {
+                CheckProgramHelper* helper = planned + result->count;
+                const uint32_t count = compare ? 6 : operation == 0 ? 2 : 3;
+                *helper = (CheckProgramHelper){
+                    .id = id,
+                    .bytes = 1u << w,
+                    .parameter_count = count,
+                    .result_type = operation == 1 ? BUSTER_TYPE_VOID : BUSTER_TYPE_ULONG,
+                    .compiler_barrier = true,
+                    .required_alignment = 1u << w,
+                    .rmw_format = CBUILTIN_ATOMIC_RMW_INTEGER_BITS,
+                    .rmw = rmw,
+                };
+                for (uint32_t p = 0; p < count; p += 1)
+                {
+                    helper->parameter_types[p] = p >= (compare ? 3 : operation == 0 ? 1 : 2) ? BUSTER_TYPE_INT : BUSTER_TYPE_ULONG;
+                }
+                first_nodes[result->count] = implicit_node;
+                keys[key] = ++result->count;
+            }
+        }
     }
     uint32_t atomic = 0;
     uint32_t misc = 0;
@@ -437,7 +509,35 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     else
                     {
                         const uint32_t arguments = graph->argument_counts != 0 ? graph->argument_counts[node] : BUSTER_CHECK_NONE;
-                        result->status = check_program_helper_atomic(program, stream->atomics + atomic, id, arguments, &helper, &result->reason);
+                        const CheckBuiltinAtomicEffect* effect = stream->atomics + atomic;
+                        if (check_builtin_atomic_c11(id))
+                        {
+                            const bool aligned = effect->alignment_known && effect->minimum_alignment >= effect->object_size;
+                            const uint8_t kind = check_action_kind(program->types, effect->value_type);
+                            const bool representation = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX;
+                            if (representation || !check_builtin_atomic_c11_native(program->types, id, effect->value_type, effect->object_size, aligned))
+                            {
+                                // The lowering uses libatomic's generic ABI for representations the native leaves don't take.
+                                folded = true;
+                            }
+                            else
+                            {
+                                CheckBuiltinAtomicEffect normalized = *effect;
+                                const bool compare = id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
+                                const uint32_t parameters = arguments + compare + (id == CBUILTIN_C11_ATOMIC_INIT);
+                                normalized.evaluated_operands = (1u << parameters) - 1;
+                                normalized.unsupported = 0;
+                                if (compare && (effect->value_type == BUSTER_TYPE_FLOAT || effect->value_type == BUSTER_TYPE_DOUBLE))
+                                {
+                                    normalized.value_type = effect->object_size == 4 ? BUSTER_TYPE_UINT : BUSTER_TYPE_ULONG;
+                                }
+                                result->status = check_program_helper_atomic(program, &normalized, effect->runtime_builtin, parameters, &helper, &result->reason);
+                            }
+                        }
+                        else
+                        {
+                            result->status = check_program_helper_atomic(program, effect, id, arguments, &helper, &result->reason);
+                        }
                     }
                 }
                 if (result->status == CHECK_PROGRAM_OK && !folded)

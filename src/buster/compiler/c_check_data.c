@@ -137,7 +137,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     if (status == CHECK_DATA_OK)
     {
         const TypeId stripped = type_strip_aligned(types, object->type);
-        base = type_unqualified(stripped);
+        base = type_conversion_operand(types, stripped);
         const uint8_t kind = type_kind(types, base);
         integer = check_action_integer_type(types, base, &width, &is_signed);
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
@@ -147,7 +147,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         const uint32_t natural = type_alignment_log2(types, object->type);
         const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
         const uint64_t scalar_size = type_size(types, base);
-        const bool shape = size != 0 && size <= sizeof(plan->bytes) && size == scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
+        const bool shape = size != 0 && size <= sizeof(plan->bytes) && size >= scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
         if ((!integer && !floating && !complex && !pointer) || !shape || (pointer && size != 8) || (integer && width > size * 8))
         {
             status = CHECK_DATA_UNSUPPORTED;
@@ -640,7 +640,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         status = CHECK_DATA_INVALID;
     }
     const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
-    const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, base) : 0;
+    const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, type_conversion_operand(types, base)) : 0;
     const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
                            kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
     if (status == CHECK_DATA_OK)

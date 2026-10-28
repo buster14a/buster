@@ -961,13 +961,15 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
+  `--program-vectors` selects the vector and x86 builtin programs alone (`c_check_program_vector_test.c`,
+  `c_check_program_x86_test.c`), run against clang -O0's code where the host has their features.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
@@ -4903,10 +4905,14 @@ reversed one/eight-lane body schedules and guarded columns.
 file-scope function body apart from the top level, out of order on any number
 of lanes, from the reader's state at the body's opening (the history's heads,
 a view of the top level's table), and merges the bodies in source order
-(`c_types.c`'s change records and `type_replay`), into source order's result.
-A unit it can't merge yet (a body with a declaration with linkage, a
-transparent union or an intrinsic, a completion of its parameter-list tag, an
-error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
+(`c_types.c`'s change records and `type_replay`), into source order's result:
+the merge's pass over the binding events and the token columns runs on the
+lanes the bodies ran on, each a share of whole bodies by their tokens
+(`check_deferred_pass_items`). A unit it can't merge yet (a body whose
+declaration with linkage changes its entity's linked state, one that makes a
+union of the top level's transparent, one whose walk reports an error, and a
+unit with overloadable functions) is checked in source order, with the reason.
+The driver still checks in source order.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
 (and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
@@ -4944,7 +4950,10 @@ lanes' dispatch and wake-up must fall within their span; and the benchmark's
 `--cpus` parser must refuse 65 CPUs without a write past its room for 64.
 Empty, duplicate-position and nonzero-start linked histories are checked against
 a forward oracle with their ends at a protected page; the last update at the
-opening must be selected.
+opening must be selected. The merge's scans of the token columns
+(`check_deferred_entries` and the others) must give their scalar twins'
+positions and counts on ranges ending at a protected page, and every merged
+fixture must merge alike with the twins (`CheckDeferred.scalar_merge`).
 `test-checker-corpus --deferred N
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
@@ -4952,7 +4961,8 @@ left to source order by reason. `./build/compiler benchmark-checker-deferred
 [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
 file...` times source order's reader against the deferred one on one lane and
 on up to N, with the parse, the top level, the bodies' walks, their position
-checks, the lanes' span and the merge apart, and what a lane costs: its copy of
+checks, the lanes' span and the merge apart (and the merge's parts: its replay,
+appended tables, events, tags, pass and rest), and what a lane costs: its copy of
 the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
 waits for, and the lanes' arenas before the lanes start; and in how many passes
 the first lane read the largest body. Each deferred reading releases its state,
