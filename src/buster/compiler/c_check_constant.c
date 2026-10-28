@@ -1858,7 +1858,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         const CheckGraph* graph = &reader->output->graph;
         check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
-                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, reader->parser->options.scalar, checked, 0, 0);
+                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, 0, 0);
     }
     else
     {

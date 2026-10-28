@@ -69,7 +69,7 @@
 #include <string.h>
 
 // CPU architecture dependent includes
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -2372,6 +2372,12 @@ static TypeId type_adjust_parameter(TypeTable* table, TypeId type)
 // entry for it, made before its tag was completed, which is stale.
 static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, TypeId* results)
 {
+#if !BUSTER_HOST_VECTOR
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        results[i] = type_derive(table, keys.kinds[i], keys.flags[i], keys.bases[i], keys.extents[i]);
+    }
+#else
     // A view's lookups pass its hidden types over, which the vector lookup doesn't: its requests go one at a time.
     const uint32_t vector_count = table->hidden_end != 0 ? 0 : count;
     for (uint32_t i = vector_count; i < count; i += 1)
@@ -2444,6 +2450,7 @@ static void type_derive_batch(TypeTable* table, TypeKeys keys, uint32_t count, T
             }
         }
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3899,6 +3906,9 @@ static void type_promote_codes_scalar(const uint8_t* codes, uint64_t count, uint
 // 64 codes at a time, with a masked load and store for the last ones: one vpermb each.
 static void type_promote_codes(const uint8_t* codes, uint64_t count, uint8_t* results)
 {
+#if !BUSTER_HOST_VECTOR
+    type_promote_codes_scalar(codes, count, results);
+#else
     const __m512i table = _mm512_load_si512(type_promotion_codes);
     for (uint64_t i = 0; i < count; i += BUSTER_TYPE_CODE_COUNT)
     {
@@ -3906,6 +3916,7 @@ static void type_promote_codes(const uint8_t* codes, uint64_t count, uint8_t* re
         const __m512i input = _mm512_maskz_loadu_epi8(lanes, codes + i);
         _mm512_mask_storeu_epi8(results + i, lanes, _mm512_permutexvar_epi8(input, table));
     }
+#endif
 }
 
 // What a code is, from its ranges (the scalar twin's, independent of type_code_classes).
@@ -4073,7 +4084,11 @@ static void type_usual_arithmetic_codes_variant(const uint8_t* left, const uint8
 // The kernel the benchmark chose (docs/c-types.md, "Conversions"); type_usual_arithmetic_codes_pairs is the other.
 static void type_usual_arithmetic_codes(const uint8_t* left, const uint8_t* right, uint64_t count, uint8_t* results)
 {
+#if !BUSTER_HOST_VECTOR
+    type_usual_arithmetic_codes_scalar(left, right, count, results);
+#else
     type_usual_arithmetic_codes_variant(left, right, count, results, false);
+#endif
 }
 
 static __attribute__((unused)) void type_usual_arithmetic_codes_pairs(const uint8_t* left, const uint8_t* right, uint64_t count, uint8_t* results)

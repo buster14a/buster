@@ -41,7 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cpuid.h>
-#include <immintrin.h>
+#include "host_isa.h"
 #include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------

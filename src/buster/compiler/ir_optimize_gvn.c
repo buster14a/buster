@@ -228,6 +228,8 @@ static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t i, bool initial)
 
 static void ir_gvn_keys(IrGvnWork* work, bool initial, bool scalar)
 {
+    (void)scalar;
+
     const uint32_t n = work->ir.function->instruction_count;
     for (uint32_t i = 0; i < n; i += 1)
     {
@@ -236,7 +238,7 @@ static void ir_gvn_keys(IrGvnWork* work, bool initial, bool scalar)
     for (uint64_t first = 0; first < n; first += BUSTER_IR_OPTIMIZE_BATCH)
     {
         const uint32_t count = n - first < BUSTER_IR_OPTIMIZE_BATCH ? n - first : BUSTER_IR_OPTIMIZE_BATCH;
-        if (!scalar)
+        if (!BUSTER_SCALAR_PATH(scalar))
         {
             for (uint32_t half = 0; half < count; half += 8)
             {
@@ -254,7 +256,7 @@ static void ir_gvn_keys(IrGvnWork* work, bool initial, bool scalar)
         for (uint32_t lane = 0; lane < count; lane += 1)
         {
             const uint32_t i = first + lane;
-            if (scalar || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
+            if (BUSTER_SCALAR_PATH(scalar) || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
             {
                 work->hashes[i] = ir_gvn_hash_one(work, i, initial);
             }
@@ -289,7 +291,9 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, bool in
 
 static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
 {
-    ir_gvn_keys(work, initial, scalar);
+    (void)scalar;
+
+    ir_gvn_keys(work, initial, BUSTER_SCALAR_PATH(scalar));
     const uint64_t n = work->ir.function->instruction_count;
     for (uint64_t width = 1; width < n; width *= 2)
     {
@@ -327,6 +331,8 @@ static uint32_t ir_gvn_partition(IrGvnWork* work, bool initial, bool scalar)
 
 static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     const IrFunction* f = work->ir.function;
     uint64_t buckets = 1;
     while (buckets < (uint64_t)f->instruction_count * 2 + 1)
@@ -342,7 +348,7 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
     if (ok)
     {
         memset(heads, 0xff, buckets * sizeof(uint32_t));
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             for (uint32_t i = 0; i < f->instruction_count; i += 1)
             {
@@ -371,7 +377,7 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
                 {
                     if (work->pure[i] != 0 && work->alias[i] == i)
                     {
-                        if (scalar)
+                        if (BUSTER_SCALAR_PATH(scalar))
                         {
                             ir_gvn_key(work, i, false, false);
                             work->hashes[i] = ir_gvn_hash_one(work, i, false);
@@ -382,14 +388,14 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
                         }
                         const uint64_t bucket = work->hashes[i] & (buckets - 1);
                         uint32_t match = heads[bucket];
-                        while (match != BUSTER_IR_NONE && (scalar ? ir_gvn_compare(work, i, match, false) != 0 : work->classes[i] != work->classes[match]))
+                        while (match != BUSTER_IR_NONE && (BUSTER_SCALAR_PATH(scalar) ? ir_gvn_compare(work, i, match, false) != 0 : work->classes[i] != work->classes[match]))
                         {
                             match = previous[match];
                         }
                         if (match != BUSTER_IR_NONE)
                         {
                             work->alias[i] = match;
-                            if (scalar)
+                            if (BUSTER_SCALAR_PATH(scalar))
                             {
                                 work->classes[i] = work->classes[match];
                             }
@@ -510,7 +516,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, options.scalar);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {
@@ -530,7 +536,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     if (check.error == IR_OK)
     {
         ir_gvn_classify(&work);
-        if (!options.scalar)
+        if (!BUSTER_SCALAR_PATH(options.scalar))
         {
             uint32_t classes = ir_gvn_partition(&work, true, false);
             bool changed = true;
@@ -544,7 +550,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
             }
             work.statistics.classes = classes;
         }
-        check.error = ir_gvn_available(&work, scratch, options.scalar);
+        check.error = ir_gvn_available(&work, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     IrFunction view = { 0 };
     if (check.error == IR_OK)
@@ -569,12 +575,12 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = 0;
-        rewrite.scalar = options.scalar;
+        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, options.scalar);
+        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {

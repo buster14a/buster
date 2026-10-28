@@ -37,7 +37,7 @@ struct CheckEnvironment
 static uint32_t check_environment_body_count(const Parser* parser)
 {
     uint32_t count = 0;
-    if (parser->options.scalar)
+    if (BUSTER_SCALAR_PATH(parser->options.scalar))
     {
         for (uint32_t token = 0; token < parser->tokens.count; token += 1)
         {

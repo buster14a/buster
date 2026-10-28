@@ -7,6 +7,8 @@
 // Run every invocation under the 9700X per-run lock, pinned to CPU 2. --only and --after-scalar expose both vector
 // states. Timing/perf helpers below are original, with no imported timing harness or third-party cost data.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -20,7 +22,7 @@
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <linux/perf_event.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #ifndef BUSTER_ARRAY_LENGTH
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
@@ -472,3 +474,12 @@ int run_tier1_schedule_benchmark(int argc, char** argv)
     free(bench.records);
     return valid ? 0 : 1;
 }
+
+#else
+int run_tier1_schedule_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

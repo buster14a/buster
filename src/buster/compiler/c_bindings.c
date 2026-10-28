@@ -23,7 +23,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_C_BINDING_NONE UINT32_MAX
 #define BUSTER_C_BINDING_WALK_LIMIT 8
@@ -317,11 +317,13 @@ static __m512i c_bindings_digits(const uint64_t* keys, uint32_t lanes, uint32_t 
 // count readable/writable entries, do not overlap, and stay alive through the consumer; count <= 1 reads neither.
 static uint64_t* c_bindings_sort(uint64_t* keys, uint64_t* temporary, uint32_t count, bool vector, uint32_t varying)
 {
+    (void)vector;
+
     uint64_t* input = keys;
     uint64_t* output = temporary;
     for (uint32_t pass = 0; count > 1 && pass < 4; pass += 1)
     {
-        if (!vector || ((varying >> (pass * 8)) & 255) != 0)
+        if (!BUSTER_VECTOR_PATH(vector) || ((varying >> (pass * 8)) & 255) != 0)
         {
             uint32_t histogram[256] = { 0 };
             const uint32_t shift = 32 + pass * 8;
@@ -337,7 +339,7 @@ static uint64_t* c_bindings_sort(uint64_t* keys, uint64_t* temporary, uint32_t c
                         total += frequency;
                     }
                 }
-                if (vector)
+                if (BUSTER_VECTOR_PATH(vector))
                 {
                     for (uint32_t begin = 0; begin < count;)
                     {
@@ -396,6 +398,8 @@ static uint64_t* c_bindings_sort(uint64_t* keys, uint64_t* temporary, uint32_t c
 // pops it. Exposing these two phases lets the benchmark measure the sort's share without reading a clock here.
 static bool c_bindings_sorted(const CBindings* bindings, Arena* scratch, uint64_t** keys, uint32_t* count, bool vector)
 {
+    (void)vector;
+
     *keys = bindings->valid ? arena_push_array(scratch, (uint64_t)bindings->count + 1, 8, 64) : 0;
     uint64_t* temporary = *keys != 0 ? arena_push_array(scratch, (uint64_t)bindings->count + 1, 8, 64) : 0;
     const bool valid = temporary != 0;
@@ -414,7 +418,7 @@ static bool c_bindings_sorted(const CBindings* bindings, Arena* scratch, uint64_
                 every &= key;
             }
         }
-        *keys = c_bindings_sort(*keys, temporary, *count, vector, any ^ every);
+        *keys = c_bindings_sort(*keys, temporary, *count, BUSTER_VECTOR_PATH(vector), any ^ every);
     }
     return valid;
 }

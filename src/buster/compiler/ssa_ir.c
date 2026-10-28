@@ -532,6 +532,8 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
 
 static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
+    (void)vector;
+
     const uint64_t output_length = output == 0 ? 0 : output->length;
     const uint64_t scratch_length = scratch == 0 ? 0 : scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -550,7 +552,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     IrFunction candidate = { 0 };
     if (check.error == IR_OK)
     {
-        check = ir_verify_path(input, scratch, 0, vector);
+        check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
     }
     if (check.error == IR_OK)
     {
@@ -568,10 +570,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     {
         // Match the builder's combined reserved-frontier/temporary-matrix cap. This is a memory bound,
         // not a measured performance crossover; larger graphs use the independent scalar constructor.
-        vector = vector && ssa_vector_fits(input->block_count);
+        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
-        check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, vector));
+        check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector)));
     }
     if (check.error == IR_OK)
     {
@@ -584,7 +586,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        check.error = ssa_ir_error(vector ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
+        check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
     }
     if (check.error == IR_OK)
     {
@@ -624,9 +626,15 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     return check;
 }
 
+static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
+
 static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return ssa_ir_promote_scalar(input, output, scratch, result);
+#else
     return ssa_ir_promote_path(input, output, scratch, result, true);
+#endif
 }
 
 static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)

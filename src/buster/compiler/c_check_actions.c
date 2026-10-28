@@ -13,7 +13,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <math.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 typedef enum CheckCategory
 {

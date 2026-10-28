@@ -5,6 +5,8 @@
 // typed output and diagnostics. Graph generation is outside timing. This synthetic benchmark does not establish
 // parser/corpus or Zen 5 acceptance. Every measured output is compared with the postorder oracle outside timing.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -373,3 +375,12 @@ int run_checker_benchmark(int argc, char** argv)
     arena_release(&type_storage);
     return !valid;
 }
+
+#else
+int run_checker_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

@@ -216,13 +216,15 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
 
 static bool parse_bindings_resolve(ParseBindings* output, bool scalar, Arena* scratch)
 {
+    (void)scalar;
+
     const uint64_t mark = scratch->length;
     uint32_t* results = output->valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)output->events.count + 1) : 0;
     bool valid = results != 0;
     CBindingStatistics statistics = { 0 };
     if (valid)
     {
-        valid = scalar ? c_bindings_scalar(&output->events, results, scratch) :
+        valid = BUSTER_SCALAR_PATH(scalar) ? c_bindings_scalar(&output->events, results, scratch) :
                          c_bindings_batch(&output->events, results, scratch, &statistics);
     }
     if (valid)
@@ -239,7 +241,7 @@ static bool parse_bindings_resolve(ParseBindings* output, bool scalar, Arena* sc
                                        output->namespaces[token] == C_BINDING_TAG ? C_BINDING_TAG_KIND : C_BINDING_OBJECT;
             }
         }
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             for (uint32_t event = 0; event < output->events.count; event += 1)
             {

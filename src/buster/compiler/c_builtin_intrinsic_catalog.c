@@ -16,7 +16,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 typedef struct BuiltinIntrinsicInfo BuiltinIntrinsicInfo;
 struct BuiltinIntrinsicInfo
@@ -165,7 +165,9 @@ static __attribute__((unused)) bool builtin_intrinsic_own_main_prototype_in_scop
 // naturally aligned slices. Per-name null or empty slices simply miss. The vector tail never reads inactive names.
 static __attribute__((unused)) void builtin_intrinsic_lookup_batch(const BuiltinIntrinsicName* inputs, const BuiltinIntrinsicInfo** outputs, uint32_t count, bool scalar)
 {
-    if (scalar)
+    (void)scalar;
+
+    if (BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t i = 0; i < count; i += 1)
         {

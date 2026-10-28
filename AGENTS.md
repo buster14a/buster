@@ -84,8 +84,11 @@ Where it is:
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Do not add other host operating systems, older-CPU
-production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
+ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
+feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
+baseline executable; `native` is the default and `znver5` selects benchmark
+builds. The host choice is made at build time, outside compiler hot paths.
+Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
 
@@ -1209,6 +1212,14 @@ The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
 do for the same options (`c_predefines.c`).
 
 ## Sharing the 9700X
+
+Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the current Clang 23
+release-branch packages, in baseline x86-64 and native host builds. Non-AVX-512
+CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
+hosted variants pass on the same triggering revision. Failed, cancelled or
+skipped tests cannot start the benchmark job. The existing required check name
+is retained by a hosted aggregation job that fails when either stage fails.
+See [the CI guide](docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
 runs on the same machine. Its timings only mean something when one thing runs

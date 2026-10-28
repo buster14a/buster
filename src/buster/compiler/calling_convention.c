@@ -88,7 +88,7 @@
 #include <string.h>
 
 // CPU architecture dependent includes
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API
@@ -2972,10 +2972,14 @@ static void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const Typ
 
 static void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
 {
+#if !BUSTER_HOST_VECTOR
+    abi_classify_scalar(abi, table, types, count);
+#else
     if (!abi_classify_vector(abi, table, types, count))
     {
         abi_classify_scalar(abi, table, types, count);
     }
+#endif
 }
 
 // The kind of a type that can be classified (a complete object type, or void), ALIGNED looked through; NONE for another.
@@ -3101,6 +3105,8 @@ static bool abi_schedule_wide(const TypeTable* table, TypeId type)
 static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, const uint32_t* pending, uint32_t pending_count, TypeId* ready,
                                      uint32_t count, Arena* arena, bool scalar)
 {
+    (void)scalar;
+
     const uint32_t live = 1u << 31;
     uint32_t* levels = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
     uint32_t* cursors = levels != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
@@ -3206,7 +3212,7 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
             const uint32_t end = cursors[level];
             if (end != result)
             {
-                if (scalar)
+                if (BUSTER_SCALAR_PATH(scalar))
                 {
                     abi_classify_scalar(abi, table, ready + result, end - result);
                 }
@@ -3226,6 +3232,8 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
 // quadratic. Wide records retain their early-classification shortcut. Without scratch, keep the original scalar scan.
 static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool scalar)
 {
+    (void)scalar;
+
     Scratch scratch = scratch_begin(0);
     const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
     uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
@@ -3289,7 +3297,7 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
             }
             pending_count = kept;
             progress = ready_count != 0;
-            if (scalar)
+            if (BUSTER_SCALAR_PATH(scalar))
             {
                 abi_classify_scalar(abi, table, ready, ready_count);
             }
@@ -3302,7 +3310,7 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
         }
         if (pending_count != 0 && progress)
         {
-            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena, scalar);
+            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena, BUSTER_SCALAR_PATH(scalar));
             fallback = extra == UINT32_MAX;
             classified += fallback ? 0 : extra;
         }
@@ -3333,9 +3341,15 @@ static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table, bool 
     return classified;
 }
 
+static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table);
+
 static uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table)
 {
+#if !BUSTER_HOST_VECTOR
+    return abi_classify_all_scalar(abi, table);
+#else
     return abi_classify_levels(abi, table, false);
+#endif
 }
 
 static uint32_t abi_classify_all_scalar(AbiTable* abi, const TypeTable* table)
@@ -3664,6 +3678,9 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 // scans' inclusive values are its totals, which a last pass over the calls reads.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
+#if !BUSTER_HOST_VECTOR
+    abi_assign_scalar(abi, signatures, locations, calls);
+#else
     Scratch scratch = scratch_begin(0);
     uint64_t total = 0;
     for (uint32_t c = 0; c < signatures.count; c += 1)
@@ -3849,6 +3866,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
         }
     }
     scratch_end(scratch);
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

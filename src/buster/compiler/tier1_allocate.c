@@ -17,7 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_ALLOCATE_MAX_INTERVALS (1u << 20)
 #define BUSTER_TIER1_ALLOCATE_MAX_POSITIONS (1u << 24)
@@ -527,11 +527,13 @@ static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t c
 // Keep the cross-product for tiny fixed sets and as an independent scalar reference. All borrowed tails are masked.
 static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, bool vector, uint32_t* allowed)
 {
+    (void)vector;
+
     for (uint32_t f = 0; f < input->fixed.count; f += 1)
     {
-        for (uint32_t first = 0; first < input->count; first += vector ? 16 : 1)
+        for (uint32_t first = 0; first < input->count; first += BUSTER_VECTOR_PATH(vector) ? 16 : 1)
         {
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 const uint32_t remaining = input->count - first;
                 const uint32_t length = remaining < 16 ? remaining : 16;
@@ -559,16 +561,18 @@ static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* inp
 // lanes per class; scratch is one u32 per fixed range. Required-use/start events do not query or advance the sweep.
 static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, bool vector, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
 {
+    (void)vector;
+
     bool valid = true;
     if (input->fixed.count != 0 && input->count != 0)
     {
         // Avoid index overhead when the cross-product fits sixteen comparisons per input row plus the already-paid
         // position domain. This keeps tiny functions/small fixed sets simple while bounding that work linearly too.
         const uint64_t simple_budget = input->position_count + 16ull * (input->count + input->fixed.count);
-        const bool simple = !vector || (uint64_t)input->fixed.count * input->count <= simple_budget;
+        const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)input->fixed.count * input->count <= simple_budget;
         if (simple)
         {
-            tier1_allocation_filter_fixed_simple(input, vector, allowed);
+            tier1_allocation_filter_fixed_simple(input, BUSTER_VECTOR_PATH(vector), allowed);
         }
         else
         {
@@ -621,6 +625,8 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
 {
+    (void)vector;
+
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
     Tier1Allocation allocation = { 0 };
@@ -677,7 +683,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
         {
             error = TIER1_ALLOCATION_OK;
         }
-        if (error == TIER1_ALLOCATION_OK && vector)
+        if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
         {
             parents = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
             next = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
@@ -716,7 +722,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
             split[i] = input->ends[i];
             regs[i] = UINT8_MAX;
             kinds[i] = BUSTER_TIER1_ALLOCATE_REGISTER;
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 parents[i] = i;
             }
@@ -775,13 +781,13 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 value_active_end[value] = input->ends[i];
             }
         }
-        if (error == TIER1_ALLOCATION_OK && input->fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, vector, events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && input->fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {
-            bool regular = vector;
+            bool regular = BUSTER_VECTOR_PATH(vector);
             uint32_t class_count = 0;
             uint32_t class_event_count = 0;
             int32_t live = 0;
@@ -804,7 +810,7 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                     {
                         allocation.peak_pressure[class] = (uint32_t)live;
                     }
-                    if (vector)
+                    if (BUSTER_VECTOR_PATH(vector))
                     {
                         class_events[class_event_count] = events[e];
                         deltas[class_event_count] = delta;
@@ -922,9 +928,15 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
     return error;
 }
 
+static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
+
 static __attribute__((unused)) Tier1AllocationError tier1_allocate(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return tier1_allocate_scalar(input, arena, result);
+#else
     return tier1_allocate_impl(input, arena, true, result);
+#endif
 }
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
@@ -1222,6 +1234,8 @@ static uint32_t tier1_move_ready_pop(uint32_t* ready, uint32_t* count)
 
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result, bool vector)
 {
+    (void)vector;
+
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
     Tier1ResolvedMoves output = { 0 };
@@ -1247,7 +1261,7 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
             error = TIER1_ALLOCATION_CAPACITY;
         }
     }
-    if (error == TIER1_ALLOCATION_OK && vector)
+    if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
     {
         const __m256i scratch = _mm256_set1_epi32((int)input->scratch);
         const __m512i indices = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
@@ -1382,7 +1396,11 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
 
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return tier1_resolve_moves_scalar(input, arena, result);
+#else
     const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
     const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, true);
     return error;
+#endif
 }

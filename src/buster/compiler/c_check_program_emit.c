@@ -348,10 +348,12 @@ static __attribute__((noinline)) void check_program_emit_body_rows(CheckEmitBody
                                                                    const uint32_t* tokens, const Tier0Code* code, uint32_t b, uint32_t* offsets, uint32_t length,
                                                                    bool scalar)
 {
+    (void)scalar;
+
     offsets[code->count] = length;
     const uint32_t declaration = program->bodies[b].declaration;
     const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
-    body->row_count = scalar ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
+    body->row_count = BUSTER_SCALAR_PATH(scalar) ? check_debug_rows_scalar(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing,
                                                        body->row_offsets, body->row_tokens) :
                                check_debug_rows(code->entry_records, tokens, code->entry_count, offsets, length, declaration, closing, body->row_offsets,
                                                 body->row_tokens);
@@ -773,12 +775,14 @@ static uint64_t check_program_emit_marked(const Tier0Code* code)
 // (check_program_emit_lanes) and check_program_access's share it.
 static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, uint32_t* declaring, bool scalar)
 {
+    (void)scalar;
+
     memset(defined, 0, (uint64_t)program->object_count + 1);
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         defined[program->bodies[b].object] = 1;
     }
-    const uint32_t declaring_count = check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, scalar);
+    const uint32_t declaring_count = check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declaring, BUSTER_SCALAR_PATH(scalar));
     for (uint32_t d = 0; d < declaring_count; d += 1)
     {
         const uint32_t token = declaring[d];
@@ -855,6 +859,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                      CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
                                      CheckClock* stage_clock)
 {
+    (void)scalar;
+
     *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
     const bool timing = lanes != NULL && lanes->timing;
     const uint64_t started = timing ? check_program_lanes_now() : 0;
@@ -878,7 +884,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool lowering = valid;
     if (valid)
     {
-        valid = check_lower_prepare(&shared, &result->lowered, program, scalar, rows != NULL, output, scratch);
+        valid = check_lower_prepare(&shared, &result->lowered, program, BUSTER_SCALAR_PATH(scalar), rows != NULL, output, scratch);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
     const uint32_t count = program->body_count;
@@ -898,7 +904,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined, declaring, scalar);
+        check_program_object_access(program, access, defined, declaring, BUSTER_SCALAR_PATH(scalar));
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
     }
     arena_pop_to(scratch, declaring_mark);
@@ -930,7 +936,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         .access = access,
         .access_count = access_count,
         .body_count = count,
-        .scalar = scalar,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
         .verify = verify,
         .unwind = unwind,
         .sources = rows != NULL,
@@ -1071,7 +1077,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t attributes_mark = scratch->length;
     uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
     valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
-    const uint32_t declared_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declared, scalar) : 0;
+    const uint32_t declared_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declared, BUSTER_SCALAR_PATH(scalar)) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
@@ -1533,11 +1539,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
+                const BranchSizingCheck shape = BUSTER_SCALAR_PATH(scalar) ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
                                                          branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
                 const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                                       scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
+                                       BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
                                                 x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
                 encodes = length >= 0;
                 if (encodes && unwind)
@@ -1545,7 +1551,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     encodes = length <= INT32_MAX && unwind_tier0_frame(code, offsets, (uint32_t)length, &run.frames[b]) == UNWIND_OK;
                     UnwindFunction proven;
                     const UnwindError analyzed = !encodes || !verify ? UNWIND_ERROR_UNSUPPORTED :
-                                                 scalar ? unwind_tier0_scalar(code, offsets, (uint32_t)length, &proven) :
+                                                 BUSTER_SCALAR_PATH(scalar) ? unwind_tier0_scalar(code, offsets, (uint32_t)length, &proven) :
                                                           unwind_tier0(code, offsets, (uint32_t)length, &proven);
                     encodes = encodes && (analyzed != UNWIND_OK || memcmp(&proven, &run.frames[b], sizeof(proven)) == 0);
                     body->reason = encodes ? body->reason : "internal compiler error: a function's prologue or epilogue isn't the frame its unwind table describes";
@@ -1623,13 +1629,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && frames != 0)
     {
         UnwindOutput tables = { .location_capacity = (uint32_t)frames, .shared = true };
-        valid = unwind_write(run.frames, (uint32_t)frames, &tables, scalar) == UNWIND_ERROR_CAPACITY;
+        valid = unwind_write(run.frames, (uint32_t)frames, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY;
         uint32_t* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, frames) : 0;
         uint8_t* table_bytes = valid ? arena_push(bytes, tables.size, 8) : 0;
         tables.bytes = table_bytes;
         tables.capacity = tables.size;
         tables.locations = locations;
-        valid = locations != 0 && table_bytes != 0 && unwind_write(run.frames, (uint32_t)frames, &tables, scalar) == UNWIND_OK;
+        valid = locations != 0 && table_bytes != 0 && unwind_write(run.frames, (uint32_t)frames, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK;
         const AtomId atom = valid ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
         valid = atom != 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
@@ -1695,7 +1701,9 @@ static bool check_program_emit_lanes(CheckProgramCode* result, const CheckProgra
                                      const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
                                      CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes)
 {
-    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, scalar, output, bytes, scratch, binding, rows, unwind, verify, lanes,
+    (void)scalar;
+
+    return check_program_emit_timed(result, program, parser, identifiers, data_capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, binding, rows, unwind, verify, lanes,
                                     NULL);
 }
 
@@ -1704,5 +1712,7 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
                                const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
                                CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify)
 {
-    return check_program_emit_lanes(result, program, parser, identifiers, data_capacity, scalar, output, bytes, scratch, binding, rows, unwind, verify, NULL);
+    (void)scalar;
+
+    return check_program_emit_lanes(result, program, parser, identifiers, data_capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, binding, rows, unwind, verify, NULL);
 }
