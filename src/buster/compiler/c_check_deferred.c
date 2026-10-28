@@ -9,9 +9,9 @@
 //   - After the walk, check_deferred_bodies reads the bodies on lanes: one, and one more per
 //     BUSTER_CHECK_DEFERRED_LANE_TOKENS (and one per BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS of the top level's tokens) of
 //     the bodies' tokens beyond the larger of the largest body's and twice the second largest's, no more than bodies.
-//     It cuts the bodies into parts before the lanes start (parts_by_cost); the first lane reads the costliest part
-//     itself, and every lane takes the others from one counter, costliest first (check_deferred_lane): the others are
-//     woken for the bodies and read them more slowly. A lane copies the top
+//     It cuts the bodies into parts before the lanes start (parts_by_cost), promotes the part containing the largest
+//     body for the first lane, and every lane takes the others from one counter, costliest first (check_deferred_lane):
+//     the others are woken for the bodies and read them more slowly. A lane copies the top
 //     level's reader when it takes its first part, so that one that takes none copies nothing
 //     (check_deferred_lane_prepare), and sets it back for each body to what source order's reader is at the body's
 //     opening (check_deferred_body): the file scope's bindings from their history (#319's environment, c_environment.c)
@@ -848,8 +848,8 @@ static void check_deferred_lane(void* argument)
         // A test's wait for the other lanes' first takes, before the first lane's own.
         sched_yield();
     }
-    // The costliest part, order[0], is the first lane's own, which it starts at once: the others are woken for the
-    // bodies, and a woken lane reads a body at about half the first lane's speed. The counter gives out the others,
+    // The part containing the largest body, order[0], is the first lane's own, which it starts at once. The others are
+    // woken for the bodies, and a woken lane reads a body at about half the first lane's speed. The counter gives out the others,
     // costliest first, to every lane as it comes.
     uint64_t taken = index == 0 ? 0 : 1 + lane_take(parts - 1);
     if (deferred->late_first && index != 0)
@@ -1348,6 +1348,25 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     return valid;
 }
 
+// The first lane must read the largest body, as the critical path assumes. The costliest aggregate part need not
+// contain it: two smaller bodies can cost more. Promote its part stably, leaving the others in their cost order.
+static void check_deferred_primary_part(CheckDeferred* deferred)
+{
+    for (uint64_t taken = 0; taken < deferred->parts; taken += 1)
+    {
+        const uint32_t part = deferred->order[taken];
+        if (deferred->boundaries[part] <= deferred->largest_index && deferred->largest_index < deferred->boundaries[part + 1])
+        {
+            if (taken != 0)
+            {
+                memmove(deferred->order + 1, deferred->order, taken * sizeof(*deferred->order));
+                deferred->order[0] = part;
+            }
+            break;
+        }
+    }
+}
+
 static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
@@ -1426,6 +1445,7 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
     deferred->parts = valid && deferred->body_count != 0 ? parts_by_cost(deferred->costs, deferred->body_count, active, deferred->boundaries, deferred->order) : 0;
+    check_deferred_primary_part(deferred);
     // The lanes' arenas, on this thread: those of a lane the state hasn't run reserved, the others taken back. A lane
     // without them takes its parts' bodies for source order's (check_deferred_lane_prepare).
     const uint64_t arenas_begin = deferred->timing ? check_deferred_now() : 0;

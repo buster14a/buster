@@ -350,18 +350,26 @@ struct CheckDeferredSize
     uint32_t second;
     uint32_t fewer;
     uint32_t lanes;
+    // When nonzero, this many tokens per body, two more in the first: grouped-part boundary cases.
+    uint32_t base_tokens;
 };
 
 static const CheckDeferredSize check_deferred_sizes[] =
 {
-    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1 },
-    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2 },
-    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7 },
-    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8 },
-    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1 },
-    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2 },
-    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2 },
-    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3 },
+    { "lane-tokens-below-two-lanes", 3, 1, 1, 1, 1, 0 },
+    { "lane-tokens-two-lanes", 3, 1, 1, 0, 2, 0 },
+    { "lane-tokens-below-eight-lanes", 9, 1, 1, 1, 7, 0 },
+    { "lane-tokens-eight-lanes", 9, 1, 1, 0, 8, 0 },
+    { "lane-tokens-large-body-below-two-lanes", 2, 4, 1, 1, 1, 0 },
+    { "lane-tokens-large-body-two-lanes", 2, 4, 1, 0, 2, 0 },
+    { "lane-tokens-second-body-below-three-lanes", 3, 3, 2, 1, 2, 0 },
+    { "lane-tokens-second-body-three-lanes", 3, 3, 2, 0, 3, 0 },
+    { .name = "grouped-parts-below-two-lanes-capacity", .bodies = 127, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-two-lanes-capacity", .bodies = 128, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-above-two-lanes-capacity", .bodies = 129, .lanes = 2, .base_tokens = 18 },
+    { .name = "grouped-parts-below-eight-lanes-capacity", .bodies = 511, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-eight-lanes-capacity", .bodies = 512, .lanes = 6, .base_tokens = 18 },
+    { .name = "grouped-parts-above-eight-lanes-capacity", .bodies = 513, .lanes = 6, .base_tokens = 18 },
 };
 
 // A CheckDeferredSize's unit: its bodies and the tokens they hold in all, the largest one's (the first of them) and the
@@ -376,7 +384,8 @@ static void check_deferred_sized(char* text, uint64_t capacity, const CheckDefer
     {
         // `void fB(void)`: five tokens of the top level a function.
         const uint64_t lane_tokens = check_deferred_test_lane_tokens((uint64_t)size->bodies * 5);
-        const uint64_t body = lane_tokens * (b == 0 ? size->first : b == 1 ? size->second : 1) - (b + 1 == size->bodies ? size->fewer : 0);
+        const uint64_t body = size->base_tokens != 0 ? size->base_tokens + (b == 0 ? 2u : 0u) :
+                              lane_tokens * (b == 0 ? size->first : b == 1 ? size->second : 1) - (b + 1 == size->bodies ? size->fewer : 0);
         length += (uint64_t)snprintf(text + length, capacity - length, "void f%u(void) {", b);
         for (uint64_t i = 2; i < body && length < capacity; i += 1)
         {
@@ -604,16 +613,19 @@ static int run_checker_deferred_tests(int count, char** arguments)
         }
         // A side of the rule of more than one body, on every lane its bodies can take of 8 with the first lane starting once
         // every other has taken from the counter, as when the others arrive first: the first lane must still read the
-        // largest body, the first, which the others' takes must leave to it.
-        if (valid && size != 0 && size->bodies > 1)
+        // largest body, the first, which the others' takes must leave to it. Grouped parts also run by the reader's
+        // rule: 129 bodies cut into 128 parts can put two smaller bodies in the costliest part instead.
+        for (uint32_t policy = 0; valid && size != 0 && size->bodies > 1 && policy < (size->base_tokens != 0 ? 2u : 1u); policy += 1)
         {
             check_corpus_deferred_lanes = 8;
             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
             check_corpus_deferred_late_first = true;
+            check_corpus_deferred_every_lane = policy == 0;
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
             check_corpus_deferred_late_first = false;
-            const uint64_t most = size->bodies < 8 ? size->bodies : 8;
+            check_corpus_deferred_every_lane = true;
+            const uint64_t most = policy == 0 ? (size->bodies < 8 ? size->bodies : 8) : size->lanes;
             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
                                 outcome.deferred_largest_body == size_largest && outcome.deferred_largest_lane == 0;
             checks += 1;

@@ -4879,8 +4879,9 @@ of the bodies' tokens beyond the larger of the largest body's and twice the
 second largest's, no more than its lanes or the bodies: a lane's copy of the
 reader, which grows with the top level, and its wake-up must be paid for by its
 share of the walks. The calling thread cuts the bodies into parts before the
-lanes start (`parts_by_cost`) and, as the first lane, reads the costliest part
-at once, while the others, woken for the bodies, take the rest from the counter
+lanes start (`parts_by_cost`), stably promotes the part containing the largest
+body, and reads that part at once as the first lane. The others, woken for the
+bodies, take the rest in the remaining cost order from the counter
 and read at about half its speed. The state (`CheckDeferred`, zeroed first)
 keeps its memory across its readings, each lane's arenas one mapping reserved
 on the calling thread before the lanes start, until `check_deferred_release`.
@@ -4894,7 +4895,10 @@ and by the lanes' rule, its reader copied only by lanes that take a part, in
 as many parts as a group of its lanes cuts. Eight fixtures of bodies of known
 tokens must take the rule's lanes on each side of its steps, their largest body
 the first lane's, also when the first lane starts after every other lane's
-first take (`CheckDeferred.late_first`). Each that merges must give source
+first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
+128 and 512 parts also require the first lane to read the largest body, with
+that lane delayed under the reader's rule and with all lanes forced. Each that
+merges must give source
 order's result again with its merge failing after the replay and when a state
 that read it before reads it again (its memory poisoned or as left, and kept),
 and count as a resource failure with its state's allocation failing; timed, one

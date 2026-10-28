@@ -38,9 +38,11 @@ nothing, and the reader says why (`CheckDeferred.unsupported` and `.reason`).
 
    The calling thread, the first lane, cuts the bodies into parts by token
    count before the lanes start (`parts_by_cost`: `lane_parts_by_cost`'s parts
-   for a group of the lanes the rule gives, by one thread), the costliest part
-   first in their order. The first lane reads that part at once, and every lane
-   takes the others with `lane_take`, costliest first, as it arrives: no lane
+   for a group of the lanes the rule gives, by one thread). The reader stably
+   promotes the part containing its largest body to the front: the costliest
+   aggregate part need not contain that body when several smaller bodies share
+   a part. The first lane reads the reserved part at once, and every lane takes
+   the others with `lane_take` in the remaining cost order, as it arrives: no lane
    waits at a sync for another. Before, the lanes cut the parts together, and
    the first lane waited at `lane_parts_by_cost`'s sync for the last lane to
    wake, which then took the costliest part from the counter: a woken lane
@@ -209,7 +211,13 @@ passes every checker test.
   largest body must be the first lane's (`CheckDeferred.largest_lane`), also
   on every lane their bodies can take of 8 with the first lane starting only
   once every other lane has taken from the counter
-  (`CheckDeferred.late_first`), as when the others arrive first. Each of the
+  (`CheckDeferred.late_first`), as when the others arrive first. Grouped-part
+  fixtures add 127/128/129 and 511/512/513 bodies, with 20 tokens in the first
+  and 18 in each other body. They check placement under both the rule and all
+  requested lanes with the first lane delayed. In the 129-body case the rule
+  cuts 128 parts: an aggregate of two smaller bodies costs 36 tokens, so merely
+  reserving the costliest part would leave the largest body to a woken lane.
+  Each of the
   issue's cases that merges runs again
   on 8 lanes with the first lane taking every part (`CheckDeferred.hold_lanes`), when
   no other lane may copy the reader; on 1 and 8 lanes with its merge failing
@@ -395,6 +403,24 @@ and wake-up outweigh what a small body gives it.
 
 ### How many lanes
 
+The campaigns below measure the hand-off and merged `54a3b6da` revisions.
+They do not retime the later grouped-part placement correction described
+above. Strict fit counts and sums use the corrected full-precision report;
+ratios and medians remain unrounded until the final display. "Within one
+point" means no more than one percentage point above the grid's best change
+against one lane, and gains forgone sum those differences.
+
+The later placement correction was compared without timing against all 43
+archived inputs. Reconstructed token counts, body counts, total body tokens,
+largest and second-largest bodies, and top-level tokens match the recorded B2
+headers exactly. The reconstructed part-order arrays are unchanged in 422 of 430 configurations
+(1/2/3/4/8 requested lanes, under the rule and with every lane forced). All
+eight changes are in `h64x3.c`, whose largest bodies tie: the former first
+part groups header helpers, while the corrected order reserves the part of
+the first largest body. The other 42 inputs, including SQLite and the four
+c-testsuite programs, retain identical orders. This is a scheduling identity
+check; it supplies no new runtime measurements for the correction.
+
 A lane costs its copy of the top level's reader and its wake-up, which only its
 share of the bodies' walks can pay for. On the 9700X, with `--cpus
 2,0,1,3,4,5,6,7` and the frozen corpus's options, each unit and lane count in a
@@ -404,7 +430,7 @@ c-testsuite's programs (`00182.c`, `00200.c`, `00204.c` and `00213.c`), the
 frozen `sqlite3.c`, and 38 synthetic units of 2 to 70 bodies after `stdio.h`,
 `stdlib.h` and `string.h`, after thirty of the C library's headers or after
 none, among them one large body beside smaller ones and two large bodies of
-different sizes ([the record](https://github.com/buster14a/buster-performance/tree/4ebe1d0bfe5ab69d3c547b9932e983e3188c8783/docs/measurements/deferred-lane-costs-113-2026-10-27)):
+different sizes ([the corrected record](https://github.com/buster14a/buster-performance/tree/ba2f0ffec9b07f2047902111fa9fe868d644f3b6/docs/measurements/deferred-lane-costs-113-2026-10-27)):
 
 - **A lane's copy** (the median of the 42 units but `sqlite3.c`, then
   `sqlite3.c`'s): when each lane reserved its five arenas inside the lane, 101
@@ -439,20 +465,20 @@ lane the second at about half. On the grid of every lane count from 1 to 4
 and 8 (`--every-lane`), the median change of each unit's reading against one
 lane in the same process, by rule (lane counts between 4 and 8 interpolated):
 
-| Rule: one lane, and one more per | Worst unit against one lane | Units within 1% of their best | Gains forgone, summed |
+| Rule: one lane, and one more per | Worst unit against one lane | Units within one point of their best | Gains forgone, summed |
 | --- | ---: | ---: | ---: |
 | 12,288 tokens beyond twice the largest body's (#448's) | +0.0% | 20 of 43 | 99.0 points |
 | 8,192 tokens beyond twice the largest body's | +0.0% | 24 | 78.8 |
-| 8,192 tokens beyond the largest body's | +5.5% | 25 | 59.0 |
-| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 29 | 48.4 |
-| the same, 6,144 tokens | +0.9% | 35 | 29.0 |
+| 8,192 tokens beyond the largest body's | +5.5% | 24 | 59.3 |
+| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 28 | 48.6 |
+| the same, 6,144 tokens | +0.9% | 35 | 29.3 |
 | 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 42 | 9.2 |
 
 Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
 that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
 eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
-rule puts 39 units within 1% of their best and forgoes 10.8 points, where
-#448's rule puts 19 and forgoes 107.5.
+rule puts 38 units within one percentage point of their best and forgoes
+10.7 points, where #448's rule puts 19 and forgoes 107.4.
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -461,11 +487,13 @@ rule's count is 1,073 tokens on the first and 9,035 on the second, about 3,300
 after three headers and 38,802 on `sqlite3.c`, which takes eight lanes either
 way. Neighbouring counts fit the grid as well, within its noise: 1,536 tokens
 and a fifth of the top level's, or 1,024 and three tenths, read every unit
-within +0.0% of one lane and put 40 or 41 within 1% of their best. A state's
+within +0.0% of one lane and put 41 or 40 within one point of their best on
+campaign A (37 or 38 on A2), respectively. A state's
 later readings, whose copies take a tenth of the time, would pay for a lane at
 a fraction of these counts: 256 tokens a lane, whatever the top level, read
-every unit of the warm grid (measured on 2 and 8 lanes alone) within +0.0% of
-one lane and forgo 14.9 points, where the rule forgoes 45.
+every unit of campaign A's warm grid (measured on 2 and 8 lanes alone) within
++0.0% of one lane and forgo 14.8 points, where the rule forgoes 44.8. On the
+merged A2 warm grid the corresponding sums are 13.1 and 47.1 points.
 
 Then the rule against main's, each on eight lanes against one lane in the same
 process, on this change merged with main (`54a3b6da`) against that main

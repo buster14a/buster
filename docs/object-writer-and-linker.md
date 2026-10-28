@@ -4830,9 +4830,9 @@ The rules for every phase:
    functions. The lanes take the parts from one counter with `lane_take`,
    costliest first to within a factor of two, until none are left. The order
    starts with the costliest part exactly, which a caller may give to a lane
-   of its choosing: the deferred reader gives it to its first lane, since a
-   lane woken for a phase reads at about half the first lane's speed on the
-   9700X (#113), and cuts its parts
+   of its choosing. The deferred reader further promotes the part containing
+   its largest body for the first lane, since a woken lane reads at about half
+   the first lane's speed on the 9700X (#113), and cuts its parts
    before its lanes start (`parts_by_cost`), so that the first lane starts its
    part without waiting for the others to wake. A lane that
    runs slower takes fewer parts, and a heavy item starts early rather than
