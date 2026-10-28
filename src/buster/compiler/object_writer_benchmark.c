@@ -33,6 +33,8 @@
 //
 // Layout, in this order: the clock and the hardware counters, the floors, and run_object_writer_benchmark.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -444,3 +446,12 @@ int run_object_writer_benchmark(int argc, char** argv)
     link_program_release(&program);
     return result;
 }
+
+#else
+int run_object_writer_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

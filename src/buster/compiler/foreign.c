@@ -100,7 +100,7 @@
 #include <sys/stat.h>
 
 // CPU architecture dependent includes
-#include <immintrin.h>
+#include "host_isa.h"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // API

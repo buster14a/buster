@@ -90,7 +90,7 @@ static const ForeignCopyTestSource foreign_bounds_test_sources[] = {
         .text = "static int fb_hidden_one(void) { return 42; }\n"
                 "static int (*fb_hidden_resolve(void))(void) { return fb_hidden_one; }\n"
                 "__attribute__((visibility(\"hidden\"))) int fb_hidden(void) __attribute__((ifunc(\"fb_hidden_resolve\")));\n"
-                "int fb_call_hidden(void) { return fb_hidden(); }\n",
+                "int fb_call_hidden(void) { int result; __asm__ volatile(\"call fb_hidden\" : \"=a\"(result) : : \"memory\"); return result; }\n",
     },
 };
 

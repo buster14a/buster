@@ -6617,19 +6617,29 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 snprintf(detail, sizeof(detail), "%s, %u-byte vectors: compiling and linking failed: %.300s", name, vector_bytes, complaints.length != 0 ? complaints.pointer : "");
                 if (abi_test_expect(tally, compiled == 0, "cross-check", detail))
                 {
-                    char* run[] = {
-                        program,
-                        0,
-                    };
-                    const int ran = type_test_run(run, output, errors);
-                    const String8 printed = type_test_read_file(&world.types.arena, output);
-                    const char* summary = printed.length != 0 ? strstr(printed.pointer, "checks ") : 0;
-                    snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the program failed (status %d):\n%.4000s", name, vector_bytes, ran,
-                             printed.length != 0 ? printed.pointer : "");
-                    if (abi_test_expect(tally, ran == 0 && summary != 0, "cross-check", detail))
+                    const X86Target native = x86_target_native();
+                    X86Target required = { 0 };
+                    const char* architecture = vector_bytes == 16 ? "x86-64" : vector_bytes == 32 ? "x86-64-v3" : "x86-64-v4";
+                    const bool parsed = x86_target_parse(architecture, strlen(architecture), &required);
+                    const bool supported = parsed && (native.features & required.features) == required.features;
+                    if (abi_test_expect(tally, parsed, "cross-check", "the requested target architecture is known") && supported)
                     {
-                        printf("%-34s %s, %u-byte vectors: %u signatures, %u arguments, %.*s", "cross-check", name, vector_bytes, count, cross.argument_count,
-                               (int)(printed.pointer + printed.length - summary), summary);
+                        char* run[] = { program, 0 };
+                        const int ran = type_test_run(run, output, errors);
+                        const String8 printed = type_test_read_file(&world.types.arena, output);
+                        const char* summary = printed.length != 0 ? strstr(printed.pointer, "checks ") : 0;
+                        snprintf(detail, sizeof(detail), "%s, %u-byte vectors: the program failed (status %d):\n%.4000s", name, vector_bytes, ran,
+                                 printed.length != 0 ? printed.pointer : "");
+                        if (abi_test_expect(tally, ran == 0 && summary != 0, "cross-check", detail))
+                        {
+                            printf("%-34s %s, %u-byte vectors: %u signatures, %u arguments, %.*s", "cross-check", name, vector_bytes, count, cross.argument_count,
+                                   (int)(printed.pointer + printed.length - summary), summary);
+                        }
+                    }
+                    else if (parsed)
+                    {
+                        printf("cross-check                        %s, %u-byte vectors: compiled and linked; native execution skipped (%s unavailable)\n", name,
+                               vector_bytes, architecture);
                     }
                 }
             }

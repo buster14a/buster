@@ -37,6 +37,8 @@
 // The exit status is 1 if the arguments are invalid, the lanes don't start, a variant's bytes differ, the runtime
 // doesn't import, or a link fails.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1408,3 +1410,12 @@ int run_executable_benchmark(int argc, char** argv)
     }
     return result;
 }
+
+#else
+int run_executable_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR
