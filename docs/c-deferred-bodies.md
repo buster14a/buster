@@ -404,7 +404,7 @@ c-testsuite's programs (`00182.c`, `00200.c`, `00204.c` and `00213.c`), the
 frozen `sqlite3.c`, and 38 synthetic units of 2 to 70 bodies after `stdio.h`,
 `stdlib.h` and `string.h`, after thirty of the C library's headers or after
 none, among them one large body beside smaller ones and two large bodies of
-different sizes ([the record](https://github.com/buster14a/buster-performance/tree/4ebe1d0bfe5ab69d3c547b9932e983e3188c8783/docs/measurements/deferred-lane-costs-113-2026-10-27)):
+different sizes ([the record](https://github.com/buster14a/buster-performance/tree/ba2f0ffec9b07f2047902111fa9fe868d644f3b6/docs/measurements/deferred-lane-costs-113-2026-10-27)):
 
 - **A lane's copy** (the median of the 42 units but `sqlite3.c`, then
   `sqlite3.c`'s): when each lane reserved its five arenas inside the lane, 101
@@ -437,22 +437,23 @@ their critical path, the larger of the largest body's and twice the second
 largest's: the first lane reads the largest body at full speed, and a woken
 lane the second at about half. On the grid of every lane count from 1 to 4
 and 8 (`--every-lane`), the median change of each unit's reading against one
-lane in the same process, by rule (lane counts between 4 and 8 interpolated):
+lane in the same process, by rule (lane counts between 4 and 8 interpolated;
+the thresholds and sums from the unrounded medians, rounded only for display):
 
-| Rule: one lane, and one more per | Worst unit against one lane | Units within 1% of their best | Gains forgone, summed |
+| Rule: one lane, and one more per | Worst unit against one lane | Units within one point of their best | Gains forgone, summed |
 | --- | ---: | ---: | ---: |
 | 12,288 tokens beyond twice the largest body's (#448's) | +0.0% | 20 of 43 | 99.0 points |
 | 8,192 tokens beyond twice the largest body's | +0.0% | 24 | 78.8 |
-| 8,192 tokens beyond the largest body's | +5.5% | 25 | 59.0 |
-| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 29 | 48.4 |
-| the same, 6,144 tokens | +0.9% | 35 | 29.0 |
+| 8,192 tokens beyond the largest body's | +5.5% | 24 | 59.3 |
+| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 28 | 48.6 |
+| the same, 6,144 tokens | +0.9% | 35 | 29.3 |
 | 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 42 | 9.2 |
 
 Campaign A2, the same grid on this change merged with main (`54a3b6da`, beside
 that main, `cd9c5c9b`), agrees: a lane's copy takes 69 and 100 µs on two and
 eight lanes (main's 103 and 261 µs) and 6 and 9 µs at a later reading, and the
-rule puts 39 units within 1% of their best and forgoes 10.8 points, where
-#448's rule puts 19 and forgoes 107.5.
+rule puts 38 units within one point of their best and forgoes 10.7 points,
+where #448's rule puts 19 and forgoes 107.4.
 
 A count of one size for every unit can't fit both ends: sixteen bodies of 265
 tokens with no headers read 9.6% faster on four lanes than on one, and sixteen
@@ -461,11 +462,11 @@ rule's count is 1,073 tokens on the first and 9,035 on the second, about 3,300
 after three headers and 38,802 on `sqlite3.c`, which takes eight lanes either
 way. Neighbouring counts fit the grid as well, within its noise: 1,536 tokens
 and a fifth of the top level's, or 1,024 and three tenths, read every unit
-within +0.0% of one lane and put 40 or 41 within 1% of their best. A state's
-later readings, whose copies take a tenth of the time, would pay for a lane at
-a fraction of these counts: 256 tokens a lane, whatever the top level, read
-every unit of the warm grid (measured on 2 and 8 lanes alone) within +0.0% of
-one lane and forgo 14.9 points, where the rule forgoes 45.
+within +0.0% of one lane and put 40 or 41 within one point of their best. A
+state's later readings, whose copies take a tenth of the time, would pay for a
+lane at a fraction of these counts: 256 tokens a lane, whatever the top level,
+read every unit of the warm grid (measured on 2 and 8 lanes alone) within
++0.0% of one lane and forgo 14.8 points, where the rule forgoes 44.8.
 
 Then the rule against main's, each on eight lanes against one lane in the same
 process, on this change merged with main (`54a3b6da`) against that main
