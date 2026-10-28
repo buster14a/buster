@@ -1299,6 +1299,12 @@ static __attribute__((noinline)) void check_test_source_extensions(CheckTest* te
             .rejected = true,
         },
         {
+            .name = "K&R implicit C89 parameter conflicts with a header enumerator",
+            .source = "int f(A,x)enum E{A=3}x;{return A+x;}",
+            .rejected = true,
+            .standard = 1989,
+        },
+        {
             .name = "K&R mixed tag and atomic declarations retain their header scope",
             .source = "int f(x,p)enum E{A=3}x;_Atomic(int*)p;{return x+*p;}int g(int *p){return f(2,p);}",
         },

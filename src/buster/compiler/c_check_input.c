@@ -3293,7 +3293,13 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
     {
         if (reader->declared_types[parameter] == 0)
         {
-            if (parser->language.standard < 1999)
+            const uint32_t visible = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[parameter]);
+            if (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader))
+            {
+                check_input_report(reader, parameter, CHECK_INPUT_REDECLARATION);
+                valid = false;
+            }
+            else if (parser->language.standard < 1999)
             {
                 // C90 6.7.1: an undeclared identifier-list parameter has type int, silently in clang's C89 modes.
                 reader->declared_types[parameter] = BUSTER_TYPE_INT;
