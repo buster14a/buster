@@ -2115,6 +2115,12 @@ Marker output and exceptional batches use the existing per-token route. No
 new output metadata is retained by the preprocessor, and the spelling and
 separation rules are unchanged.
 
+[The frozen #649 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-649/target)
+compares `123d22ae` with `bc1b4861` on the locked 9700X. Its printing and
+whole-process results measure `-E -P` on identical frozen input trees; they do
+not establish ordinary `-c` throughput or the timing of later ports. The
+retrospective interference audit excludes the extra reversed main phase pair.
+
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
 The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
