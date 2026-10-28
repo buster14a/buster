@@ -39,7 +39,8 @@
 // nothing refers to main.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
-// (runtime_probes_current). Among them are the directory GCC's versions were chosen from, whose times change when a
+// (runtime_probes_current). libgcc_s's probes are deferred until binding depends on it (runtime_deferred_probes_current).
+// Among them are the directory GCC's versions were chosen from, whose times change when a
 // version's directory comes or goes, and each version's crtbeginS.o, found or not, so that one installed into a
 // version's existing directory shows too.
 //
@@ -164,6 +165,8 @@ struct RuntimeProbe
     String8 path;
     bool directory;
     bool found;
+    // libgcc_s's search is checked only when binding can depend on it.
+    bool deferred;
     uint64_t device;
     uint64_t inode;
     uint64_t size;
@@ -477,8 +480,10 @@ static __attribute__((unused)) const ImportLibrary* runtime_libraries_provider(c
 // defines none, which the loader takes as a library without versions.
 static __attribute__((unused)) bool runtime_library_defines_version(const ImportLibrary* library, String8 name, uint32_t hash);
 // Whether every path the search probed is as it found it: absent still, or the same file or directory, by st_dev, st_ino,
-// st_size, st_mtim and st_ctim.
+// st_size, st_mtim and st_ctim, except the optional library's deferred probes, checked by binding only when needed.
 static __attribute__((unused)) bool runtime_probes_current(const Runtime* runtime);
+// The optional library's search paths, once per dependent link; an imported runtime has already read them.
+static __attribute__((unused)) bool runtime_deferred_probes_current(const Runtime* runtime);
 // The library of an export of the runtime's (RuntimeNames.export less 1, or RuntimeBinding.export): libc.so.6 for one
 // below its exports' count, then the loader, then libgcc_s.so.1; and the export's index among that library's.
 static __attribute__((unused)) const ImportLibrary* runtime_export_library(const Runtime* runtime, uint32_t export, uint32_t* index);
@@ -589,12 +594,16 @@ static bool runtime_probe(Runtime* runtime, const char* path, bool directory)
     return found;
 }
 
-static bool runtime_probes_current(const Runtime* runtime)
+static bool runtime_check_probes(const Runtime* runtime, bool deferred)
 {
     bool result = true;
     for (uint32_t p = 0; result && p < runtime->probe_count; p += 1)
     {
         const RuntimeProbe* recorded = &runtime->probes[p];
+        if (recorded->deferred != deferred)
+        {
+            continue;
+        }
         struct stat status;
         RuntimeProbe now = {
             .directory = recorded->directory,
@@ -609,6 +618,16 @@ static bool runtime_probes_current(const Runtime* runtime)
                  now.changed_seconds == recorded->changed_seconds && now.changed_nanoseconds == recorded->changed_nanoseconds;
     }
     return result;
+}
+
+static bool runtime_probes_current(const Runtime* runtime)
+{
+    return runtime_check_probes(runtime, false);
+}
+
+static bool runtime_deferred_probes_current(const Runtime* runtime)
+{
+    return runtime->snapshot == 0 || runtime_check_probes(runtime, true);
 }
 
 // Reads a whole file into the runtime's arena: its bytes, or an empty slice with the error recorded.
@@ -717,7 +736,8 @@ static bool runtime_version_greater(const char* a, const char* b)
 // Finds GCC's installation under `bases`: for the first base and triple whose directory exists, the highest version
 // that has crtbeginS.o. Each version's crtbeginS.o is probed, found or not, so that the probes show one installed into a
 // version's existing directory, and in the order of the versions' names, highest first, so that they don't depend on
-// the order readdir gives them in.
+// the order readdir gives them in. The chosen file's path becomes the begin object's path: every kind but -static
+// uses that very crtbeginS.o, so runtime_search must not probe it a second time and charge every snapshot load for it.
 static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_t base_count)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
@@ -776,6 +796,10 @@ static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_
                 {
                     snprintf(best, sizeof(best), "%s/%s", path, name);
                     snprintf(best_triple, sizeof(best_triple), "%s", path);
+                    if (runtime->kind != RUNTIME_KIND_STATIC)
+                    {
+                        runtime->object_paths[RUNTIME_OBJECT_BEGIN] = runtime_copy_path(runtime, crt);
+                    }
                     found = true;
                 }
             }
@@ -918,8 +942,13 @@ static String8 runtime_find_gcc_s(Runtime* runtime)
     static const char name[] = "libgcc_s.so.1";
     char failed[sizeof(runtime->failed_file)];
     memcpy(failed, runtime->failed_file, sizeof(failed));
+    const uint32_t first_probe = runtime->probe_count;
     String8 result = runtime_find_file(runtime, name, true);
     result = result.length != 0 ? result : runtime_find_file(runtime, name, false);
+    for (uint32_t p = first_probe; p < runtime->probe_count; p += 1)
+    {
+        runtime->probes[p].deferred = true;
+    }
     if (result.length == 0)
     {
         memcpy(runtime->failed_file, failed, sizeof(failed));
@@ -938,7 +967,11 @@ static RuntimeError runtime_search(Runtime* runtime)
     {
         const bool gcc = i == RUNTIME_OBJECT_BEGIN || i == RUNTIME_OBJECT_END;
         const char* name = runtime_object_names[runtime->kind][i];
-        runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
+        const bool selected_begin = i == RUNTIME_OBJECT_BEGIN && runtime->kind != RUNTIME_KIND_STATIC;
+        if (!selected_begin)
+        {
+            runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
+        }
         result = name == 0 || runtime->object_paths[i].length != 0 ? result : RUNTIME_ERROR_MISSING;
     }
     // A dynamic PIE's and a shared library's: libgcc.a, the first archive, libgcc_s.so.1 if the system has it, then

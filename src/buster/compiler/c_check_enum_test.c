@@ -89,7 +89,7 @@ static void check_test_enum_metadata(CheckTest* test)
                     const uint32_t node = input.token_nodes[token];
                     if (node != BUSTER_CHECK_NONE)
                     {
-                        const CheckValue value = input.graph.leaves[node];
+                        const CheckValue value = input.graph.ops[node] == CHECK_OP_VALUE ? *check_graph_leaf_of(&input.graph, node) : (CheckValue){ 0 };
                         check_test_expect(test, value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == UINT32_C(0x80000000),
                                           "ordinary graph enum leaves preserve their full value bits");
                         values += 1;

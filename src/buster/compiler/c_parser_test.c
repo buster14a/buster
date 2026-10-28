@@ -187,19 +187,12 @@ static bool parse_test_clang_spawn(const char* clang_path, const char* const* ar
     return result;
 }
 
-// Waits for a process parse_test_clang_spawn started, and reads each of its files' first error from its output into
-// `results`: one in a header the file includes counts for the file. False if clang didn't parse the files: an error
-// no file accounts for (clang's driver's, for an unknown option), or a failing exit with no file rejected.
-static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint32_t count, ParseTestClang* results)
+// Reads each of `count` files' first error from clang's output (whose wait status is `status`) into `results`: one in
+// a header the file includes counts for the file. False if clang didn't parse the files: an error no file accounts for
+// (clang's driver's, for an unknown option), or a failing exit with no file rejected.
+static bool parse_test_clang_parse(FILE* output, int status, char** paths, uint32_t count, ParseTestClang* results)
 {
-    int status = 0;
-    pid_t waited = -1;
-    do
-    {
-        waited = waitpid(child, &status, 0);
-    }
-    while (waited < 0 && errno == EINTR);
-    bool result = waited == child && fseek(output, 0, SEEK_SET) == 0;
+    bool result = fseek(output, 0, SEEK_SET) == 0;
     char line[4096];
     // The file the last "In file included from" line named, whose header the errors after it are in (clang names the
     // includes again only where they change), and whether an error came that no file accounts for.
@@ -263,6 +256,19 @@ static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint3
     return result && !ferror(output) && WIFEXITED(status) && !unaccounted && (WEXITSTATUS(status) == 0 || rejected);
 }
 
+// Waits for a process parse_test_clang_spawn started, and reads its files' first errors (parse_test_clang_parse).
+static bool parse_test_clang_read(FILE* output, pid_t child, char** paths, uint32_t count, ParseTestClang* results)
+{
+    int status = 0;
+    pid_t waited = -1;
+    do
+    {
+        waited = waitpid(child, &status, 0);
+    }
+    while (waited < 0 && errno == EINTR);
+    return waited == child && parse_test_clang_parse(output, status, paths, count, results);
+}
+
 // How many clang processes parse_test_clang runs its files on: at most one per CPU it may run on and one per
 // BUSTER_PARSE_TEST_CLANG_FILES files, and at most BUSTER_PARSE_TEST_CLANG_PROCESSES (#465).
 #define BUSTER_PARSE_TEST_CLANG_FILES 8
@@ -277,21 +283,100 @@ static uint32_t parse_test_clang_processes(uint32_t count)
     return result != 0 ? result : 1;
 }
 
+// parse_test_clang's runs through the oracle cache (oracle_cache.c, #542): a clang process per file, as many at once as
+// parse_test_clang_processes gives for one file per process, its dependencies listed, each one's errors read for its
+// file. A file's result is the one a process on several gives it, since clang checks each file on its own.
+static bool parse_test_clang_cached(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
+{
+    uint32_t variables = 0;
+    while (environ[variables] != 0)
+    {
+        variables += 1;
+    }
+    const uint32_t cpus = test_process_cpus();
+    const uint32_t at_once = cpus < BUSTER_PARSE_TEST_CLANG_PROCESSES ? cpus : BUSTER_PARSE_TEST_CLANG_PROCESSES;
+    const uint32_t fixed = 7;
+    char** environment = calloc((size_t)variables + 1, sizeof(char*));
+    char** argvs = calloc((size_t)at_once * (fixed + argument_count + 2), sizeof(char*));
+    OracleRun runs[BUSTER_PARSE_TEST_CLANG_PROCESSES];
+    bool result = environment != 0 && argvs != 0;
+    uint32_t kept = 0;
+    for (uint32_t v = 0; result && v < variables; v += 1)
+    {
+        // clang reads CPATH and C_INCLUDE_PATH, which the preprocessor doesn't: without them, both search alike.
+        if (strncmp(environ[v], "CPATH=", 6) != 0 && strncmp(environ[v], "C_INCLUDE_PATH=", 15) != 0)
+        {
+            environment[kept] = environ[v];
+            kept += 1;
+        }
+    }
+    uint32_t started = 0;
+    uint32_t finished = 0;
+    while (environment != 0 && argvs != 0 && finished < count)
+    {
+        if (started < count && started - finished < at_once)
+        {
+            char** argv = argvs + (size_t)(started % at_once) * (fixed + argument_count + 2);
+            uint32_t n = 0;
+            argv[n++] = (char*)clang_path;
+            argv[n++] = "-fsyntax-only";
+            argv[n++] = "-w";
+            argv[n++] = "-fdiagnostics-show-category=name";
+            argv[n++] = "-fno-caret-diagnostics";
+            argv[n++] = "-fno-color-diagnostics";
+            argv[n++] = "-ferror-limit=0";
+            for (uint32_t a = 0; a < argument_count; a += 1)
+            {
+                argv[n++] = (char*)arguments[a];
+            }
+            argv[n++] = paths[started];
+            argv[n] = 0;
+            runs[started % at_once] = (OracleRun){
+                .purpose = "parser: clang -fsyntax-only",
+                .arguments = argv,
+                .environment = environment,
+                .dependencies = true,
+            };
+            result = oracle_run_start(&runs[started % at_once]) && result;
+            started += 1;
+        }
+        else
+        {
+            OracleRun* run = &runs[finished % at_once];
+            result = oracle_run_finish(run) && result;
+            FILE* output = result ? test_process_file() : 0;
+            result = output != 0 && fwrite(run->errors, 1, run->errors_length, output) == run->errors_length &&
+                     parse_test_clang_parse(output, run->status, paths + finished, 1, results + finished) && result;
+            if (output != 0)
+            {
+                fclose(output);
+            }
+            oracle_run_release(run);
+            finished += 1;
+        }
+    }
+    free(environment);
+    free(argvs);
+    return result && environment != 0 && argvs != 0;
+}
+
 // Runs `clang -fsyntax-only` with `arguments` on `count` files, and reads each file's first error into `results`, as
-// parse_test_clang_read does. The files are split in order among parse_test_clang_processes processes that run at once,
-// each one's output read for its own files: the same results as one process on them all, since clang checks each file
-// on its own. Returns false if a process couldn't be run, or didn't parse its files.
+// parse_test_clang_parse does. With the oracle cache on, a file at a time through it (parse_test_clang_cached); else
+// the files are split in order among parse_test_clang_processes processes that run at once, each one's output read for
+// its own files: the same results as one process on them all, since clang checks each file on its own. Returns false if
+// a process couldn't be run, or didn't parse its files.
 static bool parse_test_clang(const char* clang_path, const char* const* arguments, uint32_t argument_count, char** paths, uint32_t count, ParseTestClang* results)
 {
     for (uint32_t i = 0; i < count; i += 1)
     {
         results[i] = (ParseTestClang){ 0 };
     }
-    const uint32_t processes = parse_test_clang_processes(count);
+    const bool cached = oracle_cache_active(oracle_cache());
+    const uint32_t processes = cached ? 0 : parse_test_clang_processes(count);
     FILE* outputs[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
     pid_t children[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
     bool started[BUSTER_PARSE_TEST_CLANG_PROCESSES] = { 0 };
-    bool result = true;
+    bool result = !cached || parse_test_clang_cached(clang_path, arguments, argument_count, paths, count, results);
     for (uint32_t p = 0; p < processes; p += 1)
     {
         const uint32_t first = (uint32_t)((uint64_t)count * p / processes);
@@ -1065,11 +1150,173 @@ static uint32_t parse_test_check_postorder(const uint32_t* parents, uint32_t cou
     return result;
 }
 
+// The tree's columns (Parser.positions, ends, first_children and next_siblings) to check, each count + 1 entries long
+// with the sentinel last.
+typedef struct ParseTestColumns ParseTestColumns;
+struct ParseTestColumns
+{
+    const uint32_t* positions;
+    const uint32_t* ends;
+    const uint32_t* first_children;
+    const uint32_t* next_siblings;
+};
+
+// The tree's columns against a depth-first walk with an explicit stack of its own, over each token's children listed in
+// token order: each token's first child and next sibling from the lists (none for a root), its subtree's end, the
+// greatest token the walk meets under it, and its position, the walk's count when it leaves it; and the sentinels,
+// each token's own end and position at count, no child and no sibling. Returns the first token where a column differs
+// (count for a sentinel), or BUSTER_PARSE_NONE.
+static uint32_t parse_test_check_columns(const uint32_t* parents, uint32_t count, const ParseTestColumns* columns, Arena* scratch)
+{
+    uint32_t result = BUSTER_PARSE_NONE;
+    const uint64_t mark = scratch->length;
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* cursors = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* nodes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    uint32_t* greatest = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+    if (offsets == 0 || cursors == 0 || children == 0 || nodes == 0 || next == 0 || greatest == 0)
+    {
+        result = 0;
+    }
+    else
+    {
+        memset(offsets, 0, slots * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            offsets[parents[i] != BUSTER_PARSE_NONE ? parents[i] + 1 : 0] += parents[i] != BUSTER_PARSE_NONE;
+        }
+        for (uint32_t i = 1; i <= count; i += 1)
+        {
+            offsets[i] += offsets[i - 1];
+        }
+        memcpy(cursors, offsets, slots * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            if (parents[i] != BUSTER_PARSE_NONE)
+            {
+                children[cursors[parents[i]]] = i;
+                cursors[parents[i]] += 1;
+            }
+        }
+        for (uint32_t v = 0; v < count && result == BUSTER_PARSE_NONE; v += 1)
+        {
+            const uint32_t first = offsets[v] < offsets[v + 1] ? children[offsets[v]] : BUSTER_PARSE_NONE;
+            result = columns->first_children[v] != first || (parents[v] == BUSTER_PARSE_NONE && columns->next_siblings[v] != BUSTER_PARSE_NONE) ? v : result;
+            for (uint32_t j = offsets[v]; j < offsets[v + 1] && result == BUSTER_PARSE_NONE; j += 1)
+            {
+                const uint32_t sibling = j + 1 < offsets[v + 1] ? children[j + 1] : BUSTER_PARSE_NONE;
+                result = columns->next_siblings[children[j]] != sibling ? children[j] : result;
+            }
+        }
+        uint32_t position = 0;
+        for (uint32_t root = 0; root < count && result == BUSTER_PARSE_NONE; root += 1)
+        {
+            uint32_t depth = 0;
+            if (parents[root] == BUSTER_PARSE_NONE)
+            {
+                nodes[0] = root;
+                next[0] = offsets[root];
+                greatest[0] = root;
+                depth = 1;
+            }
+            while (depth != 0 && result == BUSTER_PARSE_NONE)
+            {
+                const uint32_t top = nodes[depth - 1];
+                if (next[depth - 1] < offsets[top + 1])
+                {
+                    const uint32_t child = children[next[depth - 1]];
+                    next[depth - 1] += 1;
+                    nodes[depth] = child;
+                    next[depth] = offsets[child];
+                    greatest[depth] = child;
+                    depth += 1;
+                }
+                else
+                {
+                    result = columns->ends[top] != greatest[depth - 1] || columns->positions[top] != position ? top : result;
+                    if (depth >= 2 && greatest[depth - 1] > greatest[depth - 2])
+                    {
+                        greatest[depth - 2] = greatest[depth - 1];
+                    }
+                    position += 1;
+                    depth -= 1;
+                }
+            }
+        }
+        // A cycle leaves tokens unwalked.
+        result = result == BUSTER_PARSE_NONE && position != count ? position : result;
+        result = result == BUSTER_PARSE_NONE && (columns->positions[count] != count || columns->ends[count] != count || columns->first_children[count] != BUSTER_PARSE_NONE ||
+                                                 columns->next_siblings[count] != BUSTER_PARSE_NONE) ? count : result;
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
 // The check of the postorders on trees of its own: `a = b * c;` as the parser builds it passes, with its sizes; the
 // same with a parent that makes a subtree two runs, and with a cycle, fails.
+// Each helper column has exactly its documented logical extent before an unreadable page, including the sentinel.
+// Empty forests, chains and roots exercise every count through 200 independently of the parser's padded arrays.
+static uint32_t parse_test_columns_guarded(void)
+{
+    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[10] = { 0 };
+    bool ready = true;
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        mappings[column] = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
+    }
+    uint32_t failures = !ready;
+    for (uint32_t count = 0; ready && count <= 200; count += 1)
+    {
+        uint32_t* columns[10];
+        for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
+        {
+            const uint32_t length = column == 0 ? count : count + 1;
+            columns[column] = (uint32_t*)(mappings[column] + page) - length;
+            memset(columns[column], 0xa5, length * sizeof(uint32_t));
+        }
+        for (uint32_t shape = 0; shape < 2; shape += 1)
+        {
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                columns[0][token] = shape == 0 && token + 1 < count ? token + 1 : BUSTER_PARSE_NONE;
+            }
+            for (uint32_t sizes = 0; sizes < 2; sizes += 1)
+            {
+                parse_tree_columns(columns[0], count, columns[1], columns[2], columns[3], columns[4], columns[5], columns[6], columns[7],
+                                   sizes != 0 ? columns[8] : NULL, sizes != 0 ? columns[9] : NULL);
+                for (uint32_t token = 0; token <= count; token += 1)
+                {
+                    const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
+                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
+                    failures += token < count && (columns[3][token] != token || (sizes != 0 && columns[9][token] != (shape == 0 ? token + 1 : 1)));
+                }
+                parse_tree_links(columns[0], columns[3], count, columns[4], columns[5], columns[6], columns[7]);
+                for (uint32_t token = 0; token <= count; token += 1)
+                {
+                    const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
+                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
+                }
+            }
+        }
+    }
+    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+    return failures;
+}
+
 static uint32_t parse_test_check_postorder_self(Arena* scratch)
 {
-    uint32_t failures = 0;
+    uint32_t failures = parse_test_columns_guarded();
     // a = b * c ;  ->  ; <- = <- (a, * <- (b, c))
     const uint32_t good[] = { 1, 5, 3, 1, 3, BUSTER_PARSE_NONE };
     const uint32_t postorder[] = { 0, 2, 4, 3, 1, 5 };
@@ -1078,6 +1325,51 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     failures += parse_test_check_postorder(good, 6, postorder, 6, sizes, scratch, &expected) != BUSTER_PARSE_NONE;
     const uint32_t wrong_sizes[] = { 1, 1, 1, 2, 5, 6 };
     failures += parse_test_check_postorder(good, 6, postorder, 6, wrong_sizes, scratch, &expected) == BUSTER_PARSE_NONE;
+    // Its columns as parse_tree_columns (with and without the sizes) and parse_tree_links derive them, and as written out
+    // here: the walk must take all three, and refuse each column with one entry changed.
+    const uint32_t positions[] = { 0, 4, 1, 3, 2, 5, 6 };
+    const uint32_t ends[] = { 0, 4, 2, 4, 4, 5, 6 };
+    const uint32_t first_children[] = { BUSTER_PARSE_NONE, 0, BUSTER_PARSE_NONE, 2, BUSTER_PARSE_NONE, 1, BUSTER_PARSE_NONE };
+    const uint32_t next_siblings[] = { 3, BUSTER_PARSE_NONE, 4, BUSTER_PARSE_NONE, BUSTER_PARSE_NONE, BUSTER_PARSE_NONE, BUSTER_PARSE_NONE };
+    const ParseTestColumns written_out = { positions, ends, first_children, next_siblings };
+    failures += parse_test_check_columns(good, 6, &written_out, scratch) != BUSTER_PARSE_NONE;
+    for (uint32_t column = 0; column < 4; column += 1)
+    {
+        for (uint32_t token = 0; token <= 6; token += 1)
+        {
+            uint32_t changed[4][7];
+            memcpy(changed[0], positions, sizeof(positions));
+            memcpy(changed[1], ends, sizeof(ends));
+            memcpy(changed[2], first_children, sizeof(first_children));
+            memcpy(changed[3], next_siblings, sizeof(next_siblings));
+            changed[column][token] = changed[column][token] == 1 ? 2 : 1;
+            const ParseTestColumns wrong = { changed[0], changed[1], changed[2], changed[3] };
+            failures += parse_test_check_columns(good, 6, &wrong, scratch) == BUSTER_PARSE_NONE;
+        }
+    }
+    for (uint32_t way = 0; way < 3; way += 1)
+    {
+        uint32_t last_children[8];
+        uint32_t before[8];
+        uint32_t derived_postorder[8];
+        uint32_t derived[4][8];
+        uint32_t starts[8];
+        uint32_t derived_sizes[8];
+        if (way == 2)
+        {
+            parse_tree_links(good, postorder, 6, derived[0], derived[1], derived[2], derived[3]);
+            memcpy(derived_postorder, postorder, sizeof(postorder));
+        }
+        else
+        {
+            parse_tree_columns(good, 6, last_children, before, derived_postorder, derived[0], derived[1], derived[2], derived[3], way == 1 ? starts : 0,
+                               way == 1 ? derived_sizes : 0);
+        }
+        const ParseTestColumns columns = { derived[0], derived[1], derived[2], derived[3] };
+        failures += parse_test_check_columns(good, 6, &columns, scratch) != BUSTER_PARSE_NONE;
+        failures += memcmp(derived_postorder, postorder, sizeof(postorder)) != 0;
+        failures += way == 1 && memcmp(derived_sizes, sizes, sizeof(sizes)) != 0;
+    }
     // b's parent the `;`: the `*`'s subtree is c alone and b sits between the `=`'s children.
     const uint32_t split[] = { 1, 5, 5, 1, 3, BUSTER_PARSE_NONE };
     uint32_t last_children[7];
@@ -1127,7 +1419,8 @@ static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uin
     parse_test_report("   %s%s\n", text, token >= parser->tokens.count ? " >><end><<" : "");
 }
 
-// The postorders of a tree, the walk's and the parser's own (with its subtree sizes), against a depth-first walk.
+// The postorders of a tree, the walk's and the parser's own (with its subtree sizes where it has them), against a
+// depth-first walk; then the parser's columns, and their twin's from its postorder, against parse_test_check_columns'.
 static uint32_t parse_test_postorders(const Parser* parser, Preprocessor* pp, const ParseTree* tree, uint32_t count, const char* name, Arena* scratch)
 {
     uint32_t failures = 0;
@@ -1135,8 +1428,20 @@ static uint32_t parse_test_postorders(const Parser* parser, Preprocessor* pp, co
     const uint64_t slots = (uint64_t)count + 1;
     uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
     uint32_t* postorder = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
-    if (last_children != 0 && postorder != 0)
+    uint32_t* links = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 4 * slots);
+    if (last_children != 0 && postorder != 0 && links != 0)
     {
+        const ParseTestColumns columns = { parser->positions, parser->ends, parser->first_children, parser->next_siblings };
+        parse_tree_links(tree->parents, parser->postorder, count, links, links + slots, links + 2 * slots, links + 3 * slots);
+        const ParseTestColumns twin = { links, links + slots, links + 2 * slots, links + 3 * slots };
+        const uint32_t own = parse_test_check_columns(tree->parents, count, &columns, scratch);
+        const uint32_t twins = parse_test_check_columns(tree->parents, count, &twin, scratch);
+        if (own != BUSTER_PARSE_NONE || twins != BUSTER_PARSE_NONE)
+        {
+            failures += 1;
+            parse_test_report("%s: the tree's columns differ from a depth-first walk's at token %d (the parser's) and %d (parse_tree_links')\n", name, (int)own,
+                              (int)twins);
+        }
         const uint32_t written = parse_postorder(tree->parents, count, last_children, postorder);
         uint32_t expected = BUSTER_PARSE_NONE;
         const uint32_t walk = parse_test_check_postorder(tree->parents, count, postorder, written, 0, scratch, &expected);
@@ -1199,6 +1504,7 @@ static uint32_t parse_test_compare_trees(const Parser* vector, const Parser* sca
         parse_test_print_context(scalar, pp, broken);
     }
     failures += parse_test_postorders(scalar, pp, &scalar->tree, count, name, scratch);
+    failures += parse_test_postorders(vector, pp, &vector->tree, count, name, scratch);
     return failures;
 }
 
@@ -1723,7 +2029,11 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
         const bool parsed = parse_translation_unit(&tree, pp);
         same = parsed == (full->errors == 0) && tree.errors == full->errors && tree.fatal == full->fatal &&
                tree.diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree.tokens, &full->tokens) == BUSTER_PARSE_NONE &&
-               tree.postorder == 0 && tree.sizes == 0 && tree.columns[11].base == 0 && tree.columns[12].base == 0;
+               tree.postorder == 0 && tree.sizes == 0 && tree.positions == 0 && tree.ends == 0 && tree.first_children == 0 && tree.next_siblings == 0;
+        for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree.columns); column += 1)
+        {
+            same &= tree.columns[column].base == 0;
+        }
         for (uint32_t d = 0; same && d < full->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* a = &full->diagnostics[d];
@@ -2047,8 +2357,9 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
     static Preprocessor pp;
     static Parser vector;
     static Parser scalar;
+    // The scalar parser's parse also derives the subtree sizes, which parse_test_postorders checks.
     const ParseOptions vector_options = { .scalar = false };
-    const ParseOptions scalar_options = { .scalar = true };
+    const ParseOptions scalar_options = { .scalar = true, .sizes = true };
     *outcome = (ParseTestOutcome){ 0 };
     if (intern_initialize(&table) && pp_initialize(&pp, options, &table) && parse_initialize(&vector, &vector_options, options->language) &&
         parse_initialize(&scalar, &scalar_options, options->language))
@@ -2770,7 +3081,9 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
         result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || a->tokens.sources[t] != b->tokens.sources[t] ||
                  a->tokens.flags[t] != b->tokens.flags[t] ? "tokens" :
                  a->tree.roles != 0 && (a->tree.roles[t] != b->tree.roles[t] || a->tree.depths[t] != b->tree.depths[t] || a->tree.parents[t] != b->tree.parents[t]) ? "tree" :
-                 a->postorder != 0 && (a->postorder[t] != b->postorder[t] || a->sizes[t] != b->sizes[t]) ? "postorder" : 0;
+                 a->postorder != 0 && (a->postorder[t] != b->postorder[t] || (a->sizes != 0) != (b->sizes != 0) || (a->sizes != 0 && a->sizes[t] != b->sizes[t])) ? "postorder" :
+                 a->postorder != 0 && (a->positions[t] != b->positions[t] || a->ends[t] != b->ends[t] || a->first_children[t] != b->first_children[t] ||
+                                       a->next_siblings[t] != b->next_siblings[t]) ? "the tree's columns" : 0;
     }
     for (uint32_t d = 0; result == 0 && d < a->diagnostic_count; d += 1)
     {
@@ -3379,6 +3692,9 @@ static uint32_t parse_test_driver(const char* directory)
 // -E's options for the files; --reports sets how many differences the checks print (200).
 static int run_parser_tests(int argument_count, char** arguments)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint32_t failures = 0;
     const char* clang = 0;
     uint64_t mutations = 0;
@@ -3507,6 +3823,8 @@ static int run_parser_tests(int argument_count, char** arguments)
     }
     else
     {
+        // The process's oracle cache, set up before any part runs clang through it (oracle_cache.c, #542).
+        OracleCache* oracle = oracle_cache();
         failures += parse_test_check_postorder_self(&arena);
         failures += parse_test_check_k6_tables();
         failures += parse_test_check_handoff(options.language, seed);
@@ -3557,11 +3875,14 @@ static int run_parser_tests(int argument_count, char** arguments)
         {
             rmdir(directory);
         }
+        oracle_cache_report(oracle, "test-parser");
     }
     printf("test-parser: %s\n", failures == 0 ? "passed" : "FAILED");
     arena_release(&arena);
     free(rest);
     free(clang_arguments);
     free(inputs);
-    return failures == 0 ? 0 : 1;
+    const int returned = failures == 0 ? 0 : 1;
+    oracle_epoch_end(epoch);
+    return returned;
 }

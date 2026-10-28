@@ -888,6 +888,228 @@ static void check_data_test_partitions(CheckTest* test, TypeTable* types)
     }
 }
 
+static void check_data_test_nonzero(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "static-data zero scan guarded allocation");
+    for (uint64_t size = 0; ready && size <= 193; size += 1)
+    {
+        uint8_t* bytes = mapping + page - size;
+        memset(bytes, 0, size);
+        check_test_expect(test, !check_data_nonzero(bytes, size), "static-data zero scan bounded blocks and every masked tail");
+        for (uint64_t at = 0; at < size; at += 1)
+        {
+            bytes[at] = (uint8_t)(1u << (at % 8));
+            bool scalar = false;
+            for (uint64_t byte = 0; byte < size; byte += 1)
+            {
+                scalar = scalar || bytes[byte] != 0;
+            }
+            check_test_expect(test, check_data_nonzero(bytes, size) == scalar, "static-data zero scan matches scalar oracle at every guarded byte");
+            bytes[at] = 0;
+        }
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+}
+
+static void check_data_test_retained_payloads(CheckTest* test, TypeTable* types)
+{
+    enum
+    {
+        SIZE = (1u << 20) + 64,
+        COUNT = 7,
+    };
+    const TypeId array = type_array(types, BUSTER_TYPE_UCHAR, SIZE);
+    const TypeId readonly = type_qualify(types, array, BUSTER_TYPE_CONST);
+    const TypeId pointer = type_pointer(types, BUSTER_TYPE_UCHAR);
+    const TypeId pointers = type_array(types, pointer, SIZE / 8);
+    CheckDataTestLink fixture;
+    const bool ready = check_data_test_open(&fixture, COUNT + 1);
+    check_test_expect(test, ready, "static-data retained-payload fixture allocation");
+    if (ready)
+    {
+        arena_release(&fixture.bytes);
+        fixture.bytes = arena_reserve((COUNT + 1ull) * SIZE);
+        uint8_t* literal = arena_push(&fixture.bytes, SIZE, 1);
+        CheckInitPart* parts = BUSTER_ARENA_PUSH_ARRAY(&fixture.scratch, CheckInitPart, 3);
+        const bool inputs = literal != 0 && parts != 0;
+        check_test_expect(test, inputs, "static-data inputs in stable live arena prefixes");
+        if (inputs)
+        {
+            memset(literal, 0x6d, SIZE);
+            parts[0] = (CheckInitPart){
+                .kind = CHECK_INIT_VALUE,
+                .type = BUSTER_TYPE_UCHAR,
+                .value = check_test_integer(BUSTER_TYPE_UCHAR, 1),
+            };
+            parts[1] = parts[0];
+            parts[1].value.integer = 0;
+            parts[2] = (CheckInitPart){
+                .kind = CHECK_INIT_VALUE,
+                .type = pointer,
+                .bit_offset = (SIZE - 8ull) * 8,
+                .value = {
+                    .type = pointer,
+                    .category = CHECK_RVALUE,
+                    .flags = BUSTER_CHECK_STATIC_OBJECT,
+                    .constant_kind = CHECK_CONSTANT_ADDRESS,
+                    .object = COUNT + 1,
+                    .offset = INT64_C(4294967296),
+                },
+            };
+            CheckInitPart last = parts[0];
+            last.bit_offset = (SIZE - 1ull) * 8;
+            CheckInitializer initializers[4] = {
+                {
+                    .type = array,
+                    .parts = parts,
+                    .count = 1,
+                },
+                {
+                    .type = array,
+                    .parts = parts + 1,
+                    .count = 1,
+                },
+                {
+                    .type = pointers,
+                    .parts = parts + 2,
+                    .count = 1,
+                },
+                {
+                    .type = readonly,
+                    .parts = &last,
+                    .count = 1,
+                },
+            };
+            SymbolId map[COUNT + 2] = { 0 };
+            CheckDataObject objects[COUNT] = { 0 };
+            for (uint32_t i = 0; i < COUNT; i += 1)
+            {
+                char name[32];
+                snprintf(name, sizeof(name), "retained_%u", i);
+                const uint8_t kind = i == 5 ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+                map[i + 1] = check_data_test_symbol(&fixture.link, name, kind | BUSTER_LINK_SYMBOL_GLOBAL);
+                objects[i] = (CheckDataObject){
+                    .type = array,
+                    .object = i + 1,
+                    .initializer = BUSTER_CHECK_NONE,
+                    .initializer_plan = &initializers[0],
+                    .token = i + 100,
+                    .alignment_log2 = 6,
+                };
+            }
+            objects[1].initializer_plan = &initializers[1];
+            objects[2].type = readonly;
+            objects[3].initializer_plan = 0;
+            objects[3].literal_bytes = literal;
+            objects[3].literal_size = SIZE;
+            objects[3].string_pool = true;
+            objects[4].type = pointers;
+            objects[4].initializer_plan = &initializers[2];
+            objects[5].type = readonly;
+            objects[5].initializer_plan = &initializers[3];
+            objects[6].type = readonly;
+            objects[6].initializer_plan = 0;
+            map[COUNT + 1] = check_data_test_symbol(&fixture.link, "external", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL);
+            const uint64_t byte_start = fixture.bytes.length;
+            const uint64_t scratch_start = fixture.scratch.length;
+            // A full payload cannot fit scratch. Every successful materialized atom must use retained storage.
+            fixture.scratch.capacity = 8192;
+            uint8_t table_copy[8192];
+            const bool fits = fixture.tables.length <= sizeof(table_copy);
+            check_test_expect(test, fits, "static-data retained transaction table snapshot fits");
+            for (uint32_t failure = 0; fits && failure < 4; failure += 1)
+            {
+                memcpy(table_copy, fixture.tables.base, fixture.tables.length);
+                const Link before = fixture.link;
+                const uint32_t atoms = fixture.link.atoms.capacity;
+                const uint8_t flags = fixture.link.symbols.flags[map[COUNT + 1]];
+                const uint64_t byte_capacity = fixture.bytes.capacity;
+                if (failure == 0)
+                {
+                    fixture.link.atoms.capacity = fixture.link.atoms.count;
+                }
+                else if (failure == 1)
+                {
+                    fixture.link.symbols.flags[map[COUNT + 1]] = BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_LOCAL;
+                    memcpy(table_copy, fixture.tables.base, fixture.tables.length);
+                }
+                else if (failure == 2)
+                {
+                    fixture.bytes.capacity = byte_start + (COUNT - 2ull) * SIZE;
+                }
+                CheckDataResult result;
+                const bool emitted = check_data_emit(types, 0, objects, COUNT, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, 11,
+                                                     &fixture.bytes, &fixture.scratch, &result);
+                check_test_expect(test, emitted == (failure == 3), "static-data large payloads fit metadata-only scratch");
+                check_test_expect(test, fixture.scratch.length == scratch_start && literal[0] == 0x6d && literal[SIZE - 1] == 0x6d &&
+                                       parts[0].value.integer == 1 && parts[2].value.offset == INT64_C(4294967296),
+                                  "static-data direct construction preserves live input prefixes");
+                if (!emitted)
+                {
+                    if (failure != 1)
+                    {
+                        check_test_expect(test, result.status == CHECK_DATA_RESOURCE && result.atom_count == COUNT &&
+                                               result.byte_count == (COUNT - 1ull) * SIZE && result.fixup_count == 1 && result.wide_addend_count == 1,
+                                          "static-data exact capacity demand needs no implicit-zero scratch image");
+                    }
+                    check_test_expect(test, fixture.link.error == before.error && fixture.link.atoms.count == before.atoms.count &&
+                                           fixture.link.fixups.count == before.fixups.count && fixture.link.fixups.wide_count == before.fixups.wide_count &&
+                                           memcmp(table_copy, fixture.tables.base, fixture.tables.length) == 0 && fixture.bytes.length == byte_start,
+                                      "static-data late capacity/binding failure rolls back retained suffix and all Link tables");
+                }
+                else
+                {
+                    const uint8_t classes[COUNT] = {
+                        BUSTER_LINK_CLASS_DATA,
+                        BUSTER_LINK_CLASS_BSS,
+                        BUSTER_LINK_CLASS_RODATA,
+                        BUSTER_LINK_CLASS_STRINGS,
+                        BUSTER_LINK_CLASS_DATA,
+                        BUSTER_LINK_CLASS_TDATA,
+                        BUSTER_LINK_CLASS_RODATA,
+                    };
+                    uint64_t offset = byte_start;
+                    check_test_expect(test, result.byte_count == (COUNT - 1ull) * SIZE && result.fixup_count == 1 &&
+                                           result.wide_addend_count == 1 && fixture.bytes.length == offset + result.byte_count,
+                                      "static-data retained bytes exclude reclaimed BSS and keep exact counts");
+                    for (uint32_t i = 0; i < COUNT; i += 1)
+                    {
+                        const AtomId atom = fixture.link.symbols.atom[map[i + 1]];
+                        const bool zero_fill = i == 1;
+                        const uint8_t* payload = fixture.link.atoms.bytes[atom];
+                        bool exact = zero_fill ? payload == 0 : payload == fixture.bytes.base + offset;
+                        for (uint64_t byte = 0; exact && !zero_fill && byte < SIZE; byte += 1)
+                        {
+                            const uint8_t expected = i == 3 ? 0x6d : i == 0 || i == 2 ? byte == 0 : i == 5 ? byte == SIZE - 1 : 0;
+                            exact = payload[byte] == expected;
+                        }
+                        check_test_expect(test, exact && fixture.link.atoms.class[atom] == classes[i] && fixture.link.atoms.size[atom] == SIZE &&
+                                               fixture.link.atoms.alignment_log2[atom] == 6 && fixture.link.atoms.unit[atom] == 11,
+                                          "static-data retained payload has exact bytes, class, alignment and record order");
+                        offset += zero_fill ? 0 : SIZE;
+                    }
+                    const AtomId atom = fixture.link.symbols.atom[map[5]];
+                    const FixupId fixup = fixture.link.atoms.fixup_begin[atom];
+                    check_test_expect(test, fixture.link.fixups.offset[fixup] == SIZE - 8 && fixture.link.fixups.target[fixup] == map[COUNT + 1] &&
+                                           link_fixup_addend(&fixture.link, fixup) == INT64_C(4294967296) && link_check(&fixture.link) == LINK_ERROR_NONE,
+                                      "static-data retained payload preserves relocation target and wide addend");
+                }
+                fixture.link.atoms.capacity = atoms;
+                fixture.link.symbols.flags[map[COUNT + 1]] = flags;
+                fixture.bytes.capacity = byte_capacity;
+            }
+        }
+        fixture.scratch.capacity = 65536;
+    }
+    check_data_test_close(&fixture);
+}
+
 static void check_data_test_aggregate_transaction(CheckTest* test, TypeTable* types)
 {
     const TypeId pointer = type_pointer(types, BUSTER_TYPE_INT);
@@ -1301,6 +1523,8 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
 static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable* types, const char* clang)
 {
     check_data_test_objects(test, types, clang);
+    check_data_test_nonzero(test);
+    check_data_test_retained_payloads(test, types);
     check_data_test_aggregate_transaction(test, types);
     check_data_test_many_fixups(test, types);
     check_data_test_address_bit_fields(test, types);

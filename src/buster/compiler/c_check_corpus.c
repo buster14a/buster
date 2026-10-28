@@ -140,13 +140,11 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
                                      const char* path, bool preprocess, CheckCorpusOracle* result)
 {
     *result = (CheckCorpusOracle){ 0 };
-    FILE* diagnostics = tmpfile();
-    char** argv = calloc((size_t)argument_count + 10, sizeof(char*));
-    bool ready = diagnostics != 0 && argv != 0;
-    pid_t child = -1;
+    char** argv = calloc((size_t)argument_count + 12, sizeof(char*));
+    char** environment = pp_test_clang_environment();
+    bool ready = argv != 0 && environment != 0;
     int status = 0;
     char* text = 0;
-    size_t length = 0;
     if (ready)
     {
         uint32_t used = 0;
@@ -160,28 +158,26 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
         argv[used++] = "-fno-caret-diagnostics";
         argv[used++] = "-fno-color-diagnostics";
         argv[used++] = "-ferror-limit=1";
+        if (preprocess)
+        {
+            // Only its diagnostics are read: the text goes to /dev/null, as it did through standard output.
+            argv[used++] = "-o";
+            argv[used++] = "/dev/null";
+        }
         argv[used++] = (char*)path;
-        child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output < 0 || dup2(output, STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            close(output);
-            execvp(executable, argv);
-            _exit(127);
-        }
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        ready = child > 0 && waited == child && WIFEXITED(status) && pp_test_read_output(diagnostics, &text, &length);
+        argv[used] = 0;
+        // Through the oracle cache (oracle_cache.c, #542), without CPATH and C_INCLUDE_PATH.
+        OracleRun run = {
+            .purpose = "checker corpus: clang's first error",
+            .arguments = argv,
+            .environment = environment,
+            .dependencies = true,
+        };
+        ready = oracle_run(&run) && WIFEXITED(run.status);
+        status = run.status;
+        text = run.errors;
+        run.errors = 0;
+        oracle_run_release(&run);
     }
     bool unaccounted = false;
     for (char* at = text; ready && at != 0 && *at != 0; )
@@ -224,12 +220,9 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
     {
         fprintf(stderr, "checker-corpus: Clang oracle process or diagnostic accounting failed for %s (status=%d)\n", path, status);
     }
-    if (diagnostics != 0)
-    {
-        ready = fclose(diagnostics) == 0 && ready;
-    }
     free(text);
     free(argv);
+    free(environment);
     return ready;
 }
 
@@ -962,8 +955,9 @@ static void check_corpus_symbols_feature(CheckCorpusSymbols* symbols, const char
 // clang -O0 -c of `file` with the oracle's arguments into `object`, its output and errors discarded: whether it succeeded.
 static bool check_corpus_clang_object(const CheckCorpusSymbols* symbols, const char* file, const char* object)
 {
-    char** argv = calloc((size_t)symbols->argument_count + 8, sizeof(char*));
-    bool succeeded = argv != 0;
+    char** argv = calloc((size_t)symbols->argument_count + 9, sizeof(char*));
+    char** environment = pp_test_clang_environment();
+    bool succeeded = argv != 0 && environment != 0;
     if (succeeded)
     {
         uint32_t used = 0;
@@ -978,29 +972,22 @@ static bool check_corpus_clang_object(const CheckCorpusSymbols* symbols, const c
         argv[used++] = "-o";
         argv[used++] = (char*)object;
         argv[used++] = (char*)file;
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (null < 0 || dup2(null, STDOUT_FILENO) < 0 || dup2(null, STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            execvp(symbols->clang, argv);
-            _exit(127);
-        }
-        int status = 0;
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        succeeded = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        argv[used] = 0;
+        // Through the oracle cache (oracle_cache.c, #542), without CPATH and C_INCLUDE_PATH.
+        const char* files[] = { object };
+        OracleRun run = {
+            .purpose = "checker corpus: clang -O0 -c",
+            .arguments = argv,
+            .environment = environment,
+            .files = files,
+            .file_count = 1,
+            .dependencies = true,
+        };
+        succeeded = oracle_run(&run) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0;
+        oracle_run_release(&run);
     }
     free(argv);
+    free(environment);
     return succeeded;
 }
 
@@ -1141,7 +1128,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, &path->output_arena, &path->scratch);
+                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, parser->options.scalar, &path->output_arena, &path->scratch);
     CheckProgramOptions options = {
         .initializers = &path->initializers,
         .asms = &path->asms,
@@ -1573,7 +1560,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
                 left_parser->tree.parents[token] == right_parser->tree.parents[token] && left_parser->tree.depths[token] == right_parser->tree.depths[token] &&
-                left_parser->postorder[token] == right_parser->postorder[token] && left_parser->sizes[token] == right_parser->sizes[token] &&
+                left_parser->postorder[token] == right_parser->postorder[token] && (left_parser->sizes != 0) == (right_parser->sizes != 0) &&
+                (left_parser->sizes == 0 || left_parser->sizes[token] == right_parser->sizes[token]) &&
+                (left_parser->positions != 0) == (right_parser->positions != 0) &&
+                (left_parser->positions == 0 || (left_parser->positions[token] == right_parser->positions[token] && left_parser->ends[token] == right_parser->ends[token] &&
+                                                 left_parser->first_children[token] == right_parser->first_children[token] &&
+                                                 left_parser->next_siblings[token] == right_parser->next_siblings[token])) &&
                 left_parser->tokens.kinds[token] == right_parser->tokens.kinds[token] && left_parser->tokens.names[token] == right_parser->tokens.names[token] &&
                 left_parser->tokens.sources[token] == right_parser->tokens.sources[token] && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
     }
@@ -1584,7 +1576,9 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     }
     const CheckInput* left = &a->input;
     const CheckInput* right = &b->input;
-    equal = equal && left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
+    // The scalar path's walks act at no token the vector path's would skip (#529).
+    equal = equal && left->visit_misses == 0 && right->visit_misses == 0 &&
+            left->diagnostic_graph == right->diagnostic_graph && left->report_count == right->report_count && left->token_count == right->token_count &&
             left->string_count == right->string_count && left->region_count == right->region_count && left->vla_count == right->vla_count &&
             left->asm_count == right->asm_count && left->binding_event_count == right->binding_event_count &&
             left->parser_binding_event_count == right->parser_binding_event_count &&
@@ -1750,7 +1744,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         equal = equal && (graph->warning_suppressed == NULL || graph->warning_suppressed[node] == other->warning_suppressed[node]);
         if (equal && graph->ops[node] == CHECK_OP_VALUE)
         {
-            equal = check_test_value_equal(graph->leaves + node, other->leaves + node);
+            equal = check_test_value_equal(check_graph_leaf_of(graph, node), check_graph_leaf_of(other, node));
         }
     }
     equal = equal && graph->system_token_count == other->system_token_count && (graph->system_tokens == NULL) == (other->system_tokens == NULL) &&
@@ -1877,7 +1871,7 @@ static bool check_corpus_deferred_columns(const CheckInput* x, const CheckInput*
                  g->types[node] != h->types[node] ? "graph types" : g->members[node] != h->members[node] ? "graph members" :
                  g->contexts[node] != h->contexts[node] ? "graph contexts" : g->argument_offsets[node] != h->argument_offsets[node] ? "graph argument_offsets" :
                  g->argument_counts[node] != h->argument_counts[node] ? "graph argument_counts" :
-                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(g->leaves + node, h->leaves + node) ? "graph leaves" : 0;
+                 g->ops[node] == CHECK_OP_VALUE && !check_test_value_equal(check_graph_leaf_of(g, node), check_graph_leaf_of(h, node)) ? "graph leaves" : 0;
         index = node;
     }
     if (column == 0 && (g->argument_count != h->argument_count || g->varargs_count != h->varargs_count || g->builtin_count != h->builtin_count ||
@@ -1961,6 +1955,10 @@ static void check_corpus_deferred_difference(const CheckCorpusPath* a, const Che
     {
         snprintf(text, capacity, "types: tags, members, parameters or last_error (tags %u against %u, completions %u against %u, last_error %u against %u)",
                  s->tags.count, t->tags.count, s->tags.completions, t->tags.completions, s->last_error, t->last_error);
+    }
+    else if (x->visit_misses != 0 || y->visit_misses != 0)
+    {
+        snprintf(text, capacity, "the walks act at %u and %u tokens the vector path's would skip", x->visit_misses, y->visit_misses);
     }
     else if (x->binding_event_count != y->binding_event_count || x->string_count != y->string_count || x->vla_count != y->vla_count || x->asm_count != y->asm_count ||
              x->region_count != y->region_count || x->report_count != y->report_count || x->diagnostic_graph != y->diagnostic_graph ||
@@ -3131,6 +3129,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     arena_release(&include_paths.arena);
     arena_release(&options_arena);
+    oracle_cache_report(oracle_cache(), "test-checker-corpus");
     return passed ? 0 : 1;
 }
 
