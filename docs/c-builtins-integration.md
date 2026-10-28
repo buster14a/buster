@@ -410,9 +410,13 @@ The producer lowers them with quiet compares, as clang -O0's are (`ucomiss`,
 `ucomisd`, `fucomip`), so a quiet NaN raises no exception
 (`check_lower_floating_compare`). Tier 0's `EQ` and `NE` are quiet in every
 class. Its `LT` and `LE` of floats and doubles signal (`cmpsd`'s `LT_OS` and
-`LE_OS`, which C's relational operators take). So the first four compare their
-operands converted on to long double, exactly, by the x87's `fucomip`, which
-raises invalid only for a signaling NaN, as `ucomisd` does. `islessgreater` is
+`LE_OS`, which C's relational operators take). The first four retain their
+common format: both arguments finish in temporaries before eager quiet
+`(a == a) & (b == b)` tests guard the ordered comparison. Either signaling
+NaN therefore raises invalid, including one beside a quiet NaN. A float's or
+double's comparison retains MXCSR's DAZ policy, and a second argument that
+clears exceptions finishes before the comparison raises one. Long double's
+ordered comparisons use its quiet `fucomip` directly. `islessgreater` is
 `(a == a) & (b == b) & (a != b)` and `isunordered` `(a != a) | (b != b)`, of
 temporaries that hold the two.
 
@@ -423,7 +427,9 @@ IEEE's rule stated apart, the conversions and the refusals. `test-checker`'s
 `floating-comparison-builtins` program checks their results and the exceptions
 they raise on the harness's special values (zeros, infinities, quiet and
 signaling NaNs, subnormals) in each format against clang's build, and
-mingw's `fmaxl`.
+mingw's `fmaxl`. Separate programs check float/double subnormals with DAZ on
+and off, and each ordered builtin's signaling-NaN exception after a second
+argument clears the flags, including quiet-NaN/signaling-NaN pairs.
 
 ## Atomic and terminal helper calls
 

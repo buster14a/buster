@@ -3553,8 +3553,10 @@ static void check_lower_selector_test(CheckLowerWriter* writer, uint32_t local, 
 // isgreater ... isunordered of `node`'s two arguments, converted to `common`, the real floating type of their usual
 // arithmetic conversions, with quiet compares, as clang -O0's are (ucomiss, ucomisd, fucomip): a NaN raises FE_INVALID
 // only when it signals. Tier 0's EQ and NE are quiet in every class, but its LT and LE of floats and doubles signal
-// (cmpsd's LT_OS and LE_OS, C's relational operators'), and its x87 compares are all quiet: the first four compare the
-// two converted on to long double, which is exact and raises FE_INVALID only for a signaling NaN, as ucomisd does.
+// (cmpsd's LT_OS and LE_OS, C's relational operators'). Their operands stay in their common format, so that the SSE
+// comparisons retain MXCSR's DAZ policy. Evaluate both once before any comparison, then test both with quiet self-EQs:
+// their eager AND raises FE_INVALID for either signaling NaN, including one beside a quiet NaN. Only an ordered pair
+// reaches LT/LE/GT/GE. The x87's own ordered compares are quiet already and need no guard.
 // islessgreater is `(a == a) & (b == b) & (a != b)` of temporaries that hold them, and isunordered `(a != a) | (b != b)`.
 // Pushed in reverse, as tasks run.
 static void check_lower_floating_compare(CheckLowerWriter* writer, uint32_t node, CBuiltinId id, TypeId common)
@@ -3588,11 +3590,38 @@ static void check_lower_floating_compare(CheckLowerWriter* writer, uint32_t node
     {
         const uint8_t kind = id == CBUILTIN_ISGREATER ? BUSTER_TYPED_GT : id == CBUILTIN_ISGREATEREQUAL ? BUSTER_TYPED_GE :
                              id == CBUILTIN_ISLESS ? BUSTER_TYPED_LT : BUSTER_TYPED_LE;
-        check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, 0);
-        check_lower_convert(writer, common, BUSTER_TYPE_LONG_DOUBLE);
-        check_lower_operand(writer, node, 4, false, common);
-        check_lower_convert(writer, common, BUSTER_TYPE_LONG_DOUBLE);
-        check_lower_operand(writer, node, 3, false, common);
+        if (class == BUSTER_TYPED_CLASS_F80)
+        {
+            check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_operand(writer, node, 4, false, common);
+            check_lower_operand(writer, node, 3, false, common);
+        }
+        else
+        {
+            const uint32_t a = check_lower_temporary(writer, class);
+            const uint32_t b = check_lower_temporary(writer, class);
+            const uint32_t unordered = check_lower_label(writer);
+            const uint32_t end = check_lower_label(writer);
+            check_lower_mark(writer, end);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_mark(writer, unordered);
+            check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_I32, end);
+            check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, unordered);
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, b);
+            check_lower_instruction(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, a);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, b);
+            check_lower_operand(writer, node, 4, false, common);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, a);
+            check_lower_operand(writer, node, 3, false, common);
+        }
     }
 }
 
