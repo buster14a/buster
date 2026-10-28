@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_SELECT_NONE UINT32_MAX
 #define BUSTER_TIER1_SELECT_NO_REGISTER UINT8_MAX
@@ -988,6 +988,8 @@ static uint32_t tier1_select_munch(const Tier1SelectCandidates* candidates)
 // verifier alone does not establish that such a definition reaches its use. No input-dependent recursion is used.
 static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDominance* dominance, Arena* output, Arena* scratch, bool vector, Tier1SelectPlan* result, uint32_t* error_node)
 {
+    (void)vector;
+
     Tier1SelectError error = TIER1_SELECT_OK;
     uint32_t failed_node = BUSTER_IR_NONE;
     const bool arguments = function != 0 && output != 0 && scratch != 0 && output != scratch && result != 0;
@@ -1005,7 +1007,7 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
     }
     else
     {
-        const IrCheck check = vector ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
+        const IrCheck check = BUSTER_VECTOR_PATH(vector) ? ir_verify(function, scratch, dominance) : ir_verify_scalar(function, scratch, dominance);
         if (check.error != IR_OK)
         {
             error = check.error == IR_ERROR_MEMORY ? TIER1_SELECT_ERROR_MEMORY : TIER1_SELECT_ERROR_INVALID;
@@ -1138,13 +1140,13 @@ static Tier1SelectError tier1_select_plan(const IrFunction* function, const IrDo
                     {
                         cost_columns[p][lane] = batch[lane].costs[p];
                     }
-                    if (!vector)
+                    if (!BUSTER_VECTOR_PATH(vector))
                     {
                         chosen[lane] = tier1_select_munch(&batch[lane]);
                     }
                 }
             }
-            if (error == TIER1_SELECT_OK && vector)
+            if (error == TIER1_SELECT_OK && BUSTER_VECTOR_PATH(vector))
             {
                 __m512i best_cost = _mm512_set1_epi32(-1);
                 __m512i best_rule = _mm512_setzero_si512();

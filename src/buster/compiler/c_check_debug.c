@@ -88,6 +88,9 @@ static uint32_t check_debug_rows_scalar(const uint32_t* entry_records, const uin
 static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* entry_tokens, uint32_t entry_count, const uint32_t* offsets,
                                  uint32_t length, uint32_t declaration, uint32_t closing, uint32_t* row_offsets, uint32_t* row_tokens)
 {
+#if !BUSTER_HOST_VECTOR
+    return check_debug_rows_scalar(entry_records, entry_tokens, entry_count, offsets, length, declaration, closing, row_offsets, row_tokens);
+#else
     row_offsets[0] = 0;
     row_tokens[0] = declaration;
     uint32_t count = offsets[entry_records[0]] != 0 ? 1 : 0;
@@ -112,6 +115,7 @@ static uint32_t check_debug_rows(const uint32_t* entry_records, const uint32_t* 
     row_tokens[count] = closing;
     count += epilogue < length ? 1 : 0;
     return count;
+#endif
 }
 
 // The history runs that start at or before output token `output`: pp_history_at's search, whose origin is the last one's.
@@ -507,6 +511,9 @@ static uint32_t check_debug_keep_scalar(const uint32_t* offsets, const uint32_t*
 static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, const uint32_t* lines, uint32_t count, uint32_t key, uint32_t body,
                                  uint32_t* kept_offsets, uint32_t* kept_lines)
 {
+#if !BUSTER_HOST_VECTOR
+    return check_debug_keep_scalar(offsets, keys, lines, count, key, body, kept_offsets, kept_lines);
+#else
     uint32_t kept = 0;
     __m512i previous = _mm512_set1_epi32(-1);
     for (uint32_t i = 0; i < count; i += 16)
@@ -529,6 +536,7 @@ static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, 
         previous = count_eligible != 0 ? _mm512_permutexvar_epi32(_mm512_set1_epi32((int)count_eligible - 1), packed_lines) : previous;
     }
     return kept;
+#endif
 }
 
 _Static_assert(BUSTER_OBJECT_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS && BUSTER_OBJECT_DEBUG_INFO == DEBUG_SECTION_INFO &&

@@ -12,7 +12,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 typedef enum IrParseError
 {
@@ -557,9 +557,11 @@ static void ir_parse_instruction(IrParseState* state)
 
 static uint64_t ir_parse_line_end(IrParseState* state, uint64_t first, bool vector)
 {
+    (void)vector;
+
     const String8 source = state->source;
     uint64_t end = first;
-    if (vector)
+    if (BUSTER_VECTOR_PATH(vector))
     {
         bool found = false;
         while (!found)
@@ -606,6 +608,8 @@ static void ir_parse_copy(IrParseArray array, void* output)
 
 static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, IrFunction* result)
 {
+    (void)vector;
+
     const IrSizes sizes = {
         .instruction_count = state->rows.count,
         .block_count = state->blocks.count,
@@ -647,7 +651,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
             function.b[id] = rows[id].b;
             function.c[id] = rows[id].c;
         }
-        state->result.check = ir_verify_complete(&function, state->scratch, vector);
+        state->result.check = ir_verify_complete(&function, state->scratch, BUSTER_VECTOR_PATH(vector));
         if (state->result.check.error == IR_OK)
         {
             *result = function;
@@ -675,6 +679,8 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
 
 static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch, IrFunction* result, bool vector)
 {
+    (void)vector;
+
     IrParseState state = {
         .source = source,
         .scratch = scratch,
@@ -704,7 +710,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
     {
         state.cursor = next;
         state.line_start = next;
-        state.end = ir_parse_line_end(&state, next, vector);
+        state.end = ir_parse_line_end(&state, next, BUSTER_VECTOR_PATH(vector));
         next = state.end + (state.end < source.length);
         if (!ir_parse_end_line(&state))
         {
@@ -760,7 +766,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
         }
         else
         {
-            ir_parse_publish(&state, output, vector, result);
+            ir_parse_publish(&state, output, BUSTER_VECTOR_PATH(vector), result);
         }
     }
     if (state.result.error != IR_PARSE_OK && output != 0 && output->length >= output_mark)
@@ -774,9 +780,15 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
     return state.result;
 }
 
+static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result);
+
 static IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return ir_parse_scalar(source, output, scratch, result);
+#else
     return ir_parse_path(source, output, scratch, result, true);
+#endif
 }
 
 static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result)

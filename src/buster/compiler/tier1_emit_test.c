@@ -27,7 +27,17 @@ struct Tier1EmitTest
     Arena output;
     Arena scratch;
     uint8_t* allowed;
+    const uint8_t* native_allowed;
+    uint64_t native_skipped;
 };
+
+// A requested output policy may exceed the current CPU. The policy/encoding checks still run; only the native call skips.
+static bool tier1_emit_test_native(Tier1EmitTest* test, const X86Instruction* records, uint32_t count)
+{
+    const bool supported = test->native_allowed == 0 || x86_target_validate(test->native_allowed, records, count) == count;
+    test->native_skipped += !supported;
+    return supported;
+}
 
 static void tier1_emit_test_expect(Tier1EmitTest* test, bool passed, const char* message)
 {
@@ -155,7 +165,7 @@ static void tier1_emit_test_execute(Tier1EmitTest* test, const IrFunction* funct
         ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;
         tier1_emit_test_expect(test, ready, "native code made executable");
     }
-    if (ready)
+    if (ready && tier1_emit_test_native(test, code->records, code->count))
     {
         uint64_t random = UINT64_C(0x0a3385510b49decd);
         for (uint32_t sample = 0; sample < 64; sample += 1)

@@ -433,6 +433,8 @@ static void cbuiltin_misc_lower_length(CBuiltinLowerRecipe* recipe, const CBuilt
 
 static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call, bool vector)
 {
+    (void)vector;
+
     CBuiltinLowerResult result = { 0 };
     CBuiltinLowerRecipe recipe = { 0 };
     uint32_t minimum = 0;
@@ -533,7 +535,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
             result.result_class = result_class;
             result.temporary_first = buffer->local_count;
             result.temporary_count = recipe.temporary_count;
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 for (uint32_t i = 0; i < recipe.count; i += 64)
                 {
@@ -567,10 +569,16 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
     return result;
 }
 
+static CBuiltinLowerResult cbuiltin_misc_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call);
+
 static CBuiltinLowerResult cbuiltin_misc_lower(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call)
 {
+#if !BUSTER_HOST_VECTOR
+    return cbuiltin_misc_lower_scalar(buffer, call);
+#else
     const CBuiltinLowerResult result = cbuiltin_misc_append(buffer, call, true);
     return result;
+#endif
 }
 
 static CBuiltinLowerResult cbuiltin_misc_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinMiscLowerCall* call)

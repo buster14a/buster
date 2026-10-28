@@ -21,7 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_TIER1_SCHEDULE_MAX_RECORDS 256
 #define BUSTER_TIER1_SCHEDULE_WORDS (BUSTER_TIER1_SCHEDULE_MAX_RECORDS / 64)
@@ -138,6 +138,9 @@ static void tier1_schedule_graph_scalar(Tier1ScheduleGraph* graph, uint32_t coun
 
 static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
+#if !BUSTER_HOST_VECTOR
+    tier1_schedule_graph_scalar(graph, count, stats);
+#else
     for (uint32_t current = 0; current < count; current += 1)
     {
         const __m512i written = _mm512_set1_epi64((int64_t)graph->writes[current]);
@@ -156,6 +159,7 @@ static void tier1_schedule_graph_vector(Tier1ScheduleGraph* graph, uint32_t coun
             tier1_schedule_add_edges(graph, current, first, hazards & active, data, stats);
         }
     }
+#endif
 }
 
 static bool tier1_schedule_intersects(const uint64_t* left, const uint64_t* right, uint32_t words)
@@ -205,6 +209,9 @@ static void tier1_schedule_heights_scalar(Tier1ScheduleGraph* graph, uint32_t co
 
 static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
+#if !BUSTER_HOST_VECTOR
+    tier1_schedule_heights_scalar(graph, count, stats);
+#else
     uint64_t pending[BUSTER_TIER1_SCHEDULE_WORDS];
     tier1_schedule_pending(pending, count);
     const uint32_t words = (count + 63) / 64;
@@ -249,6 +256,7 @@ static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t co
         }
     }
     stats->levels = level;
+#endif
 }
 
 static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count, uint16_t* order, Tier1ScheduleStats* stats)
@@ -284,6 +292,8 @@ static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count
 // original block for counts above the bound. Encoding and all branch/relocation offsets are finalized afterwards.
 static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1ScheduleInput input, Tier1ScheduleGraph* graph, uint16_t* order, uint32_t capacity, bool vector, Tier1ScheduleStats* statistics)
 {
+    (void)vector;
+
     Tier1ScheduleStatus status = TIER1_SCHEDULE_OK;
     if (input.count > BUSTER_TIER1_SCHEDULE_MAX_RECORDS || capacity < input.count)
     {
@@ -301,7 +311,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
             memset(graph->predecessors, 0, input.count * sizeof(graph->predecessors[0]));
             memset(graph->successors, 0, input.count * sizeof(graph->successors[0]));
             memset(graph->data_successors, 0, input.count * sizeof(graph->data_successors[0]));
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 x86_instructions_effects(input.instructions, input.count, graph->reads, graph->writes);
             }
@@ -319,7 +329,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
                     stats.missing_columns[column] += x86_zen5_columns[column][id] == BUSTER_X86_COST_UNKNOWN;
                 }
             }
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 x86_zen5_lookup(graph->cost_ids, input.count, X86_COST_GPR_LATENCY, graph->latencies);
             }
@@ -333,7 +343,7 @@ static __attribute__((unused)) Tier1ScheduleStatus tier1_schedule_block(Tier1Sch
                 graph->barriers[i] = pinned ? UINT64_MAX : 0;
                 stats.pinned += pinned;
             }
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 tier1_schedule_graph_vector(graph, input.count, &stats);
                 tier1_schedule_heights_vector(graph, input.count, &stats);

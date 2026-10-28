@@ -4790,15 +4790,17 @@ static const BindTestStaticSource bind_test_shared_sources[] = {
     {
         .name = "atexit",
         .source = "#include <stdlib.h>\n"
-                  "static void buster_handler(void) {}\n"
+                  "static volatile int buster_finished;\n"
+                  "static void buster_handler(void) { buster_finished = 1; }\n"
                   "int buster_register(void) { return atexit(buster_handler); }\n",
     },
 };
 
 // Links `object` by cc -shared with the linker `fuse`, into `library`, with `why` if it isn't 0: cc's status.
-static int bind_test_shared_link(const char* fuse, const char* why, const char* object, const char* library, const char* out, const char* err)
+// Force libc only when comparing against a runtime that always binds it, including weak-only references.
+static int bind_test_shared_link(const char* fuse, const char* why, const char* object, const char* library, const char* out, const char* err, bool force_libc)
 {
-    char* arguments[8];
+    char* arguments[11];
     uint32_t count = 0;
     arguments[count++] = "cc";
     arguments[count++] = (char*)fuse;
@@ -4808,6 +4810,12 @@ static int bind_test_shared_link(const char* fuse, const char* why, const char* 
     arguments[count++] = "-o";
     arguments[count++] = (char*)library;
     arguments[count++] = (char*)object;
+    if (force_libc)
+    {
+        arguments[count++] = "-Wl,--no-as-needed";
+        arguments[count++] = "-lc";
+        arguments[count++] = "-Wl,--as-needed";
+    }
     arguments[count] = 0;
     return object_test_run(arguments, out, err);
 }
@@ -4921,8 +4929,8 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
             bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), "the paths' links the same", s);
             bind_test_shared_structure(&tally, &vector.link, &vector.bind);
             bind_test_expect(&tally, bind_test_shared_library_holds(&vector.link, &vector.bind, runtime, library->name), library->name, s);
-            bind_test_expect(&tally, bind_test_shared_link("-fuse-ld=bfd", 0, object_path, bfd_path, out, err) == 0, "linked by cc -shared with GNU ld", s);
-            const int status = bind_test_shared_link("-fuse-ld=lld", why_option, object_path, lld_path, out, err);
+            bind_test_expect(&tally, bind_test_shared_link("-fuse-ld=bfd", 0, object_path, bfd_path, out, err, true) == 0, "linked by cc -shared with GNU ld", s);
+            const int status = bind_test_shared_link("-fuse-ld=lld", why_option, object_path, lld_path, out, err, true);
             bind_test_expect(&tally, status == 0, "linked by cc -shared with lld", (uint64_t)status);
             char* readelf[] = {
                 "readelf",
@@ -5170,7 +5178,7 @@ static bool bind_test_split_stack(const Runtime* runtime, const Runtime* shared_
         {
             char* library = paths[f == 0 ? BFD_LIBRARY : LLD_LIBRARY];
             char* pie = paths[f == 0 ? BFD_PIE : LLD_PIE];
-            const bool linked = bind_test_shared_link(fuses[f], 0, paths[LIBRARY_OBJECT], library, paths[OUT], paths[ERR]) == 0;
+            const bool linked = bind_test_shared_link(fuses[f], 0, paths[LIBRARY_OBJECT], library, paths[OUT], paths[ERR], false) == 0;
             bind_test_expect(&tally, linked && bind_test_needs_libgcc_s(library, paths[OUT], paths[ERR], arena), "cc -shared's library needs libgcc_s.so.1", f);
             char* load[] = {
                 paths[HARNESS],

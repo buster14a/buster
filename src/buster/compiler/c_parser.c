@@ -41,7 +41,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include <immintrin.h>
+#include "host_isa.h"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
 // unit of its own, such as a benchmark's, has them static, as every other function here.
@@ -550,6 +550,9 @@ static void parse_tokens_from_output_scalar(const PPTokens* output, ParseTokens*
 // pragmas, with the padding on both sides.
 static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
 {
+#if !BUSTER_HOST_VECTOR
+    parse_tokens_from_output_scalar(output, tokens);
+#else
     const __m512i table0 = _mm512_load_si512(parse_kind_table);
     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
     const __m512i table2 = _mm512_load_si512(parse_kind_table + 128);
@@ -594,6 +597,7 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     }
     tokens->count = written;
     parse_tokens_pad(tokens);
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -9223,6 +9227,9 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
 // the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
 static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32_t* secondary)
 {
+#if !BUSTER_HOST_VECTOR
+    parse_secondary_scalar(kernels, count, secondary);
+#else
     uint32_t open = 0;
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -9307,6 +9314,7 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
+#endif
 }
 
 // parse_after_colons over the `{` tokens after a resolved colon only.
@@ -11896,7 +11904,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     }
     if (result)
     {
-        if (parser->options.scalar)
+        if (BUSTER_SCALAR_PATH(parser->options.scalar))
         {
             parse_tokens_from_output_scalar(output, &parser->tokens);
         }
@@ -11939,7 +11947,11 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+            // Preserve the requested parser protocol on scalar hosts, using the kernels' scalar twins.
+            // The fallback and its whole-unit retry are part of that protocol, independent of host ISA.
+            const ParseKernelResult vector = BUSTER_HOST_VECTOR ? parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers)
+                                                                 : parse_twins(&parser->kernels, &input, parser->predeclared, parser->buffers.typed,
+                                                                               parser->buffers.statements);
             parser->statistics.fallback_items = vector.fallback.items;
             parser->statistics.fallback_tokens = vector.fallback.tokens;
             parser->statistics.flagged_tokens = vector.flagged_tokens;
@@ -11985,7 +11997,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         const uint64_t bytes = (uint64_t)parser->tokens.count * (sizeof(GnuAttributeGroup) + sizeof(GnuAttribute) + sizeof(GnuAsmLabel)) + 64;
         parser->gnu_arena = arena_reserve(bytes);
         const GnuSyntaxStatus status = parser->gnu_arena.base != 0 ?
-            gnu_syntax_build(&parser->tokens, &parser->tree, &parser->gnu_arena, &parser->gnu, parser->options.scalar) : GNU_SYNTAX_MEMORY;
+            gnu_syntax_build(&parser->tokens, &parser->tree, &parser->gnu_arena, &parser->gnu, BUSTER_SCALAR_PATH(parser->options.scalar)) : GNU_SYNTAX_MEMORY;
         result = status == GNU_SYNTAX_OK;
         if (!result)
         {
