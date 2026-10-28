@@ -608,7 +608,7 @@ jobs:
           ./build/compiler test-streaming --cross-check
           == Test GNU syntax metadata against clang
           ./build/compiler test-gnu --clang
-          == Test experimental Tier 1 scheduling and model coverage
+          == Test experimental Tier 1 scheduling, model coverage and native execution
           ./build/compiler test-tier1-schedule
           == Test the x86 semantics
           # The effects table is checked by executing every covered form; --cross-check also assembles the chosen forms
