@@ -91,6 +91,27 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
         }
     }
     unlink(path);
+    static const char* const ordinary[] = {
+        "int f(void){return (missing)(1);}\n",
+        "int f(void){return __builtin_missing(1);}\n",
+        "int f(void){return missing;}\n",
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(ordinary); c += 1)
+    {
+        const bool ready = parse_test_write(path, ordinary[c], strlen(ordinary[c]));
+        for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
+        {
+            char* actual = NULL;
+            char* arguments[] = { (char*)executable, "-Wno-implicit-function-declaration", "-fsyntax-only", path,
+                                  scalar != 0 ? "--scalar" : NULL, NULL };
+            const int status = check_test_driver_spawn(arguments, &actual);
+            check_test_expect(test, status == 1 && actual != NULL && strstr(actual, "implicit function") == NULL &&
+                                    strstr(actual, "implicit-function-declaration") == NULL,
+                              "non-direct callees, builtin spellings and ordinary identifiers remain hard errors");
+            free(actual);
+        }
+    }
+    unlink(path);
     static const char native[] = "int before(int n){return convert((float)n,(unsigned char)9);}\n"
         "int convert(double d,int v){return (int)(d*7)+v;}\nint main(void){return before(4)==37?0:1;}\n";
     const bool native_written = parse_test_write(path, native, sizeof(native) - 1);

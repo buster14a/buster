@@ -102,6 +102,8 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // Block-scope declarations with linkage name the file-scope entity, which later declarations see: source order's.
     { "block-scope-extern", "int g = 3;\nint f(void) { extern int g; return g; }\n", false },
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "implicit-functions-source-order", "typedef __typeof__(top_missing()) T;\nint f(void){return first_missing();}\n"
+      "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },

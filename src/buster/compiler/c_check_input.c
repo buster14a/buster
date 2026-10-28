@@ -3283,7 +3283,11 @@ static void check_input_implicit_function(CheckInputReader* reader, uint32_t tok
     const bool call = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CALL &&
                       callee + 1 < parent && parser->tree.roles[callee + 1] == PARSE_ROLE_OPEN_CALL;
     const uint32_t name = parser->tokens.names[token];
-    if (call && reader->pp->options.language.standard < 2023 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0)
+    const bool builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
+    const bool missing = call && !builtin && reader->pp->options.language.standard < 2023 &&
+                         c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
+    check_input_lane_refuse(reader, reader->lane && missing, "an implicit function declaration needs source-order linkage");
+    if (missing && !reader->lane)
     {
         const TypeId type = check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0));
         CheckInput* input = reader->output;
