@@ -328,7 +328,11 @@ modifiability use bounded iterative walks, including inherited qualification
 on anonymous members.
 
 Before record layout, `check_input_tag_definition` packs that record's direct
-members for `check_input_record_names` (`c_check_record_input.c`). Named fields
+members for `check_input_record_names` (`c_check_record_input.c`). Direct names
+have already passed the reader's generation-stamped duplicate check. While
+packing, the reader records whether an unnamed non-bit-field member exists and
+skips namespace allocation/validation entirely when none does. An anonymous
+nonrecord still enters the defensive helper and fails as before. Named fields
 introduce only their own name, even when their type contains another record's
 definition. The temporary hash table starts from the direct member count and
 grows geometrically at half occupancy as anonymous fields expose more names.
