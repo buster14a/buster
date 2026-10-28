@@ -35,12 +35,11 @@
 #include "buster/compiler/x86_zen5.c"
 #pragma clang diagnostic pop
 #include "buster/compiler/tier1_schedule.c"
+#include "buster/compiler/tier1_schedule_fixture.c"
 
 #define BUSTER_TIER1_SCHEDULE_BENCH_PASSES 11
 #define BUSTER_TIER1_SCHEDULE_BENCH_SAMPLE_NS UINT64_C(2000000)
 #define BUSTER_TIER1_SCHEDULE_BENCH_BLOCKS 64
-#define BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS 64
-#define BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES 8192
 
 typedef struct Tier1ScheduleBench Tier1ScheduleBench;
 struct Tier1ScheduleBench
@@ -300,79 +299,10 @@ static bool tier1_schedule_bench_measure(Tier1ScheduleBench* bench, uint32_t onl
     return valid;
 }
 
-static __attribute__((no_sanitize("function"))) uint64_t tier1_schedule_bench_execute(const uint8_t* code, uint64_t first, uint64_t second, uint64_t iterations)
-{
-    // An external generated-code ABI boundary, not compiler-path dispatch. Only the absent Clang type metadata is
-    // excluded from sanitizing; the constructor, bounds and other UB checks remain active.
-    return ((uint64_t (*)(uint64_t, uint64_t, uint64_t))code)(first, second, iterations);
-}
-
 static bool tier1_schedule_bench_code(Tier1ScheduleBench* bench)
 {
-    X86Instruction body[BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS];
-    for (uint32_t i = 0; i < BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS; i += 4)
-    {
-        body[i] = tier1_schedule_bench_record(X86_FORM_NOT_RM64, 0, X86_REGISTER_R8);
-        body[i + 1] = tier1_schedule_bench_record(X86_FORM_NOT_RM64, 0, X86_REGISTER_R9);
-        body[i + 2] = tier1_schedule_bench_record(X86_FORM_IMUL_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
-        body[i + 3] = tier1_schedule_bench_record(X86_FORM_NOT_RM64, 0, X86_REGISTER_R10);
-    }
-    const Tier1ScheduleInput input = { .instructions = body, .count = BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS };
-    Tier1ScheduleStats stats;
-    bool valid = tier1_schedule_block(input, &bench->graph, bench->order, input.count, true, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, bench->order);
-    uint8_t* code[2] = { 0 };
-    int64_t sizes[2] = { 0 };
-    for (uint32_t variant = 0; valid && variant < 2; variant += 1)
-    {
-        code[variant] = mmap(0, BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        valid = code[variant] != MAP_FAILED;
-        if (valid)
-        {
-            X86Instruction records[BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS + 16];
-            uint32_t count = 0;
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_R8, X86_REGISTER_RDI);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_R9, X86_REGISTER_RSI);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_R10, X86_REGISTER_RDI);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_R11, X86_REGISTER_RSI);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_RCX, X86_REGISTER_RDX);
-            const uint32_t loop = count;
-            for (uint32_t i = 0; i < input.count; i += 1)
-            {
-                records[count++] = body[variant == 0 ? i : bench->order[i]];
-            }
-            records[count++] = tier1_schedule_bench_record(X86_FORM_DEC_RM64, 0, X86_REGISTER_RCX);
-            const uint32_t branch = count;
-            records[count++] = tier1_schedule_bench_record(X86_FORM_JNE_REL32, 0, 0);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_MOV_R64_RM64, X86_REGISTER_RAX, X86_REGISTER_R10);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_XOR_RM64_R64, X86_REGISTER_R8, X86_REGISTER_RAX);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_XOR_RM64_R64, X86_REGISTER_R9, X86_REGISTER_RAX);
-            records[count++] = tier1_schedule_bench_record(X86_FORM_RET, 0, 0);
-            uint32_t offsets[BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS + 16];
-            valid = x86_validate(records, count) == count && x86_measure(records, count, offsets) >= 0;
-            if (valid)
-            {
-                records[branch].displacement = (int32_t)offsets[loop] - (int32_t)offsets[branch + 1];
-                uint8_t scalar[BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES];
-                sizes[variant] = x86_encode(records, count, code[variant], BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES, 0, 0);
-                const int64_t scalar_size = x86_encode_scalar(records, count, scalar, sizeof(scalar), 0, 0);
-                valid = sizes[variant] > 0 && scalar_size == sizes[variant] && memcmp(scalar, code[variant], (uint64_t)scalar_size) == 0 &&
-                        mprotect(code[variant], BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES, PROT_READ | PROT_EXEC) == 0;
-            }
-        }
-    }
-    for (uint64_t seed = 1; valid && seed <= 64; seed += 1)
-    {
-        const uint64_t first = seed * 11939;
-        const uint64_t second = seed * 17 + 3;
-        uint64_t expected = first;
-        for (uint64_t i = 0; i < seed * BUSTER_TIER1_SCHEDULE_BENCH_CODE_RECORDS / 4; i += 1)
-        {
-            expected = ~(expected * second);
-        }
-        // The fixture has an even number of NOTs on each independent input per loop iteration.
-        expected ^= first ^ second;
-        valid = tier1_schedule_bench_execute(code[0], first, second, seed) == expected && tier1_schedule_bench_execute(code[1], first, second, seed) == expected;
-    }
+    Tier1ScheduleFixture fixture = { 0 };
+    const bool valid = tier1_schedule_fixture_open(&fixture, &bench->graph, bench->order, true) && tier1_schedule_fixture_check(&fixture);
     if (valid)
     {
         double samples[2][BUSTER_TIER1_SCHEDULE_BENCH_PASSES];
@@ -383,21 +313,15 @@ static bool tier1_schedule_bench_code(Tier1ScheduleBench* bench)
             {
                 const uint32_t variant = (pass + offset) % 2;
                 const uint64_t start = tier1_schedule_bench_clock();
-                bench->sink = tier1_schedule_bench_execute(code[variant], 11939, 23, iterations);
+                bench->sink = tier1_schedule_fixture_execute(fixture.code[variant], 11939, 23, iterations);
                 const uint64_t end = tier1_schedule_bench_clock();
                 samples[variant][pass] = (end - start) / (double)iterations;
             }
         }
         printf("Synthetic integer loop only: %u/%u records moved, bytes=%" PRId64 "/%" PRId64 ", baseline %.4f ns/iteration, scheduled %.4f ns/iteration\n",
-               stats.moved, input.count, sizes[0], sizes[1], tier1_schedule_bench_median(samples[0]), tier1_schedule_bench_median(samples[1]));
+               fixture.moved, BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS, fixture.sizes[0], fixture.sizes[1], tier1_schedule_bench_median(samples[0]), tier1_schedule_bench_median(samples[1]));
     }
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        if (code[variant] && code[variant] != MAP_FAILED)
-        {
-            munmap(code[variant], BUSTER_TIER1_SCHEDULE_BENCH_CODE_BYTES);
-        }
-    }
+    tier1_schedule_fixture_close(&fixture);
     return valid;
 }
 
