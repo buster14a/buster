@@ -323,6 +323,27 @@ static const CheckX86LowerRule check_x86_lower_rules[] = {
                           BUSTER_X86_FEATURE(AVX2))
     // An element of 64 bits of a 256-bit vector: its lane extracted first where it is past the low one.
     BUSTER_CHECK_X86_RULE("__builtin_ia32_vec_ext_v4di", CHECK_X86_LOWER_EXTRACT, 8, 32, false, false, 1, X86_FORM_VPEXTRQ_RM64_X_IMM8_EVEX, BUSTER_X86_FEATURE(AVX512DQ))
+    // #148's SSE builtins, which stb_image, dr_libs and minimp3 reach through the SSE2, SSSE3 and SSE4.1 intrinsics, by
+    // the existing families: shuffles, a byte shift and an align by an immediate (the instruction's whole byte, as clang
+    // -O0's code takes it), packs, multiplications, maximums and minimums (the first operand in vvvv, so that a NaN or a
+    // pair of zeros gives the second, as MAXPS and MINPS do) and the conversion by MXCSR's rounding.
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufd", CHECK_X86_LOWER_UNARY_IMMEDIATE, 4, 16, false, 1, X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshufhw", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 16, false, 1, X86_FORM_VPSHUFHW_X_XM128_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_pshuflw", CHECK_X86_LOWER_UNARY_IMMEDIATE, 2, 16, false, 1, X86_FORM_VPSHUFLW_X_XM128_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_psrldqi128_byteshift", CHECK_X86_LOWER_UNARY_IMMEDIATE, 1, 16, true, 1, X86_FORM_VPSRLDQ_X_XM128_IMM8, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_shufps", CHECK_X86_LOWER_BINARY_IMMEDIATE, 4, 16, false, 2, X86_FORM_VSHUFPS_X_X_XM128_IMM8_EVEX, 0, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_palignr128", CHECK_X86_LOWER_BINARY_IMMEDIATE, 1, 16, false, 2, X86_FORM_VPALIGNR_X_X_XM128_IMM8_EVEX, 0, BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_packssdw128", CHECK_X86_LOWER_BINARY, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPACKSSDW_X_X_XM128_EVEX,
+                          BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_packuswb128", CHECK_X86_LOWER_BINARY, 2, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPACKUSWB_X_X_XM128_EVEX,
+                          BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pmulhw128", CHECK_X86_LOWER_BINARY, 2, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMULHW_X_X_XM128_EVEX,
+                          BUSTER_CHECK_X86_BW)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pmuldq128", CHECK_X86_LOWER_BINARY, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMULDQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_pmuludq128", CHECK_X86_LOWER_BINARY, 8, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VPMULUDQ_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_maxps", CHECK_X86_LOWER_BINARY, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMAXPS_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE("__builtin_ia32_minps", CHECK_X86_LOWER_BINARY, 4, 16, false, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VMINPS_X_X_XM128_EVEX, 0)
+    BUSTER_CHECK_X86_RULE_OTHER("__builtin_ia32_cvtps2dq", CHECK_X86_LOWER_UNARY, 4, 16, false, BUSTER_CHECK_X86_NO_IMMEDIATE, X86_FORM_VCVTPS2DQ_X_XM128_EVEX, 0, 0)
 };
 
 #undef BUSTER_CHECK_X86_SHIFTS
@@ -586,7 +607,10 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
                 row->records[r].immediate = 1;
                 r += 1;
             }
-            row->records[r] = check_x86_lower_record(rule->form, index >= lane ? v1 : v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+            // VPEXTRW's form takes the general register in reg and the vector in rm; the others' the other way round.
+            const uint8_t vector = index >= lane ? v1 : v0;
+            row->records[r] = rule->form == X86_FORM_VPEXTRW_R32_X_IMM8_EVEX ? check_x86_lower_record(rule->form, BUSTER_TIER0_ROLE_INTEGER_RESULT, 0, vector) :
+                                                                                 check_x86_lower_record(rule->form, vector, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
             row->records[r].immediate = (int32_t)(index & (lane - 1));
             row->record_count = (uint8_t)(r + 1);
             row->operand_count = 1;
