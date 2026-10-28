@@ -1733,7 +1733,8 @@ static const PPTestCase pp_test_cases[] = {
     { "a comma in #if", "#if 1, 2\nyes\n#endif\n#if (1, 2)\nparenthesized\n#endif\n#if 0 ? 1, 2 : 3\nconditional\n#endif\n", 0, "c17", "", true, 0 },
     { "digit separators before C23", "#define N 1'000\nx N\n", 0, "c17", "\nx 1'000\n", false, 0 },
     { "digit separators in C23", "#define N 1'000\nx N y\n#if 1'0 == 10\nten\n#endif\n", 0, "c23", "\nx 1'000 y\nten\n", false, 0 },
-    { "target queries", "__is_target_arch(x86_64) __is_target_arch(amd64) __is_target_arch(i386) __is_target_vendor(pc) __is_target_vendor(apple)\n__is_target_os(linux) __is_target_os(windows) __is_target_environment(gnu) __is_target_environment(msvc)\n__is_target_variant_os(linux) __is_target_variant_environment(gnu)\n", 0, "c17", "1 1 0 1 0\n1 0 1 0\n0 0\n", false, 0 },
+    { "target queries", "__is_target_arch(x86_64) __is_target_arch(amd64) __is_target_arch(i386) __is_target_vendor(pc) __is_target_vendor(apple)\n__is_target_os(linux) __is_target_os(windows) __is_target_environment(gnu) __is_target_environment(msvc)\n__is_target_variant_os(linux) __is_target_variant_environment(gnu)\n", 0, "c17", "1 1 0 1 0\n1 0 1 0\n0 0\n", false, 0, "--target=x86_64-pc-linux-gnu" },
+    { "unknown target vendor", "__is_target_vendor(unknown) __is_target_vendor(pc)\n", 0, "c17", "1 0\n", false, 0, "--target=x86_64-unknown-linux-gnu" },
     { "UCNs pasted and stringized", "#define P(a, b) a ## b\n#define S(x) #x\n#define T(x) S(x)\nT(P(caf\\u00e9, x) P(y, z))\nT(P(caf\\u00e9, x)P(y, z))\nP(caf\\u00e9, x)\n", 0, "c17", "\"caf\\u00e9x yz\"\n\"caf\\u00e9xyz\"\ncaf\xC3""\xA9""x\n", false, 0 },
     { "UCNs in pragma lines", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n_Pragma(\"ppf caf\\\\u00e9\")\n#define M caf\\u00e9\n#pragma omp M\n#pragma STDC FP_CONTRACT x\\u0301\n", 0, "c17", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n#pragma ppf caf\\u00e9\n#pragma omp caf\\u00e9\n#pragma STDC FP_CONTRACT x\\u0301\n", false, 0 },
     { "_Pragma in an expanded argument", "#define S(x) #x\n#define T(x) S(x) [x]\nT(_Pragma(\"ppf one\") a)\n#define P(a, b) a ## b\n#define Q(x, y) P(x, y) [x]\nQ(_Pragma(\"ppf two\") l, r)\n#define PR _Pragma(\"ppf three\")\nT(PR b)\n#define D(x) x x\nD(_Pragma(\"ppf four\"))\n", 0, "c17", "\"_Pragma(\\\"ppf one\\\") a\" [\n#pragma ppf one\n a]\n#pragma ppf two\n lr [\n#pragma ppf two\n l]\n\"_Pragma(\\\"ppf three\\\") b\" [\n#pragma ppf three\n b]\n#pragma ppf four\n#pragma ppf four\n", false, 0 },
@@ -4690,9 +4691,9 @@ static bool pp_test_raw_recovery_failures(void)
 
 // #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
-// starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
-// pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing
-// taken away, gives F's whole expansion.
+// starts with, so expanding F(X)'s argument grows its origins first. The direct path expands in pp->arguments; the
+// scalar path first captures the expansion. Limit the buffer each path actually fills: each fault must give one
+// fatal error and no output token. The control, with nothing taken away, gives F's whole expansion in both modes.
 static bool pp_test_direct_argument_failures(void)
 {
     enum
@@ -4707,25 +4708,29 @@ static bool pp_test_direct_argument_failures(void)
     }
     length += (uint32_t)snprintf(source + length, sizeof(source) - length, "\nF(X)\n");
     bool result = true;
-    for (uint32_t fault = 0; fault < 3; fault += 1)
+    for (uint32_t run = 0; run < 6; run += 1)
     {
+        const uint32_t fault = run % 3;
         static InternTable table;
         static Preprocessor pp;
-        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .quiet = true };
+        const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .scalar = run >= 3, .quiet = true };
         const bool initialized = intern_initialize(&table) && pp_initialize(&pp, &options, &table);
         const uint32_t capacity = initialized ? pp.arguments.capacity : 0;
+        const uint32_t captures = initialized ? pp.captures.capacity : 0;
         pp.fail_origin_growth = initialized && fault == 0;
         pp.arguments.capacity = initialized && fault == 1 ? 64 : capacity;
+        pp.captures.capacity = initialized && fault == 1 && pp.options.scalar ? 64 : captures;
         const bool ran = initialized && pp_run_source(&pp, "direct-argument-failure.c", (const uint8_t*)source, length);
         const bool passed = initialized && (fault == 2 ? ran && !pp.fatal && pp.output.count == PP_TEST_DIRECT_TOKENS + 2
                                                        : !ran && pp.fatal && pp.errors == 1 && pp.output.count == 0);
         if (!passed)
         {
-            printf("direct argument failure %u: ran %u, fatal %u, errors %u, output %u\n", fault, ran, initialized && pp.fatal, initialized ? pp.errors : 0,
-                   initialized ? pp.output.count : 0);
+            printf("direct argument failure %u, scalar %u: ran %u, fatal %u, errors %u, output %u\n", fault, options.scalar, ran, initialized && pp.fatal,
+                   initialized ? pp.errors : 0, initialized ? pp.output.count : 0);
         }
         result = result && passed;
         pp.arguments.capacity = capacity;
+        pp.captures.capacity = captures;
         pp.fail_origin_growth = false;
         if (initialized)
         {

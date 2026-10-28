@@ -245,7 +245,7 @@ static int run_assembler_command(int count, char** arguments)
     bool markers;
     valid = valid && pp_parse_options((int)preprocess_count, preprocess_arguments, &preprocessing, &arena, &input, &output, &markers);
     const bool preprocessed = input != 0 && strlen(input) >= 2 && strcmp(input + strlen(input) - 2, ".S") == 0;
-    preprocessing.scalar = !options.vectorized;
+    preprocessing.scalar = !BUSTER_VECTOR_PATH(options.vectorized);
     int status = 1;
     if (!valid || input == 0)
     {

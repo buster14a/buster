@@ -683,6 +683,8 @@ static bool cbuiltin_lower_slot_valid(const CBuiltinLowerBuffer* buffer, uint32_
 
 static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, const CBuiltinLowerCall* call, bool vector)
 {
+    (void)vector;
+
     CBuiltinLowerResult result = { 0 };
     CBuiltinLowerRecipe recipe = { 0 };
     const bool unary = call != 0 && call->id > CBUILTIN_NONE && call->id <= CBUILTIN_FFSLL;
@@ -737,7 +739,7 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
             result.count = recipe.count;
             result.temporary_first = buffer->local_count;
             result.temporary_count = recipe.temporary_count;
-            if (vector)
+            if (BUSTER_VECTOR_PATH(vector))
             {
                 for (uint32_t i = 0; i < recipe.count; i += 64)
                 {
@@ -771,10 +773,16 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
     return result;
 }
 
+static CBuiltinLowerResult cbuiltin_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinLowerCall* call);
+
 static CBuiltinLowerResult cbuiltin_lower(CBuiltinLowerBuffer* buffer, const CBuiltinLowerCall* call)
 {
+#if !BUSTER_HOST_VECTOR
+    return cbuiltin_lower_scalar(buffer, call);
+#else
     const CBuiltinLowerResult result = cbuiltin_lower_append(buffer, call, true);
     return result;
+#endif
 }
 
 static CBuiltinLowerResult cbuiltin_lower_scalar(CBuiltinLowerBuffer* buffer, const CBuiltinLowerCall* call)

@@ -15,7 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_SSA_NONE UINT32_MAX
 #define BUSTER_SSA_VALUE 0
@@ -262,8 +262,10 @@ static SsaError ssa_check_input(const SsaInput* input)
 
 static void ssa_promote(SsaWork* work, bool vector)
 {
+    (void)vector;
+
     const SsaInput* input = work->input;
-    if (vector)
+    if (BUSTER_VECTOR_PATH(vector))
     {
         for (uint64_t first = 0; first < input->local_count; first += 64)
         {
@@ -322,13 +324,15 @@ static void ssa_promote(SsaWork* work, bool vector)
 // frontier matrix. No loops are requested. This bound follows dominators.c's published column/storage contract.
 static SsaError ssa_analyze(SsaWork* work, bool vector)
 {
+    (void)vector;
+
     Arena* scratch = work->scratch;
     const SsaInput* input = work->input;
     const uint64_t saved = scratch->length;
     const uint32_t blocks = input->block_count;
     const uint64_t row_bytes = ((uint64_t)blocks + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_BYTES;
     uint64_t capacity = blocks == 0 ? 0 : ((uint64_t)blocks * 7 + 1) * sizeof(uint32_t);
-    if (vector && blocks != 0)
+    if (BUSTER_VECTOR_PATH(vector) && blocks != 0)
     {
         capacity = ((capacity + BUSTER_DOMINATOR_VECTOR_BYTES - 1) & ~(uint64_t)(BUSTER_DOMINATOR_VECTOR_BYTES - 1)) + (uint64_t)blocks * row_bytes;
     }
@@ -355,8 +359,8 @@ static SsaError ssa_analyze(SsaWork* work, bool vector)
             .predecessors = work->result.predecessors,
         };
         const DominatorOptions options = {
-            .path = vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR,
-            .outputs = vector ? BUSTER_DOMINATOR_FRONTIERS : 0,
+            .path = BUSTER_VECTOR_PATH(vector) ? DOMINATOR_VECTOR : DOMINATOR_SCALAR,
+            .outputs = BUSTER_VECTOR_PATH(vector) ? BUSTER_DOMINATOR_FRONTIERS : 0,
             .max_matrix_bytes = BUSTER_SSA_DOMINANCE_BYTES,
         };
         const DominatorStatus status = dominators_analyze(&output, &temporary, &cfg, options, &work->dominators);
@@ -385,6 +389,8 @@ static bool ssa_dominates(const SsaWork* work, uint32_t definition, uint32_t use
 
 static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector)
 {
+    (void)vector;
+
     *work = (SsaWork){
         .input = input,
         .scratch = scratch,
@@ -409,7 +415,7 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
     uint32_t* cursor = 0;
     if (error == SSA_OK)
     {
-        ssa_promote(work, vector);
+        ssa_promote(work, BUSTER_VECTOR_PATH(vector));
         cursor = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
         if (cursor == 0 || !dataflow_create(scratch, input->block_count, work->promoted_count, input->edge_count, &work->flow))
         {
@@ -455,7 +461,7 @@ static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch
                 work->result.predecessor_edges[slot] = edge;
             }
         }
-        error = ssa_analyze(work, vector);
+        error = ssa_analyze(work, BUSTER_VECTOR_PATH(vector));
     }
     if (error == SSA_OK)
     {
@@ -951,6 +957,9 @@ static SsaError ssa_rename_vector(SsaWork* work)
 
 static SsaError ssa_construct_vector(SsaWork* work)
 {
+#if !BUSTER_HOST_VECTOR
+    return ssa_construct_scalar(work);
+#else
     SsaError error = ssa_place_phis(work);
     if (error == SSA_OK)
     {
@@ -961,6 +970,7 @@ static SsaError ssa_construct_vector(SsaWork* work)
         error = ssa_rename_vector(work);
     }
     return error;
+#endif
 }
 
 // Cleanup is followed by compacting only the phis reachable from original promoted reads. Alias substitution can
@@ -1339,14 +1349,16 @@ static SsaError ssa_simplify(SsaWork* work)
 
 static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
 {
+    (void)vector;
+
     SsaError error = output != 0 && scratch != 0 && output != scratch && result != 0 ? ssa_check_input(input) : SSA_ERROR_INVALID;
     const uint64_t output_length = output == 0 ? 0 : output->length;
     const uint64_t scratch_length = scratch == 0 ? 0 : scratch->length;
     SsaWork work = { 0 };
     if (error == SSA_OK)
     {
-        vector = vector && ssa_vector_fits(input->block_count);
-        error = ssa_prepare(&work, input, scratch, vector);
+        vector = BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count);
+        error = ssa_prepare(&work, input, scratch, BUSTER_VECTOR_PATH(vector));
     }
     if (error == SSA_OK)
     {
@@ -1354,7 +1366,7 @@ static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scra
     }
     if (error == SSA_OK)
     {
-        error = vector ? ssa_construct_vector(&work) : ssa_construct_scalar(&work);
+        error = BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work) : ssa_construct_scalar(&work);
     }
     if (error == SSA_OK)
     {
@@ -1375,9 +1387,15 @@ static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scra
     return error;
 }
 
+static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result);
+
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
+#if !BUSTER_HOST_VECTOR
+    return ssa_build_scalar(input, output, scratch, result);
+#else
     return ssa_build_path(input, output, scratch, result, true);
+#endif
 }
 
 static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
