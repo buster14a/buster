@@ -70,6 +70,8 @@ struct CheckVectorShuffle
 {
     uint64_t constant[8];
     uint32_t constant_bytes;
+    // A narrow shuffle's second vector, a constant of 16 bytes (check_vector_narrow_shuffle_row).
+    uint64_t second[8];
     bool reads_b;
     bool permutes;
 };
@@ -229,6 +231,86 @@ static const char* check_vector_convert_row(const TypeTable* types, uint64_t tar
     if (reason == NULL && (target & needed) != needed)
     {
         reason = "vector conversions of 8-bit elements to 16-bit ones without AVX-512BW";
+    }
+    return reason;
+}
+
+// The row of a shuffle of a conversion into a vector narrower than 16 bytes (`narrow`, which Tier 0 has no class for)
+// with a constant vector of its type (`b_bytes`, its bytes, or NULL where the shuffle reads none of its elements): the
+// intrinsics' narrowing conversions, which widen the result back with zeros
+// (`__builtin_shufflevector(__builtin_convertvector(x, v4qi), (v4qi){0, 0, 0, 0}, 0, 1, ..., 7, 7, ...)`). It truncates
+// x into its register's first bytes (check_vector_convert_row's VPMOV), which zeroes the rest: where every result
+// element is the conversion's at its place or a zero of the constant's past the conversion's, that is the result. Else
+// it permutes the two (VPERMT2, at the result's width or 16 bytes): the conversion's elements are the first table's, the
+// constant's the second's. Its operands are x, then where it permutes the constant (`plan->second`, 16 bytes) and the
+// index vector.
+static const char* check_vector_narrow_shuffle_row(const TypeTable* types, uint64_t target, TypeId converted, TypeId narrow, TypeId result,
+                                                   const uint32_t* indices, const uint8_t* b_bytes, Tier0Operation* row, CheckVectorShuffle* plan)
+{
+    const CheckVectorShape in = check_vector_builtin_shape(types, converted);
+    const CheckVectorShape middle = check_vector_builtin_shape(types, narrow);
+    const CheckVectorShape out = check_vector_builtin_shape(types, result);
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const char* reason = check_vector_convert_row(types, target, converted, in.bytes, narrow, row);
+    bool in_place = true;
+    bool reads_b = false;
+    for (uint32_t i = 0; i < out.lanes && i < BUSTER_CHECK_VECTOR_SHUFFLE_LANES; i += 1)
+    {
+        const uint32_t k = indices[i];
+        bool zero = k != BUSTER_CHECK_VECTOR_SHUFFLE_UNDEFINED && k >= middle.lanes && b_bytes != NULL;
+        for (uint32_t byte = 0; zero && byte < out.element; byte += 1)
+        {
+            zero = b_bytes[(k - middle.lanes) * out.element + byte] == 0;
+        }
+        in_place &= k == BUSTER_CHECK_VECTOR_SHUFFLE_UNDEFINED || (i < middle.lanes ? k == i : zero);
+        reads_b |= k != BUSTER_CHECK_VECTOR_SHUFFLE_UNDEFINED && k >= middle.lanes;
+    }
+    *plan = (CheckVectorShuffle){ .reads_b = reads_b && !in_place, .permutes = !in_place };
+    if (reason == NULL && (row->record_count != 1 || out.element != middle.element || out.lanes > BUSTER_CHECK_VECTOR_SHUFFLE_LANES ||
+                           middle.bytes >= 16 || (reads_b && b_bytes == NULL)))
+    {
+        reason = "vector types of other than 16, 32 or 64 bytes";
+    }
+    else if (reason == NULL)
+    {
+        row->result_bytes = (uint8_t)out.bytes;
+        if (!in_place)
+        {
+            const uint32_t bytes = out.bytes > 16 ? out.bytes : 16;
+            const uint32_t table = bytes / out.element;
+            uint8_t constant[64] = { 0 };
+            for (uint32_t i = 0; i < out.lanes; i += 1)
+            {
+                const uint32_t k = indices[i];
+                constant[i * out.element] = (uint8_t)(k == BUSTER_CHECK_VECTOR_SHUFFLE_UNDEFINED ? 0 : k < middle.lanes ? k : k - middle.lanes + table);
+            }
+            memcpy(plan->constant, constant, sizeof(constant));
+            plan->constant_bytes = bytes;
+            uint8_t second[64] = { 0 };
+            if (b_bytes != NULL)
+            {
+                memcpy(second, b_bytes, middle.bytes);
+            }
+            memcpy(plan->second, second, sizeof(second));
+            static const CheckVectorForms permutes[4] = {
+                { { X86_FORM_VPERMT2B_X_X_XM128, X86_FORM_VPERMT2B_Y_Y_YM256, X86_FORM_VPERMT2B_Z_Z_ZM512 } },
+                { { X86_FORM_VPERMT2W_X_X_XM128, X86_FORM_VPERMT2W_Y_Y_YM256, X86_FORM_VPERMT2W_Z_Z_ZM512 } },
+                { { X86_FORM_VPERMT2D_X_X_XM128, X86_FORM_VPERMT2D_Y_Y_YM256, X86_FORM_VPERMT2D_Z_Z_ZM512 } },
+                { { X86_FORM_VPERMT2Q_X_X_XM128, X86_FORM_VPERMT2Q_Y_Y_YM256, X86_FORM_VPERMT2Q_Z_Z_ZM512 } },
+            };
+            row->records[1] = check_vector_lower_record(permutes[check_vector_builtin_element(out.element)].forms[check_vector_builtin_width(bytes)], v0,
+                                                        BUSTER_TIER0_ROLE_VECTOR(2), BUSTER_TIER0_ROLE_VECTOR(1));
+            row->record_count = 2;
+            row->operand_count = 3;
+            row->operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[1] = 16;
+            row->operand_classes[2] = BUSTER_TYPED_CLASS_VECTOR;
+            row->operand_bytes[2] = (uint8_t)bytes;
+            const uint64_t needed = out.element == 1 ? BUSTER_X86_FEATURE(AVX512VBMI) : out.element == 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
+            reason = (target & needed) != needed ? (out.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
+                                                                       "vector shuffles of 16-bit elements without AVX-512BW") :
+                                                   NULL;
+        }
     }
     return reason;
 }

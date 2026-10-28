@@ -1410,19 +1410,69 @@ What the lowering covers past scalars (#145's programs):
   low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
   VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
   VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
-  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
-  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
-  integers. A builtin the table doesn't name is refused by name ("this x86
-  builtin"), and so are one whose instructions the target hasn't, a gather's or
-  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
-  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
-  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
-  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  scatters, VPBLENDVB and VPSHUFBITQMB, and the masked truncating stores
+  (`pmov*512mem_mask`: VPMOV into memory under the mask). A function with an X86
+  entry has vectors (`Tier0Function.vectors`) whatever its values' classes: an
+  opmask's are integers. A builtin the table doesn't name is refused by name
+  ("this x86 builtin"), and so are one whose instructions the target hasn't and
+  a gather's or a scatter's scale other than 1, 2, 4 or 8. Those whose
+  instructions name fixed registers or have legacy encodings, which no row
+  takes, are calls of per-unit leaves, as the atomic builtins' are
+  (`c_builtin_x86_helpers.c`, planned by `c_check_program_helpers.c`), their
+  arguments and result unsigned longs: `__rdtsc`, `pause`, `xgetbv`, `monitorx`,
+  `mwaitx` (whose leaf saves rbx, as its unwind table says) and `tzcnt_u16`,
+  `_u32` and `_u64` (bsf and cmov, the width for 0, as clang's code gives it).
+  `__builtin_unpredictable` is its operand's value, and `__builtin_assume`
+  nothing: its operand isn't evaluated, as clang's isn't. clang's header
+  builtins (`_mm_pause`, `_mm_lfence` and the others its headers declare as
+  functions, which its calls take for the builtins) are still calls of those
+  functions, which no library defines. `test-checker`'s x86 programs
+  (`c_check_program_x86_test.c`) call each family's builtins at their
   prototypes' types, the masks' and the vectors' from the call's argument, with
   every result folded into the program's hash, by both paths against clang
   -O0's code for znver5; they run where the host has the rows' features
   (`x86_target_native`), and compile and link elsewhere. `test-checker
   --program-vectors` runs them and the vector programs alone.
+- **Generic vector builtins (#136, #148).** `__builtin_shufflevector`,
+  `__builtin_convertvector`, the `__builtin_elementwise_*` functions and
+  `__builtin_reduce_*` of integer elements are X86 entries of rows of their own
+  (`c_check_program_vector_builtins.c`):
+  - a shuffle by constant indices is VPERMT2 of its two vectors by an index
+    vector, a constant (`Tier0Function.vector_constants`), at the wider of the
+    operands' and the result's widths, or nothing where every defined element
+    stays at its place. Its second vector is left out where none of its
+    elements is read and its evaluation has no effects, and
+    `__builtin_nondeterministic_value`'s isn't evaluated;
+  - a conversion is VPMOVSX or VPMOVZX at the result's width, VPMOV's
+    truncation at the operand's, or nothing between elements of one size. One
+    of a shuffle's first elements (a vector's low half, as the intrinsics widen
+    one) converts that shuffle's first vector in place;
+  - the intrinsics' narrowing conversions (`_mm_cvtepi32_epi8` and the rest: a
+    shuffle of a conversion into a vector of fewer than 16 bytes, which Tier 0
+    has no class for, with a compound literal of constants) are VPMOV's
+    truncation, which zeroes the rest of its register, where every element past
+    the conversion's is a zero of the literal's; else that, then VPERMT2 with
+    the literal's bytes as its second table. Such a literal has no local and
+    isn't evaluated, and one evaluated anywhere else is refused by name;
+  - max and min, the saturating sums and differences of 8- and 16-bit elements,
+    abs, popcount (with BITALG or VPOPCNTDQ), clzg (VPLZCNT, with its fallback
+    blended in where an element is zero) and the funnel shifts (VPSHLDV and
+    VPSHRDV, with VBMI2) are an instruction each;
+  - a reduction halves its vector (VEXTRACTI64X4, VEXTRACTI32X4, VPSHUFD, VPSRLD
+    and VPSRLW) and applies its operation at each step, then moves the element
+    into a general register, in two rows where that is more than a row's 8
+    records.
+
+  `__builtin_nondeterministic_value` of a vector or a scalar is zeros. Floating
+  elements, a shuffle by a vector of indices, bit reversal, 8-bit
+  multiplication, the funnel shifts of 8-bit elements, the leading zero counts
+  of 8- and 16-bit ones, and the rows whose extensions the target hasn't (VBMI
+  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2) are refused
+  by name. `test-checker`'s vector builtin programs
+  (`c_check_program_vector_builtins_test.c`) call each at every width, the
+  narrowing conversions as the headers write them, with the masked truncating
+  stores and the leaves (monitorx and mwaitx where the host has MWAITX), by both
+  paths against clang -O0's code for znver5.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame

@@ -21,7 +21,11 @@ static const char check_test_vector_builtin_types[] =
     "typedef long long v2ds __attribute__((vector_size(16)));typedef unsigned long long v2du __attribute__((vector_size(16)));"
     "typedef long long v4ds __attribute__((vector_size(32)));typedef unsigned long long v4du __attribute__((vector_size(32)));"
     "typedef long long v8ds __attribute__((vector_size(64)));typedef unsigned long long v8du __attribute__((vector_size(64)));"
-    "typedef float v4sf __attribute__((vector_size(16)));typedef double v4df __attribute__((vector_size(32)));\n"
+    "typedef float v4sf __attribute__((vector_size(16)));typedef double v4df __attribute__((vector_size(32)));"
+    "typedef char v16qc __attribute__((vector_size(16)));typedef char v32qc __attribute__((vector_size(32)));"
+    "typedef signed char v2qs __attribute__((vector_size(2)));typedef signed char v4qs __attribute__((vector_size(4)));"
+    "typedef signed char v8qs __attribute__((vector_size(8)));typedef short v2hs __attribute__((vector_size(4)));"
+    "typedef short v4hs __attribute__((vector_size(8)));typedef int v2ss __attribute__((vector_size(8)));\n"
     "static unsigned fold(unsigned h,const void*p,unsigned long n){const unsigned char*b=p;for(unsigned long i=0;i<n;i++)h=(h^b[i])*16777619u;return h;}\n"
     "#define FOLD(v) h=fold(h,&(v),sizeof(v))\n"
     "static void fill(void*p,unsigned long n,unsigned s){unsigned char*b=p;for(unsigned long i=0;i<n;i++){s=s*1103515245u+12345u;b[i]=(unsigned char)(s>>16);}}\n";
@@ -120,23 +124,84 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
             "return (int)h;}",
         },
         {
+            // The intrinsics' narrowing conversions as the headers write them (_mm_cvtepi32_epi8 and the rest: a shuffle of a
+            // conversion into a vector of fewer than 16 bytes with a constant one), then constants of other bytes at other
+            // places, a result of 32 bytes and a second vector of __builtin_nondeterministic_value's; and the masked
+            // truncating stores (_mm512_mask_cvtepi32_storeu_epi8 and the rest).
+            "vector-narrowing",
+            "int tested(int n){unsigned h=2166136261u;v4ss d4;v8ss d8;v2ds q2;v4ds q4;v8hs w8;v16ss d16;v32hs w32;v8ds q8;"
+            "fill(&d4,16,n);fill(&d8,32,n+1);fill(&q2,16,n+2);fill(&q4,32,n+3);fill(&w8,16,n+4);fill(&d16,64,n+5);fill(&w32,64,n+6);fill(&q8,64,n+7);"
+            "v16qs r1=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),(v4qs){0,0,0,0},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);FOLD(r1);"
+            "v16qs r2=__builtin_shufflevector(__builtin_convertvector(d8,v8qs),(v8qs){0,0,0,0,0,0,0,0},0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);FOLD(r2);"
+            "v8hs r3=__builtin_shufflevector(__builtin_convertvector(d4,v4hs),(v4hs){0,0,0,0},0,1,2,3,4,5,6,7);FOLD(r3);"
+            "v16qs r4=__builtin_shufflevector(__builtin_convertvector(q2,v2qs),(v2qs){0,0},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);FOLD(r4);"
+            "v16qs r5=__builtin_shufflevector(__builtin_convertvector(q4,v4qs),(v4qs){0,0,0,0},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);FOLD(r5);"
+            "v4ss r6=__builtin_shufflevector(__builtin_convertvector(q2,v2ss),(v2ss){0,0},0,1,2,3);FOLD(r6);"
+            "v8hs r7=__builtin_shufflevector(__builtin_convertvector(q2,v2hs),(v2hs){0,0},0,1,2,3,3,3,3,3);FOLD(r7);"
+            "v8hs r8=__builtin_shufflevector(__builtin_convertvector(q4,v4hs),(v4hs){0,0,0,0},0,1,2,3,4,5,6,7);FOLD(r8);"
+            "v16qs r9=__builtin_shufflevector(__builtin_convertvector(w8,v8qs),(v8qs){0,0,0,0,0,0,0,0},0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);FOLD(r9);"
+            "v16qs r10=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),(v4qs){1,-2,3,(signed char)200},6,0,4,1,7,5,2,3,-1,4,4,0,1,2,3,5);"
+            "r10[8]=0;FOLD(r10);"
+            "v32qs r11=__builtin_shufflevector(__builtin_convertvector(d8,v8qs),(v8qs){9,8,7,6,5,4,3,2},0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,"
+            "0,1,2,3,4,5,6,7,15,14,13,12,11,10,9,8);FOLD(r11);"
+            "v8hs r12=__builtin_shufflevector(__builtin_convertvector(q4,v4hs),(v4hs){-1,2,-3,4},4,0,5,1,6,2,7,3);FOLD(r12);"
+            "v16qs r13=__builtin_shufflevector(__builtin_convertvector(d4,v4qs),__builtin_nondeterministic_value((v4qs){0}),0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);"
+            "signed char r13b[4]={r13[0],r13[1],r13[2],r13[3]};FOLD(r13b);"
+            "char o1[16]={0},o6[32]={0};short o2[16]={0},o5[8]={0};signed char o3[16]={0};int o4[8]={0};"
+            "__builtin_ia32_pmovdb512mem_mask((v16qc*)o1,d16,(unsigned short)(n*40503u));__builtin_ia32_pmovdw512mem_mask((v16hs*)o2,d16,(unsigned short)(n*7919u));"
+            "__builtin_ia32_pmovqb512mem_mask((v16qc*)o3,q8,(unsigned char)(n*77u));__builtin_ia32_pmovqd512mem_mask((v8ss*)o4,q8,(unsigned char)(n*13u));"
+            "__builtin_ia32_pmovqw512mem_mask((v8hs*)o5,q8,(unsigned char)(n*91u));__builtin_ia32_pmovwb512mem_mask((v32qc*)o6,w32,(unsigned)n*2654435761u);"
+            "FOLD(o1);FOLD(o2);FOLD(o3);FOLD(o4);FOLD(o5);FOLD(o6);"
+            "return (int)h;}",
+        },
+        {
+            // The leaves (c_builtin_x86_helpers.c): rdtsc's counts in order, pause, xgetbv's XCR0, the trailing zeros' counts
+            // of 0 and of others at each width, at run time; and the hints, whose operands are a value and nothing.
+            "x86-leaves",
+            "int tested(int n){unsigned h=2166136261u;unsigned zero=(unsigned)n>>31;"
+            "unsigned long long t0=__rdtsc(),t1=__rdtsc(),t2=__rdtsc();int ordered=t1>=t0&&t2>=t1;FOLD(ordered);__builtin_ia32_pause();"
+            "unsigned long long x0=__builtin_ia32_xgetbv(zero);FOLD(x0);"
+            "unsigned z[]={__builtin_ia32_tzcnt_u32(zero),__builtin_ia32_tzcnt_u32(1u<<(n&31)),__builtin_ia32_tzcnt_u32((unsigned)n*2654435761u),"
+            "__builtin_ia32_tzcnt_u32(zero|0x80000000u)};FOLD(z);"
+            "unsigned long long y[]={__builtin_ia32_tzcnt_u64(zero),__builtin_ia32_tzcnt_u64(1ull<<(n*7&63)),__builtin_ia32_tzcnt_u64(zero|1ull<<63),"
+            "__builtin_ia32_tzcnt_u64((unsigned long long)n<<40)};FOLD(y);"
+            "unsigned short s[]={__builtin_ia32_tzcnt_u16((unsigned short)zero),__builtin_ia32_tzcnt_u16((unsigned short)(n<<9)),"
+            "__builtin_ia32_tzcnt_u16((unsigned short)(zero|0x8000u)),__builtin_ia32_tzcnt_u16((unsigned short)(n<<16))};FOLD(s);"
+            "long u=__builtin_unpredictable(n*3L);int p=__builtin_unpredictable(n>0);FOLD(u);FOLD(p);__builtin_assume(n>0);"
+            "return (int)h;}",
+        },
+        {
             "vector-nondeterministic",
             "int tested(int n){unsigned h=2166136261u;v8ds a;fill(&a,64,n);v8ds z=__builtin_nondeterministic_value(a);for(int i=0;i<8;i++)z[i]=(long long)i*n;FOLD(z);"
             "int k=__builtin_nondeterministic_value(n);k=n+1;FOLD(k);"
             "return (int)h;}",
         },
     };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
+    // monitorx and mwaitx's leaves, with values live across them (mwaitx's saves rbx), run where the host has MWAITX
+    // (AMD's): mwaitx waits until a write to the monitored line or for its timer, enabled by the extensions' bit 1, of at
+    // most n thousand TSC ticks.
+    static const char mwaitx[] =
+        "int tested(int n){unsigned h=2166136261u;int w=n;long a=n*3L,b=n*5L,c=n*7L,d=n*11L,e=n*13L,f=n*17L;"
+        "__builtin_ia32_monitorx(&w,0,0);__builtin_ia32_mwaitx(2,0,(unsigned)n*1000u);long r[]={a,b,c,d,e,f};FOLD(r);FOLD(w);"
+        "return (int)h;}";
+    const bool has_mwaitx = (x86_target_native().features & BUSTER_X86_FEATURE(MWAITX)) != 0;
+    for (uint32_t i = 0; i <= BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
-        const size_t length = strlen(check_test_vector_builtin_types) + strlen(programs[i][1]) + 1;
+        const char* program = i < BUSTER_ARRAY_LENGTH(programs) ? programs[i][1] : mwaitx;
+        const size_t length = strlen(check_test_vector_builtin_types) + strlen(program) + 1;
         char* source = malloc(length);
         check_test_expect(test, source != 0, "vector builtin program source");
         if (source != 0)
         {
-            snprintf(source, length, "%s%s", check_test_vector_builtin_types, programs[i][1]);
-            check_test_program_source_native_limits(test, source, programs[i][0], clang, false, -1, 0, target, run_native);
+            snprintf(source, length, "%s%s", check_test_vector_builtin_types, program);
+            check_test_program_source_native_limits(test, source, i < BUSTER_ARRAY_LENGTH(programs) ? programs[i][0] : "x86-mwaitx", clang, false, -1, 0,
+                                                    target, i < BUSTER_ARRAY_LENGTH(programs) ? run_native : run_native && has_mwaitx);
             free(source);
         }
+    }
+    if (run_native && !has_mwaitx)
+    {
+        printf("  x86-mwaitx: native execution skipped (the host hasn't MWAITX); the program compiles and links\n");
     }
 }
 
@@ -147,7 +212,8 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
     static const char types[] =
         "typedef signed char v16qs __attribute__((vector_size(16)));typedef unsigned char v16qu __attribute__((vector_size(16)));"
         "typedef short v8hs __attribute__((vector_size(16)));typedef int v4ss __attribute__((vector_size(16)));"
-        "typedef unsigned v4su __attribute__((vector_size(16)));typedef float v4sf __attribute__((vector_size(16)));";
+        "typedef unsigned v4su __attribute__((vector_size(16)));typedef float v4sf __attribute__((vector_size(16)));"
+        "typedef signed char v4qs __attribute__((vector_size(4)));";
     // Each fixture's target, source, reason and initialized declarations.
     static const struct
     {
@@ -169,6 +235,9 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int n){v4sf a={(float)n};float c=__builtin_reduce_max(a);return (int)c;}", "vector reductions of floating elements", 2 },
         { "znver5", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_fshl(a,b,b);return c[0];}",
           "vector funnel shifts of 8-bit elements", 3 },
+        { "znver5", "int tested(int n){return ((v4qs){(signed char)n,1,2,3})[1];}", "vector types of other than 16, 32 or 64 bytes", 0 },
+        { "znver5", "int tested(int n){v4ss a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v4qs),(v4qs){(signed char)n},0,1,2,3,4,5,6,7,7,7,7,7,7,7,7,7);"
+          "return c[0];}", "vector types of other than 16, 32 or 64 bytes", 2 },
         { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
           "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },
         { "x86-64-v4", "int tested(int n){v16qu a={(unsigned char)n};v16qu c=__builtin_elementwise_popcount(a);return c[0];}",
