@@ -431,3 +431,55 @@ static bool x86_target_test_gas(const char* directory)
     printf("target forms against GAS architecture gate: %s (%llu comparisons, %u explicit GAS AVX512VL/FMA gaps; independent feature removals)\n", passed ? "pass" : "FAIL", (unsigned long long)checks, gaps);
     return passed;
 }
+
+// Compare cached admission with the direct, uncached predicate for every row. This also catches a future
+// syntax predicate gaining an input that was omitted from the cache key, including false-positive admission.
+static bool x86_target_test_matcher_admission(void)
+{
+    Arena arena = arena_reserve(1ull << 20);
+    X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(&arena, X86MatchIndex, 1);
+    bool passed = index != 0;
+    static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
+    uint32_t configurations = 0;
+    uint8_t allowed[X86_FORM_COUNT];
+    uint8_t seen[X86_FORM_COUNT];
+    for (uint32_t p = 0; index != 0 && p <= BUSTER_ARRAY_LENGTH(profiles); p += 1)
+    {
+        X86Target target = { .features = UINT64_MAX };
+        if (p < BUSTER_ARRAY_LENGTH(profiles))
+        {
+            passed &= x86_target_parse(profiles[p], strlen(profiles[p]), &target);
+        }
+        const uint64_t original = target.features;
+        for (uint32_t bit = 0; bit <= X86_FEATURE_COUNT; bit += 1)
+        {
+            target.features = bit == X86_FEATURE_COUNT ? original : original & ~(UINT64_C(1) << bit);
+            x86_target_forms_scalar(&target, allowed);
+            x86_match_initialize(index, &target);
+            memset(seen, 0, sizeof(seen));
+            const uint32_t count = index->begin[BUSTER_X86_MATCH_BUCKETS];
+            passed &= count <= X86_FORM_COUNT;
+            for (uint32_t at = 0; at < count && at < X86_FORM_COUNT; at += 1)
+            {
+                const uint32_t form = index->forms[at];
+                passed &= form < X86_FORM_COUNT;
+                if (form < X86_FORM_COUNT)
+                {
+                    passed &= seen[form] == 0;
+                    seen[form] = 1;
+                }
+            }
+            for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+            {
+                uint8_t roles[4];
+                const X86FormDescription* row = &x86_form_descriptions[form];
+                const bool expected = form < BUSTER_X86_FORM_LEGACY_MODES && allowed[form] && x86_match_supported(row) && x86_match_roles(row->syntax, roles) <= 4;
+                passed &= seen[form] == expected;
+            }
+            configurations += 1;
+        }
+    }
+    printf("target matcher admission: %s (%u configurations, every form against uncached syntax and scalar ISA)\n", passed ? "pass" : "FAIL", configurations);
+    arena_release(&arena);
+    return passed;
+}

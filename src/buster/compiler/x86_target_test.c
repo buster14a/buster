@@ -8,9 +8,6 @@
 
 #include "buster/compiler/x86_target_policy_test.c"
 
-// The complete command runs in the backend unit, alongside its selector fixtures and mutable encoder state.
-bool run_x86_target_selection_tests(void);
-
 static bool x86_target_test_cpuid(void)
 {
     X86CpuId cpu = { .xcr0 = 0xe6, .znver5 = true };
@@ -340,8 +337,8 @@ static bool x86_target_test_preprocessor(const char* directory)
     return passed;
 }
 
-// Keep these fixtures with the preprocessor's home. Calling its private test helpers from the backend would emit
-// another complete preprocessor there; the policy command and its mutable encoder/selector state stay in BACKEND.
+// Keep these fixtures with the preprocessor's home and its private state. The policy command runs in FRONTEND;
+// the separate selector/native command uses only BACKEND's encoder and selector state.
 BUSTER_HOME_FRONTEND bool run_x86_target_preprocessor_tests(const char* directory)
 {
     bool passed = x86_target_test_compiler_macros();
@@ -353,10 +350,10 @@ static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
     passed &= x86_target_test_forms();
+    passed &= x86_target_test_matcher_admission();
     passed &= x86_target_test_matrix();
     passed &= x86_target_test_fma_masks();
     passed &= x86_target_test_pages();
-    passed &= run_x86_target_selection_tests();
     char directory[] = "/tmp/buster-target-XXXXXX";
     if (mkdtemp(directory) != 0)
     {

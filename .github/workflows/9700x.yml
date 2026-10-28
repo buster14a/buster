@@ -562,6 +562,8 @@ jobs:
           ./build/compiler test-ssa
           == Test generated-code ISA policy
           ./build/compiler test-x86-target
+          == Test generated-code ISA selection and native records
+          ./build/compiler test-x86-target-selection
           == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
           ./build/compiler test-unwind --cross-check
           == Test C-source binding identities and scope semantics

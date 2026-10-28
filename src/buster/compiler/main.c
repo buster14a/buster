@@ -185,7 +185,6 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor_fuzz.c"
 #include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
-#include "buster/compiler/x86_target_test.c"
 int run_preprocessor_benchmark(int argc, char** argv);
 
 // The per-file jobs on lanes and the run-ahead that fill the preprocessor's file cache (c_files.c), and their tests, for
@@ -299,6 +298,7 @@ int run_floors_benchmark(int argc, char** argv);
 int run_branch_sizing_benchmark(int argc, char** argv);
 
 #include "buster/compiler/x86_match.c"
+#include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
 #include "buster/compiler/assembler_driver.c"
 #include "buster/compiler/assembler_test.c"
@@ -526,6 +526,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit.c"
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
@@ -715,9 +716,13 @@ static int main_command(int argc, char** argv, bool* found)
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
-    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-x86-target-selection") == 0)
+    {
+        result = run_x86_target_selection_tests() ? 0 : 1;
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_X86) && argc >= 2 && strcmp(argv[1], "test-x86-zen5") == 0)
     {

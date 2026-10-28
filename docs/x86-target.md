@@ -139,10 +139,11 @@ Those cases remain denied by the policy and covered by independent F|VL
 minimal-feature negatives; they are counted separately from external assembler
 comparisons. If a later assembler rejects them, they follow the normal comparison.
 
-`test-x86-target` runs in the backend unit with its encoder and selector state.
-Its macro and preprocessor fixtures call the frontend's shared entry, keeping
-those private test helpers with the preprocessor's implementation rather than
-emitting another copy in the backend.
+`test-x86-target` runs policy, profile and preprocessor checks in the frontend
+unit, with that unit's encoder and preprocessor state. The separate
+`test-x86-target-selection` command runs selector and native-emission fixtures
+in the backend unit, with its encoder and selector state. Each command reaches
+one copy of mutable state, and policy checks can run independently of selectors.
 
 Both matcher paths validate a candidate before encoding it to choose the
 shortest instruction. The scalar matcher does not repeat that same validation
@@ -150,16 +151,16 @@ inside a length-only call. Catalogue tests compare its length and every emitted
 byte with the checked scalar encoder, alongside malformed operands and ISA
 rejection checks.
 
-`test-x86-target` also replays the existing Tier 1 selector and native-emission
+The policy command compares every matcher's admitted form with the uncached
+syntax predicate and scalar ISA policy over all six profiles, every individual
+feature removal and an all-feature target. These checks have no selector dependency.
+
+`test-x86-target-selection` replays the existing Tier 1 selector and native-emission
 fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
 policy-owned Tier 0 consumer checks every compiled template and generated
 records from both paths, including floating values, calls, aggregate objects,
-indirect/TLS accesses and dynamic frames. The selector fixtures stay in the
-backend translation unit, and the entire command runs there so it reaches only
-one copy of mutable encoder state. The command also compares every matcher's
-admitted form with the uncached syntax predicate and scalar ISA policy over
-all six profiles, every individual feature removal and an all-feature target.
-These are bounded selector tests, separate
+indirect/TLS accesses and dynamic frames. The selector fixtures and their command stay in the
+backend translation unit, reaching only one copy of mutable encoder state. These are bounded selector tests, separate
 from full source/corpus acceptance.
 
 Target feature macros are compared with both Clang and GCC for all six profiles,
