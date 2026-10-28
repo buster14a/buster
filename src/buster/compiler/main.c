@@ -1378,8 +1378,15 @@ static int main_command(int argc, char** argv, bool* found)
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
 int main(int argc, char** argv)
 {
-    bool found = false;
-    int result = main_unit_x86(argc, argv, &found);
+    const int guardian = worker_budget_guardian_command(argc, argv);
+    // A pipe-style jobserver requires '+' recipes, which make executes even under -n. Honor its dry-run flag before
+    // dispatch, including -E and parse commands that need no worker lease themselves.
+    bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
+    int result = guardian >= 0 ? guardian : 0;
+    if (!found)
+    {
+        result = main_unit_x86(argc, argv, &found);
+    }
     if (!found)
     {
         result = main_unit_frontend(argc, argv, &found);
