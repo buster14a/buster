@@ -14,6 +14,7 @@ static int run_ir_simd_tests(int argc, char** argv)
     Arena output = arena_reserve(UINT64_C(1) << 24);
     Arena scratch = arena_reserve(UINT64_C(1) << 24);
     IrTestTally tally = { .seed = 732 };
+    ir_simd_typed_test(&tally);
     IrFunction function = { 0 };
     const IrSizes sizes = { .instruction_count = 2, .block_count = 1, .vector_constant_count = 1 };
     bool ready = argc == 0 && input.base != NULL && output.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &function) == IR_OK;

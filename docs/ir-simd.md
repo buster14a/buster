@@ -6,6 +6,17 @@ scalar/vector verification, canonical text, explicit consumer refusals and a
 bounded independent execution oracle. The typed adapter is subsequent
 integration work; this checkpoint alone does not complete the issue.
 
+The disjoint typed-operation decoder reads #717's real `Tier0Operation` rows.
+It recognizes exact EVEX i32 arithmetic/bitwise forms and compare-mask plus
+mask-to-0/-1 expansion at all three widths, retaining operand classes and byte
+widths. Output-target AVX-512F/VL, and DQ for compare expansion, are explicit
+requirements. Floating/other element widths, unmodeled predicates, changed
+register roles, addresses and predicated record decorations refuse before
+publishing a semantic action. Tests use the actual producer to make rows;
+baseline and native compiler-host modes must make identical admission decisions.
+This decoder does not yet translate a complete VECTOR/X86 typed function; that
+handoff remains coordinated with the active #131 corpus-adapter owner.
+
 The chosen initial vector shapes are `v4i32`, `v8i32` and `v16i32`: 128, 256 and
 512 bits containing 32-bit integer lanes. Signedness belongs to comparison
 predicates. Other integer element widths and floating lanes are unsupported

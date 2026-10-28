@@ -502,6 +502,7 @@ int run_backend_benchmark(int argc, char** argv);
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
+#include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
 #include "buster/compiler/ssa_ir.c"
 #include "buster/compiler/ir_validate.c"
@@ -549,6 +550,7 @@ bool run_x86_target_selection_tests(void);
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
 #include "buster/compiler/ir_stack_test.c"
+#include "buster/compiler/ir_simd_typed_test.c"
 #include "buster/compiler/ir_simd_consumer_test.c"
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
