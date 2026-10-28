@@ -270,8 +270,11 @@ static void stream_test_consumers(StreamTestTally* tally, const StreamProgram* p
     }
     char* record[] = { "perf", "record", "-q", "-m", "4M", "-e", "cycles:u", "-c", "20000", "--call-graph", "dwarf", "-o", data, "--", (char*)path, 0 };
     char* report[] = { "perf", "script", "-i", data, "-F", "ip,sym,srcline", 0 };
-    const bool recorded = object_test_run(record, "/dev/null", errors) == 0;
-    const bool scripted = recorded && object_test_run(report, output, errors) == 0;
+    const int record_status = object_test_run(record, "/dev/null", errors);
+    const bool recorded = record_status == 0;
+    const String8 record_errors = object_test_read_file(arena, errors);
+    const int script_status = recorded ? object_test_run(report, output, errors) : -1;
+    const bool scripted = recorded && script_status == 0;
     const String8 samples = scripted ? object_test_read_file(arena, output) : (String8){ 0 };
     // perf script's lines are an address and a symbol, each with its source line on the line after it: some name a
     // program function, some _start, a caller, and some give a line of streamed.c.
@@ -304,6 +307,28 @@ static void stream_test_consumers(StreamTestTally* tally, const StreamProgram* p
     }
     stream_test_expect(tally, scripted && named && reached, "perf's samples name the program's functions and reach _start", path);
     stream_test_expect(tally, scripted && sourced, "perf's samples give the functions' lines in streamed.c", path);
+    if (!(scripted && named && reached && sourced))
+    {
+        struct stat metadata = { 0 };
+        const bool data_present = stat(data, &metadata) == 0;
+        const String8 script_errors = recorded ? object_test_read_file(arena, errors) : (String8){ 0 };
+        printf("streaming perf: record exit status %d, script exit status %d, data present %u, data bytes %" PRIu64
+               ", sample text bytes %" PRIu64 ", named %u, reached _start %u, source rows %u\n",
+               record_status, script_status, data_present, data_present ? (uint64_t)metadata.st_size : 0,
+               samples.length, named, reached, sourced);
+        if (record_errors.pointer != NULL)
+        {
+            printf("perf record stderr: %.*s\n", (int)(record_errors.length < 4000 ? record_errors.length : 4000), record_errors.pointer);
+        }
+        if (script_errors.pointer != NULL)
+        {
+            printf("perf script stderr: %.*s\n", (int)(script_errors.length < 4000 ? script_errors.length : 4000), script_errors.pointer);
+        }
+        if (samples.pointer != NULL)
+        {
+            printf("perf script output: %.*s\n", (int)(samples.length < 4000 ? samples.length : 4000), samples.pointer);
+        }
+    }
 }
 
 static bool stream_test_same(String8 left, String8 right)
