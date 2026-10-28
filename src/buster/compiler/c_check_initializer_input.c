@@ -474,13 +474,25 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    const CheckInputLiteralTable* table = input->literal_tables;
     for (uint32_t at = 0; valid && at < count; at += 1)
     {
         const uint32_t token = declarations[at];
         CheckInitializer* plan = result->plans + at;
-        valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+        while (table != NULL && table->declaration < token)
+        {
+            table = table->next;
+        }
+        if (table != NULL && table->declaration == token)
+        {
+            *plan = table->plan;
+        }
+        else
+        {
+            valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
                                       input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
                                       input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+        }
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {
             valid = false;

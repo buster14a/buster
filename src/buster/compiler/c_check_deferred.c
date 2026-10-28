@@ -1175,6 +1175,15 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     if (valid)
     {
         (void)top_input;
+        // Literal tables belong to the top-level reader; their retained array type must follow the same replay as
+        // declared_types, particularly for tables after bodies that insert new types into the merged table.
+        for (CheckInputLiteralTable* table = input->literal_tables; table != NULL && valid; table = table->next)
+        {
+            const TypeId type = check_deferred_type(&parts[0], table->plan.type);
+            valid = type != 0;
+            table->plan.type = type;
+            table->part.type = type;
+        }
         input->strings = strings;
         input->string_count = string_total;
         input->regions = regions;
@@ -1412,7 +1421,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->reason = !valid ? "the deferred reader's own memory" : 0;
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = timing ? check_deferred_now() : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true);
     deferred->top.changes = 0;
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;
