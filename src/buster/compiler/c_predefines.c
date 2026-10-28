@@ -1507,15 +1507,23 @@ static bool predefines_target_valid(const char* triple)
     return rest != 0 && (strcmp(rest, "linux-gnu") == 0 || (vendor_end != 0 && strcmp(vendor_end + 1, "linux-gnu") == 0));
 }
 
+// build.sh records the build Clang driver's default triple. Direct builds without that definition retain the
+// historical default; an explicit target always overrides it.
+#ifndef BUSTER_CLANG_DEFAULT_TARGET
+#define BUSTER_CLANG_DEFAULT_TARGET "x86_64-pc-linux-gnu"
+#endif
+
 // The target triple's vendor name, as clang's __is_target_vendor reads it: the -target's ("unknown" when it names none)
-// or clang's default triple's, x86_64-pc-linux-gnu. *length gets its length.
+// or the build Clang's default triple's. *length gets its length.
 static const char* predefines_target_vendor(const PredefinesOptions* options, uint32_t* length)
 {
-    const char* rest = options->target != 0 ? strchr(options->target, '-') + 1 : 0;
+    const char* target = options->target != 0 ? options->target : BUSTER_CLANG_DEFAULT_TARGET;
+    const char* separator = strchr(target, '-');
+    const char* rest = separator != 0 ? separator + 1 : 0;
     const char* vendor_end = rest != 0 ? strchr(rest, '-') : 0;
-    const bool named = rest != 0 && strcmp(rest, "linux-gnu") != 0 && vendor_end != rest;
-    *length = rest == 0 ? 2 : named ? (uint32_t)(vendor_end - rest) : 7;
-    return rest == 0 ? "pc" : named ? rest : "unknown";
+    const bool named = rest != 0 && vendor_end != 0 && strcmp(rest, "linux-gnu") != 0 && vendor_end != rest;
+    *length = named ? (uint32_t)(vendor_end - rest) : 7;
+    return named ? rest : "unknown";
 }
 
 // The target triple as clang's driver normalizes it (a missing or empty vendor is "unknown"), for its messages.
