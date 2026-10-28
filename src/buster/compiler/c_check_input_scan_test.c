@@ -63,7 +63,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     const uint8_t role = reader->parser->tree.roles[i];
     const uint8_t kind = reader->parser->tokens.kinds[i];
     const bool sparse = reader->output->expression_regions[i] != 0 || reader->constant_present[i] != 0 || reader->selected_tokens[i] < reader->parser->tokens.count ||
-                        reader->vararg_calls[i] != 0 || reader->designator_tokens[i] != 0 || reader->vla_ends[i] != 0 || reader->output->asm_ids[i] != 0;
+                        reader->vararg_calls[i] != 0 || reader->designator_tokens[i] != 0 || reader->vla_ends[i] != 0 || check_input_asm_id(reader->output, i) != 0;
     bool taken = false;
     for (uint32_t r = 0; reader->ignored[i] == 0 && r < BUSTER_ARRAY_LENGTH(roles); r += 1)
     {
@@ -134,7 +134,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
     const uint8_t role_values[] = { PARSE_ROLE_MEMBER_OPERATOR, PARSE_ROLE_OPERAND, PARSE_ROLE_CLOSE_CALL, PARSE_ROLE_CLOSE_FUNCTION, PARSE_ROLE_SEPARATOR,
                                     PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_BLOCK, PARSE_ROLE_SPECIFIER, PARSE_ROLE_MEMBER, PARSE_ROLE_TAG,
                                     PARSE_ROLE_LEAF_RIGHT, PARSE_ROLE_OPEN_BODY, PARSE_ROLE_RETURN, PARSE_ROLE_LABEL, PARSE_ROLE_CLOSE_ATTRIBUTE,
-                                    PARSE_ROLE_TERMINATOR };
+                                    PARSE_ROLE_TERMINATOR, PARSE_ROLE_OPEN_ASM };
     uint32_t mismatches = 0;
     uint32_t mark_differences = 0;
     uint32_t class_differences = 0;
@@ -223,6 +223,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         {
             expected.subscripts += kinds[i] == PARSE_KIND_L_SQUARE;
             expected.asms += kinds[i] == PARSE_KIND_ASM;
+            expected.asm_groups += roles[i] == PARSE_ROLE_OPEN_ASM;
             expected.size_queries += kinds[i] == PARSE_KIND_SIZEOF;
             expected.vector_members += kinds[i] == PARSE_KIND_PERIOD && roles[i] == PARSE_ROLE_MEMBER_OPERATOR;
             expected.operands += roles[i] == PARSE_ROLE_OPERAND;
@@ -326,6 +327,34 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
             }
             class_differences += visits[count] != 0xa5 || acting != expected_acting;
         }
+        // The empty representation must agree with an independently read dense zero column, including vector
+        // tails at the guard page. No address may be formed from the null asm column, even under a zero mask.
+        uint32_t* dense_asms = input.asm_ids;
+        uint8_t expected_empty[201];
+        memset(dense_asms, 0, (uint64_t)count * sizeof(uint32_t));
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            expected_empty[i] = check_test_expression_class(&reader, i);
+        }
+        input.asm_ids = NULL;
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            parser.options.scalar = scalar != 0;
+            memset(visits, 0xa5, (uint64_t)count + 1);
+            memset(reader.first_value, 0x5a, (uint64_t)count * sizeof(uint32_t));
+            const uint32_t acting = check_input_expression_classes(&reader);
+            uint32_t expected_acting = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint8_t classes = expected_empty[i];
+                const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+                class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+                class_differences += check_input_expression_class(&reader, i) != classes || check_input_asm_id(&input, i) != 0;
+                expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+            }
+            class_differences += visits[count] != 0xa5 || acting != expected_acting || check_input_asm_id(&input, count) != 0;
+        }
+        input.asm_ids = dense_asms;
         parser.options.scalar = false;
     }
     mismatches += mark_differences + class_differences;
