@@ -688,7 +688,7 @@ static void asm_test_targets(AsmTest* test)
         const X86FormDescription* form = &x86_form_descriptions[f];
         if (x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4)
         {
-            asm_test_check(test, x86_target_requirements[f] != 0, "matched form has ISA metadata", form->mnemonic);
+            asm_test_check(test, x86_target_requirement(f) != 0, "matched form has ISA metadata", form->mnemonic);
         }
     }
     const X86Target native = x86_target_native();

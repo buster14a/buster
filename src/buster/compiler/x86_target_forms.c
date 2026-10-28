@@ -8,7 +8,7 @@
 // or at an external-input boundary. Neither the trusted encoder nor branch sizing does these checks in its loop.
 #include "buster/compiler/x86_target.c"
 
-// Bit 63 denotes a classified row; absent initializers remain unavailable. Both tables come from the same
+// Bit 63 denotes a classified row; absent initializers remain unavailable. The maps and both kernels come from the same
 // canonical rows. The exact scalar reference keeps all 64 feature bits; the vector table projects the currently
 // used feature bits to 32 bits, halving its read working set. No run-time initialization or allocation is needed.
 #define BUSTER_X86_TARGET_KNOWN (UINT64_C(1) << 63)
@@ -18,33 +18,60 @@
 #define BUSTER_X86_TARGET_COMPACT(value) ((uint32_t)((value) & BUSTER_X86_TARGET_COMPACT_LOW) | (uint32_t)(((value) >> X86_FEATURE_PCLMUL) & 1) << (X86_FEATURE_AES + 1) | ((value) & BUSTER_X86_TARGET_KNOWN ? BUSTER_X86_TARGET_COMPACT_KNOWN : 0))
 _Static_assert(X86_FEATURE_AES + 1 < 31 && X86_FEATURE_PCLMUL > X86_FEATURE_AES, "compact target feature positions must be disjoint");
 
+// The scalar reference keeps full-width requirements densely; the inverse map returns zero for unknown forms.
+// Slot zero is reserved in the inverse map, so each explicit canonical row stores its ordinal plus one.
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) BUSTER_X86_TARGET_SLOT_##name,
+enum
+{
+#include "buster/compiler/x86_target_rows.c"
+    BUSTER_X86_TARGET_CLASSIFIED_COUNT
+};
+#undef BUSTER_X86_TARGET_REQUIREMENT
+_Static_assert(X86_FORM_COUNT <= UINT16_MAX, "classified form index fits its stored width");
+_Static_assert(BUSTER_X86_TARGET_CLASSIFIED_COUNT <= UINT16_MAX && BUSTER_X86_TARGET_CLASSIFIED_COUNT <= X86_FORM_COUNT, "classified slot fits the inverse map");
+
 #ifdef BUSTER_X86_TARGET_DATA_ELSEWHERE
-extern const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64), visibility("hidden")));
 extern const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64), visibility("hidden")));
+extern const uint16_t x86_target_requirement_slots[X86_FORM_COUNT] __attribute__((aligned(64), visibility("hidden")));
+extern const uint16_t x86_target_classified_forms[BUSTER_X86_TARGET_CLASSIFIED_COUNT] __attribute__((visibility("hidden")));
+extern const uint64_t x86_target_classified_requirements[BUSTER_X86_TARGET_CLASSIFIED_COUNT] __attribute__((visibility("hidden")));
 #else
 #ifndef BUSTER_X86_TARGET_DATA
 #define BUSTER_X86_TARGET_DATA static
 #endif
-#define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = (required),
-BUSTER_X86_TARGET_DATA const uint64_t x86_target_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
-#include "buster/compiler/x86_target_rows.c"
-};
-#undef BUSTER_X86_TARGET_REQUIREMENT
-
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = BUSTER_X86_TARGET_COMPACT(required),
 BUSTER_X86_TARGET_DATA const uint32_t x86_target_compact_requirements[X86_FORM_COUNT] __attribute__((aligned(64))) = {
 #include "buster/compiler/x86_target_rows.c"
 };
 #undef BUSTER_X86_TARGET_REQUIREMENT
+
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) [X86_FORM_##name] = BUSTER_X86_TARGET_SLOT_##name + 1,
+BUSTER_X86_TARGET_DATA const uint16_t x86_target_requirement_slots[X86_FORM_COUNT] __attribute__((aligned(64))) = {
+#include "buster/compiler/x86_target_rows.c"
+};
+#undef BUSTER_X86_TARGET_REQUIREMENT
+
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) X86_FORM_##name,
+BUSTER_X86_TARGET_DATA const uint16_t x86_target_classified_forms[BUSTER_X86_TARGET_CLASSIFIED_COUNT] = {
+#include "buster/compiler/x86_target_rows.c"
+};
+#undef BUSTER_X86_TARGET_REQUIREMENT
+
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) (required),
+BUSTER_X86_TARGET_DATA const uint64_t x86_target_classified_requirements[BUSTER_X86_TARGET_CLASSIFIED_COUNT] = {
+#include "buster/compiler/x86_target_rows.c"
+};
+#undef BUSTER_X86_TARGET_REQUIREMENT
 #endif
+_Static_assert(BUSTER_ARRAY_LENGTH(x86_target_classified_forms) == BUSTER_ARRAY_LENGTH(x86_target_classified_requirements), "one full-width requirement per classified form");
 
 // Extending the canonical policy outside the projection must fail at build time, never silently drop a feature.
 // Update the projection deliberately before adding such a row; the exhaustive tests also check every round trip.
-#define BUSTER_X86_TARGET_REQUIREMENT(name, required) _Static_assert(((required) & ~BUSTER_X86_TARGET_COMPACT_FEATURES) == 0, "target requirement cannot be compacted: " #name);
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) _Static_assert(((required) & ~BUSTER_X86_TARGET_COMPACT_FEATURES) == 0, "target requirement cannot be compacted: " #name); _Static_assert(((required) & BUSTER_X86_TARGET_KNOWN) != 0, "explicit target row must be classified: " #name);
 #include "buster/compiler/x86_target_rows.c"
 #undef BUSTER_X86_TARGET_REQUIREMENT
 _Static_assert(sizeof(x86_target_compact_requirements) == X86_FORM_COUNT * sizeof(uint32_t), "one compact requirement per form");
-_Static_assert(__alignof__(x86_target_requirements) >= 64 && __alignof__(x86_target_compact_requirements) >= 64, "target requirement table cache-line alignment");
+_Static_assert(__alignof__(x86_target_requirement_slots) >= 64 && __alignof__(x86_target_compact_requirements) >= 64, "target requirement map cache-line alignment");
 
 static uint32_t x86_target_compact_features(uint64_t features)
 {
@@ -52,19 +79,33 @@ static uint32_t x86_target_compact_features(uint64_t features)
 }
 
 
+// Full-width metadata queries are separate from eligibility construction. Unknown and out-of-range rows return zero.
+static uint64_t x86_target_requirement(uint32_t form)
+{
+    uint64_t result = 0;
+    if (form < X86_FORM_COUNT)
+    {
+        const uint16_t slot = x86_target_requirement_slots[form];
+        if (slot != 0)
+        {
+            result = x86_target_classified_requirements[slot - 1];
+        }
+    }
+    return result;
+}
+
 static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
 {
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
-    // Rows are immutable and each iteration writes a different byte. Writable output cannot overlap the const
-    // table; target/output overlap is still valid because the feature word was captured before the loop.
-    // Sanitizer instrumentation can prevent vectorization at -O1; keep its ordinary reference loop unforced.
-    #if !__has_feature(address_sanitizer) && !__has_feature(undefined_behavior_sanitizer)
-    #pragma clang loop vectorize(assume_safety)
-    #endif
-    for (uint32_t i = 0; i < X86_FORM_COUNT; i += 1)
+    // Capture features before the clear: target/output overlap is valid. Each classified form writes one byte.
+    memset(allowed, 0, X86_FORM_COUNT);
+    // The scalar oracle avoids widening indices only to extract them for byte stores. Production uses SIMD.
+    #pragma clang loop vectorize(disable)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_target_classified_forms); i += 1)
     {
-        const uint64_t required = x86_target_requirements[i];
-        allowed[i] = required != 0 && (required & ~available) == 0;
+        const uint16_t form = x86_target_classified_forms[i];
+        const uint64_t required = x86_target_classified_requirements[i];
+        allowed[form] = (required & ~available) == 0;
     }
 }
 

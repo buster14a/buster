@@ -59,23 +59,26 @@ It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on 
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates.
 
-`x86_target_rows.c` is the single source for both tables. The scalar reference
-keeps all 64 feature bits (66,816 bytes); the vector table projects the currently
-used features into 32 bits (33,408 bytes). Both are constant and cache-line
-aligned. Their combined requirement data is 100,224 bytes; the vector builder
-reads only the compact table, and the output remains 8,352 bytes. Every row has
-an exact round-trip test. An unrepresentable new requirement fails a compile-time
-assertion, so extending the policy outside the projection requires deliberately
-extending that projection. It cannot silently discard an instruction's feature.
+`x86_target_rows.c` is the single source for immutable policy data. The vector
+builder reads the compact32 table (33,408 bytes). The independent scalar
+reference keeps all 64 feature bits densely for 1,667 classified rows (13,336
+bytes), with their form indices (3,334 bytes). It clears all 8,352 output bytes
+then checks those complete requirements directly. Its loop stays scalar to
+avoid widening and extracting indices for byte stores.
 
-The executable's main units share the frontend's immutable pair through hidden
-data symbols. Their scalar/vector kernels remain local and read the same aligned
-rows directly. Standalone benchmark and helper inclusions retain static tables;
-sharing adds no initialization, allocation or mutable state.
-The scalar loop's iterations are independent: its source is immutable and each
-writes a different output byte. The public builders still allow target/output
-overlap because they capture the feature word first; regression tests check both
-paths with the target stored inside the destination.
+A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
+canonical dense slot plus one. Zero means unknown, and the bounded query returns
+zero for out-of-range forms. Forward/inverse/requirement/projection checks cover
+every form; independent named-form expectations and external ISA checks remain.
+The four arrays contain 66,782 payload bytes before alignment, replacing 116,894
+bytes of sparse64, compact32 and dense-reference data. A new requirement outside
+the 32-bit projection or without the classified marker fails at compile time.
+
+The executable's main units share these arrays through the frontend's existing
+hidden policy-data home; standalone inclusions stay static. Kernels read them
+directly, with no initialization, allocation or mutable state. Both builders
+capture the target feature word before any output write, preserving tested
+target/output overlap and exact unknown-form denial.
 
 The assembler builds its mnemonic index for one target, excluding ineligible
 forms before either matching path runs. Its syntax subset remains separate:
@@ -88,6 +91,14 @@ vector length, encoding, register class, r/m class and syntax are identical, and
 admitted rows. ISA filtering and final record validation still apply per form.
 The canonical policy retains #565's baseline string instructions and 512-bit
 quadword moves; the latter require AVX512F, independently of AVX512DQ.
+
+Default64 initialization builds base and FS entries, copies FS entries to GS,
+and patches the optional segment byte in both byte halves. Layout and fallback
+decisions are identical; the direct builder is retained when the expected prefix
+location changes. Other modes and fixup copies keep their existing construction.
+The backend selection/native test compares all 50,112 default64 entries, including segment variants
+and fixups, with direct per-form construction. Frozen before/after comparisons
+cover the complete bytes of all five modes.
 
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,

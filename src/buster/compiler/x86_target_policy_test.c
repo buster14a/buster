@@ -15,12 +15,30 @@ static bool x86_target_test_matrix(void)
     uint32_t known = 0;
     const uint64_t features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1;
     bool passed = true;
+    uint8_t indexed[X86_FORM_COUNT] = {0};
+    passed &= x86_target_requirement(X86_FORM_COUNT) == 0;
+    passed &= x86_target_requirement(UINT32_MAX) == 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_target_classified_forms); i += 1)
+    {
+        const uint16_t form = x86_target_classified_forms[i];
+        passed &= form < X86_FORM_COUNT;
+        if (form < X86_FORM_COUNT)
+        {
+            passed &= indexed[form] == 0 && x86_target_requirement(form) != 0;
+            passed &= x86_target_requirement_slots[form] == i + 1;
+            passed &= x86_target_classified_requirements[i] == x86_target_requirement(form);
+            indexed[form] = 1;
+        }
+    }
     for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
     {
-        const uint64_t row = x86_target_requirements[form];
+        const uint64_t row = x86_target_requirement(form);
         const uint32_t compact = x86_target_compact_requirements[form];
         const uint64_t restored = (compact & BUSTER_X86_TARGET_COMPACT_LOW) | (uint64_t)((compact >> (X86_FEATURE_AES + 1)) & 1) << X86_FEATURE_PCLMUL | (compact & BUSTER_X86_TARGET_COMPACT_KNOWN ? BUSTER_X86_TARGET_KNOWN : 0);
         passed &= row == restored;
+        passed &= indexed[form] == (row != 0);
+        passed &= (x86_target_requirement_slots[form] != 0) == (row != 0);
+        passed &= x86_target_requirement_slots[form] <= BUSTER_X86_TARGET_CLASSIFIED_COUNT;
         passed &= row == 0 || (row & ~(features | BUSTER_X86_TARGET_KNOWN)) == 0;
         passed &= row == 0 || (row & BUSTER_X86_TARGET_KNOWN) != 0;
         known += row != 0;
@@ -47,7 +65,7 @@ static bool x86_target_test_matrix(void)
             passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
             for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
             {
-                const uint64_t row = x86_target_requirements[form];
+                const uint64_t row = x86_target_requirement(form);
                 const bool expected = row != 0 && ((row & features) & ~subset) == 0;
                 passed &= (vector[form] != 0) == expected;
             }
@@ -116,7 +134,7 @@ static bool x86_target_test_matrix(void)
     x86_target_forms(&all, vector);
     for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
     {
-        passed &= (vector[form] != 0) == (x86_target_requirements[form] != 0);
+        passed &= (vector[form] != 0) == (x86_target_requirement(form) != 0);
         passed &= form < BUSTER_X86_FORM_LEGACY_MODES || vector[form] == 0;
     }
     union
@@ -306,7 +324,7 @@ static bool x86_target_test_gas(const char* directory)
         fputs(".intel_syntax noprefix\n.text\n", file);
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (x86_target_requirements[form] != 0)
+            if (x86_target_requirement(form) != 0)
             {
                 X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, true);
                 // This oracle checks canonical forms. Optional FS/GS prefixes have no separate ISA requirement,

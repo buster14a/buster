@@ -6,6 +6,26 @@
 // semantic/native fixtures are replayed with the requested policy, including both covers and both allocation paths.
 // This does not change the selectors' implementation or assert full C-source/corpus acceptance.
 
+// Encoder construction is checked in the same backend home as selection and native emission.
+static bool x86_target_test_template_segments(void)
+{
+    bool passed = x86_encoder_initialize();
+    uint32_t checks = 0;
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 1)
+    {
+        X86TemplateEntry expected;
+        memset(&expected, 0, sizeof(expected));
+        const bool ready = build_mode_template(form, X86_ENCODER_MODE_64, &expected.template);
+        memcpy(expected.layout, expected.template.layout, sizeof(expected.layout));
+        memcpy(expected.bytes, expected.template.bytes, sizeof(expected.bytes));
+        passed &= ready && memcmp(&expected, &x86_templates[form], sizeof(expected)) == 0;
+        passed &= memcmp(&expected, &x86_templates[BUSTER_X86_FORM_FIXUP + form], sizeof(expected)) == 0;
+        checks += 2;
+    }
+    printf("target default64 segment templates: %s (%u complete entries against the direct builder, including fixups)\n", passed ? "pass" : "FAIL", checks);
+    return passed;
+}
+
 static __attribute__((no_sanitize("function"))) uint64_t x86_target_test_call_kernel(const void* code)
 {
     uint64_t (*function)(void);
@@ -208,7 +228,7 @@ static bool x86_target_test_tier1(uint8_t* allowed, const char* profile)
 
 bool run_x86_target_selection_tests(void)
 {
-    bool passed = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize();
+    bool passed = x86_target_test_template_segments() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize();
     fflush(0);
     const pid_t child = passed ? fork() : -1;
     if (child == 0)
