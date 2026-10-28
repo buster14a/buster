@@ -1625,8 +1625,13 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "streaming unwind",
     },
     {
-        .name = "the emission's inline assembly and its link's room",
-        .files = "src/buster/compiler/assembler_words.c src/buster/compiler/bind.c",
+        .name = "the emission's inline assembly",
+        .files = "src/buster/compiler/assembler_words.c",
+        .measured = "backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the emission's link room",
+        .files = "src/buster/compiler/bind.c",
         .measured = "backend-source check-lanes lowering-source check-debug",
     },
     {
@@ -1635,8 +1640,13 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "checker-source checker-bindings checker-deferred backend-source",
     },
     {
-        .name = "the preprocessor's history and its builtin queries",
-        .files = "src/buster/compiler/c_preprocessor_history.c src/buster/compiler/c_builtin_catalog.c",
+        .name = "the preprocessor's history",
+        .files = "src/buster/compiler/c_preprocessor_history.c",
+        .measured = "gnu parser-bindings",
+    },
+    {
+        .name = "the preprocessor's builtin queries",
+        .files = "src/buster/compiler/c_builtin_catalog.c",
         .measured = "gnu parser-bindings",
     },
     {
