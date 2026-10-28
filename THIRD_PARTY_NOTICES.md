@@ -17,6 +17,11 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The implicit function binding/diagnostic additions and
+`c_check_implicit_driver_test.c` (#623) are original project material under the
+default terms. Clang and the unconfigured zlib 1.3.1 tree are external
+qualification inputs; no external implementation or fixtures are imported.
+
 The aggregate return control-flow walk, warning handling and original fixtures
 in `c_check_program.c`, `c_check_program_test.c` and
 `c_check_return_driver_test.c` (#670) use the project default terms. Clang is

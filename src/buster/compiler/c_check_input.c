@@ -181,6 +181,11 @@ struct CheckInput
     CheckInputReport* reports;
     uint32_t report_count;
     uint32_t report_capacity;
+    uint32_t* implicit_function_tokens;
+    uint32_t implicit_function_count;
+    uint8_t implicit_function_diagnostic;
+    bool implicit_function_c99;
+    bool implicit_function_system;
     uint32_t* declarations;
     TypeId* declared_types;
     uint8_t* declaration_kinds;
@@ -469,6 +474,7 @@ struct CheckInputReader
     uint32_t specifier_owner;
     uint32_t specifier_query_depth;
     bool specifier_pending;
+    uint32_t implicit_function_capacity;
     uint32_t* function_specifiers;
     uint32_t function_name_ids[3];
     uint32_t file_function_name_ids[3];
@@ -3563,6 +3569,60 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+// The C90 compatibility rule is a declaration at the first direct call's source point, with block scope and
+// external linkage. Reuse the ordinary declaration/binding path so later prototypes share its entity while calls
+// made before a prototype keep default argument promotions. C23 removed this rule even when its warning is off.
+static void check_input_implicit_function(CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t callee = token;
+    const uint32_t parent = parser->tree.parents[callee];
+    const bool call = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CALL &&
+                      callee + 1 < parent && parser->tree.roles[callee + 1] == PARSE_ROLE_OPEN_CALL;
+    const uint32_t name = parser->tokens.names[token];
+    const bool builtin = intern_length(reader->pp->table, name) >= 10 && memcmp(intern_bytes(reader->pp->table, name), "__builtin_", 10) == 0;
+    const bool missing = call && !builtin && reader->pp->options.language.standard < 2023 &&
+                         c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) == 0;
+    check_input_lane_refuse(reader, reader->lane && missing, "an implicit function declaration needs source-order linkage");
+    if (missing && !reader->lane)
+    {
+        const TypeId type = check_input_type_result(reader, type_function(reader->types, BUSTER_TYPE_INT, NULL, 0, 0));
+        CheckInput* input = reader->output;
+        if (input->implicit_function_count == reader->implicit_function_capacity)
+        {
+            const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
+                                      reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
+            uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+            if (tokens == NULL)
+            {
+                input->resource = true;
+            }
+            else
+            {
+                if (input->implicit_function_count != 0)
+                {
+                    memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
+                }
+                input->implicit_function_tokens = tokens;
+                reader->implicit_function_capacity = capacity;
+            }
+        }
+        if (!input->resource && type != 0)
+        {
+            input->implicit_function_tokens[input->implicit_function_count++] = token;
+            input->declarations[token] = token;
+            reader->declared_types[token] = type;
+            reader->declaration_kinds[token] = C_BINDING_FUNCTION;
+            reader->objects[token] = token + 1;
+            reader->static_objects[token] = true;
+            reader->linkage[token] = 2;
+            input->declaration_bodies[token] = reader->function_body;
+            check_input_bind(reader, token, token);
+        }
+    }
+}
+
 #include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
@@ -4058,6 +4118,10 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
             {
                 const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
+                if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
+                {
+                    check_input_implicit_function(reader, i);
+                }
                 if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
                 {
                     const uint32_t close = parser->tree.parents[i];
@@ -4077,7 +4141,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         }
                     }
                 }
-                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+                else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
+                         c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
                 {
                     reader->output->resource = true;
                 }
@@ -5514,7 +5579,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred, bool environment, bool literal_tables)
 {
-    *input = (CheckInput){ 0 };
+    *input = (CheckInput){ .implicit_function_diagnostic = pp->options.implicit_function_diagnostic != 0 ? pp->options.implicit_function_diagnostic :
+                                                        pp->options.language.standard >= 1999 ? 3 : 1,
+                         .implicit_function_c99 = pp->options.language.standard >= 1999,
+                         .implicit_function_system = pp->options.implicit_function_system };
     // Plain char's signedness, which every phase after the reader reads from the table too.
     types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;

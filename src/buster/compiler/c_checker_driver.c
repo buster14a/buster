@@ -258,7 +258,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
-    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
+    const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count + 1;
     const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
@@ -290,6 +290,16 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
         {
             const uint32_t token = extra[i].position < count ? extra[i].position : count;
             report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + i);
+        }
+        for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
+        {
+            const uint32_t token = input->implicit_function_tokens[i];
+            const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
+            if (token < count && severity != CHECK_WARNING_IGNORE && (!quiet || (input->implicit_function_c99 && severity >= CHECK_WARNING_ERROR)) &&
+                (repair == NULL || check_repair_warning_token(repair, token)))
+            {
+                report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
+            }
         }
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
@@ -436,18 +446,46 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             if (walking && !pp->fatal && reports && (firsts[report] >> 32) == token)
             {
                 const uint32_t sequence = (uint32_t)firsts[report];
-                const uint32_t phase = sequence < input->report_count ? 0 : sequence - input->report_count < stream_reports ? 1 : 2;
-                const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
-                const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
-                                                                                     check_driver_input_report_message(input, input->reports + index);
-                const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
-                if (source != BUSTER_CHECK_NONE)
+                const uint32_t offset = input->report_count + stream_reports + extra_count;
+                if (sequence >= offset)
                 {
-                    pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                                   severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                    const uint32_t name = parser->tokens.names[token];
+                    if (input->implicit_function_c99)
+                    {
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token],
+                            "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    }
+                    else
+                    {
+                        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
+                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    }
                 }
                 else
                 {
-                    check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
+                    const uint32_t phase = sequence < input->report_count ? 0 : sequence - input->report_count < stream_reports ? 1 : 2;
+                    const uint32_t index = phase == 0 ? sequence : phase == 1 ? sequence - input->report_count : sequence - input->report_count - stream_reports;
+                    const char* message = phase == 2 ? extra[index].message : phase == 1 ? check_driver_report_message(stream->reports + index) :
+                                                                                         check_driver_input_report_message(input, input->reports + index);
+                    const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
+                    if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+                    {
+                        const uint32_t name = parser->tokens.names[token];
+                        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "use of undeclared identifier '%.*s'",
+                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    }
+                    else if (source != BUSTER_CHECK_NONE)
+                    {
+                        pp_diagnose_output(pp, PP_SEVERITY_ERROR, source, "%s", message);
+                    }
+                    else
+                    {
+                        check_driver_diagnose(parser, pp, phase == 2 ? extra[index].token : token, message);
+                    }
                 }
                 report += 1;
             }
