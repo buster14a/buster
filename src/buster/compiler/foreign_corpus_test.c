@@ -39,7 +39,7 @@
 #define BUSTER_FOREIGN_CORPUS_MAX_SOURCES 64
 #define BUSTER_FOREIGN_CORPUS_MAX_ARGUMENTS 160
 #define BUSTER_FOREIGN_CORPUS_MAX_ROWS 65536
-#define BUSTER_FOREIGN_CORPUS_ROW_BYTES 192
+#define BUSTER_FOREIGN_CORPUS_ROW_BYTES 512
 #define BUSTER_FOREIGN_CORPUS_RUN_SECONDS 120
 
 typedef struct ForeignCorpusRun ForeignCorpusRun;
@@ -411,8 +411,9 @@ static void foreign_corpus_row(ForeignCorpusRows* rows, const char* format, ...)
     {
         va_list list;
         va_start(list, format);
-        vsnprintf(rows->rows[rows->count], BUSTER_FOREIGN_CORPUS_ROW_BYTES, format, list);
+        const int length = vsnprintf(rows->rows[rows->count], BUSTER_FOREIGN_CORPUS_ROW_BYTES, format, list);
         va_end(list);
+        rows->overflow = rows->overflow || length < 0 || (uint32_t)length >= BUSTER_FOREIGN_CORPUS_ROW_BYTES;
         rows->count += 1;
     }
     else
@@ -677,7 +678,7 @@ static uint64_t foreign_corpus_relocations(const DynamicTestImage* image, const 
             const uint64_t symbol = ELF64_R_SYM(entries[i].r_info);
             const char* class = type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT ? "slot" : type == R_X86_64_COPY ? "copy" : type == R_X86_64_64 ? "absolute" :
                                 type == R_X86_64_TPOFF64 ? "tpoff" : type == R_X86_64_DTPMOD64 ? "dtpmod" : type == R_X86_64_DTPOFF64 ? "dtpoff" :
-                                type == R_X86_64_RELATIVE || type == R_X86_64_IRELATIVE ? 0 : "other";
+                                type == R_X86_64_NONE || type == R_X86_64_RELATIVE || type == R_X86_64_IRELATIVE ? 0 : "other";
             relative += type == R_X86_64_RELATIVE ? 1 : 0;
             if (type == R_X86_64_IRELATIVE)
             {
@@ -1093,6 +1094,8 @@ typedef enum ForeignCorpusReason
     FOREIGN_CORPUS_REASON_IFUNC_FUNCTION,
     FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS,
     FOREIGN_CORPUS_REASON_IFUNC_POINTER,
+    FOREIGN_CORPUS_REASON_LOCAL_BINDING,
+    FOREIGN_CORPUS_REASON_TEMP_LABEL,
     FOREIGN_CORPUS_REASONS,
 } ForeignCorpusReason;
 
@@ -1111,6 +1114,8 @@ static const char* const foreign_corpus_reasons[FOREIGN_CORPUS_REASONS] = {
     [FOREIGN_CORPUS_REASON_LOCAL_VISIBILITY] = "in a static executable and a static PIE, a symbol of hidden visibility, written local, is written with default visibility",
     [FOREIGN_CORPUS_REASON_IFUNC_FUNCTION] = "in a static executable, an IFUNC is written as a function at its stub",
     [FOREIGN_CORPUS_REASON_UNREFERENCED_BOUNDS] = "the __start_ and __stop_ names of every section named as a C identifier are defined, local, though nothing refers to them",
+    [FOREIGN_CORPUS_REASON_LOCAL_BINDING] = "mold localizes non-exported executable symbols in its regular symbol table",
+    [FOREIGN_CORPUS_REASON_TEMP_LABEL] = "mold retains temporary local labels omitted by link-foreign",
     [FOREIGN_CORPUS_REASON_IFUNC_POINTER] = "a pointer to an IFUNC outside the GOT gets an IRELATIVE relocation, the IFUNC's address, where link-foreign and lld relocate it relative to the IFUNC's stub",
 };
 
@@ -1149,8 +1154,8 @@ static bool foreign_corpus_differs_in(const char* a, const char* b, uint32_t fie
 {
     char a_fields[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
     char b_fields[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
-    const bool parsed = sscanf(a, "%191s %191s %191s %191s %191s %191s", a_fields[0], a_fields[1], a_fields[2], a_fields[3], a_fields[4], a_fields[5]) == 6 &&
-                        sscanf(b, "%191s %191s %191s %191s %191s %191s", b_fields[0], b_fields[1], b_fields[2], b_fields[3], b_fields[4], b_fields[5]) == 6;
+    const bool parsed = sscanf(a, "%511s %511s %511s %511s %511s %511s", a_fields[0], a_fields[1], a_fields[2], a_fields[3], a_fields[4], a_fields[5]) == 6 &&
+                        sscanf(b, "%511s %511s %511s %511s %511s %511s", b_fields[0], b_fields[1], b_fields[2], b_fields[3], b_fields[4], b_fields[5]) == 6;
     bool result = parsed && strcmp(a_fields[field], b_fields[field]) != 0 && (a_value == 0 || strcmp(a_fields[field], a_value) == 0) &&
                   (b_value == 0 || strcmp(b_fields[field], b_value) == 0);
     for (uint32_t f = 0; result && f < 6; f += 1)
@@ -1163,7 +1168,7 @@ static bool foreign_corpus_differs_in(const char* a, const char* b, uint32_t fie
 // A symbol row's six fields ("name binding type visibility size place"): whether it has them.
 static bool foreign_corpus_fields(const char* row, char (*fields)[BUSTER_FOREIGN_CORPUS_ROW_BYTES])
 {
-    return sscanf(row, "%191s %191s %191s %191s %191s %191s", fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]) == 6;
+    return sscanf(row, "%511s %511s %511s %511s %511s %511s", fields[0], fields[1], fields[2], fields[3], fields[4], fields[5]) == 6;
 }
 
 // Whether a symbol row of link-foreign's and one of lld's are an IFUNC whose address is taken, which link-foreign keeps
@@ -1175,6 +1180,17 @@ static bool foreign_corpus_canonical_ifunc(const char* ours, const char* theirs)
     char b[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
     return foreign_corpus_fields(ours, a) && foreign_corpus_fields(theirs, b) && strcmp(a[0], b[0]) == 0 && strcmp(a[1], b[1]) == 0 && strcmp(a[3], b[3]) == 0 &&
            strcmp(a[5], b[5]) == 0 && strcmp(a[2], "10") == 0 && strcmp(b[2], "2") == 0 && strcmp(b[4], "0") == 0;
+}
+
+// Older mold localizes non-exported executable IFUNCs and names their stubs as functions. Both changes can
+// apply to one row, so require every other field to agree when pairing them.
+static bool foreign_corpus_local_ifunc(const char* ours, const char* theirs)
+{
+    char a[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
+    char b[6][BUSTER_FOREIGN_CORPUS_ROW_BYTES] = { 0 };
+    return foreign_corpus_fields(ours, a) && foreign_corpus_fields(theirs, b) && strcmp(a[0], b[0]) == 0 &&
+           (strcmp(a[1], "1") == 0 || strcmp(a[1], "2") == 0 || strcmp(a[1], "10") == 0) && strcmp(b[1], "0") == 0 &&
+           strcmp(a[2], "10") == 0 && strcmp(b[2], "2") == 0 && strcmp(a[3], b[3]) == 0 && strcmp(a[4], b[4]) == 0 && strcmp(a[5], b[5]) == 0;
 }
 
 // Whether one of a row set's unmatched rows differs from `row` in field `field` alone, `row`'s being `value` and the
@@ -1199,6 +1215,21 @@ static bool foreign_corpus_has_name(const ForeignCorpusRows* rows, const uint32_
     {
         const char* row = rows->rows[unmatched[i]];
         result = strncmp(row, name, length) == 0 && row[length] == ' ';
+    }
+    return result;
+}
+
+// Whether a row has the corresponding localized IFUNC or function among the other side's unmatched rows.
+static bool foreign_corpus_has_local_ifunc(const char* row, bool ours, const ForeignCorpusRows* other, const uint32_t* unmatched, uint32_t count)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < count; i += 1)
+    {
+        const char* paired = other->rows[unmatched[i]];
+        const char* end = strchr(row, ' ');
+        const uint64_t length = end != 0 ? (uint64_t)(end - row) : strlen(row);
+        const bool same_name = strncmp(row, paired, length) == 0 && paired[length] == ' ';
+        result = same_name && (ours ? foreign_corpus_local_ifunc(row, paired) : foreign_corpus_local_ifunc(paired, row));
     }
     return result;
 }
@@ -1229,6 +1260,20 @@ static ForeignCorpusReason foreign_corpus_reason(const ForeignCorpusContext* con
     else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && !ours && strncmp(name, "__evoke_link_warning_", 21) == 0)
     {
         result = FOREIGN_CORPUS_REASON_LINK_WARNING;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed &&
+             ((((ours && strcmp(fields[2], "10") == 0) || (!ours && strcmp(fields[1], "0") == 0 && strcmp(fields[2], "2") == 0)) &&
+               foreign_corpus_has_local_ifunc(row, ours, other, other_unmatched, other_count)) ||
+              foreign_corpus_paired(row, other, other_unmatched, other_count, 1, ours ? "1" : "0", ours ? "0" : "1") ||
+              foreign_corpus_paired(row, other, other_unmatched, other_count, 1, ours ? "2" : "0", ours ? "0" : "2") ||
+              foreign_corpus_paired(row, other, other_unmatched, other_count, 1, ours ? "10" : "0", ours ? "0" : "10")))
+    {
+        result = FOREIGN_CORPUS_REASON_LOCAL_BINDING;
+    }
+    else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed && !ours && strcmp(fields[1], "0") == 0 && strncmp(name, ".L", 2) == 0 &&
+             !foreign_corpus_has_name(other, other_unmatched, other_count, name))
+    {
+        result = FOREIGN_CORPUS_REASON_TEMP_LABEL;
     }
     else if (category == FOREIGN_CORPUS_SYMBOLS && context->mold && parsed && strcmp(fields[1], "0") == 0 &&
              foreign_corpus_paired(row, other, other_unmatched, other_count, 3, ours ? "2" : "0", ours ? "0" : "2"))

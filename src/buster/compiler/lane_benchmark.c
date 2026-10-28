@@ -40,6 +40,8 @@
 // after them. The exit status is 1 if the arguments are invalid, a group can't be started or pinned, or a broadcast
 // gets the wrong value.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -779,3 +781,12 @@ int run_lane_benchmark(int argc, char** argv)
     }
     return result;
 }
+
+#else
+int run_lane_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

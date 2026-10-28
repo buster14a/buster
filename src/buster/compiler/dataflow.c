@@ -19,7 +19,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_DATAFLOW_VECTOR_BITS 512
 #define BUSTER_DATAFLOW_VECTOR_WORDS 8
@@ -326,8 +326,13 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
 // The two loops are separate functions, so that neither changes how Clang compiles the other: inlined together, the
 // general loop's registers and stack slots changed, and medium-nested took 3.6% more cycles after scalar code. Each
 // starts a 64-byte line, so that a build's code before them doesn't decide where their loops fall in lines.
+static uint64_t dataflow_liveness_scalar(Dataflow* dataflow);
+
 static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
 {
+#if !BUSTER_HOST_VECTOR
+    return dataflow_liveness_scalar(dataflow);
+#else
     uint64_t iterations;
     if (dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS && dataflow->block_count != 0)
     {
@@ -338,6 +343,7 @@ static uint64_t dataflow_liveness_vector(Dataflow* dataflow)
         iterations = dataflow_liveness_vector_rows(dataflow);
     }
     return iterations;
+#endif
 }
 
 static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
@@ -401,11 +407,20 @@ static uint64_t dataflow_liveness_scalar(Dataflow* dataflow)
 
 static uint64_t dataflow_liveness(Dataflow* dataflow)
 {
+#if !BUSTER_HOST_VECTOR
+    return dataflow_liveness_scalar(dataflow);
+#else
     return dataflow_liveness_vector(dataflow);
+#endif
 }
+
+static bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words);
 
 static bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* right, uint64_t row_words)
 {
+#if !BUSTER_HOST_VECTOR
+    return dataflow_intersects_scalar(left, right, row_words);
+#else
     // Nonempty rows contain whole aligned vectors; a zero-length row may use any pointer without accessing it.
     assert(row_words % BUSTER_DATAFLOW_VECTOR_WORDS == 0);
     assert(row_words == 0 || (((uintptr_t)left | (uintptr_t)right) & (BUSTER_DATAFLOW_VECTOR_BYTES - 1)) == 0);
@@ -417,6 +432,7 @@ static bool dataflow_intersects_vector(const uint64_t* left, const uint64_t* rig
         intersections |= _mm512_test_epi64_mask(left_values, right_values);
     }
     return intersections != 0;
+#endif
 }
 
 static bool dataflow_intersects_scalar(const uint64_t* left, const uint64_t* right, uint64_t row_words)

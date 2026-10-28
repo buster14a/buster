@@ -1313,14 +1313,18 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             char* output = 0;
             char* errors = 0;
             const int status = pp_directive_test_command(argv, &output, &errors);
+            const bool unavailable = !BUSTER_HOST_VECTOR && strcmp(runs[r].command, "benchmark-preprocessor") == 0;
             const char* text = runs[r].status == 0 ? output : errors;
             // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.
-            const bool same = status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
-                              (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
+            const bool same = unavailable ? status == 1 && output != 0 && output[0] == 0 && errors != 0 &&
+                                                strcmp(errors, "benchmarks require an AVX-512 host build; run tests with this scalar build\n") == 0
+                                          : status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
+                                                (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
             if (!same)
             {
                 printf("location option: %s %s--location-limit %s exits with %d, wanted %d with \"%s\"; its output:\n%s%s", runs[r].command,
-                       with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status, runs[r].status, runs[r].says,
+                       with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status,
+                       unavailable ? 1 : runs[r].status, unavailable ? "benchmarks require an AVX-512 host build" : runs[r].says,
                        output != 0 ? output : "", errors != 0 ? errors : "");
             }
             failures += !same;
@@ -1330,7 +1334,7 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
         }
     }
     unlink(path);
-    printf("location option: %u of %u runs of the commands take --location-limit and its value as ours%s%s\n", count - failures, count,
+    printf("location option: %u of %u command checks pass%s%s\n", count - failures, count,
            with_clang ? ", clang without them" : "", failures == 0 ? "" : " (DIFFERS)");
     return written && failures == 0;
 }

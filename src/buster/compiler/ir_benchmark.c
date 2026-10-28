@@ -16,7 +16,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <time.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_IR_BENCHMARK_INSTRUCTIONS 262144u
 #define BUSTER_IR_BENCHMARK_MAX_INSTRUCTIONS (1u << 24)

@@ -250,8 +250,10 @@ static bool asm_word_byte(uint8_t byte)
 
 static uint32_t asm_word_length(const uint8_t* source, uint32_t length, bool vectorized)
 {
+    (void)vectorized;
+
     uint32_t count = 0;
-    if (vectorized)
+    if (BUSTER_VECTOR_PATH(vectorized))
     {
         while (count < length)
         {
@@ -324,7 +326,7 @@ static void asm_lex_scalar(AsmParser* parser)
         }
         if (asm_word_byte(byte))
         {
-            at = start + asm_word_length(bytes + start, length - start, parser->options.vectorized);
+            at = start + asm_word_length(bytes + start, length - start, BUSTER_VECTOR_PATH(parser->options.vectorized));
             kind = BUSTER_ASM_WORD;
         }
         else if (byte == '"')
@@ -389,6 +391,9 @@ static void asm_lex_store(AsmToken* output, const uint32_t* starts, const uint32
 
 static void asm_lex_vector(AsmParser* parser)
 {
+#if !BUSTER_HOST_VECTOR
+    asm_lex_scalar(parser);
+#else
     const uint8_t* source = (const uint8_t*)parser->source.pointer;
     const uint32_t length = parser->source.length;
     const __m512i iota = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -512,12 +517,20 @@ static void asm_lex_vector(AsmParser* parser)
         }
     }
     parser->tokens[parser->token_count] = (AsmToken){.start = length, .end = length, .kind = 0};
+#endif
 }
 
 static void asm_lex(AsmParser* parser)
 {
     parser->instruction_capacity = 1;
-    if (parser->options.vectorized)
+#if !BUSTER_HOST_VECTOR
+    asm_lex_scalar(parser);
+    for (uint32_t at = 0; at < parser->token_count; at += 1)
+    {
+        parser->instruction_capacity += parser->tokens[at].kind == '\n';
+    }
+#else
+    if (BUSTER_VECTOR_PATH(parser->options.vectorized))
     {
         asm_lex_vector(parser);
         // At most one instruction per statement. Count separators in the kind column without gathers, and reserve
@@ -539,6 +552,7 @@ static void asm_lex(AsmParser* parser)
             parser->instruction_capacity += parser->tokens[at].kind == '\n';
         }
     }
+#endif
 }
 
 static String8 asm_token_text(const AsmParser* parser, uint32_t token)
@@ -1226,7 +1240,7 @@ static bool asm_token_register(const AsmParser* parser, uint32_t at, X86Operand*
 {
     const uint32_t cached = parser->tokens[at].reserved;
     bool found;
-    if (parser->options.vectorized && (cached & BUSTER_ASM_REGISTER_CACHED))
+    if (BUSTER_VECTOR_PATH(parser->options.vectorized) && (cached & BUSTER_ASM_REGISTER_CACHED))
     {
         found = (cached & 255) == X86_OPERAND_REGISTER;
         if (found)
@@ -2226,7 +2240,7 @@ static void asm_parse(AsmParser* parser)
 {
     while (parser->at < parser->token_count && parser->result.error == 0)
     {
-        if (parser->options.vectorized && parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
+        if (BUSTER_VECTOR_PATH(parser->options.vectorized) && parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
         {
             continue;
         }
@@ -2360,7 +2374,7 @@ static void asm_match_instructions(AsmParser* parser)
                 asm_fail(parser, instruction->location, "instruction operands require an absolute value or symbol plus addend; use data directives for label differences");
             }
         }
-        const X86Match match = x86_match(parser->index, &instruction->request, parser->options.vectorized);
+        const X86Match match = x86_match(parser->index, &instruction->request, BUSTER_VECTOR_PATH(parser->options.vectorized));
         if (!match.found)
         {
             asm_fail(parser, instruction->location, match.ambiguous ? "ambiguous memory width; specify a size" : "no supported value-preserving form for these operands and ISA");
@@ -2456,7 +2470,7 @@ static bool asm_layout_records(AsmParser* parser)
             }
             else
             {
-                const BranchSizing layout = parser->options.vectorized ? size_branches(records, parser->instruction_count, branches, targets, count, offsets) : size_branches_scalar(records, parser->instruction_count, branches, targets, count, offsets);
+                const BranchSizing layout = BUSTER_VECTOR_PATH(parser->options.vectorized) ? size_branches(records, parser->instruction_count, branches, targets, count, offsets) : size_branches_scalar(records, parser->instruction_count, branches, targets, count, offsets);
                 if (layout.error != BRANCH_SIZING_OK || layout.length > BUSTER_ASM_MAX_SECTION)
                 {
                     asm_fail(parser, 0, "instruction layout failed or exceeds section limit");
@@ -2512,7 +2526,7 @@ static void asm_fragment_offsets(AsmParser* parser, const uint32_t* order, const
                 offset += fragment->size;
                 at += 1;
             }
-            else if (parser->options.vectorized)
+            else if (BUSTER_VECTOR_PATH(parser->options.vectorized))
             {
                 uint32_t sizes[16] = {0};
                 uint32_t offsets[16];
@@ -2873,7 +2887,7 @@ static void asm_emit(AsmParser* parser)
                     next += 1;
                 }
                 const uint64_t capacity = link->atoms.size[atom] - fragment->offset + BUSTER_X86_ENCODER_CAPACITY(256);
-                const int64_t encoded = parser->options.vectorized ? x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0) : x86_encode_scalar(records, count, bytes + fragment->offset, capacity, 0, 0);
+                const int64_t encoded = BUSTER_VECTOR_PATH(parser->options.vectorized) ? x86_encode(records, count, bytes + fragment->offset, capacity, 0, 0) : x86_encode_scalar(records, count, bytes + fragment->offset, capacity, 0, 0);
                 if (encoded != size)
                 {
                     asm_fail(parser, fragment->location, "encoder length disagrees with assembly layout");
@@ -2970,7 +2984,7 @@ static void asm_parse_source(AsmParser* parser)
     if (parser->result.error == 0)
     {
         parser->capacity = parser->token_count + 4;
-        if (parser->options.vectorized)
+        if (BUSTER_VECTOR_PATH(parser->options.vectorized))
         {
             asm_cache_registers(parser);
         }

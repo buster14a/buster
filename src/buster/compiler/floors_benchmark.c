@@ -29,6 +29,8 @@
 // Each file's bytes are checked against the source after its last timed write, outside the time. The exit status is
 // 1 if the arguments are invalid, a call fails, or a file differs.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -40,7 +42,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <immintrin.h>
+#include "host_isa.h"
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -1021,3 +1023,12 @@ int run_floors_benchmark(int argc, char** argv)
     }
     return result ? 0 : 1;
 }
+
+#else
+int run_floors_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR
