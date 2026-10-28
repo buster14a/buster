@@ -18,30 +18,27 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           fetch-depth: 0
-      - name: Apply validation fixes and integrate current main
+      - name: Integrate the reviewed main revision
         shell: bash
         run: |
           set -euo pipefail
-          base64 -d .github/issue-659-follow.patch.gz.b64 | gzip -d > "$RUNNER_TEMP/issue-659-follow.patch"
-          printf 'f0f22a797c4a8fb98c2c3161a5e5912e068b595ba184eb46911d546702cb6670  %s\n' "$RUNNER_TEMP/issue-659-follow.patch" | sha256sum -c
           git switch -c chatgpt/issue-659-kr-completion origin/chatgpt/issue-659-kr-completion
-          test "$(git rev-parse HEAD)" = 7dc95a4326f03b6427bb2aa56ba8a38bb24ca92a
-          git apply --unidiff-zero --check "$RUNNER_TEMP/issue-659-follow.patch"
-          git apply --unidiff-zero "$RUNNER_TEMP/issue-659-follow.patch"
-          git diff --check
+          test "$(git rev-parse HEAD)" = 3fb233e139d96ada81febe7a215eb58765e64b8a
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/buster/compiler docs/c-checker.md
-          git commit -m 'fix(checker): match Clang bool entries and source-only call diagnostics'
+          git update-ref refs/remotes/origin/main abc6bf2455c6d1d78f16bc2d494276380c546a79
+          git merge --no-commit origin/main > "$RUNNER_TEMP/issue-659-merge.log" 2>&1 || test -f .git/MERGE_HEAD
+          printf '%s\n' src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c > "$RUNNER_TEMP/expected-conflicts"
+          git diff --name-only --diff-filter=U > "$RUNNER_TEMP/actual-conflicts"
+          diff -u "$RUNNER_TEMP/expected-conflicts" "$RUNNER_TEMP/actual-conflicts"
+          sed -i '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/main$/d' src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c
+          printf '%s\n' 'a816c45201dcf58b6df81ec14b80e6e57e38ae7887883e5b2b8e981705329108  src/buster/compiler/c_check_input.c' 'ec1445e61e2361a8aecdf26cdd664dc990b84231cb96d233261622d71085ee23  src/buster/compiler/c_checker_driver.c' | sha256sum -c
+          git add src/buster/compiler/c_check_input.c src/buster/compiler/c_checker_driver.c
+          git diff --check --cached
+          git commit -m 'Merge main pragma support into K&R completion, retaining both diagnostic families'
           git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
-          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-main.tar.gz" origin/main
-          git rev-parse origin/main > "$RUNNER_TEMP/issue-659-main-sha.log"
-          status=0
-          git merge --no-edit origin/main 2>&1 | tee "$RUNNER_TEMP/issue-659-merge.log" || status=1
-          tar -czf "$RUNNER_TEMP/issue-659-worktree.tar.gz" src docs AGENTS.md build.sh
-          git status --short >> "$RUNNER_TEMP/issue-659-merge.log"
-          test "$status" = 0
-          git push origin HEAD:refs/heads/chatgpt/issue-659-kr-completion
+          git rev-parse HEAD > "$RUNNER_TEMP/issue-659-head.log"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/issue-659-source.tar.gz" HEAD
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
       - name: Build compiler
@@ -63,7 +60,6 @@ jobs:
           name: issue-659-validation
           path: |
             ${{ runner.temp }}/issue-659-*.log
-            ${{ runner.temp }}/issue-659-*.tar.gz
-            ${{ runner.temp }}/issue-659-follow.patch
+            ${{ runner.temp }}/issue-659-source.tar.gz
             build/compiler
           retention-days: 7
