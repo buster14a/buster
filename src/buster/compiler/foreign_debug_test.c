@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Foreign DWARF through link-foreign (#395, foreign_debug.c), in test-foreign. Original C and C++ fixtures are
-// compiled with -g by gcc, whose GNU as compresses the debug sections with zlib by default, and by clang, which
-// doesn't, at -O0 and -O2, in DWARF 5 and 4, and with -gz=zlib and -gz=none, and each is linked as a PIE by
+// compiled with -g by gcc and clang, at -O0 and -O2, in DWARF 5 and 4, and with -gz=zlib and -gz=none. The GCC -O2
+// variant explicitly compresses its debug sections with zlib for the damaged-stream refusal below. Each is linked as a PIE by
 // link-foreign on 1 lane, on 8 and by the exact path (--scalar): the same bytes, which run and print what the program
 // computes. The C++ fixture's inline functions are COMDAT groups in both units, whose losing copies' DWARF stays with
 // tombstones; a link with --gc-sections keeps the DWARF of what it collects the same way; -S leaves the debug sections
@@ -93,7 +93,7 @@ struct ForeignDebugTestVariant
 
 static const ForeignDebugTestVariant foreign_debug_test_variants[] = {
     { .name = "gcc-O0", .compiler = "gcc", .flags = { "-g", "-O0" } },
-    { .name = "gcc-O2", .compiler = "gcc", .flags = { "-g", "-O2" } },
+    { .name = "gcc-O2", .compiler = "gcc", .flags = { "-g", "-O2", "-gz=zlib" } },
     { .name = "gcc-dwarf4", .compiler = "gcc", .flags = { "-g", "-O2", "-gdwarf-4" } },
     { .name = "gcc-uncompressed", .compiler = "gcc", .flags = { "-g", "-O2", "-gz=none" } },
     { .name = "gcc-gc", .compiler = "gcc", .flags = { "-g", "-O2", "-ffunction-sections" }, .gc = true },

@@ -15,11 +15,12 @@ sudo apt-get update
 sudo apt-get install --yes --no-install-recommends clang-23 llvm-23-dev llvm-23-tools \
     libclang-23-dev libclang-cpp23-dev libclang-rt-23-dev lld-23 \
     gcc g++ binutils libc6-dev gdb mold tcc zstd linux-perf qemu-user
-# LLVM's release branch receives current patch updates. Use the same toolchain
-# for the build, C/C++ oracles, pragma adapter, object and DWARF consumers.
+# LLVM's release branch receives current patch updates. Use it for the build,
+# explicit Clang oracles, pragma adapter, object and DWARF consumers. The linker
+# fixtures use GNU cc semantics, including decimal types and interposable calls.
 toolbin="$RUNNER_TEMP/buster-test-tools"
 mkdir -p "$toolbin"
-ln -s /usr/lib/llvm-23/bin/clang "$toolbin/cc"
+ln -s /usr/bin/gcc "$toolbin/cc"
 printf '%s\n' "$toolbin" /usr/lib/llvm-23/bin >> "$GITHUB_PATH"
 perf --version
 # Match the existing external-linker oracle rather than silently omitting it.
