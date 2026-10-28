@@ -95,10 +95,13 @@ typedef struct CheckWarningPayload CheckWarningPayload;
 struct CheckWarningPayload
 {
     // Only these two fields contain TypeIds and need type remapping when a deferred body's facts are merged.
+    // A nonzero ID must be valid in the producing reader's type table; zero means that the kind needs no type.
     TypeId first_type;
     TypeId second_type;
     // An IdentId in source consumers; standalone graph clients need not include the interner.
     uint32_t name;
+    // Related TU parser token when the kind uses one, or NO_SOURCE. Kinds without a related location ignore it;
+    // their zero-initialized field is also a valid token whenever a primary can be published.
     uint32_t token;
     uint32_t data;
 };
