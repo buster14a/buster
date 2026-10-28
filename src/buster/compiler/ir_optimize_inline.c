@@ -138,6 +138,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         function->block_offsets,
         function->extra,
         function->constants,
+        function->vector_constants,
         function->slots,
         function->addresses,
         function->calls,
@@ -156,6 +157,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
         ((uint64_t)function->block_count + 1) * 4,
         (uint64_t)function->extra_count * 4,
         (uint64_t)function->constant_count * sizeof(IrConstant),
+        (uint64_t)function->vector_constant_count * sizeof(IrSimdValue),
         (uint64_t)function->slot_count * sizeof(IrSlot),
         (uint64_t)function->address_count * sizeof(IrAddress),
         (uint64_t)function->call_count * sizeof(IrCall),
@@ -172,7 +174,7 @@ static bool ir_inline_function_conflict(const IrFunction* function, const Arena*
 
 static bool ir_inline_sizes_valid(const IrFunction* function)
 {
-    return function->instruction_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->block_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->extra_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->slot_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->address_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_type_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->parameter_count <= BUSTER_IR_INLINE_MAX_ITEMS;
+    return function->instruction_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->block_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->extra_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->vector_constant_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->slot_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->address_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->call_type_count <= BUSTER_IR_INLINE_MAX_ITEMS && function->parameter_count <= BUSTER_IR_INLINE_MAX_ITEMS;
 }
 
 static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)

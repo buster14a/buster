@@ -63,6 +63,22 @@ static int run_ir_simd_tests(int argc, char** argv)
             checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
             ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && inlined.function_count == 123 && output.length == 0 && scratch.length == 0,
                            "inlining refuses unsupported SIMD metadata before cloning a unit");
+            IrSimdValue* original_payload = function.vector_constants;
+            IrSimdValue* borrowed = (IrSimdValue*)output.base;
+            *borrowed = (IrSimdValue){ .words = { UINT64_C(0xfedcba9876543210) } };
+            const IrSimdValue saved_payload = *borrowed;
+            function.vector_constants = borrowed;
+            checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
+            ir_test_expect(&tally, checked.error == IR_ERROR_STRUCTURE && memcmp(borrowed, &saved_payload, sizeof(saved_payload)) == 0 &&
+                           inlined.function_count == 123 && output.length == 0 && scratch.length == 0,
+                           "inliner preflight preserves a vector payload borrowed from the unused output tail before any audit allocation");
+            function.vector_constants = original_payload;
+            const uint32_t original_count = function.vector_constant_count;
+            function.vector_constant_count = BUSTER_IR_INLINE_MAX_ITEMS + 1;
+            checked = ir_optimize_inline(&unit, &output, &scratch, inline_options, &inlined, NULL);
+            ir_test_expect(&tally, checked.error == IR_ERROR_LIMIT && inlined.function_count == 123 && output.length == 0 && scratch.length == 0,
+                           "inliner checks the sparse vector payload bound before reading a declared oversized borrowed span");
+            function.vector_constant_count = original_count;
             Tier1SelectPlan selected;
             memset(&selected, 0xa5, sizeof(selected));
             const Tier1SelectPlan before = selected;
