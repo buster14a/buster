@@ -610,7 +610,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
             }
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
-                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token < low || token >= high))
+                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }
