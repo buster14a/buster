@@ -119,7 +119,7 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   directory, a file too big or unreadable). A translation unit's include
   search then makes no system call for a path the cache already looked up.
 - **Directory snapshots for negative include candidates (#653):** on the
-  first include in a search directory, its entry-name hashes are retained in
+  first include in an explicit or standard search directory, its entry-name hashes are retained in
   an optional arena of at most 16 MiB. An absent first path component needs
   no file open. A listed component always takes the existing probe, including
   symlinks and subdirectory names; a hash collision can only retain a probe.
@@ -136,6 +136,9 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
   includes need no listing. The scalar and vector paths
   share this syscall filter; the entry-name hash table is scalar, since its
   purpose is to eliminate OS calls rather than token-processing work.
+  A quoted include's own source directory is probed directly unless it
+  already has a snapshot from the search list; a first local-header hit
+  therefore does not enumerate an arbitrary source directory.
   As with cached files and negative paths, the filesystem is a snapshot for
   the cache's lifetime: new directory entries require a fresh `FileCache`.
   Listing opens/entries are recorded in `FileCache.directory_opens` and

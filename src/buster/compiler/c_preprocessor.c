@@ -4496,7 +4496,9 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
-            if (!absolute)
+            // Only explicit search directories earn a listing. Quoted includes often find their header immediately
+            // beside the source; listing an arbitrary, potentially huge source directory would add work to that hit.
+            if (directory != BUSTER_PP_NONE)
             {
                 file_cache_list_directory(pp->cache, prefix, prefix_length);
             }
