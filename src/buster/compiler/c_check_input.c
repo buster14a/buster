@@ -83,6 +83,8 @@ struct CheckInputReport
     uint32_t token;
     CheckInputMessage message;
     uint32_t pragma;
+    // Zero uses the located token. Otherwise this is a proven parser-token publication boundary; count + 1 is TU end.
+    uint32_t completion;
 };
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
@@ -229,6 +231,7 @@ struct CheckInput
     // Sparse source diagnostics, including addresses in type queries that have no runtime graph node.
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
+    CheckWarningEvents warning_events;
     uint8_t* constant_warnings;
     uint32_t constant_warning_count;
     bool constant_warnings_prepared;
@@ -275,9 +278,18 @@ struct CheckInput
     // path, and on the vector path those they act at, which the tests require to be fewer.
     uint32_t resolve_visits;
     uint32_t expression_visits;
+    // Only a rejected unit whose declaration/body resolution completed can have these per-token diagnostic cuts.
+    // Each top-level declaration keeps its original safe prefix; independent declarations retain their full graph.
+    uint32_t* diagnostic_limits;
+    uint32_t diagnostic_report_count;
     bool diagnostic_graph;
     bool resource;
 };
+
+static uint32_t check_input_diagnostic_limit(const CheckInput* input, uint32_t token)
+{
+    return input->diagnostic_limits != NULL && token < input->token_count ? input->diagnostic_limits[token] : input->token_count;
+}
 
 static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
 {
@@ -487,6 +499,8 @@ struct CheckInputReader
     TypeTable* types;
     Arena* arena;
     Arena* scratch;
+    // This reader's append-only warning suffix. Lanes reset it rather than append into the top level's buffer.
+    CheckWarningBuffer warning_events;
     bool literal_tables_disabled;
     CBindings bindings;
     TypeId* declared_types;
@@ -667,6 +681,30 @@ struct CheckInputReader
     bool lane_unsupported;
 };
 
+static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* reader, const CheckWarningEvent* event,
+                                                            const CheckWarningNote* notes, uint32_t note_count)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    bool valid = event != NULL && event->token < count &&
+                 (event->payload.token == BUSTER_CHECK_WARNING_NO_SOURCE || event->payload.token < count) &&
+                 (event->source == BUSTER_CHECK_WARNING_NO_SOURCE || event->source < reader->pp->output.count) &&
+                 (event->completion_kind == CHECK_WARNING_COMPLETE_TU_END ||
+                  (event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN ? event->completion <= count : event->completion < count));
+    for (uint32_t i = 0; valid && i < note_count; i += 1)
+    {
+        valid = notes != NULL && notes[i].token < count &&
+                (notes[i].payload.token == BUSTER_CHECK_WARNING_NO_SOURCE || notes[i].payload.token < count) &&
+                (notes[i].source == BUSTER_CHECK_WARNING_NO_SOURCE || notes[i].source < reader->pp->output.count);
+    }
+    valid = valid && check_warning_append(&reader->warning_events, event, notes, note_count);
+    reader->output->resource |= !valid;
+    if (valid)
+    {
+        reader->output->warning_events = check_warning_view(&reader->warning_events);
+    }
+    return valid;
+}
+
 // A body read on a lane that does what only source order can merge (`refused`), the first time with `reason`.
 static void check_input_lane_refuse(CheckInputReader* reader, bool refused, const char* reason)
 {
@@ -697,6 +735,9 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
         {
             .token = token,
             .message = message,
+            .completion = message == CHECK_INPUT_UNDECLARED && reader->parser != NULL && token < reader->parser->tokens.count &&
+                          reader->parser->tokens.kinds != NULL && reader->parser->tree.roles != NULL &&
+                          reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND ? token + 1u : 0,
         };
     }
     else
@@ -705,17 +746,67 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
     }
 }
 
-static void check_input_pragma_report(CheckInputReader* reader)
+static uint32_t check_input_expression_limit(const CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t before = reader->output->report_count;
-    const uint32_t token = reader->resolve_position != BUSTER_CHECK_NONE ? reader->resolve_position :
-                           reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
-    check_input_report(reader, token, reader->resolve_message);
-    if (reader->output->report_count != before && reader->resolve_diagnostic_token == BUSTER_CHECK_NONE)
+    const uint32_t local = check_input_diagnostic_limit(reader->output, token);
+    return local < reader->expression_limit ? local : reader->expression_limit;
+}
+
+// Missing ordinary names are found by the binding handoff after the whole ordered declaration walk has completed.
+// That state can check independent declarations without inventing a value for a missing operand. Propagate each
+// report's cut to its top-level root, then back to that declaration's tokens: two bounded forest passes, only on a
+// rejected unit. Other reader failures retain the conservative whole-unit prefix and never enter this recovery.
+static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolved)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    bool recoverable = resolved && input->report_count != 0 && !input->resource && input->deferred_tokens == NULL;
+    for (uint32_t report = 0; recoverable && report < input->report_count; report += 1)
     {
-        reader->output->reports[before].pragma = reader->resolve_pragma + 1;
+        const CheckInputReport* item = input->reports + report;
+        recoverable = item->message == CHECK_INPUT_UNDECLARED && item->pragma == 0 && item->token < count &&
+                      parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[item->token] == PARSE_ROLE_OPERAND;
+    }
+    if (recoverable)
+    {
+        input->diagnostic_limits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
+        input->resource |= input->diagnostic_limits == NULL;
+        if (!input->resource)
+        {
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                input->diagnostic_limits[token] = count;
+            }
+            for (uint32_t report = 0; report < input->report_count; report += 1)
+            {
+                const uint32_t token = input->reports[report].token;
+                input->diagnostic_limits[token] = token;
+            }
+            for (uint32_t order = 0; order < count; order += 1)
+            {
+                const uint32_t token = reader->postorder[order];
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < count && input->diagnostic_limits[token] < input->diagnostic_limits[parent])
+                {
+                    input->diagnostic_limits[parent] = input->diagnostic_limits[token];
+                }
+            }
+            for (uint32_t order = count; order-- > 0;)
+            {
+                const uint32_t token = reader->postorder[order];
+                const uint32_t parent = parser->tree.parents[token];
+                if (parent < count && input->diagnostic_limits[parent] < input->diagnostic_limits[token])
+                {
+                    input->diagnostic_limits[token] = input->diagnostic_limits[parent];
+                }
+            }
+            input->diagnostic_report_count = input->report_count;
+        }
     }
 }
+
+static void check_input_pragma_report(CheckInputReader* reader);
 
 static TypeId check_input_type_result(CheckInputReader* reader, TypeId type)
 {
@@ -1551,6 +1642,24 @@ static bool check_input_spelling(CheckInputReader* reader, uint32_t token, const
 #include "c_check_loop_input.c"
 #include "c_check_section_input.c"
 #include "c_check_optimize_input.c"
+
+static void check_input_pragma_report(CheckInputReader* reader)
+{
+    const uint32_t before = reader->output->report_count;
+    const uint32_t token = reader->resolve_position != BUSTER_CHECK_NONE ? reader->resolve_position :
+                           reader->resolve_diagnostic_token != BUSTER_CHECK_NONE ? reader->resolve_diagnostic_token : reader->resolve_limit;
+    check_input_report(reader, token, reader->resolve_message);
+    if (reader->output->report_count != before && reader->resolve_diagnostic_token == BUSTER_CHECK_NONE)
+    {
+        CheckInputReport* report = reader->output->reports + before;
+        report->pragma = reader->resolve_pragma + 1;
+        const CheckInputLoopDiagnostic* loop = reader->output->loop_diagnostic;
+        if (loop != NULL && loop->pragma == report->pragma && loop->position == token)
+        {
+            report->completion = token;
+        }
+    }
+}
 
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
@@ -4093,7 +4202,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
                 if (!loop)
                 {
+                    const uint32_t first = reader->output->report_count;
                     check_input_report(reader, i, CHECK_INPUT_DECLARATION);
+                    if (!reader->output->resource && reader->output->report_count > first)
+                    {
+                        reader->output->reports[first].completion = i + 1u;
+                    }
                 }
                 reader->ignored[i] = true;
             }
@@ -4552,7 +4666,7 @@ static void check_input_expressions(CheckInputReader* reader)
         // Every token's first value is written when the walk reaches it, NONE for one without values, before its parent
         // reads it: a column written before it is read.
         reader->first_value[token] = BUSTER_CHECK_NONE;
-        if (check_input_expression_end(reader, token) > reader->expression_limit ||
+        if (check_input_expression_end(reader, token) > check_input_expression_limit(reader, token) ||
             (reader->output->deferred_tokens != 0 && reader->output->deferred_tokens[token] != 0))
         {
             continue;
@@ -5251,9 +5365,15 @@ static void check_input_expressions(CheckInputReader* reader)
 static void check_input_complete_use(CheckInputReader* reader, uint32_t token)
 {
     if (reader->output->tentative[token] && !type_is_complete(reader->types, reader->declared_types[token]) &&
-        type_kind(reader->types, reader->declared_types[token]) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+        type_kind(reader->types, reader->declared_types[token]) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
+        token < check_input_expression_limit(reader, token))
     {
+        const uint32_t first = reader->output->report_count;
         check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+        if (reader->output->report_count > first)
+        {
+            reader->output->reports[first].completion = reader->parser->tokens.count + 1u;
+        }
     }
 }
 
@@ -5728,6 +5848,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .types = types,
         .arena = arena,
         .scratch = scratch,
+        .warning_events = { .arena = arena },
         .literal_tables_disabled = !literal_tables,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
@@ -6253,8 +6374,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         if (!input->resource && reader.bindings.valid)
         {
+            // A successful deferred merge clears its mask and supplies the same complete unit as source order.
+            // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
+            const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
-            for (uint32_t report = 0; report < input->report_count; report += 1)
+            check_input_diagnostic_recover(&reader, resolved);
+            for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
             {
                 const uint32_t token = input->reports[report].token;
                 reader.expression_limit = token < reader.expression_limit ? token : reader.expression_limit;
@@ -6267,13 +6392,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 {
                     check_input_selections(&reader);
                 }
-                if (complete_translation_unit && input->report_count == 0)
+                if (complete_translation_unit && input->report_count == input->diagnostic_report_count)
                 {
                     check_input_complete_uses(&reader);
                 }
-                for (uint32_t report = 0; report < input->report_count; report += 1)
+                for (uint32_t report = input->diagnostic_report_count; report < input->report_count; report += 1)
                 {
-                    const uint32_t token = input->reports[report].token;
+                    const uint32_t token = input->reports[report].completion != 0 ? input->reports[report].completion : input->reports[report].token;
                     reader.expression_limit = token < reader.expression_limit ? token : reader.expression_limit;
                 }
                 const uint32_t tags = types->tags.count;
