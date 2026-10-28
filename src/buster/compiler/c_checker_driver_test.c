@@ -2959,7 +2959,7 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     static const char refused[] = "construct is not yet supported by the type checker";
     static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
-    static const char typed[] = "unsupported: a section of a name ELF gives another type (a note, an init or fini array)";
+    static const char typed[] = "unsupported: a section name with an unsupported ELF type or reserved family";
     static const char asm_symbol[] = "unsupported: file-scope assembly that defines or refers to a symbol";
     static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
@@ -3028,6 +3028,8 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a note's section", "int g __attribute__((section(\".note.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
+        { "the reserved llvm dot family includes ordinary PROGBITS names", "int g __attribute__((section(\".llvm.custom\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
+        { "llvm underscore is outside the reserved dot family", "int g __attribute__((section(\".llvm_custom\"))) = 1;\nint main(void) { return g - 1; }\n" },
         { "an unknown kind", "#pragma clang section foo = \".x\"\nint f(void) { return 1; }\n" },
         { "a missing '='", "#pragma clang section text \".x\"\nint f(void) { return 1; }\n" },
         { "a name that isn't a string", "#pragma clang section text = x\nint f(void) { return 1; }\n" },

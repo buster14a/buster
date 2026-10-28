@@ -245,8 +245,8 @@ does, each rule checked against clang's answers on probes of it:
   kind. The deferred reader leaves a unit with a setting to source order, and
   a lane refuses a body with a section attribute.
 - **Named sections in `-c` and the direct path** (#619's part 2): a
-  definition with a `section` attribute, its own or the latest of its earlier
-  declarations' as clang passes them on, and a function a text setting places
+  definition with a `section` attribute (the first within one declaration,
+  or the latest earlier declaration's as clang passes it on), and a function a text setting places
   go in their sections (`CheckInputSections.placements`,
   `check_program_sections`). `-c`'s object has one section of each name and
   flags (`ObjectOptions.atom_sections`), of the kind LLVM gives a global with
@@ -269,7 +269,11 @@ does, each rule checked against clang's answers on probes of it:
   `section` attribute takes it out of the refusal, into its section. Also
   refused by name: a name LLVM gives another kind than the definition's (an initialized variable in a `.bss`, which clang's code
   generation refuses too, or one not thread-local in a `.tdata`); and a name
-  ELF gives another type (`.note*`, the init and fini arrays').
+  ELF gives another type (`.note*`, the init and fini arrays'). The entire
+  `.llvm.*` family is conservatively refused too, including ordinary
+  PROGBITS names such as `.llvm.custom`; `.llvm_custom` is outside this
+  reserved family. The diagnostic names the unsupported ELF type or reserved
+  family without claiming every reserved name has another ELF type.
 - **File-scope `asm`** (#619's part 2), which `main.c` makes
   `.text.buster_checker` with: its statements' templates in source order, a
   line each, assembled by `assembler.c` (`asm_assemble`), whose sections'

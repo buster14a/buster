@@ -1935,7 +1935,8 @@ static bool check_program_section_prefix(String8 name, const char* prefix)
 // .data) is a section of its own with this kind's flags, as LLVM makes it. The file-scope assembly's atoms keep their
 // own (CheckProgramCode.asm_sections). Refused by name: a name LLVM gives another kind than the definition's (an
 // initialized variable in a .bss, which clang's code generation refuses too, a function in a .tdata), and one it gives
-// another type (.note, the arrays'). `*table` is null for a unit without either, and otherwise the descriptors by AtomId,
+// another type (.note, the arrays'), or the conservatively reserved .llvm.* family (including ordinary PROGBITS names).
+// `*table` is null for a unit without either, and otherwise the descriptors by AtomId,
 // in `output`. Returns false with `code`'s status, reason and token set.
 static bool check_program_sections(CheckProgramCode* code, const CheckProgram* program, Arena* bytes, Arena* output, ObjectAtomSection** table)
 {
@@ -1976,11 +1977,13 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                                check_program_section_prefix(name, ".llvm.linkonce.td.");
             const bool tbss = check_program_section_family(name, ".tbss") || check_program_section_prefix(name, ".gnu.linkonce.tb.") ||
                               check_program_section_prefix(name, ".llvm.linkonce.tb.");
-            const bool typed = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
-                               check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
-                               check_program_section_prefix(name, ".llvm.");
+            // Keep the entire .llvm.* family unsupported, including names Clang treats as ordinary PROGBITS. This
+            // is a conservative reserved-name boundary, separate from the names ELF assigns another section type.
+            const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
+                                    check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
+                                    check_program_section_prefix(name, ".llvm.");
             const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
-            const bool fits = typed ? false :
+            const bool fits = restricted ? false :
                               bss ? class == BUSTER_LINK_CLASS_BSS :
                               tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :
                               tbss ? class == BUSTER_LINK_CLASS_TBSS :
@@ -1998,7 +2001,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 // The placements are in source order but for the unit's end's tentative definitions, after the rest:
                 // the refusal is the earliest's.
                 refused = placement->token < refused ? placement->token : refused;
-                reason = placement->token == refused ? (typed ? "a section of a name ELF gives another type (a note, an init or fini array)" :
+                reason = placement->token == refused ? (restricted ? "a section name with an unsupported ELF type or reserved family" :
                                                                 "a definition in a section whose name gives it another kind") :
                                                        reason;
             }
