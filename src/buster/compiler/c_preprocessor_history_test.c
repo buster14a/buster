@@ -440,9 +440,10 @@ static bool pp_test_diagnostic_buffer(void)
     message[sizeof(message) - 1] = 0;
     bool result = true;
     uint32_t checked = 0;
-    for (uint32_t mode = 0; result && mode < 2; mode += 1)
+    // A finite arena permits an early growth and then forces fallback on a later append.
+    for (uint32_t mode = 0; result && mode < 3; mode += 1)
     {
-        Arena arena = mode == 0 ? arena_reserve_small(1 << 20, 1 << 20) : (Arena){ 0 };
+        Arena arena = mode == 0 ? arena_reserve_small(1 << 20, 1 << 20) : mode == 1 ? (Arena){ 0 } : arena_reserve_small(4096, 4096);
         for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(capacities); c += 1)
         {
             for (uint32_t l = 0; result && l < BUSTER_ARRAY_LENGTH(lengths); l += 1)
@@ -457,7 +458,7 @@ static bool pp_test_diagnostic_buffer(void)
                     .bytes = bytes,
                     .capacity = capacities[c],
                 };
-                result = actual != 0 && expected != 0 && (mode != 0 || arena.base != 0);
+                result = actual != 0 && expected != 0 && (mode == 1 || arena.base != 0);
                 if (result)
                 {
                     fputs("before\n", actual);

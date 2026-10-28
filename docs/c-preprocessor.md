@@ -1762,7 +1762,7 @@ scalar/vector history tables.
 Separate checks cover guarded input tails, maximal runs across split copies,
 batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
-The diagnostic buffer checks compare 90 combinations of buffer/message sizes
+The diagnostic buffer checks compare 135 combinations of buffer/message sizes
 against independent piecewise printing, including boundary lengths, repeated
 growth, unavailable scratch and bytes written before and after the diagnostic.
 
