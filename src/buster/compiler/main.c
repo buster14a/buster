@@ -443,6 +443,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
+// The driver's commands of several source files (#152): their units on lanes, and one executable of them all.
+#include "buster/compiler/c_checker_units.c"
 #pragma clang section text = ""
 // The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681). On the 9700X, the measured
 // 716c980d to 4ce693ad pair's checker-unit mean fell from 33.7 to 27.35 s, and compilation-phase wall from 33.7 to
@@ -479,6 +481,8 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_debug_test.c"
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
 #include "buster/compiler/c_check_lanes_test.c"
+// #152's test-check-units: the driver's commands of several source files, every unit's output its own alone's.
+#include "buster/compiler/c_check_units_test.c"
 #include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
 #pragma clang optimize on
@@ -990,6 +994,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-lanes") == 0)
     {
         result = run_check_lanes_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-check-units") == 0)
+    {
+        result = run_check_units_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {

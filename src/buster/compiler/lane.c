@@ -92,8 +92,24 @@ struct Arena
 static __attribute__((unused)) Arena arena_reserve(uint64_t capacity);
 // arena_reserve with the first `small` bytes in base pages (a multiple of BUSTER_ARENA_PAGE_BYTES, at least
 // BUSTER_ARENA_SMALL_BYTES), for a table that usually stays below what a huge page is worth: the kernel clears a huge
-// page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X.
+// page whole when it is first touched, which costs as much as about 750 KB of base pages on the 9700X. The thread's
+// arena_small_floor, if larger, takes the place of `small`.
 static __attribute__((unused)) Arena arena_reserve_small(uint64_t capacity, uint64_t small);
+
+// The base pages every arena the thread reserves starts with, at least (0 for BUSTER_ARENA_SMALL_BYTES alone; a
+// multiple of BUSTER_ARENA_PAGE_BYTES). A thread whose arenas each hold a small and sparse part of its work, as each
+// lane of the C driver's translation units does (#152: a few kilobytes of each of about 70 arenas per unit, past
+// their first 64 KB), sets it, so that such an arena's first touch past BUSTER_ARENA_SMALL_BYTES takes a base page
+// rather than a huge page the kernel clears whole; a large unit's arenas still take huge pages past it. Only the
+// thread sets and reads it. main.c's units share it, as they share the thread context (below): an arena that one
+// unit's code reserves is another's to use.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern _Thread_local uint64_t arena_small_floor;
+#elif defined(BUSTER_UNIT)
+_Thread_local uint64_t arena_small_floor;
+#else
+static _Thread_local uint64_t arena_small_floor;
+#endif
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
 // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
@@ -125,6 +141,7 @@ static uint64_t arena_mapping_bytes(uint64_t capacity)
 static Arena arena_reserve_small(uint64_t capacity, uint64_t small)
 {
     Arena result = { 0 };
+    small = arena_small_floor > small ? arena_small_floor : small;
     if (capacity != 0 && capacity <= BUSTER_ARENA_MAX_CAPACITY)
     {
         const uint64_t mapping_bytes = arena_mapping_bytes(capacity);
