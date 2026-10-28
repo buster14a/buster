@@ -404,7 +404,7 @@ c-testsuite's programs (`00182.c`, `00200.c`, `00204.c` and `00213.c`), the
 frozen `sqlite3.c`, and 38 synthetic units of 2 to 70 bodies after `stdio.h`,
 `stdlib.h` and `string.h`, after thirty of the C library's headers or after
 none, among them one large body beside smaller ones and two large bodies of
-different sizes ([the record](https://github.com/buster14a/buster-performance/tree/2c7efa3f6dfbb67af36cc94cd7d268419a6a8948/docs/measurements/deferred-lane-costs-113-2026-10-27)):
+different sizes ([the record](https://github.com/buster14a/buster-performance/tree/4ebe1d0bfe5ab69d3c547b9932e983e3188c8783/docs/measurements/deferred-lane-costs-113-2026-10-27)):
 
 - **A lane's copy** (the median of the 42 units but `sqlite3.c`, then
   `sqlite3.c`'s): when each lane reserved its five arenas inside the lane, 101
