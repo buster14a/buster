@@ -116,7 +116,8 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
             "v8di idx64;for(int i=0;i<8;i++)idx64[i]=(i*11+n)&63;v16si src;fill(&src,64,n);v8di src2;fill(&src2,64,n+1);unsigned long long m=mask(n);"
             "v16si g1=__builtin_ia32_gathersiv16si(src,table,idx,(unsigned short)m,4);v8di g2=__builtin_ia32_gathersiv8di(src2,wide,idx8,(unsigned char)m,8);"
             "v8di g3=__builtin_ia32_gatherdiv8di(src2,wide,idx64,(unsigned char)(m>>3),8);v16si g4=__builtin_ia32_gathersiv16si(src,(char*)table+4,idx,0xffff,2);"
-            "FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);int dst[128];long long dst2[64];fill(dst,sizeof(dst),n+2);fill(dst2,sizeof(dst2),n+3);"
+            "v16si g5=__builtin_ia32_gathersiv16si(src,table,idx,(unsigned short)m,4294967300ULL);"
+            "FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);FOLD(g5);int dst[128];long long dst2[64];fill(dst,sizeof(dst),n+2);fill(dst2,sizeof(dst2),n+3);"
             "__builtin_ia32_scatterdiv16si(dst,(unsigned char)m,idx64,idx8,4);__builtin_ia32_scatterdiv8di(dst2,(unsigned char)(m>>1),idx64,src2,8);"
             "__builtin_ia32_scattersiv16si(dst,(unsigned short)(m>>4),idx,src,4);FOLD(dst);FOLD(dst2);"
             "return (int)h;}",
@@ -195,6 +196,19 @@ static void check_test_program_x86_sources(CheckTest* test, const char* clang, c
 // What the lowering refuses by name: a builtin the table doesn't name, and one whose instructions the target hasn't.
 static void check_test_program_x86_refusals(CheckTest* test)
 {
+    X86Target baseline = { 0 };
+    const bool baseline_parsed = x86_target_parse("x86-64", strlen("x86-64"), &baseline);
+    check_test_expect(test, baseline_parsed, "the integer-only opmask refusals' baseline target");
+    static const char* const masks[] = {
+        "int tested(int n){return __builtin_ia32_kandhi((unsigned short)n,3);}",
+        "int tested(int n){return __builtin_ia32_kmovw((unsigned short)n);}",
+        "int tested(int n){return __builtin_ia32_kshiftlihi((unsigned short)n,3);}",
+    };
+    for (uint32_t i = 0; baseline_parsed && i < BUSTER_ARRAY_LENGTH(masks); i += 1)
+    {
+        check_test_program_boundary_target(test, masks[i], "integer-only-opmask-without-avx512", true, false, 0, 0,
+                                           "x86 builtins whose instructions the target hasn't", &baseline);
+    }
     X86Target v4 = { 0 };
     const bool parsed = x86_target_parse("x86-64-v4", strlen("x86-64-v4"), &v4);
     check_test_expect(test, parsed, "the x86 builtins' refusals' target, x86-64-v4");
@@ -230,5 +244,17 @@ static __attribute__((noinline)) void check_test_program_x86(CheckTest* test, co
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64";
         check_test_program_x86_refusals(test);
+        X86Target bmi2 = { 0 };
+        const bool bmi2_parsed = x86_target_parse("x86-64-v3", strlen("x86-64-v3"), &bmi2);
+        check_test_expect(test, bmi2_parsed, "the integer-only BMI2 target without AVX-512");
+        if (bmi2_parsed)
+        {
+            check_test_program_march = "-march=x86-64-v3";
+            check_test_program_source_native_limits(test, "int tested(int n){return (int)__builtin_ia32_pdep_si((unsigned)n,0x55555555u);}",
+                                                    "integer-only-BMI2-without-avx512", clang, false, -1, 0, &bmi2,
+                                                    (native.features & bmi2.features) == bmi2.features);
+            check_test_program_build_release();
+            check_test_program_march = "-march=x86-64";
+        }
     }
 }

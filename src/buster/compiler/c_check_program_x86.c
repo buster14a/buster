@@ -468,7 +468,10 @@ static const char* check_x86_lower_row(uint64_t target, const char* name, uint32
         const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
         const uint8_t v3 = BUSTER_TIER0_ROLE_VECTOR(3);
         const bool masked = rule->family <= CHECK_X86_LOWER_STORE;
-        needed = rule->features | (masked && rule->element <= 2 && rule->family != CHECK_X86_LOWER_KMOV ? BUSTER_CHECK_X86_BW : 0) |
+        // Integer-only opmask rows never reach the VECTOR value-class gate. Their KMOV and mask instructions still
+        // require AVX-512F; keep GENERAL's BMI2-only target independent of that requirement.
+        needed = rule->features | (mask_bits ? BUSTER_X86_FEATURE(AVX512F) : 0) |
+                 (masked && rule->element <= 2 && rule->family != CHECK_X86_LOWER_KMOV ? BUSTER_CHECK_X86_BW : 0) |
                  (check_x86_lower_family_masks(rule->family) && lanes >= 32 ? BUSTER_CHECK_X86_BW : 0);
         row->result_class = BUSTER_TYPED_CLASS_VECTOR;
         row->result_bytes = rule->bytes;

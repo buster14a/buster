@@ -3796,6 +3796,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
+            "an intrinsic immediate cannot discard side effects",
+            "typedef int V __attribute__((vector_size(64)));V f(V a,int*p){return __builtin_ia32_alignd512(a,a,((*p)++,3));}",
+            true,
+            false
+        },
+        {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
             false,

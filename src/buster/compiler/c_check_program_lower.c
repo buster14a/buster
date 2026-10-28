@@ -4011,7 +4011,15 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     const uint32_t count = graph->argument_counts[node];
     const BuiltinIntrinsicInfo* info = effect != NULL ? effect->info : NULL;
     const uint32_t skipped = info != NULL ? check_x86_lower_immediate(info->name, info->name_length) : BUSTER_CHECK_X86_NO_IMMEDIATE;
-    const CheckValue* constant = skipped < count ? stream->values + graph->argument_nodes[first + skipped] : NULL;
+    CheckValue immediate = { 0 };
+    if (skipped < count)
+    {
+        // Immediates follow the same retained prototype conversion as evaluated arguments. In particular, a wide
+        // integer converted to the scale's int may be 1, 2, 4 or 8 even when its original payload is not.
+        immediate = stream->values[graph->argument_nodes[first + skipped]];
+        check_action_convert_value(program->types, &immediate, stream->argument_conversions[first + skipped].type, node);
+    }
+    const CheckValue* constant = skipped < count ? &immediate : NULL;
     Tier0Operation row;
     const char* reason = info == NULL ? "this x86 builtin" :
                          skipped != BUSTER_CHECK_X86_NO_IMMEDIATE && (constant == NULL || constant->constant_kind != CHECK_CONSTANT_INTEGER) ?
