@@ -102,6 +102,8 @@ struct CheckProgramOptions
     // label or case of an outer switch enters the other, as clang -O0's code has (CodeGenFunction::EmitIfStmt): the
     // same model's. Tier 0 lowers both arms, which -c's program keeps.
     bool folded_ifs;
+    // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
+    uint64_t* return_flow_work;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -1315,7 +1317,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
 // task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
 // as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
 // conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body)
+static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, uint32_t* node_seen, uint32_t* node_stack, uint64_t* work)
 {
     const CheckProgram* program = writer->program;
     const TypeId result = type_strip_aligned(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
@@ -1327,19 +1329,14 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
         uint8_t* seen = (uint8_t*)writer->tasks;
         uint32_t* queue = writer->labels;
         const CheckGraph* graph = &program->input->graph;
-        // The task records are no longer live. Their storage also bounds the warning-only expression walk;
-        // capacity is 8 * token_count + 16, hence these byte offsets keep the u32 worklist aligned.
-        _Static_assert(sizeof(CheckControlTask) >= 6, "control tasks hold two byte marks and one u32 worklist");
-        uint8_t* node_seen = (uint8_t*)writer->tasks + writer->capacity;
-        uint32_t* node_stack = (uint32_t*)((uint8_t*)writer->tasks + (uint64_t)writer->capacity * 2);
+        // The reference walk owns these initialized unit arrays. Warning epochs are disjoint from body epochs:
+        // token_count < UINT32_MAX / 8 bounds the latter. The following reference walk visits every warning root
+        // and replaces its warning marks before builtin collection. Task storage remains only control scratch.
+        const uint32_t epoch = UINT32_MAX - program->body_count;
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
-            bool warning_safe = graph->count <= writer->capacity;
+            bool warning_safe = true;
             memset(seen, 0, body->count);
-            if (pass != 0 && warning_safe)
-            {
-                memset(node_seen, 0, graph->count);
-            }
             uint32_t head = 0;
             uint32_t tail = 1;
             queue[0] = 0;
@@ -1361,6 +1358,32 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
                     next = !jump && (!known || !taken);
+                }
+                else if (pass != 0 && entry->kind == CHECK_CONTROL_SWITCH)
+                {
+                    unsigned __int128 value = 0;
+                    const bool known = check_program_case_value(program, entry->node, program->stream->values[entry->node].type, &value);
+                    if (known)
+                    {
+                        uint32_t dispatch = index + 1;
+                        uint32_t selected = BUSTER_CHECK_NONE;
+                        while (dispatch < body->count && entries[dispatch].kind == CHECK_CONTROL_CASE)
+                        {
+                            const CheckProgramCase* item = program->cases + entries[dispatch].target;
+                            uint32_t width = 0;
+                            bool sign = false;
+                            check_action_integer_type(program->types, item->type, &width, &sign);
+                            const unsigned __int128 ordered = value ^ (sign ? (unsigned __int128)1 << (width - 1) : 0);
+                            if (selected == BUSTER_CHECK_NONE && ordered >= check_program_case_order(program, item, false) &&
+                                ordered <= check_program_case_order(program, item, true))
+                            {
+                                selected = item->target;
+                            }
+                            dispatch += 1;
+                        }
+                        targets[0] = selected != BUSTER_CHECK_NONE ? selected : dispatch;
+                        next = false;
+                    }
                 }
                 else if (entry->kind == CHECK_CONTROL_CASE)
                 {
@@ -1398,14 +1421,18 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 }
                 // Calls may be declared noreturn. Until that contract is carried by controls, avoid diagnosing a
                 // conservative fall-off after an expression containing a call or a terminal builtin.
-                if (pass != 0 && warning_safe && entry->node < graph->count && node_seen[entry->node] == 0)
+                if (pass != 0 && warning_safe && entry->node < graph->count && node_seen[entry->node] != epoch)
                 {
                     uint32_t depth = 1;
                     node_stack[0] = entry->node;
-                    node_seen[entry->node] = 1;
+                    node_seen[entry->node] = epoch;
                     while (depth != 0 && warning_safe)
                     {
                         const uint32_t node = node_stack[--depth];
+                        if (work != NULL)
+                        {
+                            *work += 1;
+                        }
                         const CheckOp op = graph->ops[node];
                         warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC;
                         if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
@@ -1427,9 +1454,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
                             {
                                 const uint32_t operand = operands[o];
-                                if (operand < graph->count && node_seen[operand] == 0)
+                                if (operand < graph->count && node_seen[operand] != epoch)
                                 {
-                                    node_seen[operand] = 1;
+                                    node_seen[operand] = epoch;
                                     node_stack[depth++] = operand;
                                 }
                             }
@@ -1991,6 +2018,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .folded_ifs = options.folded_ifs, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
+    if (options.return_flow_work != NULL)
+    {
+        *options.return_flow_work = 0;
+    }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -2082,6 +2113,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
+        if (options.return_flow_work != NULL)
+        {
+            *options.return_flow_work += (uint64_t)node_count + 1;
+        }
         memset(region_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t r = input->region_count; r-- > 0;)
         {
@@ -2268,7 +2303,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             const uint32_t name = parser->tokens.names[declaration];
             body->is_main = intern_length(options.identifiers, name) == 4 && memcmp(intern_bytes(options.identifiers, name), "main", 4) == 0;
         }
-        check_program_return_flow(&writer, body);
+        check_program_return_flow(&writer, body, nodes, stack, options.return_flow_work);
         body->reference_count = check_program_references(program, entries + start, body->entry_count, program->body_count, seen, nodes, stack, reference_items, needed);
         if (body->reference_count > UINT32_MAX - reference_count)
         {

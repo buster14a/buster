@@ -1368,6 +1368,7 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
+        uint64_t return_flow_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1375,8 +1376,15 @@ static void check_test_program_source_native_limits(CheckTest* test, const char*
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
+            .return_flow_work = &return_flow_work,
         };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch);
+        if (ready && strcmp(name, "many-aggregate-return-bodies") == 0)
+        {
+            check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
+                                   return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
+                              "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -2025,10 +2033,38 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 
 #include "c_check_program_batch_test.c"
 
+static void check_test_program_many_aggregate_returns(CheckTest* test, const char* clang)
+{
+    for (uint32_t bodies = 64; bodies <= 128; bodies *= 2)
+    {
+        char* source = NULL;
+        size_t length = 0;
+        FILE* text = open_memstream(&source, &length);
+        check_test_expect(test, text != NULL, "many aggregate bodies have bounded source output storage");
+        if (text != NULL)
+        {
+            fputs("struct S{long a,b;};", text);
+            for (uint32_t b = 0; b < bodies; b += 1)
+            {
+                fprintf(text, "struct S f%u(int n,struct S s){if(n)return s;}", b);
+            }
+            fprintf(text, "int tested(int n){struct S s={n,n+1};struct S a=f0(1,s),b=f%u(1,s);return a.a+a.b+b.a+b.b;}", bodies - 1);
+            const bool written = fclose(text) == 0;
+            check_test_expect(test, written, "many aggregate bodies complete without truncation");
+            if (written)
+            {
+                check_test_program_source(test, source, "many-aggregate-return-bodies", clang);
+            }
+        }
+        free(source);
+    }
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
+    check_test_program_many_aggregate_returns(test, clang);
     check_test_program_source(test,
         "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
         "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
