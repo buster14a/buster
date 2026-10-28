@@ -38,6 +38,11 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_DIVXC3,
     CHECK_LOWER_RUNTIME_MEMMOVE,
     CHECK_LOWER_RUNTIME_MEMCPY,
+    CHECK_LOWER_RUNTIME_ATOMIC_LOAD,
+    CHECK_LOWER_RUNTIME_ATOMIC_STORE,
+    CHECK_LOWER_RUNTIME_ATOMIC_EXCHANGE,
+    CHECK_LOWER_RUNTIME_ATOMIC_COMPARE_EXCHANGE,
+    CHECK_LOWER_RUNTIME_ATOMIC_IS_LOCK_FREE,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
@@ -45,6 +50,7 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
     "__floatuntidf",    "__floatuntixf", "__fixsfti", "__fixdfti",   "__fixxfti",  "__fixunssfti", "__fixunsdfti", "__fixunsxfti", "__mulsc3",
     "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove", "memcpy",
+    "__atomic_load", "__atomic_store", "__atomic_exchange", "__atomic_compare_exchange", "__atomic_is_lock_free",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -76,6 +82,7 @@ struct CheckLowerTable
 #define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
 #define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
 #define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
+#define BUSTER_CHECK_LOWER_TYPE_ATOMIC 0x40u
 #define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
 
 #include "c_check_program_initializers.c"
@@ -162,6 +169,7 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_VARARGS,
     // The size of `type`, a variable-length array's, computed from its extents (an I64: a pointer's runtime stride).
     CHECK_LOWER_SIZE,
+    CHECK_LOWER_ATOMIC,
     // Expression `node`'s operation on complex values (check_lower_complex_emit), its operands in the temporaries `value`
     // holds (the first's in its low 32 bits), or with `address` its compound assignment's (check_lower_complex_update_emit),
     // the value's and the destination's address's.
@@ -227,6 +235,27 @@ static inline __attribute__((always_inline)) CheckLowerTask check_lower_task_unp
 }
 
 typedef struct CheckLowerAbi CheckLowerAbi;
+typedef struct CheckLowerAtomic CheckLowerAtomic;
+struct CheckLowerAtomic
+{
+    uint32_t node;
+    uint32_t address;
+    uint32_t desired;
+    uint32_t expected;
+    uint32_t result;
+    uint32_t arguments[6];
+    TypeId operand_type;
+    TypeId value_type;
+    TypeId object_type;
+    uint64_t size;
+    CBuiltinId id;
+    uint8_t operation;
+    bool builtin;
+    bool native;
+    bool postfix;
+    bool discard;
+};
+
 struct CheckLowerAbi
 {
     TypeId* results;
@@ -325,6 +354,8 @@ struct CheckLowerWriter
     CBuiltinLowerCall* builtins;
     CBuiltinMiscLowerCall* miscellaneous;
     CBuiltinFloatLowerCall* floating;
+    CheckLowerAtomic* atomics;
+    uint32_t atomic_count;
     uint32_t count;
     uint32_t depth;
     uint32_t capacity;
@@ -453,7 +484,7 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // holds (check_lower_classify_types), which the bodies read (check_lower_class).
 static uint8_t check_lower_type_class(const TypeTable* types, TypeId type)
 {
-    const TypeId base = type_unqualified(type_strip_aligned(types, type));
+    const TypeId base = type_conversion_operand(types, type);
     const uint8_t kind = type_kind(types, base);
     uint8_t result = UINT8_MAX;
     uint32_t bits = 0;
@@ -513,7 +544,7 @@ static bool check_lower_wide_class(uint8_t class)
 // GNU's complex integer types aren't lowered.
 static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 {
-    const TypeId base = type_unqualified(type_strip_aligned(types, type));
+    const TypeId base = type_conversion_operand(types, type);
     const TypeId element = type_kind(types, base) == BUSTER_TYPE_KIND_COMPLEX ? type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
     return element == BUSTER_TYPE_FLOAT || element == BUSTER_TYPE_DOUBLE || element == BUSTER_TYPE_LONG_DOUBLE ? element : 0;
 }
@@ -528,13 +559,15 @@ static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 // which the bodies read (check_lower_facts).
 static uint8_t check_lower_type_facts(const TypeTable* types, TypeId type)
 {
-    const TypeId base = type_unqualified(type_strip_aligned(types, type));
+    const bool atomic = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC;
+    const TypeId base = type_conversion_operand(types, type);
     const uint8_t kind = type_kind(types, base);
     const bool complex = check_lower_complex_element(types, type) != 0;
     const bool aggregate = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || complex;
     const bool address = kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) || aggregate;
     return (aggregate ? BUSTER_CHECK_LOWER_TYPE_AGGREGATE : 0) | (complex ? BUSTER_CHECK_LOWER_TYPE_COMPLEX : 0) | (address ? BUSTER_CHECK_LOWER_TYPE_ADDRESS : 0) |
-           (kind == BUSTER_TYPE_KIND_POINTER ? BUSTER_CHECK_LOWER_TYPE_POINTER : 0) | (base == BUSTER_TYPE_BOOL ? BUSTER_CHECK_LOWER_TYPE_BOOL : 0);
+           (kind == BUSTER_TYPE_KIND_POINTER ? BUSTER_CHECK_LOWER_TYPE_POINTER : 0) | (base == BUSTER_TYPE_BOOL ? BUSTER_CHECK_LOWER_TYPE_BOOL : 0) |
+           (atomic ? BUSTER_CHECK_LOWER_TYPE_ATOMIC : 0);
 }
 
 // The kinds whose types, but the builtins, take their class and facts from the kind alone, as the rules give them: each
@@ -550,7 +583,6 @@ static const uint8_t check_lower_kind_facts[64] __attribute__((aligned(64))) = {
     [BUSTER_TYPE_KIND_FUNCTION] = BUSTER_CHECK_LOWER_TYPE_KIND | BUSTER_CHECK_LOWER_TYPE_ADDRESS,
     [BUSTER_TYPE_KIND_VECTOR] = BUSTER_CHECK_LOWER_TYPE_KIND,
     [BUSTER_TYPE_KIND_EXT_VECTOR] = BUSTER_CHECK_LOWER_TYPE_KIND,
-    [BUSTER_TYPE_KIND_ATOMIC] = BUSTER_CHECK_LOWER_TYPE_KIND,
     [BUSTER_TYPE_KIND_STRUCT] = BUSTER_CHECK_LOWER_TYPE_KIND | BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS,
     [BUSTER_TYPE_KIND_UNION] = BUSTER_CHECK_LOWER_TYPE_KIND | BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS,
 };
@@ -564,7 +596,6 @@ static const uint8_t check_lower_kind_classes[64] __attribute__((aligned(64))) =
     [BUSTER_TYPE_KIND_FUNCTION] = BUSTER_TYPED_CLASS_U64,
     [BUSTER_TYPE_KIND_VECTOR] = UINT8_MAX,
     [BUSTER_TYPE_KIND_EXT_VECTOR] = UINT8_MAX,
-    [BUSTER_TYPE_KIND_ATOMIC] = UINT8_MAX,
     [BUSTER_TYPE_KIND_STRUCT] = UINT8_MAX,
     [BUSTER_TYPE_KIND_UNION] = UINT8_MAX,
 };
@@ -2488,19 +2519,24 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     const uint32_t selected = check_program_builtin_index(helpers->uses, helpers->use_count, sizeof(CheckProgramHelperUse), node);
     const uint32_t count = graph->argument_counts[node];
     const uint32_t first = graph->argument_offsets[node];
+    const CBuiltinId source_id = (CBuiltinId)graph->members[node];
+    const bool c11 = check_builtin_atomic_c11(source_id);
+    const bool compare = source_id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_STRONG || source_id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK;
+    const bool init = source_id == CBUILTIN_C11_ATOMIC_INIT;
+    const uint32_t parameters = count + compare + init;
     CheckLowerAbi* abi = writer->abi;
     if (selected == BUSTER_CHECK_NONE || helpers->uses[selected].helper >= helpers->count)
     {
         check_lower_unsupported(writer, "this builtin");
     }
-    else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
+    else if (abi->count >= abi->capacity || parameters > abi->argument_capacity - abi->argument_count)
     {
         check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
     }
     else
     {
         const CheckProgramHelper* helper = helpers->items + helpers->uses[selected].helper;
-        if (count != helper->parameter_count)
+        if (parameters != helper->parameter_count)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
         }
@@ -2509,15 +2545,15 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             const uint32_t call = writer->call_count++;
             writer->call_targets[call] = helper->symbol;
             writer->call_first[call] = writer->argument_count;
-            writer->call_counts[call] = count;
+            writer->call_counts[call] = parameters;
             writer->call_variadic[call] = 0;
             writer->call_result_objects[call] = 0;
             abi->first[abi->count] = abi->argument_count;
             abi->results[abi->count] = helper->result_type;
-            abi->counts[abi->count] = count;
-            abi->named[abi->count] = count;
+            abi->counts[abi->count] = parameters;
+            abi->named[abi->count] = parameters;
             abi->variadic[abi->count++] = 0;
-            for (uint32_t a = 0; a < count; a += 1)
+            for (uint32_t a = 0; a < parameters; a += 1)
             {
                 const TypeId type = helper->parameter_types[a];
                 abi->arguments[abi->argument_count++] = type;
@@ -2543,9 +2579,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 check_lower_convert(writer, helper->result_type, stream->values[node].type);
             }
             check_lower_instruction(writer, BUSTER_TYPED_CALL, check_lower_class(writer, helper->result_type), call);
-            for (uint32_t a = count; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+            for (uint32_t a = parameters; a-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
             {
-                const TypeId checked = stream->argument_conversions[first + a].type;
+                const bool inserted = (compare && a == 3) || (init && a == 2);
+                const uint32_t source = compare && a > 3 ? a - 1 : a;
+                const TypeId checked = inserted ? BUSTER_TYPE_INT : stream->argument_conversions[first + source].type;
                 const uint8_t class = check_lower_class(writer, checked);
                 if (helper->parameter_types[a] == BUSTER_TYPE_ULONG && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64))
                 {
@@ -2562,7 +2600,24 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                 {
                     check_lower_convert(writer, checked, helper->parameter_types[a]);
                 }
-                check_lower_operand(writer, node, a + 3, false, checked);
+                if (inserted)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, compare && source_id == CBUILTIN_C11_ATOMIC_COMPARE_EXCHANGE_WEAK);
+                }
+                else
+                {
+                    if (c11 && a == 1 && (source_id == CBUILTIN_C11_ATOMIC_FETCH_ADD || source_id == CBUILTIN_C11_ATOMIC_FETCH_SUB))
+                    {
+                        const TypeId object = type_element(program->types, stream->argument_conversions[first].type);
+                        const TypeId value = type_conversion_operand(program->types, object);
+                        if (check_action_kind(program->types, value) == BUSTER_TYPE_KIND_POINTER)
+                        {
+                            check_lower_instruction(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
+                            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, type_size(program->types, type_element(program->types, value)));
+                        }
+                    }
+                    check_lower_operand(writer, node, source + 3, false, checked);
+                }
             }
         }
     }
@@ -3654,6 +3709,8 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
     }
 }
 
+#include "c_check_program_atomic.c"
+
 static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const CheckProgram* program = writer->program;
@@ -3740,6 +3797,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_STATEMENT_VALUE)
     {
         check_lower_region(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = initialized, .discard = discard });
+    }
+    else if (!address && value->category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
+    {
+        check_lower_atomic_prepare(writer, node, false, discard);
     }
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
              ((value->category == CHECK_RVALUE && !address) || ((address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
@@ -3870,7 +3931,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_BUILTIN_ATOMIC)
     {
-        check_lower_helper(writer, node);
+        const uint32_t helper = check_program_builtin_index(writer->output->helpers.uses, writer->output->helpers.use_count, sizeof(CheckProgramHelperUse), node);
+        if (check_builtin_atomic_c11((CBuiltinId)graph->members[node]) && helper == BUSTER_CHECK_NONE)
+        {
+            check_lower_atomic_prepare(writer, node, true, discard);
+        }
+        else
+        {
+            check_lower_helper(writer, node);
+        }
     }
     else if (op == CHECK_OP_BUILTIN_VECTOR || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_BIT_CAST)
     {
@@ -4087,6 +4156,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_VARARGS)
     {
         check_lower_varargs_prepare(writer, node);
+    }
+    else if ((op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) &&
+             (check_lower_facts(writer, stream->values[a].type) & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
+    {
+        check_lower_atomic_prepare(writer, node, false, discard);
     }
     else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
@@ -4354,6 +4428,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_SIZE)
         {
             check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_I64);
+        }
+        else if (kind == CHECK_LOWER_ATOMIC)
+        {
+            check_lower_atomic_emit(writer, node);
         }
         else if (kind >= CHECK_LOWER_COMPLEX)
         {
@@ -5348,6 +5426,7 @@ struct CheckLowerShared
     uint32_t x87_constant_capacity;
     uint32_t label_symbol_capacity;
     uint32_t builtin_count;
+    uint32_t atomic_capacity;
     bool terminal;
     bool scalar;
     // The runtime's functions: each one's symbol where the unit declares it (check_lower_runtime), 0 for none, and the
@@ -5423,10 +5502,19 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint32_t count = input != 0 ? input->token_count : 0;
     const uint32_t nodes = input != 0 ? input->graph.count : 0;
     uint32_t builtin_count = 0;
+    uint32_t atomic_capacity = 0;
     for (uint32_t node = 0; node < nodes; node += 1)
     {
         builtin_count += input->graph.ops[node] == CHECK_OP_BUILTIN_UNARY || input->graph.ops[node] == CHECK_OP_BUILTIN_OVERFLOW ||
                          input->graph.ops[node] == CHECK_OP_BUILTIN_MISC || input->graph.ops[node] == CHECK_OP_BUILTIN_FLOAT;
+        const CheckOp op = input->graph.ops[node];
+        const uint32_t left = input->graph.operand0[node];
+        const bool update = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+        const TypeId type = program->stream != NULL && program->stream->values != NULL ? program->stream->values[node].type : 0;
+        const TypeId target = update && left < node && program->stream != NULL ? program->stream->values[left].type : 0;
+        atomic_capacity += op == CHECK_OP_BUILTIN_ATOMIC ||
+                           (type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC) ||
+                           (target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_ATOMIC);
     }
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
@@ -5509,6 +5597,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->local_capacity = valid ? (uint32_t)local_capacity64 : 0;
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;
     shared->builtin_count = builtin_count;
+    shared->atomic_capacity = atomic_capacity;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
     // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
     // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
@@ -5753,6 +5842,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(builtins, CBuiltinLowerCall, (uint64_t)shared->builtin_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(miscellaneous, CBuiltinMiscLowerCall, (uint64_t)program->stream->misc_count + 1);
     BUSTER_CHECK_LOWER_COLUMN(floating, CBuiltinFloatLowerCall, (uint64_t)program->stream->floating_count + 1);
+    BUSTER_CHECK_LOWER_COLUMN(atomics, CheckLowerAtomic, (uint64_t)shared->atomic_capacity + 1);
     BUSTER_CHECK_LOWER_COLUMN(x87_constants, uint64_t, 2 * (uint64_t)shared->x87_constant_capacity);
     BUSTER_CHECK_LOWER_COLUMN(label_entries, uint32_t, (uint64_t)program->control_count + 1);
 #undef BUSTER_CHECK_LOWER_COLUMN
@@ -5870,6 +5960,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->call_count = 0;
         writer->argument_count = 0;
         writer->builtin_count = 0;
+        writer->atomic_count = 0;
         writer->miscellaneous_count = 0;
         writer->floating_count = 0;
         writer->label_count = body.count + 1;
@@ -5957,7 +6048,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             }
             const uint32_t local = object ? check_lower_object(writer, type_size(types, parameter_type), alignment) :
                                             check_lower_temporary(writer, check_lower_class(writer, parameter_type));
-            if ((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+            if (((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+                 type_kind(types, type_strip_aligned(types, parameter_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
             {
                 writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
@@ -6023,7 +6115,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                         writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_DECLARED;
                     }
                 }
-                else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || check_lower_complex(writer, local_type))
+                else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ATOMIC || check_lower_complex(writer, local_type))
                 {
                     // Arrays, structs, unions and complex values are frame objects (aligned past 16 bytes, in a realigned
                     // frame). An incomplete type has no size at all.
@@ -6057,7 +6149,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 {
                     local = check_lower_temporary(writer, check_lower_class(writer, local_type));
                 }
-                if ((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+                if (((type_qualifiers(local_type) & BUSTER_TYPE_VOLATILE) != 0 || kind == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
                 {
                     writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
                 }

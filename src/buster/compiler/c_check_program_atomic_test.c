@@ -99,6 +99,35 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "for(int i=0;i<4;i++){h=fold(h,table.cells[i].half);h=fold(h,table.cells[i].word);h=fold(h,table.cells[i].wide);}"
             "for(int i=0;i<8;i++){h=fold(h,(unsigned long long)words[i]);}return (int)h;}",
         },
+        {
+            "c11-atomic-builtins",
+            "static _Atomic int a;static _Atomic unsigned short b;static _Atomic float f;static int array[32];static _Atomic(int*)p;"
+            "int tested(int n){unsigned h=2166136261u;__c11_atomic_init(&a,n);__c11_atomic_init(&b,(unsigned short)(n*73));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_add(&a,3,0));h=fold(h,(unsigned)__c11_atomic_fetch_sub(&a,2,5));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_and(&a,31,5));h=fold(h,(unsigned)__c11_atomic_fetch_or(&a,4,5));"
+            "h=fold(h,(unsigned)__c11_atomic_fetch_xor(&a,7,5));h=fold(h,__c11_atomic_fetch_add(&b,(unsigned short)n,5));"
+            "int e=__c11_atomic_load(&a,2);h=fold(h,__c11_atomic_compare_exchange_strong(&a,&e,n*2,5,0));"
+            "e=999;h=fold(h,__c11_atomic_compare_exchange_weak(&a,&e,n,5,0));h=fold(h,(unsigned)e);"
+            "h=fold(h,(unsigned)__c11_atomic_exchange(&a,n+9,5));__c11_atomic_store(&a,n+3,3);h=fold(h,(unsigned)__c11_atomic_load(&a,2));"
+            "__c11_atomic_init(&f,(float)n+0.5f);h=fold(h,(unsigned)__c11_atomic_exchange(&f,(float)n+2.0f,5));"
+            "float ef=(float)n+2.0f;h=fold(h,__c11_atomic_compare_exchange_strong(&f,&ef,(float)n+3.0f,5,5));"
+            "__c11_atomic_init(&p,array);h=fold(h,(unsigned long)(__c11_atomic_fetch_add(&p,3,5)-array));"
+            "h=fold(h,(unsigned long)(__c11_atomic_fetch_sub(&p,2,5)-array));h=fold(h,(unsigned long)(__c11_atomic_load(&p,5)-array));"
+            "__c11_atomic_thread_fence(5);__c11_atomic_signal_fence(5);return (int)h;}",
+        },
+        {
+            "atomic-language-operations",
+            "static _Atomic int a[4];static _Atomic signed char byte;static _Atomic unsigned short half;static _Atomic float f;"
+            "static _Atomic int*last;static int calls;static _Atomic int*address(void){calls++;return last;}"
+            "int tested(int n){unsigned h=2166136261u;_Atomic int local=n;last=&local;calls=0;"
+            "h=fold(h,(unsigned)(*address()+=3));h=fold(h,(unsigned)(*address())++);h=fold(h,(unsigned)++*address());"
+            "h=fold(h,(unsigned)(*address()*=2));h=fold(h,(unsigned)(*address()^=n));h=fold(h,(unsigned)(*address()/=2));"
+            "h=fold(h,(unsigned)(*address()%=7));h=fold(h,(unsigned)(*address()<<=1));h=fold(h,(unsigned)(*address()>>=1));"
+            "h=fold(h,(unsigned)(*address()&=15));h=fold(h,(unsigned)(*address()|=2));h=fold(h,(unsigned)calls);"
+            "byte=(signed char)n;half=(unsigned short)(n*19);h=fold(h,(unsigned)++byte);h=fold(h,(unsigned)half++);"
+            "f=(float)n+0.5f;h=fold(h,(unsigned)(f+=1.5f));h=fold(h,(unsigned)(f*=2.0f));"
+            "for(int i=0;i<4;i++){a[i]=n+i;h=fold(h,(unsigned)++a[i]);}return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {

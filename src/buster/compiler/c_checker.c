@@ -10,6 +10,7 @@
 #define BUSTER_C_CHECKER_INCLUDED
 
 #include "c_check_overload.c"
+#include "c_check_builtin_atomic_c11.c"
 
 #define BUSTER_CHECK_NONE UINT32_MAX
 #define BUSTER_CHECK_BATCH 16u
@@ -643,7 +644,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     {
         op = CHECK_OP_BUILTIN_QUERY;
     }
-    else if (id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_SYNC_SYNCHRONIZE ||
+    else if (check_builtin_atomic_c11(id) || id == CBUILTIN_ATOMIC_LOAD_N || id == CBUILTIN_ATOMIC_STORE_N || id == CBUILTIN_SYNC_SYNCHRONIZE ||
              id == CBUILTIN_ATOMIC_THREAD_FENCE || id == CBUILTIN_ATOMIC_SIGNAL_FENCE || check_builtin_atomic_rmw_rule(id) != NULL)
     {
         op = CHECK_OP_BUILTIN_ATOMIC;
@@ -1386,12 +1387,12 @@ struct CheckAlignmentStep
 // from it out. A member's offset is its whole offset from its record, where clang applies each anonymous member's on the
 // way. Returns the alignment's log2, or UINT32_MAX for a step it doesn't model, an object the witness doesn't give, or more
 // than BUSTER_CHECK_ALIGNMENT_STEPS steps.
-static uint32_t check_graph_atomic_alignment(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, const CheckBuiltinCall* witness)
+static uint32_t check_graph_atomic_address_alignment(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node,
+                                                    const CheckBuiltinCall* witness, bool lvalue, bool declaration_types)
 {
     CheckAlignmentStep steps[BUSTER_CHECK_ALIGNMENT_STEPS];
     uint32_t count = 0;
     uint32_t result = UINT32_MAX;
-    bool lvalue = false;
     bool declaration = false;
     bool done = false;
     while (!done && node < stream->count && count < BUSTER_CHECK_ALIGNMENT_STEPS)
@@ -1464,7 +1465,7 @@ static uint32_t check_graph_atomic_alignment(const TypeTable* types, const Check
         else if (op == CHECK_OP_VALUE)
         {
             const bool witnessed = witness != NULL && witness->base_alignment != 0 && graph->tokens != NULL && graph->tokens[node] == witness->base_token;
-            result = witnessed ? (uint32_t)witness->base_alignment - 1 : UINT32_MAX;
+            result = witnessed ? (uint32_t)witness->base_alignment - 1 : declaration_types ? type_alignment_log2(types, type) : UINT32_MAX;
             declaration = true;
             done = true;
         }
@@ -1509,6 +1510,11 @@ static uint32_t check_graph_atomic_alignment(const TypeTable* types, const Check
         declaration |= steps[i].member;
     }
     return result;
+}
+
+static uint32_t check_graph_atomic_alignment(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, const CheckBuiltinCall* witness)
+{
+    return check_graph_atomic_address_alignment(types, graph, stream, node, witness, false, false);
 }
 
 static void check_graph_special_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, const CheckAction* action, CheckActionResult* result)
@@ -1685,7 +1691,11 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .alignment_known = walked < 64,
         };
         CheckBuiltinAtomicResult checked;
-        if (check_builtin_atomic_rmw_rule(input.id) != NULL)
+        if (check_builtin_atomic_c11(input.id))
+        {
+            check_builtin_atomic_c11_one(types, &input, &checked);
+        }
+        else if (check_builtin_atomic_rmw_rule(input.id) != NULL)
         {
             // A read/modify/write's own rules (the orders' ICE proofs from the source's analysis); its atomic part is what
             // the effect records.

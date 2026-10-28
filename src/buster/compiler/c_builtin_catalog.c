@@ -137,6 +137,23 @@
     X(ATOMIC_FETCH_MAX, 0x19bu, "__atomic_fetch_max") \
     X(ATOMIC_MIN_FETCH, 0x19cu, "__atomic_min_fetch") \
     X(ATOMIC_MAX_FETCH, 0x19du, "__atomic_max_fetch") \
+    X(C11_ATOMIC_INIT, 0x1a0u, "__c11_atomic_init") \
+    X(C11_ATOMIC_LOAD, 0x1a1u, "__c11_atomic_load") \
+    X(C11_ATOMIC_STORE, 0x1a2u, "__c11_atomic_store") \
+    X(C11_ATOMIC_EXCHANGE, 0x1a3u, "__c11_atomic_exchange") \
+    X(C11_ATOMIC_COMPARE_EXCHANGE_STRONG, 0x1a4u, "__c11_atomic_compare_exchange_strong") \
+    X(C11_ATOMIC_COMPARE_EXCHANGE_WEAK, 0x1a5u, "__c11_atomic_compare_exchange_weak") \
+    X(C11_ATOMIC_FETCH_ADD, 0x1a6u, "__c11_atomic_fetch_add") \
+    X(C11_ATOMIC_FETCH_SUB, 0x1a7u, "__c11_atomic_fetch_sub") \
+    X(C11_ATOMIC_FETCH_AND, 0x1a8u, "__c11_atomic_fetch_and") \
+    X(C11_ATOMIC_FETCH_OR, 0x1a9u, "__c11_atomic_fetch_or") \
+    X(C11_ATOMIC_FETCH_XOR, 0x1aau, "__c11_atomic_fetch_xor") \
+    X(C11_ATOMIC_FETCH_NAND, 0x1abu, "__c11_atomic_fetch_nand") \
+    X(C11_ATOMIC_FETCH_MIN, 0x1acu, "__c11_atomic_fetch_min") \
+    X(C11_ATOMIC_FETCH_MAX, 0x1adu, "__c11_atomic_fetch_max") \
+    X(C11_ATOMIC_THREAD_FENCE, 0x1aeu, "__c11_atomic_thread_fence") \
+    X(C11_ATOMIC_SIGNAL_FENCE, 0x1afu, "__c11_atomic_signal_fence") \
+    X(C11_ATOMIC_IS_LOCK_FREE, 0x1b0u, "__c11_atomic_is_lock_free") \
     X(SYNC_FETCH_AND_ADD, 0x1c0u, "__sync_fetch_and_add") \
     X(SYNC_FETCH_AND_SUB, 0x1c1u, "__sync_fetch_and_sub") \
     X(SYNC_FETCH_AND_OR, 0x1c2u, "__sync_fetch_and_or") \
