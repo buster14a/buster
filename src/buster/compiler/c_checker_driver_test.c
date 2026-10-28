@@ -2744,6 +2744,7 @@ static void check_test_driver_named_ucns(CheckTest* test, const char* clang, con
 #include "c_check_capacity_test.c"
 #include "c_check_visibility_driver_test.c"
 #include "c_check_implicit_driver_test.c"
+#include "c_check_kr_driver_test.c"
 #include "c_check_return_driver_test.c"
 
 // #503: compare the production renderer, not just source locations sorted after the fact. Type errors are discovered
@@ -3832,6 +3833,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
+            check_test_driver_kr_policy(&test, clang, executable, directory);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);

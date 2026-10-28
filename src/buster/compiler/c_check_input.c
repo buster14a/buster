@@ -224,6 +224,12 @@ struct CheckInput
     uint32_t kr_parameter_count;
     CheckInputKrDiagnostic* kr_diagnostics;
     uint32_t kr_diagnostic_count;
+    // Copy the four cold policy baselines once; checked input never borrows command-line option storage.
+    uint8_t kr_warning_severities[4];
+    bool kr_warning_policy;
+    bool kr_warning_quiet;
+    bool kr_warning_system;
+    bool kr_warning_errors;
     uint8_t* explicit_abis;
     uint32_t* objects;
     uint8_t* static_objects;
@@ -5764,6 +5770,8 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
 
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
+static void check_input_kr_warning_policy(CheckInput* input, const PPOptions* options);
+
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
                             CheckDeferred* deferred, bool environment, bool literal_tables)
@@ -5772,6 +5780,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .implicit_function_system = pp->options.implicit_function_system };
+    check_input_kr_warning_policy(input, &pp->options);
     // Plain char's signedness, which every phase after the reader reads from the table too.
     types->char_unsigned = pp->options.predefines.char_unsigned;
     const uint32_t count = parser->tokens.count;
