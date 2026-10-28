@@ -9,6 +9,7 @@
 #define CHECK_WARNING_UNKNOWN_PRAGMA 0x200u
 #define CHECK_WARNING_IGNORED_ATTRIBUTES 0x400u
 #define CHECK_WARNING_ADDRESS_OF_PACKED_MEMBER 0x10000u
+#define CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE 0x20000u
 
 #include "c_check_packed_diagnostic.c"
 
@@ -47,6 +48,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wconditional-type-mismatch", NULL, "pointer/integer type mismatch in conditional expression" },
     { "-Wpointer-type-mismatch", NULL, "pointer type mismatch" },
     { "-Waddress-of-packed-member", NULL, "taking address of packed member may result in an unaligned pointer value" },
+    { "-Wargument-outside-range", NULL, "argument value is outside the valid range" },
 };
 
 static bool check_diagnostic_option(String8 option, const char* expected)
@@ -71,7 +73,8 @@ static const char* check_diagnostic_message(uint32_t warning)
 static CheckWarningSeverity check_diagnostic_severity_at(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, bool default_ignored)
 {
     const uint32_t index = check_diagnostic_warning_index(warning);
-    CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
+    CheckWarningSeverity severity = default_ignored ? CHECK_WARNING_IGNORE :
+                                    warning == CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     if (history != NULL && index < BUSTER_ARRAY_LENGTH(check_warning_descriptions))
     {
@@ -136,9 +139,30 @@ static uint32_t check_diagnostic_attribute_warnings(const CheckInput* input, uin
     return warnings;
 }
 
+static uint32_t check_diagnostic_x86_token(const CheckInput* input, uint32_t node)
+{
+    const uint32_t token = input->graph.tokens[node];
+    const uint32_t call = input->intrinsic_ids != NULL && token < input->token_count ? input->intrinsic_ids[token] : 0;
+    const uint32_t result = call != 0 && call <= input->intrinsic_call_count ? input->intrinsic_calls[call - 1].keyword : token;
+    return result;
+}
+
 static bool check_diagnostic_first_error(const CheckInput* input, const CheckStream* stream, uint32_t* token)
 {
     uint32_t first = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; stream != NULL && i < stream->x86_count; i += 1)
+    {
+        const CheckBuiltinX86Effect* effect = stream->x86 + i;
+        const uint32_t at = check_diagnostic_x86_token(input, effect->node);
+        for (uint32_t e = 0; e < effect->range_event_count; e += 1)
+        {
+            if (effect->range_events[e].disposition == CHECK_BUILTIN_X86_READY && at < first &&
+                check_diagnostic_severity(input, at, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE) >= CHECK_WARNING_ERROR)
+            {
+                first = at;
+            }
+        }
+    }
     const bool policies = input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0;
     for (uint32_t i = 0; policies && i < input->packed_member_count; i += 1)
     {
@@ -205,6 +229,10 @@ static uint32_t check_diagnostic_pragma_source(const CheckInputFpPragma* record)
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
+    {
+        source = parser->tokens.sources[input->naked_diagnostic->token];
+    }
     if (input->loop_diagnostic != 0 && report->pragma == input->loop_diagnostic->pragma && report->token == input->loop_diagnostic->position)
     {
         source = input->loop_diagnostic->source;

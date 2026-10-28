@@ -352,7 +352,6 @@ BUSTER_HOME_FRONTEND bool run_x86_target_preprocessor_tests(const char* director
 static int run_x86_target_tests(void)
 {
     bool passed = x86_target_test_cpuid();
-    passed &= x86_target_test_templates();
     passed &= x86_target_test_forms();
     passed &= x86_target_test_matrix();
     passed &= x86_target_test_fma_masks();

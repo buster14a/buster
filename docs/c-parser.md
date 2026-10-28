@@ -653,6 +653,20 @@ outlive checker adaptation; PP/intern/cache storage outlives spelling and
 error rendering. A parse with diagnostics/fatal status is not valid semantic
 input even if some tree columns were filled.
 
+A parse's temporaries live only while it runs: the vector path's arrays but
+the tree's roles, node depths and parents (which are its columns), the scalar
+parser's stacks and the postorder's passes. They go in `ParseOptions.scratch`,
+the caller's arena, or without it in the parser's own, and each step pops them.
+The C driver passes its checker's scratch, whose reader then takes the same
+pages: `sqlite3.c`'s vector path takes 63 MB of them, and the postorder's passes
+14 MB, which the parser held to the end of the compile in arenas of its own
+until #528. So a parse's temporaries may hold what an earlier one left: where
+the vector path gives up on a unit (unbalanced brackets, a typedef K3 can't
+read, statements K5 can't settle), the kernels before K6 leave some of what it
+reads unwritten, so it is skipped, and the unit, whole to the scalar parser,
+flags no token. `test-parser` checks units on one parser whose borrowed arena
+is dirty against fresh parsers.
+
 The logical unit and top-level declaration fallback boundaries are independent
 of 64-token/16-lane kernels. Cross-block brackets, typedef state, statement
 ownership and nearest-smaller searches prevent treating arbitrary chunks as

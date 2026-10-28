@@ -66,6 +66,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LOOP_MISSING: result = "missing argument; expected an integer value"; break;
         case CHECK_INPUT_LOOP_EXPRESSION: result = "expected expression"; break;
         case CHECK_INPUT_LOOP_PARENTHESIS: result = "expected ')'"; break;
+        case CHECK_INPUT_NAKED_STATEMENT: result = "non-ASM statement in naked function is not supported"; break;
+        case CHECK_INPUT_NAKED_PARAMETER: result = "parameter references not allowed in naked functions"; break;
     }
     return result;
 }
@@ -163,6 +165,47 @@ static void check_driver_packed_report(const Parser* parser, Preprocessor* pp, c
                            "taking address of packed member '%.*s' of class or structure '%.*s' may result in an unaligned pointer value",
                            (int)member->member_name.length, member->member_name.pointer,
                            (int)member->record_name.length, member->record_name.pointer);
+    }
+}
+
+static void check_driver_x86_reports(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                      const TypeTable* types, bool quiet)
+{
+    for (uint32_t i = 0; !quiet && !pp->fatal && i < stream->x86_count; i += 1)
+    {
+        const CheckBuiltinX86Effect* effect = stream->x86 + i;
+        for (uint32_t e = 0; !pp->fatal && e < effect->range_event_count; e += 1)
+        {
+            const uint32_t token = check_diagnostic_x86_token(input, effect->node);
+            const CheckWarningSeverity severity = check_diagnostic_severity(input, token, CHECK_WARNING_ARGUMENT_OUTSIDE_RANGE);
+            const CheckBuiltinX86RangeEvent* event = effect->range_events + e;
+            // A failed/incomplete program cannot prove deadness. Report any still-deferred event conservatively.
+            if (event->disposition != CHECK_BUILTIN_X86_SUPPRESSED && severity != CHECK_WARNING_IGNORE && token < parser->tokens.count)
+            {
+                uint32_t width = 0;
+                bool sign = false;
+                check_action_integer_type(types, event->value.type, &width, &sign);
+                const bool negative = sign && (event->value.integer >> (width - 1)) != 0;
+                unsigned __int128 magnitude = negative ? (0 - event->value.integer) & check_action_mask(width) : event->value.integer;
+                char digits[42];
+                char* text = digits + sizeof(digits) - 1;
+                *text = 0;
+                do
+                {
+                    *--text = '0' + magnitude % 10;
+                    magnitude /= 10;
+                }
+                while (magnitude != 0);
+                if (negative)
+                {
+                    *--text = '-';
+                }
+                const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
+                                               severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+                pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token],
+                                   "argument value %s is outside the valid range [%u, %u]", text, event->low, event->high);
+            }
+        }
     }
 }
 
@@ -1122,7 +1165,8 @@ static int run_check_command(int count, char** arguments, bool executable)
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
-        const ParseOptions parser_options = { .scalar = scalar };
+        // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528).
+        const ParseOptions parser_options = { .scalar = scalar, .scratch = &scratch };
         bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
         if (!ready || scratch.base == 0 || output_arena.base == 0)
         {
@@ -1193,7 +1237,11 @@ static int run_check_command(int count, char** arguments, bool executable)
             TypeTable types = { 0 };
             if (ready)
             {
-                type_arena = arena_reserve(type_capacity_bytes(capacity));
+                // The table's columns in base pages: each has room for every type the unit could make, far apart, of which
+                // a unit makes few (sqlite3.c's 716,380 tokens, 3,434 types), at each column's start. In huge pages each
+                // column's first touch cleared a 2 MB page: 39 MB of sqlite3.c's peak RSS (#528).
+                const uint64_t type_bytes = type_capacity_bytes(capacity);
+                type_arena = arena_reserve_small(type_bytes, type_bytes);
                 index_arena = arena_reserve(type_index_capacity_bytes(capacity));
                 ready = capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
                 if (!ready)
@@ -1354,6 +1402,8 @@ static int run_check_command(int count, char** arguments, bool executable)
                             check_driver_diagnose(checking, &pp, program.token, message);
                             result = 1;
                         }
+                        check_driver_x86_reports(checking, &pp, &input, &stream, &types, quiet);
+                        result = pp.errors != 0 ? 1 : result;
                         check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                         if (result == 0 && emit_object && !prefix_only)
                         {

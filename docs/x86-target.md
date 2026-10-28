@@ -88,43 +88,6 @@ vector length, encoding, register class, r/m class and syntax are identical, and
 admitted rows. ISA filtering and final record validation still apply per form.
 The canonical policy retains #565's baseline string instructions and 512-bit
 quadword moves; the latter require AVX512F, independently of AVX512DQ.
-The default 64-bit encoder initializer reuses FS templates for GS: their layouts,
-checks and fallback choices are identical, with only the optional segment byte
-changing. It checks that byte before patching both template halves and uses the
-direct builder if the expected location changes. Existing storage, per-record
-packing and the instruction record format are unchanged. Single-group encoder
-variants omit the redundant second full-group loop: the first loop has already
-exhausted the same condition. Multi-group variants retain their remainder loop.
-The existing five-mode scalar/vector, offset/fixup, random and page-edge tests
-cover complete groups and tails through the same entry points.
-
-Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
-home. The caller supplies its immutable form descriptions and keeps its own
-template storage and readiness flags. Descriptions and output must be disjoint.
-DRIVER, ASSEMBLER, BACKEND and CHECKER retain static descriptions, including
-initializer visibility and the physical copy used by the C source pipeline.
-Other main units share X86's hidden immutable catalogue; their template storage,
-readiness and legacy properties remain local. Standalone units retain static
-catalogues. Sharing introduces no initialization or allocation.
-The constructor accepts only default 64-bit, address32 and APX modes and reads no legacy-mode state; legacy properties
-and initialization stay local. Standalone inclusions keep static descriptions
-and construction. Address32 also accepts null descriptions to select the home's
-canonical table, so its forced writer adapter does not retain unused caller
-descriptions. Default 64-bit and APX require the caller's table. The output contract requires space for
-`BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES` entries, permits unaligned
-storage and leaves the intervening gap untouched. Unsupported modes and missing
-required descriptions fail without writing; an invalid catalogue can leave partial output.
-
-The target test compares 250,560 complete entries, including unavailable rows,
-fallbacks, segment variants and fixup copies, with private per-form construction.
-It uses a separate descriptor copy, including an isolated opcode change that
-must affect construction without changing the global catalogue. It poisons an
-unaligned output and checks its prefix, suffix and intervening gap, plus unchanged
-output after unsupported-mode or missing-descriptor rejection. Address32 checks
-both supplied and canonical tables. These comparisons check
-bulk construction and layout; both builders use the same pure form-construction
-body. A separate frozen before/after comparison checks all five encoder modes'
-complete bytes against the implementation before the refactor.
 
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,

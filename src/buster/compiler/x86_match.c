@@ -796,8 +796,8 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
                 // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
-                const uint32_t chosen = x86_form_row(result.instruction.form);
-                const uint32_t number = x86_form_row(instruction.form);
+                const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
+                const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
                 const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
                 if (length > 0 && (!result.found || length < result.length || (length == result.length && movq)))
                 {
