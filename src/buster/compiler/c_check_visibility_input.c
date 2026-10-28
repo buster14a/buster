@@ -160,7 +160,9 @@ static void check_input_visibility_placement(CheckInputReader* reader, CheckInpu
                               (role == PARSE_ROLE_CLOSE_CONDITION && parent_role != PARSE_ROLE_TERMINATOR);
         if (*structs != 0 || !statement || !boundary)
         {
+            const bool expression = parser->tokens.kinds[before] == PARSE_KIND_EQUAL || parser->tokens.kinds[before] == PARSE_KIND_RETURN;
             record->message = *structs != 0 ? "this pragma cannot appear in struct declaration" :
+                              expression ? "expected expression" :
                               group_role == PARSE_ROLE_OPEN_FUNCTION ? "expected parameter declarator" :
                               role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_CLOSE_SPECIFIER || *group == BUSTER_CHECK_NONE ?
                               "expected identifier or '('" : "expected expression";

@@ -131,6 +131,8 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
         "int\n#pragma GCC visibility push(hidden)\nx;\n",
         "int f(void){return\n#pragma GCC visibility push(hidden)\n0;}\n",
         "struct S {\n#pragma GCC visibility push(hidden)\nint x;};\n",
+        "int x=\n#pragma GCC visibility push(hidden)\n1;\n",
+        "int x=\n#pragma GCC visibility push(bad)\n1;\n",
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(malformed); c += 1)
     {
