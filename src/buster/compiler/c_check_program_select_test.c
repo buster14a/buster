@@ -403,13 +403,14 @@ static void check_test_program_selection(CheckTest* test, const char* clang)
         "retention-root-requires-object-section-retention", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int tested(int n) __attribute__((visibility(\"hidden\")));int tested(int n){return n;}",
-        "hidden-symbol-requires-visibility-publication", 1, 0, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "hidden-symbol-visibility-publication", 1, 0, CHECK_PROGRAM_OK, 0, 0, 0, false);
     check_test_program_selection_run(test,
         "int kept __attribute__((common));int tested(int n){return n;}",
         "explicit-common-requires-common-symbol-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+    // A section attribute's definition emits as any other's: check_program_sections gives its atom its section (#619).
     check_test_program_selection_run(test,
         "static int kept __attribute__((section(\".kept\")))=3;int tested(int n){return n+kept;}",
-        "active-section-requires-named-section-publication", 1, 1, CHECK_PROGRAM_UNSUPPORTED, 0, 0, 0, false);
+        "active-section-emits-for-named-section-publication", 1, 1, CHECK_PROGRAM_OK, 0, 0, 0, false);
     // #129's kinds of definition, each emitted exactly where clang -O0 -c emits it.
     check_test_program_selection_case(test,
         "static int used(int n){return n+1;}static int unused(int n){return n+2;}static int only_from_dead(int n){return n+3;}"

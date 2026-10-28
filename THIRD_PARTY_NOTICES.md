@@ -17,6 +17,45 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
+(`c_check_program_atomic.c`) and the added semantic, native and static-data
+fixtures (#671) are original project material under the default terms. Exact
+Clang/LLVM `llvmorg-23.1.1` Sema and code-generation sources supply behavioral
+facts; Clang and system libatomic run externally as oracles/runtime consumers.
+No external implementation, corpus fixture or generated data is incorporated.
+
+`c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
+associated declaration/ELF integration (#620) are original project material
+under the default terms. Clang is an external behavior and object-format oracle;
+cJSON is an external compile qualification input. No upstream implementation or
+fixtures are incorporated.
+
+The implicit function binding/diagnostic additions and
+`c_check_implicit_driver_test.c` (#623) are original project material under the
+default terms. Clang and the unconfigured zlib 1.3.1 tree are external
+qualification inputs; no external implementation or fixtures are imported.
+
+The aggregate return control-flow walk, warning handling and original fixtures
+in `c_check_program.c`, `c_check_program_test.c` and
+`c_check_return_driver_test.c` (#670) use the project default terms. Clang is
+an external behavior oracle. The dr_wav header used for compile qualification
+remains an external input; no upstream implementation or fixtures are imported.
+
+The system-header warning policy, retained pragma completion and `_Pragma`
+diagnostic-source changes (#666/#662), including their original fixtures in
+`c_preprocessor_system_warning_test.c` and `c_check_pragma_test.c`, use the
+project default terms. LLVM/Clang 23.1.4 diagnostic metadata and engine sources
+provide behavior facts, and Clang runs externally as an oracle. Miniz 3.0.2 is an
+external compile/runtime corpus with its original license retained outside the
+source tree; no implementation or corpus fixtures are copied into this project.
+
+The diagnostic publication gate, command-line limit parsing and summary changes
+in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
+`c_checker_driver_limit_test.c` (#669), are original project material under the
+default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
+and Clang runs externally as an independent oracle. No external implementation
+or fixture is copied.
+
 The deep aggregate-call setup, argument bound and extended generated/guarded
 native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
 `tier0_validate_test.c` and `c_check_program_test.c` (#668/#663) are original

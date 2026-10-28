@@ -196,7 +196,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-naked-intel", clang);
     // The original wide-register path also executes where CPU and OS save-state support permit AVX-512F. Its
     // compilation, constraints, lowering, encoding, oracle compilation and link remain required on every host.
-    const bool wide_native = __builtin_cpu_supports("avx512f");
+    const X86Target native = x86_target_native();
+    const bool wide_native = (native.features & BUSTER_X86_FEATURE(AVX512F)) != 0;
     if (!wide_native)
     {
         printf("test-checker: asm-naked-intel-avx512: AVX-512F unavailable; checking compile/link without native execution\n");

@@ -30,7 +30,7 @@
     "build_arguments": "clang -std=c17 -O2 -march=native -Wall -Wextra -Werror -pedantic clang_builtin_metadata.c -o clang_builtin_metadata",
     "base_arguments": "--builtins /usr/include/clang/Basic/Builtins.inc --x86 /usr/include/clang/Basic/BuiltinsX86.inc --x86-64 /usr/include/clang/Basic/BuiltinsX86_64.inc --version /usr/include/clang/Basic/Version.inc",
     "host_policy": "Each build and each generation invocation ran under its own ordinary exclusive.sh lock; all three generation exits were zero.",
-    "regeneration": "2026-10-26 (#126): the generator rebuilt with build_arguments to binary_sha256 again, the same four inputs, own-main.names.txt with 28 names this compiler's build calls added; the three invocations exited zero, the full catalogue's output was byte-identical to its recorded sha256, and the own-main outputs added exactly those 28 rows."
+    "regeneration": "2026-10-26 (#126): the generator rebuilt with build_arguments to binary_sha256 again, the same four inputs, own-main.names.txt with 28 names this compiler's build calls added; the three invocations exited zero, the full catalogue's output was byte-identical to its recorded sha256, and the own-main outputs added exactly those 28 rows. 2026-10-28 (#619): the same again with __builtin_ia32_ucmpd128_mask added, which c_check_program_batch.c reaches through _mm_cmplt_epu32_mask; the full catalogue byte-identical again, and the own-main outputs added exactly that row."
   },
   "outputs": [
     {
@@ -42,20 +42,20 @@
     {
       "path": "own-main.tsv",
       "additional_arguments": "--names own-main.names.txt",
-      "rows": 1534,
-      "sha256": "46cdb0537a70f53ee42fb1a945af4d00ff20d00671e41792eeaf03f127fc7e11",
+      "rows": 1535,
+      "sha256": "aa4fe999939349175b1e776c8c082dda81e7e1586805e4a8ed090fc971785c9f",
       "name_filter": "own-main.names.txt",
-      "name_filter_sha256": "553724b3d9830b644788469f3d94ed5695b046027c308b247aef17fc85096eaf",
-      "scope": "1483 x86/x86_64 records (1482 ia32 spellings and __rdtsc) and 51 others from the own-main identifier inventory; bit_cast and va_list are explicit non-prototype gap rows. #126 added 28 names this compiler's build calls to the first 1506-row inventory."
+      "name_filter_sha256": "61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21",
+      "scope": "1484 x86/x86_64 records (1483 ia32 spellings and __rdtsc) and 51 others from the own-main identifier inventory; bit_cast and va_list are explicit non-prototype gap rows. #126 added 28 names this compiler's build calls to the first 1506-row inventory, and #619 one more."
     },
     {
       "path": "../../src/buster/compiler/generated/clang_builtin_own_main_23_1_1.inc",
       "additional_arguments": "--names own-main.names.txt --format c",
-      "rows": 1534,
-      "sha256": "7891827eedfcbb6d0d4a0e351423fab3d1673f56eb4226cb7e480e92e7c0f3e8",
+      "rows": 1535,
+      "sha256": "7c281d3b3f97fb29cc999e101f89b04cbc951afab34cf1f8470263b3a63bd30f",
       "name_filter": "own-main.names.txt",
-      "name_filter_sha256": "553724b3d9830b644788469f3d94ed5695b046027c308b247aef17fc85096eaf",
-      "scope": "The same 1534-row inventory in C record format supplies exact audited membership, including 1483 x86/x86_64 records and the two explicit gap rows. No ordinary prototype or source capability is implied."
+      "name_filter_sha256": "61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21",
+      "scope": "The same 1535-row inventory in C record format supplies exact audited membership, including 1484 x86/x86_64 records and the two explicit gap rows. No ordinary prototype or source capability is implied."
     }
   ],
   "qualification_limit": "Metadata is not implementation, ordinary typing of custom signatures, source ICE acceptance, complete target-feature closure, source dispatch or runtime support. Handwritten Sema constraints remain a separate audited scope."

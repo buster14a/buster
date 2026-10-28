@@ -3356,7 +3356,7 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         },
         {
             "the build's immediates of the x86 builtins in range",
-            "typedef int I16 __attribute__((vector_size(64)));\ntypedef long long L8 __attribute__((vector_size(64)));\ntypedef long long L4 __attribute__((vector_size(32)));\ntypedef long long L2 __attribute__((vector_size(16)));\ntypedef int I8 __attribute__((vector_size(32)));\ntypedef int I4 __attribute__((vector_size(16)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef char C32 __attribute__((vector_size(32)));\ntypedef short S32 __attribute__((vector_size(64)));\nunsigned long long f(I16 a, L8 q, L4 h, L2 t, I8 e, I4 i, C16 c, C32 w, S32 s, const void* p, void* o)\n{\n    unsigned long long r = __builtin_ia32_ucmpd512_mask(a, a, 7, 0xffff) + __builtin_ia32_ucmpd256_mask(e, e, 0, 0xff) +\n                           __builtin_ia32_ucmpb128_mask(c, c, 4, 0xffff) + __builtin_ia32_ucmpb256_mask(w, w, 4, ~0u) +\n                           __builtin_ia32_ucmpw512_mask(s, s, 6, ~0u) + __builtin_ia32_kshiftlihi(1, 255) + __builtin_ia32_kshiftlidi(1, 0);\n    I16 g = __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 4) + __builtin_ia32_alignd512(a, a, 255) + __builtin_ia32_shuf_i32x4(a, a, 0) +\n            __builtin_ia32_inserti32x4(a, i, 3) + __builtin_ia32_prold512(a, 31);\n    L8 l = __builtin_ia32_gathersiv8di(q, p, e, 0xff, 8) + __builtin_ia32_gatherdiv8di(q, p, q, 0xff, 1) + __builtin_ia32_alignq512(q, q, 7);\n    __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 2);\n    __builtin_ia32_scatterdiv8di(o, 0xff, q, q, 8);\n    __builtin_ia32_scattersiv16si(o, 0xffff, a, a, 4);\n    L4 x = __builtin_ia32_extracti64x4_mask(q, 1, h, 0xff) + __builtin_ia32_insert128i256(h, t, 1);\n    I4 v = __builtin_ia32_vec_set_v4si(i, 5, 3);\n    return r + (unsigned long long)g[0] + (unsigned long long)l[0] + (unsigned long long)x[0] + (unsigned long long)v[0] +\n           (unsigned)__builtin_ia32_vec_ext_v4si(i, 3) + (unsigned char)__builtin_ia32_vec_ext_v16qi(c, 15);\n}\n",
+            "typedef int I16 __attribute__((vector_size(64)));\ntypedef long long L8 __attribute__((vector_size(64)));\ntypedef long long L4 __attribute__((vector_size(32)));\ntypedef long long L2 __attribute__((vector_size(16)));\ntypedef int I8 __attribute__((vector_size(32)));\ntypedef int I4 __attribute__((vector_size(16)));\ntypedef char C16 __attribute__((vector_size(16)));\ntypedef char C32 __attribute__((vector_size(32)));\ntypedef short S32 __attribute__((vector_size(64)));\nunsigned long long f(I16 a, L8 q, L4 h, L2 t, I8 e, I4 i, C16 c, C32 w, S32 s, const void* p, void* o)\n{\n    unsigned long long r = __builtin_ia32_ucmpd512_mask(a, a, 7, 0xffff) + __builtin_ia32_ucmpd256_mask(e, e, 0, 0xff) +\n                           __builtin_ia32_ucmpd128_mask(i, i, 1, 0xff) +\n                           __builtin_ia32_ucmpb128_mask(c, c, 4, 0xffff) + __builtin_ia32_ucmpb256_mask(w, w, 4, ~0u) +\n                           __builtin_ia32_ucmpw512_mask(s, s, 6, ~0u) + __builtin_ia32_kshiftlihi(1, 255) + __builtin_ia32_kshiftlidi(1, 0);\n    I16 g = __builtin_ia32_gathersiv16si(a, p, a, 0xffff, 4) + __builtin_ia32_alignd512(a, a, 255) + __builtin_ia32_shuf_i32x4(a, a, 0) +\n            __builtin_ia32_inserti32x4(a, i, 3) + __builtin_ia32_prold512(a, 31);\n    L8 l = __builtin_ia32_gathersiv8di(q, p, e, 0xff, 8) + __builtin_ia32_gatherdiv8di(q, p, q, 0xff, 1) + __builtin_ia32_alignq512(q, q, 7);\n    __builtin_ia32_scatterdiv16si(o, 0xff, q, e, 2);\n    __builtin_ia32_scatterdiv8di(o, 0xff, q, q, 8);\n    __builtin_ia32_scattersiv16si(o, 0xffff, a, a, 4);\n    L4 x = __builtin_ia32_extracti64x4_mask(q, 1, h, 0xff) + __builtin_ia32_insert128i256(h, t, 1);\n    I4 v = __builtin_ia32_vec_set_v4si(i, 5, 3);\n    return r + (unsigned long long)g[0] + (unsigned long long)l[0] + (unsigned long long)x[0] + (unsigned long long)v[0] +\n           (unsigned)__builtin_ia32_vec_ext_v4si(i, 3) + (unsigned char)__builtin_ia32_vec_ext_v16qi(c, 15);\n}\n",
             false,
             false
         },
@@ -3940,6 +3940,20 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             "an extension vector's logic and swizzles in an inferred array",
             "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int e2 __attribute__((ext_vector_type(2)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef int e3 __attribute__((ext_vector_type(3)));\ntypedef int g2 __attribute__((vector_size(8)));\nint f(int n, e4 v, e4 w, e2 t, g4 x, e3 u, g2 z)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(!v), e4), \"not vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v && w), e4), \"and vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v || w), e4), \"or vector\");\n    g4 a[] = { !v, v && w, v || w, x };\n    _Static_assert(sizeof a == 4 * sizeof(g4), \"four\");\n    g4 b[] = { v.x, 2, 3, 4, x, v.s3, t.lo, !v.x, n && v.y };\n    _Static_assert(sizeof b == 3 * sizeof(g4), \"lanes braced into vectors\");\n    g4 c[] = { v.xyzw, v.wzyx, x, !n };\n    _Static_assert(sizeof c == 4 * sizeof(g4), \"two swizzled vectors, a vector, then a scalar\");\n    g2 d[] = { u.lo, u.hi, u.even, u.odd, z };\n    _Static_assert(sizeof d == 5 * sizeof(g2), \"odd lanes' halves round up\");\n    g4 e[] = { v.xy.lo, 2, 3, 4, x, v.xy.hi, v.zw.lo, v.xyz.lo.x, 0 };\n    _Static_assert(sizeof e == 3 * sizeof(g4), \"nested swizzles' lanes braced into vectors\");\n    g2 h[] = { v.xyzw.lo, z, v.wzyx.hi };\n    _Static_assert(sizeof h == 3 * sizeof(g2), \"nested swizzles' vectors whole\");\n    return a[3][0] + b[2][1] + c[3][0] + d[4][0] + e[2][0] + h[2][0];\n}\n",
             false,
+            false
+        },
+        // An intrinsic's result, from its prototype, which the reader keeps at the call's `)`, whatever the last operand the
+        // call names: a vector after a scalar count, and a scalar after a vector.
+        {
+            "intrinsics' results in an inferred array",
+            "typedef short v8hi __attribute__((vector_size(16)));\ntypedef char v16qi __attribute__((vector_size(16)));\ntypedef int v4si __attribute__((vector_size(16)));\nint f(v8hi h, int n, v16qi c, v4si x)\n{\n    v8hi a[] = { __builtin_ia32_psllwi128(h, n), h, __builtin_ia32_psrawi128(h, n) };\n    _Static_assert(sizeof a == 3 * sizeof(v8hi), \"three vectors\");\n    v4si b[] = { __builtin_ia32_pmovmskb128(c), 2, 3, 4, x };\n    _Static_assert(sizeof b == 2 * sizeof(v4si), \"four scalars braced into a vector, then a vector\");\n    return a[2][0] + b[1][0];\n}\n",
+            false,
+            false
+        },
+        {
+            "an intrinsic immediate cannot discard side effects",
+            "typedef int V __attribute__((vector_size(64)));V f(V a,int*p){return __builtin_ia32_alignd512(a,a,((*p)++,3));}",
+            true,
             false
         },
         {
@@ -4614,6 +4628,7 @@ static int run_checker_tests(int argc, char** argv)
     };
     const char* clang = "clang";
     bool program_initializers = false;
+    bool program_vectors = false;
     bool embed_initializers = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
@@ -4630,6 +4645,10 @@ static int run_checker_tests(int argc, char** argv)
         {
             program_initializers = true;
         }
+        else if (strcmp(argv[i], "--program-vectors") == 0)
+        {
+            program_vectors = true;
+        }
         else if (strcmp(argv[i], "--embed-initializers") == 0)
         {
             embed_initializers = true;
@@ -4645,7 +4664,7 @@ static int run_checker_tests(int argc, char** argv)
         }
     }
     CheckTestTypes types = { 0 };
-    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]");
+    check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]");
     // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
     OracleCache* oracle = oracle_cache();
     if (options)
@@ -4659,6 +4678,11 @@ static int run_checker_tests(int argc, char** argv)
         else if (initialized && program_initializers)
         {
             check_test_program_initializers(&test, clang);
+        }
+        else if (initialized && program_vectors)
+        {
+            check_test_program_vectors(&test, clang);
+            check_test_program_x86(&test, clang);
         }
         else if (initialized)
         {
