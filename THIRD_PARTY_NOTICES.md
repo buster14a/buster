@@ -24,6 +24,13 @@ default terms. The radix kernel follows this project's original
 and linkers are external test tools; no external implementation or corpus
 fixture is incorporated.
 
+The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
+(`c_check_program_atomic.c`) and the added semantic, native and static-data
+fixtures (#671) are original project material under the default terms. Exact
+Clang/LLVM `llvmorg-23.1.1` Sema and code-generation sources supply behavioral
+facts; Clang and system libatomic run externally as oracles/runtime consumers.
+No external implementation, corpus fixture or generated data is incorporated.
+
 `c_check_visibility_input.c`, `c_check_visibility_driver_test.c` and the
 associated declaration/ELF integration (#620) are original project material
 under the default terms. Clang is an external behavior and object-format oracle;
@@ -55,6 +62,14 @@ in `c_preprocessor.c`, `c_preprocessor_history.c` and `c_checker_driver.c`, with
 default terms. Clang/LLVM 23.1.4's diagnostic engine supplies behavior facts,
 and Clang runs externally as an independent oracle. No external implementation
 or fixture is copied.
+
+The source-driver collection and independent-declaration diagnostic recovery
+(#698, #699), `c_checker_driver_recovery_test.c`, and sparse warning completion
+facts in `c_check_warning_events.c` and its model tests are original project
+material under the default terms. They reuse this project's arenas, parser
+forest, binding history, diagnostic gate and deferred type replay. Installed
+Clang 23.1.4 supplies independent behavior and diagnostic-order observations;
+no compiler implementation, external fixture or generated corpus is imported.
 
 The deep aggregate-call setup, argument bound and extended generated/guarded
 native fixtures in `tier0.c`, `tier0_generate.c`, `tier0_test.c`,
