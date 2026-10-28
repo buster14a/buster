@@ -186,6 +186,12 @@ struct CheckInputAttribute
     bool keyword;
     // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
     uint32_t cleanup_function;
+    // cleanup's argument is an expression other than a name, which clang's handleCleanupAttr says isn't a function: a
+    // name in parentheses or a literal (check_input_attribute_validate).
+    bool cleanup_expression;
+    // cleanup has another count of arguments than one, an error only on a variable it applies to, as clang checks the
+    // subject first (check_input_cleanup_declaration).
+    bool cleanup_count;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
@@ -684,7 +690,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     valid &= begin == attribute->argument_first || begin < attribute->argument_end;
     count += begin < attribute->argument_end;
     attribute->argument_count = count;
-    valid &= count >= minimum && (maximum == 255 || count <= maximum);
+    // Whether a cleanup attribute's count is an error depends on its declaration's subject.
+    attribute->cleanup_count = valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP && count != 1;
+    valid &= attribute->cleanup_count || (count >= minimum && (maximum == 255 || count <= maximum));
     CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
     if (valid && count > 1)
     {
@@ -708,7 +716,9 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             attribute->argument_ends[argument] = end;
             begin = end + 1;
         }
-        const bool identifier = attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER || (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
+        // cleanup's argument is an expression, which its own check below reads.
+        const bool identifier = (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER && attribute->kind != CHECK_ATTRIBUTE_CLEANUP) ||
+                                (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
         const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST;
         if (valid && identifier)
         {
@@ -731,15 +741,29 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             valid = first < end;
         }
     }
-    if (valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP)
+    if (valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->cleanup_count)
     {
-        // Every argument is an expression's name, including ignored subjects and earlier duplicate attributes.
-        const uint32_t token = attribute->argument_first;
-        const uint32_t name = parser->tokens.names[token];
-        const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
-        valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0;
-        reader->output->resource |= !valid;
-        attribute->cleanup_function = handle != 0 ? reader->bindings.declaration[handle - 1] + 1u : 0;
+        // clang parses the argument as an expression, whose names it looks up where it is, on ignored subjects and in
+        // earlier duplicate attributes too: an undeclared one is the bindings' error. Its handleCleanupAttr takes a
+        // function's name; any other expression isn't a function. Of those, a name in parentheses and a literal are taken
+        // (cleanup_expression: the error is at the expression's first token, as clang's); any other is refused here.
+        uint32_t token = attribute->argument_first;
+        uint32_t last = attribute->argument_end - 1;
+        while (token < last && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN && parser->tree.parents[token] == last)
+        {
+            token += 1;
+            last -= 1;
+        }
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool named = token == last && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] != 0;
+        const bool literal = token == last && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_STRING || kind == PARSE_KIND_CHARACTER);
+        const uint32_t name = named ? parser->tokens.names[token] : 0;
+        const uint32_t handle = named ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+        valid = literal || (named && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0);
+        reader->output->resource |= named && !valid;
+        error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
+        attribute->cleanup_function = handle != 0 && token == attribute->argument_first ? reader->bindings.declaration[handle - 1] + 1u : 0;
+        attribute->cleanup_expression = valid && (literal || (handle != 0 && token != attribute->argument_first));
         if (valid && handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
         {
             // Keep the typed rejection as the one primary; the generic malformed-attribute fallback must not add one.

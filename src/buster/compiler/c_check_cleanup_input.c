@@ -60,10 +60,22 @@ static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputClean
 static bool check_input_cleanup_declaration(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name, TypeId type, bool applies)
 {
     CheckInputAttribute* applied = NULL;
-    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    bool valid = true;
+    for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
-        if (attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->ignored)
+        if (attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->ignored && attribute->cleanup_count)
+        {
+            // Another count of arguments than one, an error on a variable it applies to; on any other declaration clang
+            // ignores it with a warning.
+            if (applies)
+            {
+                check_input_report(reader, attribute->name_token, CHECK_INPUT_CLEANUP_ARGUMENTS);
+                valid = false;
+            }
+            attribute->ignored = true;
+        }
+        else if (attribute->kind == CHECK_ATTRIBUTE_CLEANUP && !attribute->ignored)
         {
             // Of several, the last applies, as clang warns.
             if (applied != NULL)
@@ -73,8 +85,7 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, CheckInput
             applied = attribute;
         }
     }
-    bool valid = true;
-    if (applied != NULL)
+    if (valid && applied != NULL)
     {
         // The schema bound every argument where parsed, including ignored subjects and duplicate attributes.
         // A shared specifier retains that binding if an earlier declarator shadows the name.
@@ -86,7 +97,7 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, CheckInput
                                         type_parameters(reader->types, function_type, &parameters) : NULL;
         const bool prototype = function_type != 0 && (reader->types->types.flags[type_index(function_type)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         applied->ignored |= !applies;
-        if (applies && function != BUSTER_CHECK_NONE && parameter_types == NULL)
+        if (applies && (applied->cleanup_expression || (function != BUSTER_CHECK_NONE && parameter_types == NULL)))
         {
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_FUNCTION);
             valid = false;

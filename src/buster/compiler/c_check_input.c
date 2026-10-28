@@ -43,6 +43,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CLEANUP_FUNCTION,
     CHECK_INPUT_CLEANUP_PARAMETERS,
     CHECK_INPUT_CLEANUP_TYPE,
+    CHECK_INPUT_CLEANUP_ARGUMENTS,
 } CheckInputMessage;
 
 static const char* const check_input_messages[] =

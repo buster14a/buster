@@ -2835,6 +2835,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 
 #include "c_checker_driver_limit_test.c"
 #include "c_checker_driver_recovery_test.c"
+#include "c_check_cleanup_driver_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -3758,6 +3759,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_recovery(&test, clang, executable, directory);
+        check_test_driver_cleanup_errors(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
