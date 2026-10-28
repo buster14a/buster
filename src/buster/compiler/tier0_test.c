@@ -4020,11 +4020,13 @@ static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0Test
     }
     for (uint32_t stack = 0; deep && stack < 2; stack += 1)
     {
-        // A DUP establishes the next operand's class after CALL/COPY, and again when the two stacks change class.
-        caller->kinds[count] = BUSTER_TYPED_DUP;
+        // Adding zero establishes postorder's last class after CALL/COPY, and when the two stacks change class.
+        caller->kinds[count] = BUSTER_TYPED_CONST;
         caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
-        count += 1;
-        for (uint32_t value = 0; value < 17; value += 1)
+        caller->kinds[count + 1] = BUSTER_TYPED_ADD;
+        caller->classes[count + 1] = caller->classes[count];
+        count += 2;
+        for (uint32_t value = 0; value < 16; value += 1)
         {
             caller->kinds[count] = BUSTER_TYPED_DISCARD;
             caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
