@@ -675,7 +675,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "-E") == 0)
     {
-        result = run_preprocessor_command(argc - 1, argv + 1);
+        result = run_preprocessor_command_mode(argc - 1, argv + 1, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
@@ -959,7 +959,7 @@ static int main_command(int argc, char** argv, bool* found)
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
     {
-        result = run_check_command(argc - 2, argv + 2, false);
+        result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
@@ -1467,7 +1467,7 @@ int main_unit_types(int argc, char** argv, bool* found)
 #elif BUSTER_UNIT == BUSTER_UNIT_CHECKER
 int run_source_check_command(int count, char** arguments)
 {
-    return run_check_command(count, arguments, true);
+    return run_check_command_mode(count, arguments, true, false);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)
