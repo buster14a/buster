@@ -96,9 +96,10 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             }
         }
     }
-    if (valid && type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+    const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    if (valid && (incomplete || check_const_eligible(reader->types, type)))
     {
-        reader->incomplete_array_types[declaration] = type;
+        reader->incomplete_array_types[declaration] = incomplete ? type : 0;
         reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
         reader->initializer_finish_heads[end] = declaration;
         check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
@@ -144,6 +145,8 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     }
     return valid;
 }
+
+#include "c_check_input_const_values.c"
 
 static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t declaration)
 {
@@ -195,6 +198,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
                 }
             }
         }
+    }
+    if (valid && check_const_eligible(reader->types, type))
+    {
+        check_input_initializer_const(reader, declaration, begin, end, type);
     }
     if (!valid && reader->output->report_count == 0)
     {
