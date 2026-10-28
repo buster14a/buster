@@ -4496,16 +4496,17 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
         {
-            // Only explicit search directories earn a listing. Quoted includes often find their header immediately
-            // beside the source; listing an arbitrary, potentially huge source directory would add work to that hit.
-            if (directory != BUSTER_PP_NONE)
-            {
-                file_cache_list_directory(pp->cache, prefix, prefix_length);
-            }
             const uint32_t file = pp_lookup_path(pp, path, path_length, system);
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
+            // A directory earns a snapshot only after a real missing candidate. Enumerating a large -I directory
+            // for a header found on its first probe would add work to a successful search. The first miss remains in
+            // the path cache; the snapshot serves later names. Quoted includer directories retain ordinary probes.
+            if (directory != BUSTER_PP_NONE && error == ENOENT)
+            {
+                file_cache_list_directory(pp->cache, prefix, prefix_length);
+            }
         }
         failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
         if (failed)
