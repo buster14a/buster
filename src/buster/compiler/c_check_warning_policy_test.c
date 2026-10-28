@@ -13,6 +13,14 @@ static void check_test_warning_policy(CheckTest* test)
         const char* second;
         CheckWarningSeverity expected;
     } cases[] = {
+        { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-ignored-pragmas", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-pragmas", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_VISIBILITY_PRAGMA, "-Wno-visibility", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_KR_DEFINITION, "-Wno-deprecated-non-prototype", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_NON_PROTOTYPE_CALL, "-Werror=deprecated-non-prototype", NULL, CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_TOO_FEW, "-Wno-everything", NULL, CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_KR_TOO_FEW, "-Werror", NULL, CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_KR_TOO_MANY, "-Wno-deprecated-non-prototype", NULL, CHECK_WARNING_WARNING },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-Wno-literal-range", "-Weverything", CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-Weverything", "-Wno-literal-range", CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-Wno-everything", "-Wliteral-range", CHECK_WARNING_WARNING },
