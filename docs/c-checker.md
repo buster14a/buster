@@ -1921,7 +1921,7 @@ in a depth-65,536 chain, with and without an enclosing region, within one CPU
 second, and runs the source-level legality fixtures against Clang. This bound
 checks the repeated-walk regression; it is not a throughput measurement.
 
-The [frozen qualification record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/evidence-657/target)
+The [frozen qualification record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-657/target)
 retains the exact source/binary identities, stage clocks, every object and all
 outliers. Those timings compare `bc1b4861` with `086c24b1`; they do not measure
 this later integration's whole-compile throughput.
