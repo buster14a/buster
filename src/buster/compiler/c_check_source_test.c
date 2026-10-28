@@ -12,6 +12,10 @@ static __attribute__((noinline)) bool check_test_source_region_transfer_call(con
 
 static void check_test_source_region_transfers(CheckTest* test)
 {
+    const Parser no_region_parser = { .tokens = { .count = 1 } };
+    CheckInput no_regions = { 0 };
+    const CheckInputReader no_region_reader = { .parser = &no_region_parser, .output = &no_regions };
+    check_test_expect(test, check_input_region_transfer(&no_region_reader, 0, 0), "an empty region set needs neither region nor postorder columns");
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
