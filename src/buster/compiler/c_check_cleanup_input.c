@@ -59,8 +59,6 @@ static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputClean
 // `applies` says a variable of automatic storage in a block has. Whether the declaration is valid: a reported error isn't.
 static bool check_input_cleanup_declaration(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name, TypeId type, bool applies)
 {
-    const Parser* parser = reader->parser;
-    CheckInput* input = reader->output;
     CheckInputAttribute* applied = NULL;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
@@ -78,29 +76,18 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, CheckInput
     bool valid = true;
     if (applied != NULL)
     {
-        // The schema made the argument one identifier, looked up as an expression's: an undeclared one is the bindings'
-        // report there (check_input_binding_answers). A specifier's attribute is each declarator's: the first declarator
-        // that records it records its use.
+        // The schema bound every argument where parsed, including ignored subjects and duplicate attributes.
+        // A shared specifier retains that binding if an earlier declarator shadows the name.
         const uint32_t argument = applied->argument_first;
-        const uint32_t identifier = parser->tokens.names[argument];
-        const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-        const bool recorded = input->cleanup_count != 0 && input->cleanups[input->cleanup_count - 1].argument == argument;
-        if (!recorded && c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, argument, argument) == 0)
-        {
-            input->resource = true;
-            valid = false;
-        }
-        const uint32_t function = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
-        const uint8_t kind = handle != 0 ? reader->bindings.kind[handle - 1] : C_BINDING_OBJECT;
+        const uint32_t function = applied->cleanup_function != 0 ? applied->cleanup_function - 1u : BUSTER_CHECK_NONE;
         const TypeId function_type = function != BUSTER_CHECK_NONE ? type_strip_aligned(reader->types, reader->declared_types[function]) : 0;
         uint32_t parameters = 0;
         const TypeId* parameter_types = function_type != 0 && type_kind(reader->types, function_type) == BUSTER_TYPE_KIND_FUNCTION ?
                                         type_parameters(reader->types, function_type, &parameters) : NULL;
         const bool prototype = function_type != 0 && (reader->types->types.flags[type_index(function_type)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         applied->ignored |= !applies;
-        if (kind == C_BINDING_TYPEDEF || (applies && function != BUSTER_CHECK_NONE && (kind != C_BINDING_FUNCTION || parameter_types == NULL)))
+        if (applies && function != BUSTER_CHECK_NONE && parameter_types == NULL)
         {
-            // A type's name isn't an expression, whatever the declaration, as clang's parser says first.
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_FUNCTION);
             valid = false;
         }

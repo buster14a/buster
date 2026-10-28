@@ -37,6 +37,10 @@ static __attribute__((noinline)) void check_test_cleanup_sources(CheckTest* test
         { .name = "cleanup ignored on a typedef", .source = "void f(int *p);\nvoid g(void) { typedef int T __attribute__((cleanup(f))); }\n" },
         { .name = "cleanup ignored on a function", .source = "void f(int *p);\nvoid g(void) { int h(void) __attribute__((cleanup(f))); }\n" },
         { .name = "cleanup ignored on a parameter", .source = "void f(int *p);\nvoid g(int a __attribute__((cleanup(f)))) { }\n" },
+        { .name = "cleanup undeclared on an ignored parameter", .source = "void g(int a __attribute__((cleanup(missing)))) { }\n", .rejected = true },
+        { .name = "cleanup undeclared on an ignored field", .source = "struct S { int a __attribute__((cleanup(missing))); };\n", .rejected = true },
+        { .name = "an earlier cleanup still resolves its argument", .source = "void f(int *);\nvoid g(void) { int a __attribute__((cleanup(missing), cleanup(f))); }\n", .rejected = true },
+        { .name = "an earlier cleanup cannot name a type", .source = "typedef int T;\nvoid f(int *);\nvoid g(void) { int a __attribute__((cleanup(T), cleanup(f))); }\n", .rejected = true },
         { .name = "goto out of a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { { int a __attribute__((cleanup(f))); if (n) goto out; } out:; }\n" },
         { .name = "goto within a cleanup's scope", .source = "void f(int *p);\nvoid g(int n) { int a __attribute__((cleanup(f))); again: if (n--) goto again; }\n" },
         { .name = "case in a block of a cleanup", .source = "void f(int *p);\nvoid g(int n) { switch (n) { case 1: { int a __attribute__((cleanup(f))); break; } case 2:; } }\n" },
@@ -106,6 +110,10 @@ static __attribute__((noinline)) void check_test_cleanup_sources(CheckTest* test
 
 static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* test, const char* clang)
 {
+    // Both declarators inherit the argument parsed before the first declarator shadows the function's name.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "int tested(int n){trace=0;int r;{__attribute__((cleanup(note))) int note=n,other=n+1;r=note+other;}return r^(int)trace;}",
+        "cleanup-shared-specifier-binding", clang);
     check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
         "int tested(int n){trace=0;int r=0;{int a __attribute__((cleanup(note)))=n;int b __attribute__((cleanup(note)))=n+1;"
         "{int c __attribute__((cleanup(note)))=n+2;r+=c;}__attribute__((cleanup(note))) int d=n+3,e=n+4;int f __attribute__((cleanup(note)));"

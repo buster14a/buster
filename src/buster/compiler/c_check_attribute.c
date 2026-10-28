@@ -184,6 +184,8 @@ struct CheckInputAttribute
     bool ignored;
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
+    // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
+    uint32_t cleanup_function;
 };
 
 typedef struct CheckInputAttributes CheckInputAttributes;
@@ -727,6 +729,25 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
         {
             // The shared ICE reader validates expression semantics once the declaration's scope is available.
             valid = first < end;
+        }
+    }
+    if (valid && attribute->kind == CHECK_ATTRIBUTE_CLEANUP)
+    {
+        // Every argument is an expression's name, including ignored subjects and earlier duplicate attributes.
+        const uint32_t token = attribute->argument_first;
+        const uint32_t name = parser->tokens.names[token];
+        const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+        valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, token) != 0;
+        reader->output->resource |= !valid;
+        attribute->cleanup_function = handle != 0 ? reader->bindings.declaration[handle - 1] + 1u : 0;
+        if (valid && handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
+        {
+            // Keep the typed rejection as the one primary; the generic malformed-attribute fallback must not add one.
+            attributes->error = CHECK_ATTRIBUTE_ERROR_IDENTIFIER;
+            attributes->error_first = token;
+            attributes->error_end = token + 1u;
+            check_input_report(reader, token, CHECK_INPUT_CLEANUP_FUNCTION);
+            valid = false;
         }
     }
     if (valid && attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)
