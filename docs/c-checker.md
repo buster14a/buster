@@ -1457,11 +1457,21 @@ tokens it may act at, and tests there only what may make it act. On SQLite
   the marks and the classes by both paths against its own reading, with every
   column ending at a `PROT_NONE` page.
 
-What is left of the reader's per-token work: the graph's leaves, a 96-byte
-`CheckValue` written for each leaf and cleared for every node (#572), the
-walks' work at the tokens they act at, which building the expression graph
-data-parallel would take next, and `check_input_run`'s fills (#572) and
-tree passes (#186).
+On the locked 9700X, CPU 2, main `92c025e7` against `60732582`, the completed
+final comparison gives `check-input` 63.682 → 58.927 ms, the direct reader
+53.912 → 49.375 ms, and whole `-c` perf task clock 146.340 → 141.725 ms.
+User cycles fall 3.77% and instructions 5.21%; all observations, unchanged
+scalar/one/eight-lane objects and the 16 target checker-suite results are
+in the [record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/check-input-529-walks-2026-10-27).
+This is the sparse-walk snapshot, before the later combined storage/traversal
+integration, not a new measurement of that combination.
+
+What is left of the reader's per-token work is the walks' work where they
+act, the expression-comma propagation, graph construction and the remaining
+output fills. Since #572 the graph stores `CheckValue` only for VALUE leaves;
+since #186 the parser and reader share one retained traversal. The sparse
+walk consumes that reader-owned postorder, and the continuation's dynamic
+visit mark is retained even when zero-valued sparse stores are skipped.
 
 ## Benchmark and validation limits
 
