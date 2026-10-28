@@ -11447,11 +11447,18 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     return valid;
 }
 
+#define BUSTER_TIER0_VALIDATE_SMALL_COUNT 16
+
 static Tier0Check tier0_validate(const Tier0Function* function)
 {
     Tier0Check check;
     memset(&check, 0, sizeof(check));
-    if (!tier0_validate_accepts(function))
+    // Locked 9700X size controls favor scalar validation through 16 entries. Keep empty streams on their cheap
+    // vector setup path and do not infer a small total workload from entry count when metadata tables are large.
+    const bool small = function->count != 0 && function->count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
+                       function->local_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT && function->call_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
+                       function->argument_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT;
+    if (small || !tier0_validate_accepts(function))
     {
         check = tier0_validate_scalar(function);
     }

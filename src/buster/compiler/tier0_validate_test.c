@@ -498,9 +498,11 @@ static void tier0_test_stream_judge(Tier0TestTally* tally, const char* name, con
     }
     const bool vector = tier0_validate_accepts(&function);
     const Tier0Check scalar = tier0_validate_scalar(&function);
+    const Tier0Check selected = tier0_validate(&function);
+    const bool same_rule = (selected.rule == 0) == (scalar.rule == 0) && (selected.rule == 0 || strcmp(selected.rule, scalar.rule) == 0);
     taken[0] += vector ? 1 : 0;
     taken[1] += scalar.error == TIER0_OK ? 1 : 0;
-    tier0_test_expect(tally, (scalar.error == TIER0_OK) == valid && vector == (valid && !leaves), "validation",
+    tier0_test_expect(tally, (scalar.error == TIER0_OK) == valid && vector == (valid && !leaves) && selected.error == scalar.error && selected.node == scalar.node && same_rule, "validation",
                       "%s (%u entries%s): the scalar validator %s (%s at %u), the vector path %s", name, stream->count, guard != 0 ? ", at a page's end" : "",
                       scalar.error == TIER0_OK ? "takes it" : "refuses it", scalar.rule != 0 ? scalar.rule : "", scalar.node, vector ? "takes it" : "leaves it");
 }
