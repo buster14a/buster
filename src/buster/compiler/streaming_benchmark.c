@@ -5,14 +5,14 @@
 //                     [--lanes N] [--cpus A,B] [--directory PATH] [--keep]: streaming.c's schedules against each other
 // and against the direct path's writer, on one program of `--units` generated units (400) of `--functions` functions
 // each (32): from the start of the write to the file closed, with Tier 0 compiling every function in it. Each run
-// writes the program by every variant, in an order that rotates from run to run, into `--directory` (TMPDIR or /tmp):
+// writes the program by every available variant, in an order that rotates from run to run, into `--directory` (TMPDIR or /tmp):
 //   - at the end, streamed, and streamed by a writer lane (on the CPUs of `--cpus`, or the process's), each with its
 //     time to the last function compiled and after it;
 //   - the direct path: the same compiled code as a Link, written by executable_write on one lane and on `--lanes` (8),
 //     each with its compiling, the Link's building and the write.
-// Before the runs, every variant's file must run and print the same 8 bytes, and the schedules' files must be the same.
+// Before the runs, every available variant's file must run and print the same 8 bytes, and the schedules' files must be the same.
 // It reports the medians of `--runs` runs (11). Run it under the 9700X's lock with taskset -c 2 for the one-lane
-// variants, or with a writer lane's two CPUs (--cpus 2,3 and taskset -c 2,3).
+// variants; parallel variants need enough allowed CPUs (--cpus 2,3 and taskset -c 2,3 for two lanes).
 // main.c includes this file after streaming_test.c, whose runner it takes.
 
 #define BUSTER_STREAM_BENCHMARK_VARIANTS 5
@@ -21,6 +21,68 @@
 // the rest; and the schedules' rest in parts: .text's last chunks, pairs and DWARF units, the tail built, written, the
 // headers and the close (with the lanes' end).
 #define BUSTER_STREAM_BENCHMARK_TIMES 9
+
+typedef struct StreamBenchmarkCpus StreamBenchmarkCpus;
+struct StreamBenchmarkCpus
+{
+    uint32_t allowed_count;
+    uint32_t lanes;
+    uint32_t writer[2];
+    bool writer_available;
+};
+
+static bool stream_benchmark_cpu_allowed(const uint64_t* allowed, uint32_t cpu)
+{
+    return cpu < BUSTER_LANE_CPU_MASK_WORDS * 64 && (allowed[cpu / 64] >> (cpu % 64) & 1) != 0;
+}
+
+// --cpus is exactly two bounded decimal CPU IDs. Reject a missing second number, trailing text and overflow.
+static bool stream_benchmark_parse_cpus(const char* text, uint32_t* cpus)
+{
+    bool result = true;
+    for (uint32_t part = 0; result && part < 2; part += 1)
+    {
+        uint32_t cpu = 0;
+        const char* begin = text;
+        while (result && *text >= '0' && *text <= '9')
+        {
+            cpu = cpu * 10 + (uint32_t)(*text - '0');
+            text += 1;
+            result = cpu < BUSTER_LANE_CPU_MASK_WORDS * 64;
+        }
+        result = result && text != begin && *text == (part == 0 ? ',' : 0);
+        cpus[part] = cpu;
+        text += result && part == 0;
+    }
+    return result;
+}
+
+// Select only within the inherited affinity. Explicit writer CPUs may not widen a taskset/cpuset placement.
+// The CI caller chooses one CPU per physical core; the benchmark itself counts the allowed logical CPUs.
+static StreamBenchmarkCpus stream_benchmark_cpus(const uint64_t* allowed, uint32_t requested, const uint32_t* writer)
+{
+    StreamBenchmarkCpus result = { .writer = { BUSTER_LANE_CPU_MASK_WORDS * 64, BUSTER_LANE_CPU_MASK_WORDS * 64 } };
+    for (uint32_t word = 0; word < BUSTER_LANE_CPU_MASK_WORDS; word += 1)
+    {
+        for (uint64_t bits = allowed[word]; bits != 0; bits &= bits - 1)
+        {
+            if (result.allowed_count < 2)
+            {
+                result.writer[result.allowed_count] = word * 64 + (uint32_t)__builtin_ctzll(bits);
+            }
+            result.allowed_count += 1;
+        }
+    }
+    result.lanes = requested < result.allowed_count ? requested : result.allowed_count;
+    if (writer != 0)
+    {
+        result.writer[0] = writer[0];
+        result.writer[1] = writer[1];
+    }
+    result.writer_available = result.writer[0] != result.writer[1] && stream_benchmark_cpu_allowed(allowed, result.writer[0]) &&
+                              stream_benchmark_cpu_allowed(allowed, result.writer[1]);
+    return result;
+}
 
 typedef struct StreamBenchmarkSample StreamBenchmarkSample;
 struct StreamBenchmarkSample
@@ -165,10 +227,7 @@ static int run_streaming_benchmark(int argc, char** argv)
         else if (strcmp(argv[i], "--cpus") == 0 && value)
         {
             i += 1;
-            char* end = 0;
-            cpu_list[0] = (uint32_t)strtoul(argv[i], &end, 10);
-            valid = end != argv[i] && *end == ',';
-            cpu_list[1] = valid ? (uint32_t)strtoul(end + 1, 0, 10) : 0;
+            valid = stream_benchmark_parse_cpus(argv[i], cpu_list);
             cpus = cpu_list;
         }
         else if (strcmp(argv[i], "--directory") == 0 && value)
@@ -187,6 +246,29 @@ static int run_streaming_benchmark(int argc, char** argv)
         fprintf(stderr, "usage: benchmark-streaming [--units N] [--functions N] [--seed N] [--runs N] [--chunk-bytes N] [--order callees|callers] "
                         "[--lanes N] [--cpus A,B] [--directory PATH] [--keep]\n");
     }
+    uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
+    const bool known = valid && syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
+    const StreamBenchmarkCpus placement = stream_benchmark_cpus(allowed, lanes, cpus);
+    if (valid && (!known || placement.allowed_count == 0))
+    {
+        fprintf(stderr, "benchmark-streaming: cannot read a nonempty allowed CPU set\n");
+        valid = false;
+    }
+    if (valid)
+    {
+        printf("benchmark-streaming: requested lanes=%u, selected lanes=%u, allowed CPUs=%u; ", lanes, placement.lanes, placement.allowed_count);
+        if (placement.writer_available)
+        {
+            printf("writer CPUs=%u,%u\n", placement.writer[0], placement.writer[1]);
+        }
+        else
+        {
+            printf("writer unavailable\n");
+        }
+    }
+    lanes = placement.lanes;
+    cpus = placement.writer;
+    const bool enabled[BUSTER_STREAM_BENCHMARK_VARIANTS] = { true, true, placement.writer_available, true, lanes > 1 };
     char directory[PATH_MAX];
     snprintf(directory, sizeof(directory), "%s/buster-streaming-benchmark-XXXXXX", base);
     valid = valid && x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && unwind_initialize() && mkdtemp(directory) != 0;
@@ -231,6 +313,10 @@ static int run_streaming_benchmark(int argc, char** argv)
         const String8 reference_bytes = valid ? object_test_read_file(&files, path) : (String8){ 0 };
         for (uint32_t variant = 0; valid && variant < BUSTER_STREAM_BENCHMARK_VARIANTS; variant += 1)
         {
+            if (!enabled[variant])
+            {
+                continue;
+            }
             char variant_path[PATH_MAX];
             StreamBenchmarkSample sample;
             uint64_t streamed = 0;
@@ -263,6 +349,10 @@ static int run_streaming_benchmark(int argc, char** argv)
             for (uint32_t step = 0; valid && step < BUSTER_STREAM_BENCHMARK_VARIANTS; step += 1)
             {
                 const uint32_t variant = (run + step) % BUSTER_STREAM_BENCHMARK_VARIANTS;
+                if (!enabled[variant])
+                {
+                    continue;
+                }
                 char path[PATH_MAX];
                 StreamBenchmarkSample sample;
                 valid = stream_benchmark_variant(&program, variant, directory, order, chunk_bytes, lanes, cpus, &sample, path, &streamed[variant]);
@@ -282,6 +372,11 @@ static int run_streaming_benchmark(int argc, char** argv)
                 double* row = samples + ((uint64_t)variant * BUSTER_STREAM_BENCHMARK_TIMES) * runs;
                 char label[64];
                 snprintf(label, sizeof(label), variant == BUSTER_STREAM_BENCHMARK_VARIANTS - 1 ? "%s (%u)" : "%s", names[variant], lanes);
+                if (!enabled[variant])
+                {
+                    printf("  %-24s not run (%s)\n", label, variant == STREAM_SCHEDULE_WRITER ? "two distinct allowed writer CPUs required" : "multiple selected lanes required");
+                    continue;
+                }
                 double medians[BUSTER_STREAM_BENCHMARK_TIMES];
                 for (uint32_t t = 0; t < BUSTER_STREAM_BENCHMARK_TIMES; t += 1)
                 {

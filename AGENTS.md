@@ -315,7 +315,10 @@ designs and the compilers already built this way.
   helper; a template of no instructions, a barrier's, is no code at all. A
   naked function's templates are its whole code. Templates' labels are local
   symbols, and the other names they refer to are the unit's symbols of those
-  link names or undefined globals (`check_program_emit_asm_symbols`).
+  link names or undefined globals (`check_program_emit_asm_symbols`). A
+  file-scope `asm`'s templates are assembled by the emission into atoms of
+  their sections before the functions' (`check_program_emit_file_asm`, #619),
+  each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
   `test-checker-driver` links and runs naked functions' labels and a template's
@@ -323,7 +326,8 @@ designs and the compilers already built this way.
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](docs/c-inline-assembly.md) has the placement, the substitution, the
-  helper's frame, naked functions, names, the refusals and what is pending.
+  helper's frame, naked functions, names, file-scope assembly, the refusals and
+  what is pending.
 - `src/buster/compiler/c_testsuite.c` is #145's harness: `test-c-testsuite
   [--subset FILE] [--jobs N] [--timeout SECONDS] [--compiler PATH]
   [--clang PATH] [--cross-check] [--keep] DIR` compiles each of c-testsuite's
@@ -957,7 +961,7 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers] [--program-vectors]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--program-vectors|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
@@ -966,6 +970,9 @@ designs and the compilers already built this way.
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
   `--program-vectors` selects the vector and x86 builtin programs alone (`c_check_program_vector_test.c`,
   `c_check_program_x86_test.c`), run against clang -O0's code where the host has their features.
+  `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
+  initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
+  exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
@@ -1169,6 +1176,7 @@ From the repository root, on the approved Linux Ryzen 7 9700X host:
 ./build.sh
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
 ./build/compiler parse -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+./build/compiler -fsyntax-only -march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror src/buster/compiler/main.c
 ./build/compiler test-call-graph
 ./build.sh check-call-graph
 ./build/compiler test-profile
@@ -5636,8 +5644,15 @@ reports the medians of the whole, the compiling, the Link's building (the
 direct path) and what follows the last function compiled, which for the
 schedules it splits into `.text`'s last chunks, unwind pairs and DWARF units,
 the tail built, the tail written, the headers, and the close. Run it under the
-9700X's lock with `taskset -c 2`, or `taskset -c 2,3` with `--cpus 2,3` for the
-writer lane. The outputs are overwritten in place, as `executable_write`
+9700X's lock with `taskset -c 2` for serial rows, or `taskset -c 2,3` with
+`--lanes 2 --cpus 2,3` for parallel rows. The benchmark clamps lanes to its
+inherited CPU affinity and reports the requested and selected counts. A writer
+pair must name two distinct allowed CPUs; an unavailable writer or parallel
+direct row prints `not run` and is excluded from validation and timing. Default
+writer CPUs are the first two allowed CPUs. CI selects one allowed CPU per
+physical core (up to eight), avoiding SMT siblings, and passes that placement
+to the benchmark. Manual placements should do the same. The outputs are
+overwritten in place, as `executable_write`
 overwrites an executable: a file truncated on open and written again is flushed
 when it is closed on btrfs and ext4.
 
