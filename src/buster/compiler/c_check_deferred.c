@@ -292,6 +292,15 @@ struct CheckDeferred
     uint64_t environment_ns;
     uint64_t lanes_ns;
     uint64_t merge_ns;
+    // With `timing`, the merge's parts (check_deferred_merge): the replay; the appended tables, their layouts, copies
+    // and intrinsics; the events; the tags' completions; the pass over every token's columns; and the rest, the names'
+    // linked types, the predefined types and the reader's fields.
+    uint64_t merge_replay_ns;
+    uint64_t merge_tables_ns;
+    uint64_t merge_events_ns;
+    uint64_t merge_tags_ns;
+    uint64_t merge_tokens_ns;
+    uint64_t merge_rest_ns;
     uint64_t walk_ns;
     uint64_t position_ns;
     uint64_t copy_ns;
@@ -1123,6 +1132,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     Arena* scratch = &deferred->memory.arena;
     const uint32_t bodies = deferred->body_count;
     const uint32_t count = parser->tokens.count;
+    const uint64_t begin_ns = deferred->timing ? check_deferred_now() : 0;
     // The types: the top level's changes and the bodies', replayed into the caller's table.
     TypeReplayPart* parts = BUSTER_ARENA_PUSH_ARRAY(scratch, TypeReplayPart, (uint64_t)bodies + 1);
     bool valid = parts != 0;
@@ -1153,6 +1163,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         valid = parts[1 + b].types != 0 && parts[1 + b].tags != 0 && parts[1 + b].merged != 0;
     }
     valid = valid && type_replay(deferred->table, parts, bodies + 1, scratch) && !deferred->fail_after_replay;
+    const uint64_t replay_ns = deferred->timing ? check_deferred_now() : 0;
     // Each appended table's places, and the events'.
     uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)bodies + 1);
     valid = valid && counts != 0;
@@ -1381,6 +1392,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             }
         }
     }
+    const uint64_t tables_ns = deferred->timing ? check_deferred_now() : 0;
     // The events: each body's at its cut, every handle and index into the stream mapped, and a restore's mark past the
     // top level's active declarations at the cut.
     CBindings* bindings = &reader->bindings;
@@ -1444,6 +1456,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         bindings->kind = kind;
         bindings->count = event_total;
     }
+    const uint64_t events_ns = deferred->timing ? check_deferred_now() : 0;
     // The tags' completion positions, by the replay's tags.
     uint32_t* completions = valid ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)deferred->table->tags.capacity + 1) : 0;
     uint32_t* transparent = valid && reader->transparent_unions != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)deferred->table->tags.capacity + 1) : 0;
@@ -1487,6 +1500,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             }
         }
     }
+    const uint64_t tags_ns = deferred->timing ? check_deferred_now() : 0;
     // Every column the walk wrote with a TypeId or an id into those tables, through its owner's part: a body's tokens and
     // its parameters' (which its opening rebinds), and the top level's everywhere else. A body's part maps the top
     // level's ids as the top level's does.
@@ -1554,6 +1568,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             job->result = check_deferred_type(part, job->result);
         }
     }
+    const uint64_t tokens_ns = deferred->timing ? check_deferred_now() : 0;
     for (uint32_t name = 0; valid && name < reader->bindings.name_capacity; name += 1)
     {
         reader->linked_types[name] = check_deferred_type(&parts[0], reader->linked_types[name]);
@@ -1631,6 +1646,15 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         }
         // As source order's input: no body is deferred.
         input->deferred_tokens = 0;
+    }
+    if (deferred->timing)
+    {
+        deferred->merge_replay_ns = replay_ns - begin_ns;
+        deferred->merge_tables_ns = tables_ns - replay_ns;
+        deferred->merge_events_ns = events_ns - tables_ns;
+        deferred->merge_tags_ns = tags_ns - events_ns;
+        deferred->merge_tokens_ns = tokens_ns - tags_ns;
+        deferred->merge_rest_ns = check_deferred_now() - tokens_ns;
     }
     return valid;
 }
