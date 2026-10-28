@@ -1557,7 +1557,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
     {
         equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
                 left_parser->tree.parents[token] == right_parser->tree.parents[token] && left_parser->tree.depths[token] == right_parser->tree.depths[token] &&
-                left_parser->postorder[token] == right_parser->postorder[token] && left_parser->sizes[token] == right_parser->sizes[token] &&
+                left_parser->postorder[token] == right_parser->postorder[token] && (left_parser->sizes != 0) == (right_parser->sizes != 0) &&
+                (left_parser->sizes == 0 || left_parser->sizes[token] == right_parser->sizes[token]) &&
+                (left_parser->positions != 0) == (right_parser->positions != 0) &&
+                (left_parser->positions == 0 || (left_parser->positions[token] == right_parser->positions[token] && left_parser->ends[token] == right_parser->ends[token] &&
+                                                 left_parser->first_children[token] == right_parser->first_children[token] &&
+                                                 left_parser->next_siblings[token] == right_parser->next_siblings[token])) &&
                 left_parser->tokens.kinds[token] == right_parser->tokens.kinds[token] && left_parser->tokens.names[token] == right_parser->tokens.names[token] &&
                 left_parser->tokens.sources[token] == right_parser->tokens.sources[token] && left_parser->tokens.flags[token] == right_parser->tokens.flags[token];
     }

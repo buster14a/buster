@@ -1265,8 +1265,9 @@ static int run_check_command(int count, char** arguments, bool executable)
         static InternTable identifiers;
         static Preprocessor pp;
         static Parser parser;
-        // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528).
-        const ParseOptions parser_options = { .scalar = scalar, .scratch = &scratch };
+        // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
+        // alone: the reader derives the traversal it reads into those pages (check_input_run).
+        const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = &scratch };
         bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parser_options, options.language);
         if (!ready || scratch.base == 0 || output_arena.base == 0)
         {
