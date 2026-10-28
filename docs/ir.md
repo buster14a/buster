@@ -577,6 +577,34 @@ objects and copies. Target conclusions require the optimized
 repository build on the approved 9700X, pinned to one CPU and under the shared
 lock; cloud correctness runs do not establish Zen 5 throughput.
 
+### Bytes per source token
+
+#15 asks for the IR's bytes per source token on `sqlite3.c`, whose largest
+function, `sqlite3VdbeExec`, is 5.0% of its `-O0` code. `benchmark-ir-source`
+on the frozen `sqlite3.c`, with the 9700X job's options (benchmark-backend-source's),
+counts each function's IR as an arena of its own (`IrFunction.arena_bytes`: every
+column and side table, each aligned to 64 bytes, with the gaps), against the
+705,670 tokens that reach the parser:
+
+| IR | Instructions | Bytes | Per token | Per typed entry |
+| --- | ---: | ---: | ---: | ---: |
+| Lowered (all in memory) | 598,388 | 13,981,835 | 19.81 | 35.23 |
+| Promoted (`ssa_ir_promote`) | 496,807 | 12,390,063 | 17.56 | 31.22 |
+
+The lowered IR's 19.81 bytes per token are 13.57 of instruction columns (16 bytes
+per instruction), 4.64 of block offsets and side tables (constants, slots,
+addresses, calls, their extra words and types, labels and the ABI records) and
+1.60 of the columns' 64-byte alignment gaps, which small functions pay for most.
+Each constant takes an instruction and a 16-byte `IrConstant` of its own: the
+adapter shares none.
+
+`sqlite3VdbeExec` is the largest function: 571,536 bytes, 4.09% of the IR's
+(26,798 instructions, 4.48% of them), from 18,937 typed entries. The ten largest
+are 14.00% (#15: 16.8% of the `-O0` code), the next being `yy_reduce` (2.69%) and
+`sqlite3Pragma` (1.65%). One function's IR is thus at most about 0.6 MB of a
+lane's arena at a time (#151). c-testsuite's subset comes to 2.63 bytes per token,
+its tokens mostly its headers'.
+
 ### Initial 9700X qualification
 
 [Protected run 39934441798](https://github.com/buster14a/buster/actions/runs/39934441798)
