@@ -447,8 +447,8 @@ static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const
     const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, warning);
     if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
     {
-        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_FATAL :
-                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         if (warning == CHECK_WARNING_KR_TOO_FEW || warning == CHECK_WARNING_KR_TOO_MANY)
         {
             const uint32_t name = parser->tokens.names[token];
