@@ -1735,6 +1735,11 @@ message rather than truncating it. Rendering follows the required note order;
 the optimization removes the per-piece system calls without changing how
 source locations and note identities are computed.
 
+[The frozen #636 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-636/target)
+compares `60ff4b25` with `bc1b4861` on the locked 9700X, with exact bytes,
+file/pipe write counts and diagnostic-heavy compile timings. These numbers
+describe those revisions, rather than a timing qualification of later ports.
+
 `test-preprocessor --clang` compares 36 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
