@@ -234,10 +234,13 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
     const uint32_t stream_reports = stream != NULL ? stream->report_count : 0;
     const uint32_t scanned = count < input->token_count ? count : input->token_count;
     const uint32_t nodes = stream != NULL ? stream->count : 0;
+    const bool attribute_warnings = !input->asm_warnings_prepared || input->ignored_asm_count != 0;
+    const uint32_t constant_warnings = input->constant_warnings_prepared ? input->constant_warning_count : scanned;
+    const uint32_t node_warnings = stream != NULL && stream->warnings_prepared ? stream->warning_count : nodes;
     const bool show_warnings = !quiet;
     // Room for every report or warning a token may have, and a key past them, which no token's reaches: the walk's end.
     const uint64_t report_room = (uint64_t)input->report_count + stream_reports + extra_count + 1;
-    const uint64_t warning_room = show_warnings ? 2 * (uint64_t)scanned + nodes + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
     uint64_t* report_keys = fits && reports ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, report_room) : NULL;
@@ -283,9 +286,9 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
             firsts[first_count] = UINT64_MAX;
         }
         uint32_t warning_total = 0;
-        for (uint32_t first = 0; show_warnings && input->attributes != NULL && first < scanned; first += 8)
+        for (uint32_t first = 0; show_warnings && attribute_warnings && input->attributes != NULL && first < scanned; first += 8)
         {
-            const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, scanned) & 0xff : check_input_scan_pointers((const void* const*)input->attributes, first, scanned);
+            const uint32_t lanes = check_input_asm_attributed(input, first, scanned, scalar);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -296,7 +299,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
             }
         }
-        for (uint32_t first = 0; show_warnings && input->constant_warnings != NULL && first < scanned; first += 64)
+        for (uint32_t first = 0; show_warnings && constant_warnings != 0 && input->constant_warnings != NULL && first < scanned; first += 64)
         {
             const uint64_t lanes = scalar ? check_input_scan_all(first, scanned) : check_input_scan_nonzero(input->constant_warnings, first, scanned);
             for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
@@ -310,7 +313,7 @@ static bool check_driver_reports(const Parser* parser, Preprocessor* pp, const C
                 }
             }
         }
-        for (uint32_t first = 0; show_warnings && first < nodes; first += 16)
+        for (uint32_t first = 0; show_warnings && node_warnings != 0 && first < nodes; first += 16)
         {
             const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, nodes) & 0xffff : check_input_scan_nonzero32(stream->warnings, first, nodes);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
@@ -1492,6 +1495,7 @@ static int run_check_command(int count, char** arguments, bool executable)
                         const CheckProgramOptions program_options = {
                             .initializers = &initializers,
                             .asms = &asms,
+                            .prepared_data = (emit_object || link) && !prefix_only ? &data : NULL,
                             .identifiers = pp.table,
                             .initializer_references = data.references,
                             .initializer_reference_count = data.reference_count,

@@ -181,6 +181,9 @@ struct CheckInput
     uint8_t* thread_local;
     uint8_t* compound_objects;
     CheckInputAttributes** attributes;
+    // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
+    uint32_t ignored_asm_count;
+    bool asm_warnings_prepared;
     uint8_t* linkage;
     uint8_t* defined;
     uint8_t* tentative;
@@ -192,6 +195,8 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     uint8_t* constant_warnings;
+    uint32_t constant_warning_count;
+    bool constant_warnings_prepared;
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
     uint32_t* declaration_bodies;
@@ -5528,6 +5533,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
+        input->constant_warnings_prepared = true;
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)
         {
