@@ -792,6 +792,28 @@ What the lowering covers past scalars (#145's programs):
   the same way, and so do initializer parts with a bit width. A field whose bits
   are spread over more than 8 bytes (a packed one) is refused.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The source reader's declaration handoff retains the half-open append range
+  of VLA records introduced by its specifiers and declarator. Only that range
+  is associated and given the declaration's scope; reusing a typedef creates
+  no new bound or capture. A suspended `typeof` specifier saves the range's
+  beginning across its source walk. A definition retains its header's range
+  until parameter activation, and deferred-body cuts save it for each lane,
+  whose private record table also contains other headers. The original
+  declaration-token/body filters still exclude nested prototypes. These ranges
+  use scalar indices, require no allocation or padded access, and are empty
+  for declarations without new bounds. One-bound declarations visit one record
+  each instead of all earlier records (#611); the small, ordered span updates
+  retain the existing scalar record layout and stable bound identities.
+  Empty ranges still validate variably modified declarations and retain their
+  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
+  34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
+  instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
+  The SQLite control adds 0.0112% instructions and shows mixed, small timing
+  changes within process/copy variability. The
+  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/b5a850b6171da718b16feb4db341109476e3db19/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
+  record exact sources and limits, five byte-identical baseline/head objects
+  and their stage receipts ([performance PR #27](https://github.com/buster14a/buster-performance/pull/27)).
   The control stream puts a `STACK_SAVE` before each block's first array, an
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
