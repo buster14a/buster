@@ -113,6 +113,10 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
     { "visibility-extern-source-order", "int shared;\n#pragma GCC visibility push(hidden)\nint hidden;\n"
       "int f(void){extern int shared;return shared;}\nint g(void){extern int shared;return shared;}\n#pragma GCC visibility pop\n", false },
+    { "visibility-attribute-extern-source-order", "int shared;\n"
+      "int f(void){extern int shared __attribute__((visibility(\"hidden\")));return shared;}\nint g(void){return shared;}\n", false },
+    { "visibility-locals-still-merge", "#pragma GCC visibility push(hidden)\n"
+      "int f(void){int local=3;return local;}\nint g(void){int local=7;return local;}\n#pragma GCC visibility pop\n", true },
     { "implicit-functions-source-order", "typedef __typeof__(top_missing()) T;\nint f(void){return first_missing();}\n"
       "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     { "block-scope-extern-first", "int f(void) { extern int e; return e; }\nint g(void) { extern int e; return e + 1; }\n", false },
