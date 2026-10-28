@@ -73,6 +73,13 @@ static void test_memory(void)
         memcpy(&actual, end - 4 * (i + 1), 4);
         assert(actual == values.u32[i]);
     }
+    // Hardware gather also permits an absolute address as its index with a NULL base.
+    uint64_t absolute_value = UINT64_C(0x8877665544332211);
+    HostV512 absolute_indices = {0};
+    absolute_indices.u64[0] = (uintptr_t)&absolute_value;
+    got.value = _mm512_mask_i64gather_epi64(src.value, 1, absolute_indices.value, NULL, 1);
+    assert(got.u64[0] == absolute_value);
+
     // A zero mask must tolerate an entirely inaccessible address.
     got.value = _mm512_mask_loadu_epi64(src.value, 0, NULL);
     assert(memcmp(&got, &src, 64) == 0);

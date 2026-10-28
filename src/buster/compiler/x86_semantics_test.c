@@ -288,6 +288,28 @@ static char x86_semantics_test_case[256];
 static uint8_t x86_semantics_test_baseline[X86_FORM_COUNT];
 static uint8_t x86_semantics_test_native[X86_FORM_COUNT];
 
+// The target table fails closed on unclassified forms. These covered legacy forms are nevertheless baseline
+// instructions; keep executing them rather than treating an absent target-table row as a missing CPU feature.
+static bool x86_semantics_test_known_legacy(uint32_t form)
+{
+    static const char* const prefixes[] = {
+        "LOCK_XADD_", "LOCK_ADD_", "LOCK_OR_", "LOCK_ADC_", "LOCK_SBB_", "LOCK_AND_", "LOCK_SUB_", "LOCK_XOR_",
+        "LOCK_INC_", "LOCK_DEC_", "LOCK_NOT_", "LOCK_NEG_", "BT_", "COMISS_", "COMISD_", "ANDPS_", "ANDPD_", "ANDNPS_", "ORPS_", "PAND_", "PANDN_", "POR_",
+        "MOVD_", "ANDNPD_", "ORPD_", "CMPSS_", "CMPSD_",
+    };
+    const char* name = x86_semantics_test_name(form);
+    bool known = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
+    {
+        known |= strncmp(name, prefixes[i], strlen(prefixes[i])) == 0;
+    }
+    if (strncmp(name, "ROUNDSS_", 8) == 0 || strncmp(name, "ROUNDSD_", 8) == 0)
+    {
+        known |= __builtin_cpu_supports("sse4.1") != 0;
+    }
+    return known && x86_form_descriptions[form].family == BUSTER_X86_FAMILY_LEGACY;
+}
+
 static void x86_semantics_test_fault(int signal_number)
 {
     char message[400];
@@ -1363,6 +1385,7 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     uint32_t witness_runs = 0;
     uint32_t never_shown = 0;
     uint32_t unavailable = 0;
+    uint32_t wide_state = 0;
     for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
     {
         const X86Effects* effects = x86_effects(form);
@@ -1373,6 +1396,12 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
         else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_native[form])
         {
             unavailable += 1;
+        }
+        else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_wide && x86_form_descriptions[form].family != BUSTER_X86_FAMILY_LEGACY)
+        {
+            // The SSE-only trampoline does not initialize YMM/ZMM state. Do not execute a VEX/EVEX form even
+            // if the CPU supports it: an upper lane or implicit upper-state effect could influence its result.
+            wide_state += 1;
         }
         else if (effects->operation != X86_OPERATION_NONE)
         {
@@ -1405,6 +1434,10 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
            "return or trap left to the fixtures\n",
            forms, runs, witness_runs, never_shown, skipped);
     printf("effects: %u covered forms require unavailable host features\n", unavailable);
+    if (wide_state != 0)
+    {
+        printf("effects: %u covered vector-encoded forms skipped (the harness captures only 128-bit state)\n", wide_state);
+    }
     return x86_semantics_report(&tally);
 }
 
@@ -1703,10 +1736,17 @@ static bool x86_semantics_check_shift_flags(X86SemanticsMachine* machine, uint64
         output = input;
         if (x86_semantics_expect(&tally, x86_semantics_machine_load(machine, record, 1), "%s encodes", x86_semantics_test_case))
         {
-            x86_semantics_machine_run(machine, &output);
-            const uint8_t carry = x86_semantics_flags(output.flags) & BUSTER_X86_FLAG_CF;
-            x86_semantics_expect(&tally, output.gpr[X86_REGISTER_RAX] == 1 && carry == (i == 0 ? BUSTER_X86_FLAG_CF : 0), "%s: result %#llx, CF %#x",
-                                 x86_semantics_test_case, (unsigned long long)output.gpr[X86_REGISTER_RAX], carry);
+            if (x86_semantics_test_native[record->form])
+            {
+                x86_semantics_machine_run(machine, &output);
+                const uint8_t carry = x86_semantics_flags(output.flags) & BUSTER_X86_FLAG_CF;
+                x86_semantics_expect(&tally, output.gpr[X86_REGISTER_RAX] == 1 && carry == (i == 0 ? BUSTER_X86_FLAG_CF : 0), "%s: result %#llx, CF %#x",
+                                     x86_semantics_test_case, (unsigned long long)output.gpr[X86_REGISTER_RAX], carry);
+            }
+            else
+            {
+                printf("effects: %s encoded; native execution skipped (host feature unavailable)\n", x86_semantics_test_name(record->form));
+            }
         }
     }
     return x86_semantics_report(&tally);
@@ -2755,6 +2795,15 @@ static int run_x86_semantics_tests(int argc, char** argv)
         x86_target_forms(&baseline, x86_semantics_test_baseline);
         const X86Target native = x86_target_native();
         x86_target_forms(&native, x86_semantics_test_native);
+        for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
+        {
+            if (x86_target_requirements[form] == 0 && x86_semantics_test_known_legacy(form))
+            {
+                x86_semantics_test_native[form] = 1;
+            }
+        }
+        // RORX's substitution fixture executes it even though the effects table does not cover it.
+        x86_semantics_test_native[X86_FORM_RORX_R32_RM32_IMM8] = __builtin_cpu_supports("bmi2") != 0;
         x86_semantics_test_wide = __builtin_cpu_supports("avx512f") != 0;
         if (!x86_semantics_test_wide)
         {

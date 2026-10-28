@@ -4048,7 +4048,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !parser->options.scalar && token < count; token += 64)
+    for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -4107,7 +4107,9 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
+    // The requested walk controls filtering and value-list accounting. Host ISA
+    // only selects how the classification above is computed.
+    const bool scalar = parser->options.scalar;
     // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
     const uint32_t acts = check_input_expression_classes(reader);
     reader->output->expression_visits = scalar ? parser->tokens.count : acts;

@@ -113,8 +113,13 @@ instructions, unknown immediates, known L1 loads, compare/branch adjacency,
 malformed permutations, rejected capacities and null/empty slices. Every
 length from zero through 256 ends at guarded input, pin and output boundaries.
 Random mixed and movable-register blocks exercise many legal topological
-orders. These checks operate on machine records, not on a source-language
-corpus.
+orders. The shared 64-record integer-loop fixture also compares both encoders'
+bytes and executes the original and reordered programs against an independent
+reference for 64 inputs through each scheduling path. Baseline hosts retain
+these executions with the existing scalar routing; vector-capable hosts also
+exercise vector scheduling and encoding. The correctness command runs no
+benchmark timing loop. These checks operate on machine records, not on a
+source-language corpus.
 
 `benchmark-tier1-schedule [--blocks N] [--records N] [--only
 encode|scalar|vector] [--after-scalar MS]` freezes original machine-record

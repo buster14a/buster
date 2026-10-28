@@ -882,7 +882,7 @@ static void oracle_test_identities(OracleTest* test)
 // make their calls, whatever they return, and print their names; `random N` prints getrandom's N bytes in hex (and
 // " short" if it gave fewer); `list DIRECTORY` each name getdents64 gives but . and .., after its inode, in its order;
 // `mtime PATH` its modification time's seconds; `inode PATH` the inode number stat gives ("none" if it gives none);
-// `mkdir PATH` "made", "there" or "failed"; `cat`, `readlink`, `rmdir`, `unlink` and `zero` exercise the
+// `mkdir PATH` "made", "there" or "failed"; `cat`, `readlink`, `rmdir`, `unlink`, `device` and `zero` exercise the
 // corresponding file operations without depending on a system utility; and `tty` whether it could open /dev/tty.
 static const char oracle_test_helper[] =
     "#define _GNU_SOURCE\n"
@@ -962,6 +962,16 @@ static const char oracle_test_helper[] =
     "    }\n"
     "    else if (argc == 3 && strcmp(argv[1], \"rmdir\") == 0) return rmdir(argv[2]) != 0;\n"
     "    else if (argc == 3 && strcmp(argv[1], \"unlink\") == 0) return unlink(argv[2]) != 0;\n"
+    "    else if (argc == 3 && strcmp(argv[1], \"device\") == 0)\n"
+    "    {\n"
+    "        unsigned char bytes[16];\n"
+    "        const int file = open(argv[2], O_RDONLY);\n"
+    "        const ssize_t got = file >= 0 ? read(file, bytes, sizeof(bytes)) : -1;\n"
+    "        if (got != sizeof(bytes)) return 1;\n"
+    "        close(file);\n"
+    "        for (unsigned int i = 0; i < sizeof(bytes); i += 1) printf(\"%02x\", bytes[i]);\n"
+    "        putchar('\\n');\n"
+    "    }\n"
     "    else if (argc == 2 && strcmp(argv[1], \"zero\") == 0)\n"
     "    {\n"
     "        unsigned char bytes[4]; int zero = open(\"/dev/zero\", O_RDONLY), null = open(\"/dev/null\", O_RDONLY);\n"
@@ -1610,8 +1620,8 @@ static void oracle_test_streams(OracleTest* test)
     oracle_test_expect(test, given, "streams: another key's getrandom bytes, others");
     char* many[] = { test->helper, "random", "300", 0 };
     oracle_test_expect(test, oracle_test_unkept(&cache, many, true), "streams: getrandom of more than the cache gives, the kernel's, never taken");
-    char* urandom[] = { "sh", "-c", "head -c 16 /dev/urandom | od -An -tx1", 0 };
-    char* random_device[] = { "sh", "-c", "head -c 16 /dev/random | od -An -tx1", 0 };
+    char* urandom[] = { test->helper, "device", "/dev/urandom", 0 };
+    char* random_device[] = { test->helper, "device", "/dev/random", 0 };
     oracle_test_expect(test, oracle_test_unkept(&cache, urandom, true) && oracle_test_unkept(&cache, random_device, true),
                        "streams: /dev/urandom's and /dev/random's bytes, never taken");
     static const char zero[] = "\"$BUSTER_ORACLE_TEST_HELPER\" zero";
