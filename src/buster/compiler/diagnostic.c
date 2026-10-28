@@ -15,7 +15,7 @@
 //
 // Include after lane.c and String8. Layout: records and buffers; append; sorting; merge and write.
 
-#include <immintrin.h>
+#include "host_isa.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -160,11 +160,26 @@ static void diagnostic_sort(DiagnosticOrder* items, uint32_t count, DiagnosticOr
                         const DiagnosticOrder item = input[begin + i];
                         digits[i] = (uint32_t)((pass < 8 ? item.sequence : item.source) >> shift) & 255;
                     }
+#if BUSTER_HOST_VECTOR
                     const __m512i conflicts = _mm512_conflict_epi32(_mm512_loadu_si512(digits));
                     _mm512_storeu_si512(ranks, _mm512_popcnt_epi32(conflicts));
                     const __mmask16 live = (__mmask16)((1u << width) - 1);
                     // Only live conflicts participate: inactive zero digits must not hide a live bucket's last key.
                     const uint32_t last = (uint32_t)live & ~(uint32_t)_mm512_mask_reduce_or_epi32(live, conflicts);
+#else
+                    uint32_t last = 0;
+                    for (uint32_t i = 0; i < width; i += 1)
+                    {
+                        ranks[i] = 0;
+                        bool final = true;
+                        for (uint32_t j = 0; j < width; j += 1)
+                        {
+                            ranks[i] += j < i && digits[j] == digits[i];
+                            final &= j <= i || digits[j] != digits[i];
+                        }
+                        last |= (uint32_t)final << i;
+                    }
+#endif
                     if (placing != 0)
                     {
                         for (uint32_t i = 0; i < width; i += 1)
@@ -200,6 +215,8 @@ static void diagnostic_sort(DiagnosticOrder* items, uint32_t count, DiagnosticOr
 // from those buffers. No output is usable after a failed merge, including a buffer that ran out of room after a fatal.
 static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t buffer_count, Arena* arena, bool scalar)
 {
+    (void)scalar;
+
     Diagnostics result = { 0 };
     const uint64_t before = arena->length;
     uint64_t total = 0;
@@ -213,8 +230,8 @@ static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t bu
     {
         result.records = BUSTER_ARENA_PUSH_ARRAY(arena, Diagnostic, total);
         result.order = BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
-        DiagnosticOrder* scratch = scalar || total <= BUSTER_DIAGNOSTIC_SMALL_COUNT ? 0 : BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
-        valid = result.records != 0 && result.order != 0 && (scalar || total <= BUSTER_DIAGNOSTIC_SMALL_COUNT || scratch != 0);
+        DiagnosticOrder* scratch = BUSTER_SCALAR_PATH(scalar) || total <= BUSTER_DIAGNOSTIC_SMALL_COUNT ? 0 : BUSTER_ARENA_PUSH_ARRAY(arena, DiagnosticOrder, total);
+        valid = result.records != 0 && result.order != 0 && (BUSTER_SCALAR_PATH(scalar) || total <= BUSTER_DIAGNOSTIC_SMALL_COUNT || scratch != 0);
         for (uint32_t lane = 0; valid && lane < buffer_count; lane += 1)
         {
             for (uint32_t i = 0; i < buffers[lane].count; i += 1)
@@ -232,7 +249,7 @@ static Diagnostics diagnostic_merge(const DiagnosticBuffer* buffers, uint32_t bu
         }
         if (valid)
         {
-            if (scalar)
+            if (BUSTER_SCALAR_PATH(scalar))
             {
                 diagnostic_sort_scalar(result.order, result.count);
             }

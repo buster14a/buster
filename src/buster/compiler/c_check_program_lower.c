@@ -586,6 +586,9 @@ static void check_lower_classify_types_scalar(const TypeTable* types, uint32_t c
 // the types' kinds alone (the last 64 masked to the `count` types), and writes `count` bytes of each column.
 static void check_lower_classify_types(const TypeTable* types, uint32_t count, uint8_t* classes, uint8_t* facts)
 {
+#if !BUSTER_HOST_VECTOR
+    check_lower_classify_types_scalar(types, count, classes, facts);
+#else
     const uint32_t builtins = count < BUSTER_TYPE_BUILTIN_COUNT ? count : BUSTER_TYPE_BUILTIN_COUNT;
     check_lower_classify_types_scalar(types, builtins, classes, facts);
     const __m512i kind_facts = _mm512_load_si512(check_lower_kind_facts);
@@ -608,6 +611,7 @@ static void check_lower_classify_types(const TypeTable* types, uint32_t count, u
             facts[index] = check_lower_type_facts(types, type);
         }
     }
+#endif
 }
 
 // A record's volatile subobjects are computed once before bodies share this immutable column. Pointer pointees are
@@ -1065,8 +1069,13 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
 
 _Static_assert(BUSTER_TYPED_CLASS_U128 == (BUSTER_TYPED_CLASS_I128 | 1), "the 128-bit integers' classes differ in their low bit alone");
 
+static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_t count);
+
 static uint32_t check_lower_entry_classes(const uint8_t* classes, uint32_t count)
 {
+#if !BUSTER_HOST_VECTOR
+    return check_lower_entry_classes_scalar(classes, count);
+#else
     uint64_t x87 = 0;
     uint64_t wide = 0;
     for (uint32_t first = 0; first < count; first += 64)
@@ -1078,6 +1087,7 @@ static uint32_t check_lower_entry_classes(const uint8_t* classes, uint32_t count
         wide |= _mm512_cmpeq_epi8_mask(_mm512_and_si512(some, _mm512_set1_epi8((char)~1)), _mm512_set1_epi8(BUSTER_TYPED_CLASS_I128));
     }
     return (x87 != 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : 0) | (wide != 0 ? BUSTER_CHECK_LOWER_ENTRIES_WIDE : 0);
+#endif
 }
 
 static uint32_t check_lower_entry_classes_scalar(const uint8_t* classes, uint32_t count)
@@ -3261,7 +3271,7 @@ static void check_lower_builtin_emit(CheckLowerWriter* writer, CheckLowerTask ta
         .local_classes = writer->local_classes, .local_flags = writer->local_flags, .local_count = writer->local_count,
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
-    const CBuiltinLowerResult result = writer->scalar ? cbuiltin_lower_scalar(&buffer, writer->builtins + task.node) : cbuiltin_lower(&buffer, writer->builtins + task.node);
+    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_lower_scalar(&buffer, writer->builtins + task.node) : cbuiltin_lower(&buffer, writer->builtins + task.node);
     check_lower_builtin_finish(writer, &buffer, result, task.type);
 }
 
@@ -3364,7 +3374,7 @@ static void check_lower_varargs_emit(CheckLowerWriter* writer, CheckLowerTask ta
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
     const CBuiltinVaLowerCall* call = writer->varargs + task.node;
-    const CBuiltinLowerResult result = writer->scalar ? cbuiltin_varargs_lower_scalar(&buffer, call) : cbuiltin_varargs_lower(&buffer, call);
+    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_varargs_lower_scalar(&buffer, call) : cbuiltin_varargs_lower(&buffer, call);
     check_lower_builtin_finish(writer, &buffer, result, task.type);
 }
 
@@ -3432,7 +3442,7 @@ static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerT
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
     const CBuiltinMiscLowerCall* call = writer->miscellaneous + task.node;
-    const CBuiltinLowerResult result = writer->scalar ? cbuiltin_misc_lower_scalar(&buffer, call) : cbuiltin_misc_lower(&buffer, call);
+    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_misc_lower_scalar(&buffer, call) : cbuiltin_misc_lower(&buffer, call);
     check_lower_builtin_finish(writer, &buffer, result, task.type);
 }
 
@@ -3444,7 +3454,7 @@ static void check_lower_floating_recipe(CheckLowerWriter* writer, const CBuiltin
         .local_classes = writer->local_classes, .local_flags = writer->local_flags, .local_count = writer->local_count,
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
-    const CBuiltinLowerResult result = writer->scalar ? cbuiltin_float_lower_scalar(&buffer, call) : cbuiltin_float_lower(&buffer, call);
+    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_float_lower_scalar(&buffer, call) : cbuiltin_float_lower(&buffer, call);
     check_lower_builtin_finish(writer, &buffer, result, type);
 }
 
@@ -3573,10 +3583,9 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
         }
         else if (selectors && effect->selected_selector < 5)
         {
-            // A known category still retains Clang's exact evaluated selector prefix and its side effects. Clang's
-            // CodeGen evaluates the normal and subnormal selectors as two arguments of one C++ call, an order C++
-            // leaves unspecified: the approved host's GCC-built Clang 23.1.1 evaluates the subnormal one first.
-            const uint32_t order[] = { 5, 4, 0, 1, 3, 2 };
+            // A known category retains the selector prefix and its side effects in the tested Clang 23.1.4's order.
+            // C does not specify this order; Clang's own build compiler can affect its CodeGen argument order.
+            const uint32_t order[] = { 5, 4, 0, 1, 2, 3 };
             const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
             for (uint32_t i = BUSTER_ARRAY_LENGTH(order); i-- > 0;)
@@ -3605,19 +3614,18 @@ static void check_lower_floating_prepare(CheckLowerWriter* writer, uint32_t node
             {
                 const uint32_t category = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
                 const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
-                const uint32_t subnormal = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
+                const uint32_t normal = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
                 const uint32_t end = check_lower_label(writer);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
                 check_lower_mark(writer, end);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
-                check_lower_selector_test(writer, category, 3, end, false);
-                // Emitted in reverse: the subnormal selector runs before the normal one, as the approved host's
-                // Clang evaluates them (see the known-category order above).
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, normal);
+                check_lower_selector_test(writer, category, 2, end, false);
+                // Emitted in reverse: normal runs before subnormal, as in official Clang 23.1.4.
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, result);
-                check_lower_operand(writer, node, 5, false, BUSTER_TYPE_INT);
-                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, subnormal);
                 check_lower_operand(writer, node, 6, false, BUSTER_TYPE_INT);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, normal);
+                check_lower_operand(writer, node, 5, false, BUSTER_TYPE_INT);
                 for (uint32_t i = 3; i-- > 0;)
                 {
                     const uint32_t operand = i == 0 ? 4 : i - 1;
@@ -4262,10 +4270,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             if (kind == CHECK_LOWER_EXPRESSION)
             {
                 const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
-                const bool simple = !value_node && !sources && !writer->scalar && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
+                const bool simple = !value_node && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
                                     check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
-                const bool plain = !value_node && !simple && !sources && !writer->scalar && check_lower_plain(writer, node, (flags & 1) != 0);
-                const bool batched = !value_node && !plain && !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
+                const bool plain = !value_node && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && !simple && !sources && !BUSTER_SCALAR_PATH(writer->scalar) && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
                                      check_lower_batch_expression(writer, node);
                 if (!batched)
                 {
@@ -5416,8 +5424,10 @@ static void check_lower_failed(CheckProgramLowered* lowered, Arena* output, uint
 static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
                                 Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
-    *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = scalar };
+    *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar) };
     const CheckInput* input = program->input;
     const TypeTable* types = program->types;
     const uint32_t count = input != 0 ? input->token_count : 0;
@@ -5460,7 +5470,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         valid = false;
     }
     // The asm statements' helpers after the builtins', before the runtime's symbols, which come after every helper's.
-    if (valid && !check_program_asm_plan(&lowered->asms, &lowered->helpers, program, scalar, output, scratch))
+    if (valid && !check_program_asm_plan(&lowered->asms, &lowered->helpers, program, BUSTER_SCALAR_PATH(scalar), output, scratch))
     {
         lowered->status = lowered->asms.status;
         lowered->token = lowered->asms.token;
@@ -5474,7 +5484,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     valid = valid && shared->type_classes != 0 && shared->type_facts != 0;
     if (valid)
     {
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             check_lower_classify_types_scalar(types, shared->type_count, shared->type_classes, shared->type_facts);
         }
@@ -5555,7 +5565,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     valid = valid && (program->body_count == 0 || abi_initialize_types(&shared->table, scratch, types, 16, types->types.count));
     if (valid && program->body_count != 0)
     {
-        if (scalar)
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             abi_classify_all_scalar(&shared->table, types);
         }
@@ -5568,7 +5578,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         // One bounded lookup obtains both columns for the leaf and vector kernels. The optional table's
         // failure retains scalar expression expansion; scalar/source-row lowering allocates none.
-        shared->type_templates = valid && !scalar && !sources && program->body_count != 0 ?
+        shared->type_templates = valid && !BUSTER_SCALAR_PATH(scalar) && !sources && program->body_count != 0 ?
                                  BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)shared->type_count + 1) : NULL;
         for (uint32_t first = 0; shared->type_templates != NULL && first < shared->type_count; first += 16)
         {
@@ -5616,7 +5626,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         }
         memset(shared->local_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // In reverse, so that a node's declaration is its first token and each body's locals are linked in token order.
-        for (uint32_t d = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, scalar); d-- > 0;)
+        for (uint32_t d = check_program_declaring(input->declarations, input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)); d-- > 0;)
         {
             const uint32_t token = declaring[d];
             if (input->initializer_nodes[token] < nodes)
@@ -5701,7 +5711,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .abi = abi,
         .capacity = capacity,
         .local_capacity = local_capacity,
-        .scalar = shared->scalar,
+        .scalar = BUSTER_SCALAR_PATH(shared->scalar),
         .sources = sources,
         .x87_constant_capacity = shared->x87_constant_capacity,
         .label_symbol_capacity = shared->label_symbol_capacity,
@@ -6163,7 +6173,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         // The function has long double values (Tier0Function.x87) where its result is one or an entry is of class F80, and
         // 128-bit integer ones (Tier0Function.int128) where an entry is of class I128 or U128.
-        const uint32_t memory = writer->scalar ? check_lower_entry_classes_scalar(writer->classes, writer->count) : check_lower_entry_classes(writer->classes, writer->count);
+        const uint32_t memory = BUSTER_SCALAR_PATH(writer->scalar) ? check_lower_entry_classes_scalar(writer->classes, writer->count) : check_lower_entry_classes(writer->classes, writer->count);
         writer->x87 = writer->x87 || (memory & BUSTER_CHECK_LOWER_ENTRIES_X87) != 0;
         writer->int128 = (memory & BUSTER_CHECK_LOWER_ENTRIES_WIDE) != 0;
 #define BUSTER_CHECK_LOWER_COPY(field, source, type, length) \
@@ -6270,7 +6280,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             .count = abi->count,
             .arguments = abi->arguments,
         };
-        if (shared->scalar)
+        if (BUSTER_SCALAR_PATH(shared->scalar))
         {
             abi_assign_scalar(table, signature, locations, calls);
         }
@@ -6459,6 +6469,8 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
 static inline __attribute__((always_inline)) bool check_program_lower_body(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, bool sources,
                                                                           Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     CheckLowerShared shared;
@@ -6466,7 +6478,7 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
     CheckLowerAbi abi;
     CheckProgramLowered status;
     CheckLowerPart part = { .first = 0, .end = program->body_count };
-    bool valid = check_lower_prepare(&shared, lowered, program, scalar, sources, output, scratch);
+    bool valid = check_lower_prepare(&shared, lowered, program, BUSTER_SCALAR_PATH(scalar), sources, output, scratch);
     if (valid && !check_lower_writer_begin(&writer, &abi, &status, &shared, sources, scratch))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -6499,7 +6511,9 @@ static inline __attribute__((always_inline)) bool check_program_lower_body(Check
 
 static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
 {
-    return check_program_lower_body(lowered, program, scalar, false, output, scratch);
+    (void)scalar;
+
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), false, output, scratch);
 }
 
 // The lowering with each function's entries' source tokens (CheckProgramLowered.entry_tokens), for -g's rows: a copy of
@@ -6507,5 +6521,7 @@ static bool check_program_lower(CheckProgramLowered* lowered, const CheckProgram
 static __attribute__((noinline)) bool check_program_lower_sources(CheckProgramLowered* lowered, const CheckProgram* program, bool scalar, Arena* output,
                                                                   Arena* scratch)
 {
-    return check_program_lower_body(lowered, program, scalar, true, output, scratch);
+    (void)scalar;
+
+    return check_program_lower_body(lowered, program, BUSTER_SCALAR_PATH(scalar), true, output, scratch);
 }

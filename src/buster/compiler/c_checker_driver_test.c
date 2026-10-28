@@ -1946,8 +1946,8 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     uint64_t batch_nodes = 0;
     const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
     const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
-    check_test_expect(test, counted && expression_nodes >= batch_nodes && batch_nodes != 0,
-                      "--time-stages reports the templates' nonzero share of evaluated expression occurrences");
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes && (BUSTER_HOST_VECTOR ? batch_nodes != 0 : batch_nodes == 0),
+                      "--time-stages reports evaluated expressions and the host's template share");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));

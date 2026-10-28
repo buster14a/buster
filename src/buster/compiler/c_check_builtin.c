@@ -257,6 +257,8 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
 
 static void check_builtins(TypeTable* table, const CheckBuiltinAction* actions, CheckBuiltinResult* results, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     for (uint32_t begin = 0; begin < count;)
     {
         const uint32_t lanes = count - begin < BUSTER_CBUILTIN_LANES ? count - begin : BUSTER_CBUILTIN_LANES;
@@ -281,7 +283,7 @@ static void check_builtins(TypeTable* table, const CheckBuiltinAction* actions, 
                 .overflow = batch.overflows,
                 .status = batch.statuses,
             };
-            if (scalar)
+            if (BUSTER_SCALAR_PATH(scalar))
             {
                 cbuiltin_fold_scalar(input, output, lanes);
             }

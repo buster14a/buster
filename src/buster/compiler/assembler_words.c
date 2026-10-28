@@ -120,6 +120,9 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
 
 static void asm_cache_registers(AsmParser* parser)
 {
+#if !BUSTER_HOST_VECTOR
+    (void)parser; // The independent asm_register grammar handles each word.
+#else
     uint64_t keys[64];
     uint64_t lengths[64];
     uint64_t descriptions[64];
@@ -153,4 +156,5 @@ static void asm_cache_registers(AsmParser* parser)
             parser->tokens[tokens[i]].reserved = descriptions[i];
         }
     }
+#endif
 }

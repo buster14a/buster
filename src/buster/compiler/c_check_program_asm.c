@@ -797,6 +797,8 @@ static bool check_asm_register_variable(const CheckProgram* program, uint32_t no
 static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
                                        bool scalar, CheckProgramAsm* plan, CheckProgramHelper* helper, Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     const CheckInput* input = program->input;
     const CheckInputAsm* statement = input->asm_statements + s;
     const TypeTable* types = program->types;
@@ -1026,7 +1028,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     AsmCode code = { 0 };
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !scalar }, output, scratch);
+        code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
         reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
         valid = code.error == NULL || reason != NULL;
         // A label with no instruction to follow in its template would be a place in the statement's function, which its
@@ -1100,6 +1102,8 @@ static bool check_program_asm_naked(const CheckProgram* program, uint32_t b)
 static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckProgram* program, uint32_t b, const CheckAsmCheckedOperand* operands,
                                          const uint32_t* firsts, const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     static const char att[] = ".att_syntax prefix\n";
     const CheckInput* input = program->input;
     const CheckProgramBody body = program->bodies[b];
@@ -1177,7 +1181,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     AsmCode code = { 0 };
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !scalar }, output, scratch);
+        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
         reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
         valid = code.error == NULL || reason != NULL;
         // clang makes an empty function of none, which would have an unwind entry of no bytes.
@@ -1332,6 +1336,8 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
 // inconsistent input; the refusals are the plans' own, which the lowering reports in its order.
 static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers* helpers, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
 {
+    (void)scalar;
+
     *result = (CheckProgramAsms){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
     const CheckInput* input = program->input;
     const uint64_t output_mark = output->length;
@@ -1385,7 +1391,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     {
         if (check_program_asm_naked(program, b))
         {
-            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, index, scalar, output, scratch);
+            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, index, BUSTER_SCALAR_PATH(scalar), output, scratch);
             result->status = valid ? CHECK_PROGRAM_OK : result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
         }
     }
@@ -1406,7 +1412,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             {
                 CheckProgramHelper* helper = added + count;
                 *helper = (CheckProgramHelper){ 0 };
-                valid = check_program_asm_plan_one(program, s, asms->operands + firsts[s], index, scalar, result->plans + s, helper, output, scratch);
+                valid = check_program_asm_plan_one(program, s, asms->operands + firsts[s], index, BUSTER_SCALAR_PATH(scalar), result->plans + s, helper, output, scratch);
                 if (valid && result->plans[s].helper != BUSTER_CHECK_NONE)
                 {
                     result->plans[s].helper = helpers->count + count;

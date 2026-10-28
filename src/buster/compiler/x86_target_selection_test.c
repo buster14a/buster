@@ -66,7 +66,10 @@ static bool x86_target_test_native_kernel(const X86Target* target, const uint8_t
     uint8_t scalar[BUSTER_X86_ENCODER_CAPACITY(11)];
     uint8_t vector[BUSTER_X86_ENCODER_CAPACITY(11)];
     const X86Target native = x86_target_native();
-    bool passed = (native.features & target->features) == target->features && x86_target_validate(allowed, records, count) == count;
+    uint8_t native_allowed[X86_FORM_COUNT];
+    x86_target_forms(&native, native_allowed);
+    const bool can_execute = x86_target_validate(native_allowed, records, count) == count;
+    bool passed = x86_target_validate(allowed, records, count) == count;
     const int64_t bytes = passed ? x86_encode_scalar(records, count, scalar, sizeof(scalar), 0, 0) : -1;
     passed &= bytes > 0 && x86_encode(records, count, vector, sizeof(vector), 0, 0) == bytes;
     passed &= bytes > 0 && memcmp(scalar, vector, bytes > 0 ? (size_t)bytes : 0) == 0;
@@ -78,22 +81,29 @@ static bool x86_target_test_native_kernel(const X86Target* target, const uint8_t
         x86_target_forms(&denied, lower);
         passed &= x86_target_validate(lower, records, count) == 6;
     }
-    void* code = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    passed &= code != MAP_FAILED;
-    if (passed)
+    if (passed && can_execute)
     {
-        memcpy(code, vector, (size_t)bytes);
-        passed &= mprotect(code, 4096, PROT_READ | PROT_EXEC) == 0;
-        for (uint32_t i = 0; passed && i < 64; i += 1)
+        void* code = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        passed &= code != MAP_FAILED;
+        if (passed)
         {
-            passed &= x86_target_test_call_kernel(code) == UINT64_C(0x40300000);
+            memcpy(code, vector, (size_t)bytes);
+            passed &= mprotect(code, 4096, PROT_READ | PROT_EXEC) == 0;
+            for (uint32_t i = 0; passed && i < 64; i += 1)
+            {
+                passed &= x86_target_test_call_kernel(code) == UINT64_C(0x40300000);
+            }
+        }
+        if (code != MAP_FAILED)
+        {
+            munmap(code, 4096);
         }
     }
-    if (code != MAP_FAILED)
+    else if (passed)
     {
-        munmap(code, 4096);
+        printf("target %s %s kernel: execution skipped (host features unavailable)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE");
     }
-    printf("target %s native %s kernel: %s (%lld bytes, exact scalar/vector bytes; lower-profile rejection)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE", passed ? "pass" : "FAIL", (long long)bytes);
+    printf("target %s %s kernel: %s (%lld bytes, exact scalar/vector bytes; lower-profile rejection%s)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE", passed ? "pass" : "FAIL", (long long)bytes, can_execute ? "; native execution" : "");
     fflush(stdout);
     return passed;
 }
@@ -181,7 +191,10 @@ static bool x86_target_test_tier0(const uint8_t* allowed, const char* profile)
 
 static bool x86_target_test_tier1(uint8_t* allowed, const char* profile)
 {
-    Tier1SelectTest selection = { .allowed = allowed };
+    uint8_t native_allowed[X86_FORM_COUNT];
+    const X86Target native = x86_target_native();
+    x86_target_forms(&native, native_allowed);
+    Tier1SelectTest selection = { .allowed = allowed, .native_allowed = native_allowed };
     selection.executable = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool ready = selection.executable != MAP_FAILED;
     if (ready)
@@ -207,6 +220,7 @@ static bool x86_target_test_tier1(uint8_t* allowed, const char* profile)
         .output = arena_reserve(64u << 20),
         .scratch = arena_reserve(32u << 20),
         .allowed = allowed,
+        .native_allowed = native_allowed,
     };
     ready = ready && emission.input.base != 0 && emission.output.base != 0 && emission.scratch.base != 0;
     if (ready)
@@ -218,11 +232,39 @@ static bool x86_target_test_tier1(uint8_t* allowed, const char* profile)
         tier1_terminal_tests(&emission);
     }
     const bool passed = ready && selection.failures == 0 && emission.failures == 0;
-    printf("target %s Tier 1: %s (%llu selection / %llu native-emission checks; both covers and allocation paths)\n", profile, passed ? "pass" : "FAIL", (unsigned long long)selection.checks, (unsigned long long)emission.checks);
+    printf("target %s Tier 1: %s (%llu selection / %llu emission checks; %llu / %llu native-code groups unavailable on host; both covers and allocation paths)\n",
+           profile, passed ? "pass" : "FAIL", (unsigned long long)selection.checks, (unsigned long long)emission.checks,
+           (unsigned long long)selection.native_skipped, (unsigned long long)emission.native_skipped);
     fflush(stdout);
     arena_release(&emission.input);
     arena_release(&emission.output);
     arena_release(&emission.scratch);
+    return passed;
+}
+
+// A denied native ISA must still validate against the requested policy and encode the records before it skips the call.
+static bool x86_target_test_native_gate(void)
+{
+    uint8_t requested[X86_FORM_COUNT];
+    uint8_t denied[X86_FORM_COUNT] = {0};
+    const X86Target baseline = { .architecture = X86_ARCH_BASELINE };
+    x86_target_forms(&baseline, requested);
+    Tier1SelectTest test = { .allowed = requested, .native_allowed = denied };
+    test.executable = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool passed = test.executable != MAP_FAILED;
+    if (passed)
+    {
+        const X86Instruction records[] = {
+            { .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = 1 },
+            { .form = X86_FORM_RET },
+        };
+        const uint8_t expected[] = { 0xb8, 1, 0, 0, 0, 0xc3 };
+        const bool executable = tier1_select_test_load_code(&test, records, BUSTER_ARRAY_LENGTH(records), 1, false);
+        passed = !executable && test.failures == 0 && test.native_skipped == 1 && test.emitted_records[1] == 1 &&
+                 test.emitted_records[2] == 1 && memcmp(test.executable, expected, sizeof(expected)) == 0;
+        munmap(test.executable, 4096);
+    }
+    printf("target native execution gate: %s (requested policy and encoded bytes checked before an explicit skip)\n", passed ? "pass" : "FAIL");
     return passed;
 }
 
@@ -235,6 +277,7 @@ bool run_x86_target_selection_tests(void)
     {
         static const char* const profiles[] = { "x86-64", "x86-64-v3", "x86-64-v4" };
         uint8_t allowed[X86_FORM_COUNT];
+        passed &= x86_target_test_native_gate();
         for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(profiles); p += 1)
         {
             X86Target target;
