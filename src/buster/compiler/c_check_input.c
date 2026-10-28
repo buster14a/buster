@@ -2317,10 +2317,12 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 valid = packed != 0;
                 reader->output->resource |= !valid;
                 uint32_t written = 0;
+                bool anonymous_names = false;
                 for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
                     const TypeMember value = members[member].member;
                     packed[written++] = value;
+                    anonymous_names |= value.name == 0 && value.bit_width == BUSTER_TYPE_NOT_BIT_FIELD;
                     if (value.name != 0)
                     {
                         reader->member_seen[value.name] = members[member].previous;
@@ -2337,7 +2339,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     }
                 }
                 uint32_t failed_member = BUSTER_CHECK_NONE;
-                valid = valid && check_input_record_names(reader, packed, frame->count, frame->close - frame->token + 1, &failed_member);
+                // Direct names were checked by member_seen while reading and their previous stamps are restored
+                // above. Only an anonymous non-bit-field can add a namespace conflict or an invalid nonrecord.
+                valid = valid && (!anonymous_names || check_input_record_names(reader, packed, frame->count, frame->close - frame->token + 1, &failed_member));
                 for (uint32_t member = frame->first; !valid && member != BUSTER_CHECK_NONE && failed_member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
                     if (failed_member == 0)

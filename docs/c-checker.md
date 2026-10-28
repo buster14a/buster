@@ -327,6 +327,25 @@ Anonymous member lookup and aggregate
 modifiability use bounded iterative walks, including inherited qualification
 on anonymous members.
 
+Before record layout, `check_input_tag_definition` packs that record's direct
+members for `check_input_record_names` (`c_check_record_input.c`). Direct names
+have already passed the reader's generation-stamped duplicate check. While
+packing, the reader records whether an unnamed non-bit-field member exists and
+skips namespace allocation/validation entirely when none does. An anonymous
+nonrecord still enters the defensive helper and fails as before. Named fields
+introduce only their own name, even when their type contains another record's
+definition. The temporary hash table starts from the direct member count and
+grows geometrically at half occupancy as anonymous fields expose more names.
+Its clearing and rebuilding therefore follow the visited namespace, rather
+than the entire nested token span (#614). The explicit expansion stack starts
+with one local frame and grows only with anonymous depth; the token span still
+bounds that depth. Both scratch structures belong to this validation call and
+restore its arena mark on success, duplicate or allocation failure. Duplicate
+diagnostics retain the later containing direct member; layout receives the
+same packed members. `test-checker` exercises colliding identifier IDs, repeated
+table/stack growth, every scratch byte limit, named versus anonymous nesting,
+and Clang-checked source layouts and first-error lines on both parser paths.
+
 `CheckStream` holds expression results. `CheckProgram` adds checked control
 bracketing, body references and shared object/function identities without
 rechecking expressions or rebinding identifiers. The source body-extraction
