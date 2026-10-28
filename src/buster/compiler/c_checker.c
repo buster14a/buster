@@ -750,16 +750,28 @@ static void check_graph_record_nodes(CheckGraph* graph)
         const bool varargs = op == CHECK_OP_VARARGS;
         CheckGraphValidation* state = &graph->recorded;
         graph->recorded_pure[node] = (uint8_t)check_graph_pure(graph, node, graph->recorded_pure);
-        state->maximum_arguments = !varargs && count > state->maximum_arguments ? count : state->maximum_arguments;
-        state->maximum_effects += op == CHECK_OP_BUILTIN_OVERFLOW;
-        state->arguments += varargs ? 0 : count;
-        state->varargs += varargs;
-        state->builtins[0] += op == CHECK_OP_BUILTIN_MISC;
-        state->builtins[1] += op == CHECK_OP_BUILTIN_FLOAT;
-        state->builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
-        state->builtins[3] += op == CHECK_OP_BUILTIN_ATOMIC;
-        state->builtins[4] += op == CHECK_OP_BUILTIN_VECTOR;
-        state->builtins[5] += op == CHECK_OP_BUILTIN_BIT_CAST;
+        if (varargs)
+        {
+            state->varargs += 1;
+        }
+        else if (count != 0)
+        {
+            state->maximum_arguments = count > state->maximum_arguments ? count : state->maximum_arguments;
+            state->arguments += count;
+        }
+        // Most nodes are leaves or ordinary arithmetic. Leave their cold, exceptional counters untouched:
+        // unconditional zero increments otherwise make Clang load/store the complete counter vector per node.
+        switch (op)
+        {
+            case CHECK_OP_BUILTIN_OVERFLOW: state->maximum_effects += 1; break;
+            case CHECK_OP_BUILTIN_MISC: state->builtins[0] += 1; break;
+            case CHECK_OP_BUILTIN_FLOAT: state->builtins[1] += 1; break;
+            case CHECK_OP_BUILTIN_QUERY: state->builtins[2] += 1; break;
+            case CHECK_OP_BUILTIN_ATOMIC: state->builtins[3] += 1; break;
+            case CHECK_OP_BUILTIN_VECTOR: state->builtins[4] += 1; break;
+            case CHECK_OP_BUILTIN_BIT_CAST: state->builtins[5] += 1; break;
+            default: break;
+        }
     }
     graph->recorded_nodes = graph->count;
 }
