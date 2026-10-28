@@ -40,6 +40,11 @@ struct CheckProgramCode
     Link link;
     CheckProgramLowered lowered;
     AtomId* function_atoms;
+    // #619: the file-scope assembly's atoms (check_program_emit_file_asm), in the link before the functions', and each
+    // one's section, which -c's object gives it (check_program_sections).
+    AtomId* asm_atoms;
+    ObjectAtomSection* asm_sections;
+    uint32_t asm_atom_count;
     CheckProgramStatus status;
     Tier0Error backend_error;
     uint32_t token;
@@ -845,7 +850,10 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
             const uint32_t symbol = lowered->runtime_symbols[runtime];
-            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ? BUSTER_TIER0_ACCESS_GOT : BUSTER_TIER0_ACCESS_DIRECT;
+            access[symbol] = runtime == CHECK_LOWER_RUNTIME_ERRNO || runtime == CHECK_LOWER_RUNTIME_MEMCPY ||
+                                     (runtime >= CHECK_LOWER_RUNTIME_FMINF && runtime <= CHECK_LOWER_RUNTIME_FMAX)
+                                 ? BUSTER_TIER0_ACCESS_GOT
+                                 : BUSTER_TIER0_ACCESS_DIRECT;
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -865,6 +873,124 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
 // lanes (above): one, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest
 // body's, but with lanes->every_lane as many as there are parts for; without, on the calling thread alone. With
 // `stage_clock` (the driver's --time-stages), each step's time is charged to its stage (c_check_clock.c).
+// The unit's file-scope assembly (#619), as clang emits a module's: its statements' templates in source order, a line
+// each, before the functions, assembled by assembler.c into sections of its own (asm_assemble). Of what it makes, the
+// emission takes the sections' bytes and alignments into atoms of their classes before the functions' (`file_asm`, their
+// bytes in `bytes` and their descriptors' names in `output`), each in its section in -c's object
+// (CheckProgramCode.asm_sections), as main.c's `.section`, `.p2align` and `.text` make an empty, page-aligned
+// .text.buster_checker. Refused by name: a template the assembler doesn't take, one that defines or refers to a symbol
+// (a label, an instruction's operand, CFI), which the unit's symbols don't join yet, and a section of a class C's
+// definitions don't have (an init array's, a note). Returns false with `result`'s status and reason set.
+typedef struct CheckProgramFileAsm CheckProgramFileAsm;
+struct CheckProgramFileAsm
+{
+    uint8_t* classes;
+    uint8_t* alignments;
+    uint64_t* sizes;
+    uint8_t** bytes;
+    ObjectAtomSection* sections;
+    uint32_t count;
+};
+
+static bool check_program_emit_file_asm(CheckProgramFileAsm* file_asm, CheckProgramCode* result, const CheckProgram* program, bool scalar, Arena* bytes,
+                                        Arena* output, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    *file_asm = (CheckProgramFileAsm){ 0 };
+    uint64_t length = 0;
+    uint32_t first = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < input->asm_count; i += 1)
+    {
+        const CheckInputAsm* statement = input->asm_statements + i;
+        length += statement->body == BUSTER_CHECK_NONE ? (uint64_t)statement->template_text.length + 1 : 0;
+        first = statement->body == BUSTER_CHECK_NONE && first == BUSTER_CHECK_NONE ? statement->token : first;
+    }
+    bool valid = true;
+    if (first != BUSTER_CHECK_NONE)
+    {
+        const uint64_t mark = scratch->length;
+        char* source = length < UINT32_MAX ? arena_push(scratch, length, 1) : 0;
+        const X86MatchIndex* index = source != 0 ? check_asm_matches(scratch) : 0;
+        valid = index != 0;
+        uint64_t at = 0;
+        for (uint32_t i = 0; valid && i < input->asm_count; i += 1)
+        {
+            const CheckInputAsm* statement = input->asm_statements + i;
+            if (statement->body == BUSTER_CHECK_NONE)
+            {
+                memcpy(source + at, statement->template_text.bytes, statement->template_text.length);
+                at += statement->template_text.length;
+                source[at] = '\n';
+                at += 1;
+            }
+        }
+        const AsmResult assembled = valid ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar }, scratch) :
+                                            (AsmResult){ .error = "" };
+        const Link* link = &assembled.link;
+        const char* refused = !valid ? NULL :
+                              assembled.error != 0 ? "file-scope assembly the assembler doesn't take" :
+                              link->symbols.count > 1 || link->fixups.count > 1 ? "file-scope assembly that defines or refers to a symbol" :
+                              NULL;
+        // A section of a class C's definitions have, of its type (or with bytes, PROGBITS), as the object writer takes it:
+        // not an init array's (.init_array is one in a data class), a note's or a group's.
+        for (AtomId atom = 1; valid && refused == NULL && atom < link->atoms.count; atom += 1)
+        {
+            const uint8_t class = link->atoms.class[atom];
+            const uint32_t type = assembled.object_options.atom_sections[atom].type;
+            const bool kind = class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA ||
+                              class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS || class == BUSTER_LINK_CLASS_TDATA ||
+                              class == BUSTER_LINK_CLASS_TBSS;
+            refused = kind && (type == object_class_sections[class].type || (!link_class_is_zero_fill(class) && type == SHT_PROGBITS)) ? NULL :
+                      "file-scope assembly's section of this kind";
+        }
+        const uint32_t count = valid && refused == NULL && link->atoms.count > 1 ? link->atoms.count - 1 : 0;
+        file_asm->classes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : 0;
+        file_asm->alignments = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : 0;
+        file_asm->sizes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count) : 0;
+        file_asm->bytes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t*, count) : 0;
+        file_asm->sections = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, count) : 0;
+        valid = valid && (count == 0 || (file_asm->classes != 0 && file_asm->alignments != 0 && file_asm->sizes != 0 && file_asm->bytes != 0 &&
+                                         file_asm->sections != 0));
+        for (uint32_t a = 0; valid && a < count; a += 1)
+        {
+            const AtomId atom = a + 1;
+            const uint64_t size = link->atoms.size[atom];
+            const bool zero = link_class_is_zero_fill(link->atoms.class[atom]);
+            const ObjectAtomSection section = assembled.object_options.atom_sections[atom];
+            uint8_t* copy = !zero && size != 0 ? arena_push(bytes, size, 16) : 0;
+            char* name = section.name.length != 0 ? arena_push(output, section.name.length, 1) : 0;
+            valid = (zero || size == 0 || copy != 0) && (section.name.length == 0 || name != 0);
+            if (valid)
+            {
+                if (copy != 0)
+                {
+                    memcpy(copy, link->atoms.bytes[atom], size);
+                }
+                if (name != 0)
+                {
+                    memcpy(name, section.name.pointer, section.name.length);
+                }
+                file_asm->classes[a] = link->atoms.class[atom];
+                file_asm->alignments[a] = link->atoms.alignment_log2[atom];
+                file_asm->sizes[a] = size;
+                file_asm->bytes[a] = copy;
+                file_asm->sections[a] = section;
+                file_asm->sections[a].name = (String8){ .pointer = name, .length = section.name.length };
+            }
+        }
+        file_asm->count = valid ? count : 0;
+        if (!valid || refused != NULL)
+        {
+            result->status = refused != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
+            result->reason = refused;
+            result->token = first;
+            valid = false;
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
+}
+
 static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgram* program, const Parser* parser,
                                      const InternTable* identifiers, LinkCapacity data_capacity, bool scalar, Arena* output, Arena* bytes, Arena* scratch,
                                      CheckProgramBinding* binding, CheckProgramRows* rows, bool unwind, bool verify, CheckProgramLanes* lanes,
@@ -1092,6 +1218,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             valid = false;
         }
     }
+    CheckProgramFileAsm file_asm = { 0 };
+    valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     uint8_t* retained_objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : 0;
@@ -1136,7 +1264,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     program->input->declaration_kinds[token] == C_BINDING_FUNCTION, &gnu_inline) != 0;
             }
         }
-        for (uint32_t d = 0; valid && d < attributed; d += 1)
+        // The first emitted variable under active #pragma clang section object settings, or BUSTER_CHECK_NONE (#619).
+        // Static objects are conservative candidates under any active object setting; section-kind selection belongs
+        // with actual section emission, so the refusal must not claim that this object would use the named section. A
+        // function's sections, a text setting's and a section attribute's, are check_program_sections'.
+        const CheckInputSections* sections = program->input->sections;
+        uint32_t placed = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; sections != NULL && placed == BUSTER_CHECK_NONE && i < sections->definition_count; i += 1)
+        {
+            const uint32_t token = sections->definitions[i];
+            const uint32_t object = token < program->input->token_count ? program->input->objects[token] : 0;
+            placed = object != 0 && object < program->object_count && program->object_symbols[object] != 0 ? token : placed;
+        }
+        for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
         {
             const uint32_t token = declared[d];
             const CheckInputAttributes* attributes = program->input->attributes[token];
@@ -1168,20 +1308,29 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                     const bool visible_alias = alias && (symbol != 0 || program->input->linkage[token] == 2 || retained_objects[object]);
                     const bool unpublished = kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
                                              kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
-                                             kind == CHECK_ATTRIBUTE_SECTION || kind == CHECK_ATTRIBUTE_COMMON ||
-                                             (kind == CHECK_ATTRIBUTE_VISIBILITY && !check_input_attribute_equal(attribute->text, "default"));
+                                             kind == CHECK_ATTRIBUTE_COMMON;
                     if (!attribute->ignored && (visible_alias || (symbol != 0 && unpublished)))
                     {
                         // The typed source contract retains these obligations. Until symbol aliases and startup
-                        // lists, section properties and weak/visibility semantics are published, refusing code
+                        // lists and weak semantics are published, refusing code
                         // emission is required. A dropped definition has no object-format obligation of its own.
                         result->status = CHECK_PROGRAM_UNSUPPORTED;
-                        result->reason = "this attribute (alias, ifunc, constructor, destructor, weak, retain, section, common or a visibility)";
+                        result->reason = "this attribute (alias, ifunc, constructor, destructor, weak, retain or common)";
                         result->token = attribute->name_token;
                         valid = false;
                     }
                 }
             }
+        }
+        // A variable under active #pragma clang section object settings (#619) is refused, where no attribute's refusal
+        // comes before it: the loop above stops at its token. Such a variable needn't have an attribute at all (a section
+        // attribute of its own keeps it out), so the settings list them (CheckInputSections.definitions).
+        if (valid && placed != BUSTER_CHECK_NONE)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a definition under active '#pragma clang section' settings";
+            result->token = placed;
+            valid = false;
         }
     }
     arena_pop_to(scratch, attributes_mark);
@@ -1295,7 +1444,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
-    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) + (valid ? result->lowered.table_count : 0);
+    const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
+                                (valid ? result->lowered.table_count : 0) + file_asm.count;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols;
@@ -1400,6 +1550,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  program->input->thread_local[declaration] ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
             flags = kind | (program->input->linkage[declaration] == 2 ? BUSTER_LINK_SYMBOL_GLOBAL : BUSTER_LINK_SYMBOL_LOCAL);
+            if (program->input->linkage[declaration] == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
+            {
+                flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+            }
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
                  (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1)))
@@ -1558,6 +1712,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             code->references[i].target = valid ? asm_symbols[code->references[i].target] : 0;
         }
     }
+    // The file-scope assembly's atoms, before the functions', as clang's assembly output has a module's asm first.
+    result->asm_atoms = valid && file_asm.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, file_asm.count) : 0;
+    valid = valid && (file_asm.count == 0 || result->asm_atoms != 0);
+    for (uint32_t a = 0; valid && a < file_asm.count; a += 1)
+    {
+        result->asm_atoms[a] = link_add_atom(&result->link, file_asm.classes[a], file_asm.alignments[a], file_asm.sizes[a], file_asm.bytes[a], 0);
+        valid = result->asm_atoms[a] != 0;
+    }
+    result->asm_sections = valid ? file_asm.sections : 0;
+    result->asm_atom_count = valid ? file_asm.count : 0;
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
@@ -1784,4 +1948,135 @@ static bool check_program_emit(CheckProgramCode* result, const CheckProgram* pro
     (void)scalar;
 
     return check_program_emit_lanes(result, program, parser, identifiers, data_capacity, BUSTER_SCALAR_PATH(scalar), output, bytes, scratch, binding, rows, unwind, verify, NULL);
+}
+
+// Whether `name` is `prefix`, or starts with it and a '.', as LLVM's section names group (hasPrefix).
+static bool check_program_section_family(String8 name, const char* prefix)
+{
+    const uint64_t length = strlen(prefix);
+    return name.length >= length && memcmp(name.pointer, prefix, length) == 0 && (name.length == length || name.pointer[length] == '.');
+}
+
+// Whether `name` starts with `prefix`.
+static bool check_program_section_prefix(String8 name, const char* prefix)
+{
+    const uint64_t length = strlen(prefix);
+    return name.length >= length && memcmp(name.pointer, prefix, length) == 0;
+}
+
+// The named sections of the unit's emitted definitions (#619), once its static data is published, for -c's object
+// (ObjectOptions.atom_sections) and the direct path alike: each definition CheckInputSections.placements names a
+// section for, which the unit defines in an atom of the link, gets a descriptor of that name, of the kind LLVM gives a
+// global with an explicit section (TargetLoweringObjectFileELF's getExplicitSectionGlobal): a function's text (AX); a
+// variable's by its atom's class, data (WA), read-only (A), read-only after relocation (WA) or thread-local data (WAT),
+// or by its name's family, .bss's (WA, NOBITS) or .tbss's (WAT, NOBITS) for a zero-filled one. A zero-filled variable
+// in another section's name is data, as LLVM doesn't put a global with an explicit section in BSS: its atom becomes
+// zeroed bytes of the class it is in (DATA or TDATA), in `bytes`. A name another kind's section has (a function's
+// .data) is a section of its own with this kind's flags, as LLVM makes it. The file-scope assembly's atoms keep their
+// own (CheckProgramCode.asm_sections). Refused by name: a name LLVM gives another kind than the definition's (an
+// initialized variable in a .bss, which clang's code generation refuses too, a function in a .tdata), and one it gives
+// another type (.note, the arrays'), or the conservatively reserved .llvm.* family (including ordinary PROGBITS names).
+// `*table` is null for a unit without either, and otherwise the descriptors by AtomId,
+// in `output`. Returns false with `code`'s status, reason and token set.
+static bool check_program_sections(CheckProgramCode* code, const CheckProgram* program, Arena* bytes, Arena* output, ObjectAtomSection** table)
+{
+    const CheckInputSections* sections = program->input->sections;
+    const uint32_t placements = sections != NULL ? sections->placement_count : 0;
+    Link* link = &code->link;
+    *table = 0;
+    bool valid = true;
+    if (placements != 0 || code->asm_atom_count != 0)
+    {
+        uint32_t refused = BUSTER_CHECK_NONE;
+        const char* reason = NULL;
+        ObjectAtomSection* descriptors = BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, link->atoms.count);
+        valid = descriptors != 0;
+        code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+        if (valid)
+        {
+            memset(descriptors, 0, (uint64_t)link->atoms.count * sizeof(ObjectAtomSection));
+            for (uint32_t a = 0; a < code->asm_atom_count; a += 1)
+            {
+                descriptors[code->asm_atoms[a]] = code->asm_sections[a];
+            }
+            *table = descriptors;
+        }
+        for (uint32_t p = 0; valid && p < placements; p += 1)
+        {
+            const CheckInputSectionPlacement* placement = sections->placements + p;
+            const uint32_t object = placement->token < program->input->token_count ? program->input->objects[placement->token] : 0;
+            const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+            const AtomId atom = symbol != 0 && symbol < link->symbols.count ? link->symbols.atom[symbol] : 0;
+            const String8 name = placement->name;
+            const uint8_t class = atom != 0 ? link->atoms.class[atom] : BUSTER_LINK_CLASS_NONE;
+            // The kind its name gives it, if any (getELFKindForNamedSection), and the class it then goes in.
+            const bool bss = check_program_section_family(name, ".bss") || check_program_section_prefix(name, ".gnu.linkonce.b.") ||
+                             check_program_section_prefix(name, ".llvm.linkonce.b.") || check_program_section_family(name, ".sbss") ||
+                             check_program_section_prefix(name, ".gnu.linkonce.sb.") || check_program_section_prefix(name, ".llvm.linkonce.sb.");
+            const bool tdata = check_program_section_family(name, ".tdata") || check_program_section_prefix(name, ".gnu.linkonce.td.") ||
+                               check_program_section_prefix(name, ".llvm.linkonce.td.");
+            const bool tbss = check_program_section_family(name, ".tbss") || check_program_section_prefix(name, ".gnu.linkonce.tb.") ||
+                              check_program_section_prefix(name, ".llvm.linkonce.tb.");
+            // Keep the entire .llvm.* family unsupported, including names Clang treats as ordinary PROGBITS. This
+            // is a conservative reserved-name boundary, separate from the names ELF assigns another section type.
+            const bool restricted = check_program_section_prefix(name, ".note") || check_program_section_family(name, ".init_array") ||
+                                    check_program_section_family(name, ".fini_array") || check_program_section_family(name, ".preinit_array") ||
+                                    check_program_section_prefix(name, ".llvm.");
+            const uint8_t placed = class == BUSTER_LINK_CLASS_BSS && !bss ? BUSTER_LINK_CLASS_DATA : class == BUSTER_LINK_CLASS_TBSS && !tbss ? BUSTER_LINK_CLASS_TDATA : class;
+            const bool fits = restricted ? false :
+                              bss ? class == BUSTER_LINK_CLASS_BSS :
+                              tdata ? class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS :
+                              tbss ? class == BUSTER_LINK_CLASS_TBSS :
+                                     class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_DATA || class == BUSTER_LINK_CLASS_BSS ||
+                                     class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_TDATA ||
+                                     class == BUSTER_LINK_CLASS_TBSS;
+            const ObjectSectionFormat* format = &object_class_sections[placed];
+            const ObjectAtomSection descriptor = {
+                .name = name,
+                .type = format->type,
+                .flags = format->flags,
+            };
+            if (atom != 0 && !fits)
+            {
+                // The placements are in source order but for the unit's end's tentative definitions, after the rest:
+                // the refusal is the earliest's.
+                refused = placement->token < refused ? placement->token : refused;
+                reason = placement->token == refused ? (restricted ? "a section name with an unsupported ELF type or reserved family" :
+                                                                "a definition in a section whose name gives it another kind") :
+                                                       reason;
+            }
+            // An empty section attribute clears inherited placement and overrides pragma settings, but LLVM keeps
+            // the definition in its default class. Retain its reader event for Sema's conflicts without materializing
+            // a zero-filled BSS/TBSS atom as data for a descriptor that the object writer treats as absent.
+            else if (atom != 0 && name.length != 0)
+            {
+                if (placed != class)
+                {
+                    // A zero-filled variable, as data in its section: its atom's zeroed bytes.
+                    const uint64_t size = link->atoms.size[atom];
+                    uint8_t* zeros = size != 0 ? arena_push(bytes, size, 16) : 0;
+                    valid = size == 0 || zeros != 0;
+                    code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
+                    if (valid)
+                    {
+                        if (zeros != 0)
+                        {
+                            memset(zeros, 0, size);
+                        }
+                        link->atoms.class[atom] = placed;
+                        link->atoms.bytes[atom] = zeros;
+                    }
+                }
+                descriptors[atom] = descriptor;
+            }
+        }
+        if (valid && refused != BUSTER_CHECK_NONE)
+        {
+            code->status = CHECK_PROGRAM_UNSUPPORTED;
+            code->reason = reason;
+            code->token = refused;
+            valid = false;
+        }
+    }
+    return valid;
 }

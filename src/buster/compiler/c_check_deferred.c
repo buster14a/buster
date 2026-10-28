@@ -281,6 +281,8 @@ struct CheckDeferred
     bool fail_after_replay;
     bool hold_lanes;
     bool late_first;
+    // For the tests: the merge finds the token columns' entries by its scalar twin (check_deferred_entries).
+    bool scalar_merge;
     // The first lane's word that it has taken every part, which hold_lanes' other lanes wait for; and the other lanes
     // that have taken from the counter, which late_first's first lane waits for.
     uint32_t held;
@@ -292,6 +294,16 @@ struct CheckDeferred
     uint64_t environment_ns;
     uint64_t lanes_ns;
     uint64_t merge_ns;
+    // With `timing`, the merge's parts (check_deferred_merge): the replay; the appended tables, their layouts, copies
+    // and intrinsics; the events' stream and the indices into it (the heads and the active declarations); the tags'
+    // completions; the pass over the events and every token's columns, on the lanes; and the rest, the names' linked
+    // types, the predefined types and the reader's fields.
+    uint64_t merge_replay_ns;
+    uint64_t merge_tables_ns;
+    uint64_t merge_events_ns;
+    uint64_t merge_tags_ns;
+    uint64_t merge_pass_ns;
+    uint64_t merge_rest_ns;
     uint64_t walk_ns;
     uint64_t position_ns;
     uint64_t copy_ns;
@@ -1066,23 +1078,294 @@ static uint32_t check_deferred_id1(const uint32_t* top, uint32_t top_count, uint
     return id != 0 ? check_deferred_id(top, top_count, base, id - 1) + 1 : 0;
 }
 
-// check_deferred_type and check_deferred_id1 of a token's entry, in place, where it has one: the reader keeps these
-// columns in pages of their own, which take memory only where the walk wrote them (#572), and writing their zeros back
-// would make every page of zeros real.
-static void check_deferred_map_type(TypeId* column, uint32_t token, const TypeReplayPart* part)
+// The tokens from `begin` to `end` of `column` that have an entry (a value other than `none`), in token order, into
+// `positions`: how many. The walk writes each of the merge's columns at few tokens (on sqlite3.c, a declared type at
+// 7% of them, a query type at 2% and the rest at fewer still), so the vector path tests 64 tokens at a time and takes
+// those that have one lane by lane; the scalar path, its twin, tests each token. Every load is masked to the range.
+// The merge writes a column back at its entries alone: the reader keeps these columns in pages of their own, which
+// take memory only where the walk wrote them (#572), and writing their zeros back would make every page of zeros real.
+static uint32_t check_deferred_entries(const uint32_t* column, uint32_t begin, uint32_t end, uint32_t none, bool vector, uint32_t* positions)
 {
-    if (column[token] != 0)
+    uint32_t total = 0;
+    if (vector)
     {
-        column[token] = type_replay_type(part, column[token]);
+        const __m512i empty = _mm512_set1_epi32((int)none);
+        for (uint32_t first = begin; first < end; first += 64)
+        {
+            uint64_t set = 0;
+            for (uint32_t part = 0; part < 4; part += 1)
+            {
+                const uint32_t at = first + part * 16;
+                const uint32_t length = at < end ? (end - at < 16 ? end - at : 16) : 0;
+                const __mmask16 active = (__mmask16)(((uint32_t)1 << length) - 1);
+                const __m512i values = length != 0 ? _mm512_maskz_loadu_epi32(active, column + at) : empty;
+                set |= (uint64_t)_mm512_mask_cmpneq_epu32_mask(active, values, empty) << (part * 16);
+            }
+            while (set != 0)
+            {
+                positions[total] = first + (uint32_t)__builtin_ctzll(set);
+                total += 1;
+                set &= set - 1;
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            positions[total] = token;
+            total += column[token] != none;
+        }
+    }
+    return total;
+}
+
+// check_deferred_entries of a column of 64-bit values, whose entries are those other than 0.
+static uint32_t check_deferred_entries64(const uint64_t* column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+{
+    uint32_t total = 0;
+    if (vector)
+    {
+        for (uint32_t first = begin; first < end; first += 64)
+        {
+            uint64_t set = 0;
+            for (uint32_t part = 0; part < 8; part += 1)
+            {
+                const uint32_t at = first + part * 8;
+                const uint32_t length = at < end ? (end - at < 8 ? end - at : 8) : 0;
+                const __mmask8 active = (__mmask8)(((uint32_t)1 << length) - 1);
+                const __m512i values = length != 0 ? _mm512_maskz_loadu_epi64(active, column + at) : _mm512_setzero_si512();
+                set |= (uint64_t)_mm512_mask_test_epi64_mask(active, values, values) << (part * 8);
+            }
+            while (set != 0)
+            {
+                positions[total] = first + (uint32_t)__builtin_ctzll(set);
+                total += 1;
+                set &= set - 1;
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            positions[total] = token;
+            total += column[token] != 0;
+        }
+    }
+    return total;
+}
+
+// How many of a byte column's tokens from `begin` to `end` are other than 0: 64 at a time, or with the scalar twin one
+// by one.
+static uint32_t check_deferred_count_bytes(const uint8_t* column, uint32_t begin, uint32_t end, bool vector)
+{
+    uint32_t total = 0;
+    if (vector)
+    {
+        for (uint32_t first = begin; first < end; first += 64)
+        {
+            const uint32_t length = end - first < 64 ? end - first : 64;
+            const __mmask64 active = length == 64 ? ~(__mmask64)0 : (((__mmask64)1 << length) - 1);
+            const __m512i bytes = _mm512_maskz_loadu_epi8(active, column + first);
+            total += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(active, bytes, bytes));
+        }
+    }
+    else
+    {
+        for (uint32_t token = begin; token < end; token += 1)
+        {
+            total += column[token] != 0;
+        }
+    }
+    return total;
+}
+
+// The owner of `token` in a pass over a column's entries in token order: b + 1 for body b's tokens and its parameters'
+// (which its opening rebinds), 0 for the top level's. `body` is the pass's cursor, the first body that doesn't close
+// before the token: a body's parameters come after the body before it closes and before it opens.
+static uint32_t check_deferred_owner(const CheckDeferred* deferred, const CheckInputReader* reader, uint32_t token, uint32_t* body)
+{
+    uint32_t b = *body;
+    while (b < deferred->body_count && deferred->cuts[b].closing < token)
+    {
+        b += 1;
+    }
+    *body = b;
+    uint32_t owner = 0;
+    if (b < deferred->body_count)
+    {
+        const CheckDeferredCut* cut = deferred->cuts + b;
+        owner = cut->opening <= token ? b + 1 : 0;
+        for (uint32_t p = reader->parameters[cut->opening]; owner == 0 && p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
+        {
+            owner = p == token ? b + 1 : 0;
+        }
+    }
+    return owner;
+}
+
+// A column of ids into one of the walk's appended tables, which the pass maps at its entries through their owners'
+// places in the table's layout (check_deferred_layout's `map` of the top level's `top` ids and the bodies' `bases`):
+// ids, or with `one` 1 ids + 1, none being `none`.
+typedef struct CheckDeferredIds CheckDeferredIds;
+struct CheckDeferredIds
+{
+    uint32_t* column;
+    uint32_t none;
+    uint32_t one;
+    const uint32_t* map;
+    const uint32_t* bases;
+    uint32_t top;
+};
+
+// The merge's pass over the events and the token columns, which the lanes that read the bodies share by whole items
+// (check_deferred_pass_items): item b, for each body b, is the top level's tokens and events after body b - 1's and
+// then body b's own, and item `bodies` the rest of the unit's. Every item writes places of its own: the merged stream's
+// from the events' layout, and its tokens' entries in place.
+typedef struct CheckDeferredPass CheckDeferredPass;
+struct CheckDeferredPass
+{
+    const CheckDeferred* deferred;
+    const CheckInputReader* reader;
+    const TypeReplayPart* parts;
+    // The items' tokens, as prefix sums: the lanes' shares by cost (lane_range_by_cost).
+    const uint64_t* costs;
+    // Room for every token's position, an item's tokens' at their own.
+    uint32_t* positions;
+    bool vector;
+    // The top level's stream (the reader's), its layout, and the merged stream's columns.
+    const uint32_t* event_map;
+    const uint32_t* event_bases;
+    uint32_t top_events;
+    uint32_t* key;
+    uint32_t* declaration;
+    uint32_t* point;
+    uint32_t* end;
+    uint32_t* previous;
+    uint32_t* depth;
+    uint8_t* operation;
+    uint8_t* kind;
+    // The columns of TypeIds, and of ids into the tables some body appended to.
+    TypeId* types[7];
+    CheckDeferredIds ids[9];
+    uint32_t id_count;
+    // Each lane's tokens with a constant's warning.
+    uint32_t warnings[BUSTER_CHECK_DEFERRED_MAX_LANES];
+};
+
+// Item `item`'s events: the top level's before its body's cut (the rest of them for the last item), each as many places
+// on as the bodies before them have events, then the body's at its place; every index into the stream mapped, and a
+// restore's mark past the top level's declarations active at the cut. The fields that hold no index are copied whole.
+static void check_deferred_pass_events(const CheckDeferredPass* pass, uint32_t item)
+{
+    const CheckDeferred* deferred = pass->deferred;
+    const CBindings* top = &pass->reader->bindings;
+    const uint32_t* map = pass->event_map;
+    const uint32_t bodies = deferred->body_count;
+    const uint32_t from = item == 0 ? 0 : deferred->cuts[item - 1].events;
+    const uint32_t to = item < bodies ? deferred->cuts[item].events : pass->top_events;
+    if (from < to)
+    {
+        const uint32_t at = map[from];
+        const uint64_t length = to - from;
+        memcpy(pass->key + at, top->key + from, length * sizeof(uint32_t));
+        memcpy(pass->declaration + at, top->declaration + from, length * sizeof(uint32_t));
+        memcpy(pass->point + at, top->point + from, length * sizeof(uint32_t));
+        memcpy(pass->depth + at, top->depth + from, length * sizeof(uint32_t));
+        memcpy(pass->operation + at, top->operation + from, length);
+        memcpy(pass->kind + at, top->kind + from, length);
+        for (uint32_t e = from; e < to; e += 1)
+        {
+            const uint32_t last = top->end[e];
+            const uint32_t before = top->previous[e];
+            pass->end[at + (e - from)] = last != BUSTER_C_BINDING_NONE ? map[last] : BUSTER_C_BINDING_NONE;
+            pass->previous[at + (e - from)] = before != 0 ? map[before - 1] + 1 : 0;
+        }
+    }
+    const CheckDeferredResult* result = item < bodies ? deferred->results + item : 0;
+    if (result != 0 && result->event_count != 0)
+    {
+        const uint32_t base = pass->event_bases[item];
+        const uint32_t actives = deferred->cuts[item].actives;
+        const uint64_t length = result->event_count;
+        memcpy(pass->key + base, result->key, length * sizeof(uint32_t));
+        memcpy(pass->point + base, result->point, length * sizeof(uint32_t));
+        memcpy(pass->depth + base, result->depth, length * sizeof(uint32_t));
+        memcpy(pass->operation + base, result->operation, length);
+        memcpy(pass->kind + base, result->kind, length);
+        for (uint32_t e = 0; e < result->event_count; e += 1)
+        {
+            const uint32_t last = result->end[e];
+            pass->declaration[base + e] = result->operation[e] == C_BINDING_RESTORE ? result->declaration[e] + actives : result->declaration[e];
+            pass->end[base + e] = last != BUSTER_C_BINDING_NONE ? check_deferred_id(map, pass->top_events, base, last) : BUSTER_C_BINDING_NONE;
+            pass->previous[base + e] = check_deferred_id1(map, pass->top_events, base, result->previous[e]);
+        }
     }
 }
 
-static void check_deferred_map_id1(uint32_t* column, uint32_t token, const uint32_t* top, uint32_t top_count, uint32_t base)
+// Items `first` to `end` of the pass: their events, then each column's entries among their tokens, each through its
+// owner's part (check_deferred_owner): a body's tokens and its parameters' through the body's, and the top level's
+// through its own; a body's part maps the top level's ids as the top level's does. Returns the tokens among them with a
+// constant's warning.
+static uint32_t check_deferred_pass_items(const CheckDeferredPass* pass, uint32_t first, uint32_t end)
 {
-    if (column[token] != 0)
+    const CheckDeferred* deferred = pass->deferred;
+    const CheckInputReader* reader = pass->reader;
+    const uint32_t bodies = deferred->body_count;
+    const uint32_t count = reader->parser->tokens.count;
+    for (uint32_t item = first; item < end; item += 1)
     {
-        column[token] = check_deferred_id(top, top_count, base, column[token] - 1) + 1;
+        check_deferred_pass_events(pass, item);
     }
+    // The items' tokens: from the end of body first - 1 to the end of body end - 1, or of the unit's last token.
+    const uint32_t begin = first == end || first == 0 ? 0 : deferred->cuts[first - 1].closing + 1;
+    const uint32_t finish = end == first ? begin : end <= bodies ? deferred->cuts[end - 1].closing + 1 : count + 1;
+    uint32_t* positions = pass->positions + begin;
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pass->types); c += 1)
+    {
+        TypeId* column = pass->types[c];
+        const uint32_t entries = check_deferred_entries(column, begin, finish, 0, pass->vector, positions);
+        uint32_t body = first;
+        for (uint32_t e = 0; e < entries; e += 1)
+        {
+            const uint32_t token = positions[e];
+            column[token] = type_replay_type(&pass->parts[check_deferred_owner(deferred, reader, token, &body)], column[token]);
+        }
+    }
+    for (uint32_t c = 0; c < pass->id_count; c += 1)
+    {
+        const CheckDeferredIds* ids = pass->ids + c;
+        const uint32_t entries = check_deferred_entries(ids->column, begin, finish, ids->none, pass->vector, positions);
+        uint32_t body = first;
+        for (uint32_t e = 0; e < entries; e += 1)
+        {
+            const uint32_t token = positions[e];
+            const uint32_t owner = check_deferred_owner(deferred, reader, token, &body);
+            ids->column[token] = check_deferred_id(ids->map, ids->top, owner != 0 ? ids->bases[owner - 1] : 0, ids->column[token] - ids->one) + ids->one;
+        }
+    }
+    const uint32_t jobs = check_deferred_entries64((const uint64_t*)reader->specifier_finishes, begin, finish, pass->vector, positions);
+    uint32_t body = first;
+    for (uint32_t e = 0; e < jobs; e += 1)
+    {
+        const uint32_t token = positions[e];
+        const TypeReplayPart* part = &pass->parts[check_deferred_owner(deferred, reader, token, &body)];
+        CheckInputSpecifierJob* job = reader->specifier_finishes[token];
+        job->base = check_deferred_type(part, job->base);
+        job->result = check_deferred_type(part, job->result);
+    }
+    // Lanes share disjoint token columns but own their reader counters: the count of the tokens with a constant's
+    // warning, which later declaration-time warning mutations keep through the same helper.
+    return check_deferred_count_bytes(reader->output->constant_warnings, begin, finish < count ? finish : count, pass->vector);
+}
+
+// A lane's share of the pass: its items by their tokens.
+static void check_deferred_pass_lane(void* argument)
+{
+    CheckDeferredPass* pass = argument;
+    const Range64 items = lane_range_by_cost(pass->costs, (uint64_t)pass->deferred->body_count + 1);
+    pass->warnings[lane_index()] = check_deferred_pass_items(pass, (uint32_t)items.begin, (uint32_t)items.end);
 }
 
 // Maps a decoded intrinsic's types through a part of the replay.
@@ -1123,6 +1406,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     Arena* scratch = &deferred->memory.arena;
     const uint32_t bodies = deferred->body_count;
     const uint32_t count = parser->tokens.count;
+    const uint64_t begin_ns = deferred->timing ? check_deferred_now() : 0;
     // The types: the top level's changes and the bodies', replayed into the caller's table.
     TypeReplayPart* parts = BUSTER_ARENA_PUSH_ARRAY(scratch, TypeReplayPart, (uint64_t)bodies + 1);
     bool valid = parts != 0;
@@ -1153,6 +1437,7 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         valid = parts[1 + b].types != 0 && parts[1 + b].tags != 0 && parts[1 + b].merged != 0;
     }
     valid = valid && type_replay(deferred->table, parts, bodies + 1, scratch) && !deferred->fail_after_replay;
+    const uint64_t replay_ns = deferred->timing ? check_deferred_now() : 0;
     // Each appended table's places, and the events'.
     uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)bodies + 1);
     valid = valid && counts != 0;
@@ -1381,8 +1666,9 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             }
         }
     }
-    // The events: each body's at its cut, every handle and index into the stream mapped, and a restore's mark past the
-    // top level's active declarations at the cut.
+    const uint64_t tables_ns = deferred->timing ? check_deferred_now() : 0;
+    // The events: the merged stream's columns, of the stream's capacity, which the pass fills (check_deferred_pass_events),
+    // and the top level's active declarations and every name's head, which index into the stream, mapped.
     CBindings* bindings = &reader->bindings;
     const uint64_t capacity = (uint64_t)bindings->capacity + 1;
     uint32_t* key = valid ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, capacity) : 0;
@@ -1394,35 +1680,6 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     uint8_t* operation = depth != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, capacity) : 0;
     uint8_t* kind = operation != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, capacity) : 0;
     valid = kind != 0;
-    for (uint32_t e = 0; valid && e < top_events; e += 1)
-    {
-        const uint32_t to = event_map[e];
-        key[to] = bindings->key[e];
-        declaration[to] = bindings->declaration[e];
-        point[to] = bindings->point[e];
-        end[to] = bindings->end[e] != BUSTER_C_BINDING_NONE ? event_map[bindings->end[e]] : BUSTER_C_BINDING_NONE;
-        previous[to] = bindings->previous[e] != 0 ? event_map[bindings->previous[e] - 1] + 1 : 0;
-        depth[to] = bindings->depth[e];
-        operation[to] = bindings->operation[e];
-        kind[to] = bindings->kind[e];
-    }
-    for (uint32_t b = 0; valid && b < bodies; b += 1)
-    {
-        const CheckDeferredResult* result = deferred->results + b;
-        const uint32_t base = event_bases[b];
-        for (uint32_t e = 0; e < result->event_count; e += 1)
-        {
-            const uint32_t to = base + e;
-            key[to] = result->key[e];
-            declaration[to] = result->operation[e] == C_BINDING_RESTORE ? result->declaration[e] + deferred->cuts[b].actives : result->declaration[e];
-            point[to] = result->point[e];
-            end[to] = result->end[e] != BUSTER_C_BINDING_NONE ? check_deferred_id(event_map, top_events, base, result->end[e]) : BUSTER_C_BINDING_NONE;
-            previous[to] = check_deferred_id1(event_map, top_events, base, result->previous[e]);
-            depth[to] = result->depth[e];
-            operation[to] = result->operation[e];
-            kind[to] = result->kind[e];
-        }
-    }
     if (valid)
     {
         for (uint32_t i = 0; i < bindings->active_count; i += 1)
@@ -1434,16 +1691,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         {
             bindings->heads[k] = bindings->heads[k] != 0 ? event_map[bindings->heads[k] - 1] + 1 : 0;
         }
-        bindings->key = key;
-        bindings->declaration = declaration;
-        bindings->point = point;
-        bindings->end = end;
-        bindings->previous = previous;
-        bindings->depth = depth;
-        bindings->operation = operation;
-        bindings->kind = kind;
-        bindings->count = event_total;
     }
+    const uint64_t events_ns = deferred->timing ? check_deferred_now() : 0;
     // The tags' completion positions, by the replay's tags.
     uint32_t* completions = valid ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)deferred->table->tags.capacity + 1) : 0;
     uint32_t* transparent = valid && reader->transparent_unions != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)deferred->table->tags.capacity + 1) : 0;
@@ -1487,73 +1736,104 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             }
         }
     }
-    // Every column the walk wrote with a TypeId or an id into those tables, through its owner's part: a body's tokens and
-    // its parameters' (which its opening rebinds), and the top level's everywhere else. A body's part maps the top
-    // level's ids as the top level's does.
-    uint32_t* owners = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    valid = valid && owners != 0;
+    const uint64_t tags_ns = deferred->timing ? check_deferred_now() : 0;
+    // The pass over the events and every column the walk wrote with a TypeId or an id into those tables, on the lanes
+    // that read the bodies, each a share of the items by their tokens (check_deferred_pass_items).
+    uint32_t* positions = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint64_t* costs = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)bodies + 1) : 0;
+    valid = valid && costs != 0;
+    CheckDeferredPass pass = {
+        .deferred = deferred,
+        .reader = reader,
+        .parts = parts,
+        .costs = costs,
+        .positions = positions,
+        .vector = !BUSTER_SCALAR_PATH(parser->options.scalar) && !deferred->scalar_merge,
+        .event_map = event_map,
+        .event_bases = event_bases,
+        .top_events = top_events,
+        .key = key,
+        .declaration = declaration,
+        .point = point,
+        .end = end,
+        .previous = previous,
+        .depth = depth,
+        .operation = operation,
+        .kind = kind,
+        .types = {
+            input->declared_types,
+            reader->query_types,
+            reader->return_types,
+            reader->incomplete_array_types,
+            reader->selection_types,
+            reader->tag_types,
+            reader->declaration_bases,
+        },
+    };
+    // The id columns of the tables some body appended to: a table no body appended to maps each id to itself, and its
+    // column stays as it is.
+    const struct
+    {
+        CheckDeferredIds ids;
+        uint32_t total;
+    } id_columns[] = {
+        { { reader->string_ids, BUSTER_CHECK_NONE, 0, string_map, string_bases, top_strings }, string_total },
+        { { input->expression_regions, 0, 1, region_map, region_bases, top_regions }, region_total },
+        { { reader->vla_bounds, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
+        { { reader->vla_ends, 0, 1, vla_map, vla_bases, top_vlas }, vla_total },
+        { { input->asm_ids, 0, 1, asm_map, asm_bases, top_asms }, asm_total },
+        { { input->intrinsic_ids, 0, 1, call_map, call_bases, top_calls }, call_total },
+        { { reader->vararg_calls, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
+        { { reader->vararg_types, 0, 1, vararg_map, vararg_bases, top_varargs }, vararg_total },
+        { { reader->constant_present, 0, 1, constant_map, constant_bases, top_constants }, constant_total },
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(id_columns) == BUSTER_ARRAY_LENGTH(pass.ids), "every id column has room in the pass");
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(id_columns); c += 1)
+    {
+        if (id_columns[c].ids.column != NULL && id_columns[c].total != id_columns[c].ids.top)
+        {
+            pass.ids[pass.id_count] = id_columns[c].ids;
+            pass.id_count += 1;
+        }
+    }
+    for (uint32_t b = 0; valid && b < bodies; b += 1)
+    {
+        costs[b] = (uint64_t)deferred->cuts[b].closing + 1;
+    }
     if (valid)
     {
-        memset(owners, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        for (uint32_t b = 0; b < bodies; b += 1)
-        {
-            const CheckDeferredCut* cut = deferred->cuts + b;
-            for (uint32_t token = cut->opening; token <= cut->closing; token += 1)
-            {
-                owners[token] = b + 1;
-            }
-            for (uint32_t p = reader->parameters[cut->opening]; p != BUSTER_CHECK_NONE; p = reader->parameter_next[p])
-            {
-                owners[p] = b + 1;
-            }
-        }
+        costs[bodies] = (uint64_t)count + 1;
     }
-    // Lanes share disjoint token columns but own their reader counters. Fold the final count into the remap pass
-    // already visiting every merged token; later declaration-time warning mutations keep it through the same helper.
-    input->constant_warning_count = 0;
-    input->constant_warnings_prepared = false;
-    for (uint32_t token = 0; valid && token <= count; token += 1)
+    // On one lane, this thread; on more, a lane_run of the lanes the bodies ran on, which are awake.
+    const uint32_t lanes = deferred->active > 1 ? deferred->active : 1;
+    if (valid && lanes == 1)
     {
-        const bool inside = owners[token] != 0;
-        const uint32_t b = inside ? owners[token] - 1 : 0;
-        const TypeReplayPart* part = inside ? &parts[1 + b] : &parts[0];
-        input->declared_types[token] = check_deferred_type(part, input->declared_types[token]);
-        input->constant_warning_count += token < count && input->constant_warnings[token] != 0;
-        reader->query_types[token] = check_deferred_type(part, reader->query_types[token]);
-        reader->return_types[token] = check_deferred_type(part, reader->return_types[token]);
-        check_deferred_map_type(reader->incomplete_array_types, token, part);
-        check_deferred_map_type(reader->selection_types, token, part);
-        check_deferred_map_type(reader->tag_types, token, part);
-        check_deferred_map_type(reader->declaration_bases, token, part);
-        const uint32_t string_base = inside ? string_bases[b] : 0;
-        const uint32_t region_base = inside ? region_bases[b] : 0;
-        const uint32_t vla_base = inside ? vla_bases[b] : 0;
-        const uint32_t asm_base = inside ? asm_bases[b] : 0;
-        const uint32_t vararg_base = inside ? vararg_bases[b] : 0;
-        const uint32_t constant_base = inside ? constant_bases[b] : 0;
-        reader->string_ids[token] = reader->string_ids[token] != BUSTER_CHECK_NONE ? check_deferred_id(string_map, top_strings, string_base, reader->string_ids[token]) :
-                                    BUSTER_CHECK_NONE;
-        input->expression_regions[token] = check_deferred_id1(region_map, top_regions, region_base, input->expression_regions[token]);
-        check_deferred_map_id1(reader->vla_bounds, token, vla_map, top_vlas, vla_base);
-        check_deferred_map_id1(reader->vla_ends, token, vla_map, top_vlas, vla_base);
-        if (input->asm_ids != NULL)
+        input->constant_warning_count = check_deferred_pass_items(&pass, 0, bodies + 1);
+    }
+    else if (valid)
+    {
+        valid = lane_run(lanes, check_deferred_pass_lane, &pass, deferred->cpus);
+        deferred->reason = !valid ? "the merge's lanes couldn't start" : deferred->reason;
+        input->constant_warning_count = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
         {
-            input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
-        }
-        if (intrinsics)
-        {
-            check_deferred_map_id1(input->intrinsic_ids, token, call_map, top_calls, inside ? call_bases[b] : 0);
-        }
-        check_deferred_map_id1(reader->vararg_calls, token, vararg_map, top_varargs, vararg_base);
-        check_deferred_map_id1(reader->vararg_types, token, vararg_map, top_varargs, vararg_base);
-        check_deferred_map_id1(reader->constant_present, token, constant_map, top_constants, constant_base);
-        CheckInputSpecifierJob* job = reader->specifier_finishes[token];
-        if (job != 0)
-        {
-            job->base = check_deferred_type(part, job->base);
-            job->result = check_deferred_type(part, job->result);
+            input->constant_warning_count += pass.warnings[lane];
         }
     }
+    input->constant_warnings_prepared = false;
+    if (valid)
+    {
+        bindings->key = key;
+        bindings->declaration = declaration;
+        bindings->point = point;
+        bindings->end = end;
+        bindings->previous = previous;
+        bindings->depth = depth;
+        bindings->operation = operation;
+        bindings->kind = kind;
+        bindings->count = event_total;
+    }
+    const uint64_t pass_ns = deferred->timing ? check_deferred_now() : 0;
     for (uint32_t name = 0; valid && name < reader->bindings.name_capacity; name += 1)
     {
         reader->linked_types[name] = check_deferred_type(&parts[0], reader->linked_types[name]);
@@ -1632,6 +1912,15 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         // As source order's input: no body is deferred.
         input->deferred_tokens = 0;
     }
+    if (deferred->timing)
+    {
+        deferred->merge_replay_ns = replay_ns - begin_ns;
+        deferred->merge_tables_ns = tables_ns - replay_ns;
+        deferred->merge_events_ns = events_ns - tables_ns;
+        deferred->merge_tags_ns = tags_ns - events_ns;
+        deferred->merge_pass_ns = pass_ns - tags_ns;
+        deferred->merge_rest_ns = check_deferred_now() - pass_ns;
+    }
     return valid;
 }
 
@@ -1658,11 +1947,12 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
 {
     CheckInput* input = reader->output;
     deferred->top.changes = 0;
-    // A unit whose top level reported, or that has overloadable functions, is source order's.
+    // A unit whose top level reported, that has overloadable functions, or that has #pragma clang section, whose settings
+    // and conflicts read the walk's declarations in source order (c_check_section_input.c), is source order's.
     bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
-                 input->overload_heads == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
+                 input->overload_heads == 0 && input->sections == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
-                       !valid ? "the top level ran out of room" : 0;
+                       input->sections != 0 ? "#pragma clang section" : !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
     const uint64_t environment_begin = deferred->timing ? check_deferred_now() : 0;
     deferred->top_ns = deferred->timing ? environment_begin - deferred->top_ns : 0;
@@ -1802,7 +2092,7 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     const uint64_t merge_begin = deferred->timing ? check_deferred_now() : 0;
     const bool merged = valid && check_deferred_merge(deferred, reader);
     deferred->merge_ns = deferred->timing ? check_deferred_now() - merge_begin : 0;
-    deferred->reason = valid && !merged ? "the merge ran out of room" : deferred->reason;
+    deferred->reason = valid && !merged && deferred->reason == 0 ? "the merge ran out of room" : deferred->reason;
     valid = merged;
     // A unit that isn't merged is source order's: nothing more of this run counts.
     deferred->unsupported |= !valid;
@@ -1866,6 +2156,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     const bool hold_lanes = deferred->hold_lanes;
     const bool late_first = deferred->late_first;
     const bool every_lane = deferred->every_lane;
+    const bool scalar_merge = deferred->scalar_merge;
     const CheckDeferredMemory memory = deferred->memory;
     *deferred = (CheckDeferred){
         .memory = memory,
@@ -1874,6 +2165,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .timing = timing,
         .cpus = cpus,
         .every_lane = every_lane,
+        .scalar_merge = scalar_merge,
         .fail_after_replay = fail_after_replay,
         .hold_lanes = hold_lanes,
         .late_first = late_first,
