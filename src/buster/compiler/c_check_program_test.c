@@ -2297,6 +2297,8 @@ static void check_test_program_many_aggregate_returns(CheckTest* test, const cha
         }
         free(source);
     }
+}
+
 static void check_test_program_builtin_scratch(CheckTest* test, const char* clang)
 {
     for (uint32_t limit = CBUILTIN_LOWER_LIMIT_RECIPE; limit <= CBUILTIN_LOWER_LIMIT_LOCALS; limit += 1)
