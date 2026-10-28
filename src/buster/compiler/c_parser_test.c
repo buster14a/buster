@@ -3493,7 +3493,8 @@ static ParseTestProbe parse_test_probe(char** arguments, int count, int capture,
 // before its address space reached the limit, and leave the address space and the descriptors as they were.
 static uint32_t parse_test_check_probe(const ParseTestProbe* probe, uint64_t limit, const char* name)
 {
-    const bool failed = probe->status == 1 && strstr(probe->text, "fatal error: ") != 0 && probe->peak <= limit;
+    const char* fatal = strstr(probe->text, "fatal error: ");
+    const bool failed = probe->status == 1 && fatal != 0 && strstr(fatal + 1, "fatal error: ") == 0 && probe->peak <= limit;
     const uint32_t result = !failed || !probe->clean;
     if (result != 0)
     {

@@ -17925,7 +17925,9 @@ static void pp_history_record(Preprocessor* pp, bool report)
     else
     {
         // A reporting replay replaces the first pass's silent diagnostics. Keep only the groups it actually
-        // published, then allow the replacement fatal even when the first pass had already stopped silently.
+        // published. Its own fatal is already final; otherwise allow the replacement fatal even when the first
+        // pass had already stopped silently.
+        const bool published_fatal = report && replay != 0 && replay->fatal;
         if (report)
         {
             pp->errors = replay != 0 ? replay->errors : 0;
@@ -17936,7 +17938,7 @@ static void pp_history_record(Preprocessor* pp, bool report)
             pp_release_unit(replay);
         }
         arena_release(&pp->history_replay_arena);
-        pp->fatal = false;
+        pp->fatal = published_fatal;
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
                                               !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
                                                              "the translation unit gave another result when preprocessed again for its expansion history");
@@ -20034,8 +20036,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
                 fprintf(stderr, "can't write %s\n", output);
             }
             result = preprocessed && printed ? 0 : 1;
+            pp_diagnostic_summary(&pp);
         }
-        pp_diagnostic_summary(&pp);
         // What a failed reservation left reserved too.
         pp_release(&pp);
         intern_release(&table);
