@@ -22,9 +22,74 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' 'H4sIAAAAAAAC/71YUXObRhB+16/Y5MGVDMISCCFFVVLHSVtN0riTKu10Mhl8wCFTYVC4Q7bHzX/v3h0gkBRbSdrqAcRxt7v37Xff3RJEYQjd7iLiQE6C1Gcnfte/pP6SZsZVAN5uWytKAnoDo4FD7JAYhjUaDkZDC/q93nAwaHW73X2WWpqm7bX2ww/QtftDvQea3Xd0C7AhoGGURDxKE4gYZDTMGQ10IAzO+g4MDccYGtbKgktsifgEzkwLe/1FfY7PAU14FEY0gzhinBktbZbEUUKFVZplNAB+u6LAVtSX3Riw3L8Uxi/cU55eRX573rmAKAF+KQb5McmIjEXYa2kZvSL4Ms05Q1/YSYZIAppN5Aj6MY/WJMYoKoMwv4CPOYlVWGGaXQFJEJJVRtdRmrP4tvBTBIeRMsAnIL5PV5wGhoLJ7EmYzIGCaZWlV6mIjAmb4KdXKwzUi+KI34KEOEoWwhOcPp9BnF7TDBskjugMXwlfAsGWdsrEhGWrXoV9ASuc+hXlAqSMcqIwibJNtMJwYSVhHFF40tKqWYdxSviFSGGS8iJaMcMUgjT3YqrL2EgCRPUni0VGF4RTWFK6EoGxlsZ4mpEFxVCCAKM34FWSXmOoJI7rQTFaiwUneE3jWNxVvJiPnCJAyRqnIgAzWkGd+CzzT7wcJ5CdCBSjWPxxJYRulKxybvhI3gN6FYtjHPR9i4wMY9C3RubAby6OQ+yo5XJIT8EMqbuspGQ==' | base64 -d > /dev/null
-          printf '%s' 'H4sIAAAAAAAC/71YUXObRhB+16/Y5MGVDMISCCFFVVLHSVtN0riTKu10Mhl8wCFTYVC4Q7bHzX/v3h0gkBRbSdrqAcRxt7v37Xff3RJEYQjd7iLiQE6C1Gcnfte/pP6SZsZVAN5uWytKAnoDo4FD7JAYhjUaDkZDC/q93nAwaHW73X2WWpqm7bX2ww/QtftDvQea3Xd0C7AhoGGURDxKE4gYZDTMGQ10IAzO+g4MDccYGtbKgktsifgEzkwLe/1FfY7PAU14FEY0gzhinBktbZbEUUKFVZplNAB+u6LAVtSX3Riw3L8Uxi/cU55eRX573rmAKAF+KQb5McmIjEXYa2kZvSL4Ms05Q1/YSYZIAppN5Aj6MY/WJMYoKoMwv4CPOYlVWGGaXQFJEJJVRtdRmrP4tvBTBIeRMsAnIL5PV5wGhoLJ7EmYzIGCaZWlV6mIjAmb4KdXKwzUi+KI34KEOEoWwhOcPp9BnF7TDBskjugMXwlfAsGWdsrEhGWrXoV9ASuc+hXlAqSMcqIwibJNtMJwYSVhHFF40tKqWYdxSviFSGGS8iJaMcMUgjT3YqrL2EgCRPUni0VGF4RTWFK6EoGxlsZ4mpEFxVCCAKM34FWSXmOoJI7rQTFaiwUneE3jWNxVvJiPnCJAyRqnIgAzWkGd+CzzT7wcJ5CdCBSjWPxxJYRulKxybvhI3gN6FYtjHPR9i4wMY9C3RubAby6OQ+yo5XJIT8EMqY+eMBDXwbusjwQ3GkQpIPMRjFkBthFsyOs3aZ6J5JlrfSgIfF0TWy3EeYZilPEqQIicnML/coAxpCAReHb3dkMSAd7jSllSmNFvkV2IN0BtkOROgf8cgT0h2W8uDriiHbyoj0lHFbBCDabbGpBasegJ0TRNocAy9ZdFaJV42fJ5ZijGSWxWlBMk+h9Yyc6vQXDHvNkbPuOw6J0jiY8W5CrJyaXRa2l1LA/xtBswK7ZnKm5snpSgE7WrYRA3COPMsUf1wGQftwotsYDyLVi4OXSS08abTgekUnr/7bf7yrTv/89eX7qvZmxfu6fz8l9kZPFPenygjKDIkj7lbZsotFmjDHkbzqaUpjlmOYJjl1Pm1TqP97MLc3UMvwSjLdDmEUcZ4p9WFPb9SMN4vNe1Didlno1amu0/rONUBLt+XQMtksvdVcj90SugfiuN+emzF8bDbyeFShJEscJwrpfxBSdrqXUgTylLfG/cMY4zbjON4h0vTtr2HJWp7hKCRObRM0PDaR8HaSyTZ2xUCrxj0Wjz/kUVcMOha3msMStKAFgSqL7RjaOaFlQTabGl1outwtHmBKSkitYSoyrv178UqSYYi9wo3OZTQpdzPhJAyXM8Elz1FPSyEa7OnSdXjl2m+uJTiFVDVHTd+cQxKUsFTnorORl13vDSNYZnh9NthTBYMjhr68OPr05/cX9+ez8/Fo5SPHhwd7QoPJnJ1WdD6vZjIh/1a8+O7N2fz2fmbya74fUFOMOBne1wW2rUvW0O7b4GGV7uWqUid/FyXcJRML+fUddttEl+TW+aqlyiZO/lE49z10uC2SmpToRqK3pwTTknGfrDE7t0F3ELMn0CjZUugDgjjfq0qwmh63XWq4LVG+lAAPOjp5n8D8ffqBz+/PH3RBDwKof2oOkAiPWXobnWmZlvIbZH89/PXp/PZa6T3o4LecYprFr4vlmj3qXx2/TRPxG40Vb/dGNo7fpuIPuD477/37HRfsMVvObtvs+88PMun6gdmr0+xtAhsj46Gjtkb9xzP7vXH3tC0nX6AL+2e4w9HTfLtpuSbcoLQ7N18vwqn7WX0LTAp8ttjQX3b+Z+1JUpwT8Ujqls/Nn6rqtynItsOv0I/vuI8wynjBx9nVOfiNIP11dAcYqHlm6PQ6oVffpopzB1+mCkGyBPCeGDLE8J4MGyUXVukSNJ9fBCGSqtMsWGOTVhQ4FVXeakOC2W9U6vIxQcCUViz3BOfPkRdLb4/pBkWNaLMqrrWPhQY6tShquJawYzVUlFoVx6L6ghInCYL+amDbGr4ykmt3Nr6NJB66oMMmhEFoKiV5GeKsiTzfWylrDys7EDisjTPfCSZQGND2ce44nOc7fwuT4hc9TiWoFnd0/3JpwmetYCTJW3fdErMyhFwM7mr/q+nN5OiyFobRFsb3rGFV//YmXx6XHMn7IVtaV0PKpOilUzKp2Yk3qRZnPoTdQ8mdbt3RJuaE0+bWhNfm/YMOyzDIZqntdFBp+0fudth7grbkZk8AFF7f4mTRX0+LjO60WTjMxHKN/XxoPtWTPchzDcoZGx7Qcwzb7TV0ixoWXKtSzrKWy1cL8tsrkt1YcfFoU8Ljo/wGFdmMZIhMAAA==' | base64 -d > /dev/null
-          printf '%s' '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' | sed 's/IT8EMq7eM/IT8EMq+cM/; s/Oc7fwuT4hc/Oc7fwuT5hc/' | base64 -d | gzip -d > "$RUNNER_TEMP/issue-659-integrate.patch"
+          cat > "$RUNNER_TEMP/issue-659-integrate.patch" <<'PATCH'
+          diff --git a/docs/c-checker.md b/docs/c-checker.md
+          index 847a5fa..3864863 100644
+          --- a/docs/c-checker.md
+          +++ b/docs/c-checker.md
+          @@ -516,0 +517,3 @@ definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
+          +Inline deferred type specifiers such as `_Atomic(T)` in the declaration list
+          +remain outside this reader; the equivalent `_Atomic T` qualifier form and
+          +previously declared typedefs are accepted.
+          @@ -520,0 +524,3 @@ promotions for compatibility checking and ABI lowering, as clang types it
+          +As in clang, `_Atomic` parameters retain their declared ABI types instead:
+          +`_Atomic float` is not promoted to double, and an atomic aggregate keeps its
+          +storage padding. Known calls retain these ABI types as well as their value conversions.
+          diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+          index 9d1c3a8..413824c 100644
+          --- a/src/buster/compiler/c_check_input.c
+          +++ b/src/buster/compiler/c_check_input.c
+          @@ -3074,0 +3075,8 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
+          +// The ABI type of a K&R parameter. Unlike an argument expression's unary conversion, clang's parameter
+          +// promotion preserves _Atomic: even _Atomic float arrives as float, and an atomic aggregate retains its padding.
+          +static TypeId check_input_kr_parameter_type(const TypeTable* types, TypeId declared)
+          +{
+          +    const TypeId type = type_unqualified(declared);
+          +    return type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC ? type : type_default_argument_promote(types, type);
+          +}
+          +
+          @@ -3370 +3378 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+          -                    promoted[k++] = type_default_argument_promote(reader->types, type_unqualified(reader->declared_types[parameter]));
+          +                    promoted[k++] = check_input_kr_parameter_type(reader->types, reader->declared_types[parameter]);
+          diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+          index 3a81b90..9ede77b 100644
+          --- a/src/buster/compiler/c_check_program_lower.c
+          +++ b/src/buster/compiler/c_check_program_lower.c
+          @@ -2632 +2631,0 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+          -    const TypeId* parameter_types = type_parameters(types, type, &parameters);
+          @@ -2633,0 +2633,3 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
+          +    // Keep a known K&R signature's atomic ABI types even though its designator has no prototype.
+          +    const bool kr = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 && type_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_FUNCTION;
+          +    const TypeId* parameter_types = type_parameters(types, kr ? graph->types[node] : type, &parameters);
+          @@ -6513 +6515 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+          -            const TypeId parameter_type = kr ? type_default_argument_promote(types, type_unqualified(declared_type)) : declared_type;
+          +            const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
+          @@ -6538,6 +6540,2 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+          -<<<<<<< HEAD
+          -            if (!promoted && (type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 && local < writer->local_count)
+          -=======
+          -            if (((type_qualifiers(parameter_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+          -                 type_kind(types, type_strip_aligned(types, parameter_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+          ->>>>>>> 201e520d5be86720907b5019b62571d1e5507c68
+          +            if (!promoted && ((type_qualifiers(declared_type) & BUSTER_TYPE_VOLATILE) != 0 ||
+          +                              type_kind(types, type_strip_aligned(types, declared_type)) == BUSTER_TYPE_KIND_ATOMIC) && local < writer->local_count)
+          @@ -6559 +6557 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+          -            const TypeId incoming_type = type_default_argument_promote(types, type_unqualified(declared_type));
+          +            const TypeId incoming_type = check_input_kr_parameter_type(types, declared_type);
+          diff --git a/src/buster/compiler/c_check_program_test.c b/src/buster/compiler/c_check_program_test.c
+          index 4136268..c28f30f 100644
+          --- a/src/buster/compiler/c_check_program_test.c
+          +++ b/src/buster/compiler/c_check_program_test.c
+          @@ -2945,0 +2946,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
+          +    // _Atomic parameters are not subject to the ordinary parameter promotions. Keep their ABI types and storage
+          +    // padding alongside a promoted ordinary float, and their declared objects addressable for atomic accesses.
+          +    check_test_program_source(test,
+          +        "struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}"
+          +        "int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;"
+          +        "{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}"
+          +        "int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}",
+          +        "kr-atomic-and-promoted-parameters", clang);
+          PATCH
           printf 'beed031df8702c7e4913a7896f658d2c138353a753ff07d6bb76522f23ec1787  %s\n' "$RUNNER_TEMP/issue-659-integrate.patch" | sha256sum -c
           git switch -c issue-659-integrated 66b3b87da2fed441441c7f9df2804f5b8dabc55e
           git config user.name 'github-actions[bot]'
