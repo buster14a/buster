@@ -175,7 +175,7 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     // in preprocessing, avoiding the independently documented cross-stage recovery boundary (#698).
     const char* noted_sources[] =
     {
-        "#define ONE(x) x\n#if ONE(1,2)\n#endif\n#if ONE(1,2)\n#endif\n#if ONE(1,2)\n#endif\n",
+        "#define ONE(x) x\n#if ONE(1,2) + 0\n#endif\n#if ONE(1,2) + 0\n#endif\n#if ONE(1,2) + 0\n#endif\n",
         "#define BAD0(...) __VA_OPT__(\n#define BAD1(...) __VA_OPT__(\n#define BAD2(...) __VA_OPT__(\n",
     };
     const char* noted_limits[] = { NULL, "-ferror-limit=1", "-ferror-limit=0" };
