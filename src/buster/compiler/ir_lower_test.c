@@ -1687,6 +1687,38 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
                                         result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
                              "the indirect jump refused at its entry without allocation", 0, vector);
     }
+    // #148's frame address, which the adapter doesn't lower either: refused at its entry the same way.
+    static const uint8_t frame_kinds[3] =
+    {
+        BUSTER_TYPED_FRAME_ADDRESS,
+        BUSTER_TYPED_DISCARD,
+        BUSTER_TYPED_RETURN
+    };
+    static const uint8_t frame_classes[3] =
+    {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID
+    };
+    static const uint64_t frame_values[3] = { 0 };
+    const Tier0Function frame =
+    {
+        .kinds = frame_kinds,
+        .classes = frame_classes,
+        .values = frame_values,
+        .count = 3,
+    };
+    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    {
+        const uint64_t output_mark = output.length;
+        const uint64_t scratch_mark = scratch.length;
+        IrFunction result = preserved;
+        const IrCheck check = ir_lower_typed_path(&frame, IR_VOID, 1, &output, &scratch, &result, vector != 0);
+        ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_ERROR_OPCODE && check.instruction == 0 &&
+                                        output.length == output_mark && scratch.length == scratch_mark &&
+                                        result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                             "the frame address refused at its entry without allocation", 0, vector);
+    }
     arena_release(&output);
     arena_release(&scratch);
 }

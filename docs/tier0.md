@@ -21,7 +21,8 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Structs and unions passed and returned by value** (#137), in registers, on the stack and through a hidden pointer,
   from #137's locations ("Structs and unions by value", below), and **variadic functions' incoming frames** (#356).
 - **Variable-length arrays:** allocations on the stack (`ALLOCA`) and the stack's position saved and restored
-  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15).
+  (`STACK_SAVE`, `STACK_RESTORE`), in a function with a frame pointer, or in a realigned frame with a base (r15); and
+  the frame's address (`FRAME_ADDRESS`, #148's `__builtin_frame_address(0)`), its frame pointer.
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
   function's address that may be one) and thread-locals by local-exec and initial-exec, from an optional access column.
 - **Long double** (#136's item 8): the x87's 80-bit values, in memory, passed on the stack and returned in st0, and
@@ -145,11 +146,14 @@ table. The kinds are:
 - the stack, for variable-length arrays, each U64 with no value:
   - `ALLOCA` pops a byte count, rounds it up to 16 (to the frame's alignment in a realigned frame, so that rsp keeps
     it), takes it from the stack and pushes the allocation's address, a multiple of 16;
-  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it.
+  - `STACK_SAVE` pushes the stack's position, and `STACK_RESTORE` pops one, releasing what was allocated after it;
+  - `FRAME_ADDRESS` pushes the frame's address, its frame pointer: where the prologue's push saved the caller's rbp,
+    under the return address, as clang -O0's frame has it.
 
   A producer saves the position into a local before a block's first array, and restores it from there at the block's
   end and before every jump out of the arrays' scope (a loop's next iteration is one), as clang does. A return needs
   none: the epilogue releases the frame. That a restored position is an earlier save's is the producer's to keep.
+  `__builtin_alloca` is an `ALLOCA` of its own, which a block's restore releases where clang's `stackrestore` does.
 
 **The checker makes explicit** what C leaves implicit:
 
@@ -597,7 +601,7 @@ the objects' limit):
   the size needs no rounding of its own.
 - **The frame's places** (slots, objects, the call save area, the fixed, deep and memory classes' slots, the incoming
   variadic save area) are rsp's, with no bias (`Tier0Frame.base`).
-- **With entries that move rsp** (`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE`: `Tier0Frame.based`), they are r15's: the
+- **With the stack's entries** (`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`: `Tier0Frame.based`), they are r15's: the
   prologue pushes r15 with the callee-saved registers and sets it to rsp after the `and`, and r15 leaves the depth table
   and the homes. r15 is the table's last register but rbp, so the stack keeps the table's first 13 depths, as a frame
   pointer keeps its first 14 (`tier0_integer_depth_count`); clang takes rbx for its base pointer, which in Tier 0's
@@ -756,7 +760,9 @@ selection:
 - a call's stack arguments still go at rsp: the outgoing area is rounded up to 16 and stays below the allocations, so
   `ALLOCA` is `add r, 15; and r, -16; sub rsp, r; lea r, [rsp + outgoing]` (`mov` without an outgoing area). rsp
   stays a multiple of 16, at every call too;
-- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it;
+- `STACK_SAVE` and `STACK_RESTORE` are a `mov` from rsp and to it, and `FRAME_ADDRESS` a `mov` from rbp. A function
+  whose only stack entry is `FRAME_ADDRESS` takes the same frame as one whose rsp moves: rare enough that a frame of
+  its own (rbp's, its places rsp's) wouldn't pay for its code;
 - the epilogue sets rsp back from rbp (`lea rsp, [rbp - 8 * pushes]`, or `mov rsp, rbp`), past whatever the body
   allocated, before its pops and `pop rbp`.
 
@@ -1122,7 +1128,8 @@ Before the programs, checks of their own:
   fit its class.
 - **stack:**
   - `tier0_validate` must refuse, at the entry, an allocation of another class, with a value or of a U32, a save of
-    another class or with a value, and a restore of another class or with a value, and take a save restored.
+    another class or with a value, a restore of another class or with a value, and a frame's address of another class
+    or with a value, and take a save restored.
   - 14 and 15 integer values at once must compile with a frame pointer and without, by both paths alike: with one,
     the 15th goes to its deep slot (rbp, the table's last depth, is the frame's).
   - a function of the test's own (`tier0_test_stack_entry`) allocates 64 KB and up 1,000 times in a loop, each in a
@@ -1131,6 +1138,11 @@ Before the programs, checks of their own:
     the position restored. Without its restores it would take 64 MB of stack. Both paths must compile it alike, with
     `push rbp` in its prologue, and it must run in a child on eight inputs with the interpreter's result and the
     expected one.
+- **frame address** (`tier0_test_frame_address`): a function of `FRAME_ADDRESS` alone must compile by both paths
+  alike, with a frame pointer and a `mov` from rbp; then a callee that returns the word its frame address points at
+  (the rbp its push saved) and an entry that compares it with its own frame address, takes its frame address again
+  after an allocation (which moves rsp, not rbp) and checks the allocation below it, both functions with frame
+  pointers, run in a child on eight inputs against the expected results (the interpreter has no frame to model).
 - **labels** (#133's labels as values, `tier0_label_test.c`):
   - `tier0_validate` must refuse, at the entry, an indirect jump to an I64, of class I64, with a value, with a value left
     under it and in a function without labels, a label past the end, the labels' count without their entries and a

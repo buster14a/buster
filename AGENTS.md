@@ -5428,9 +5428,11 @@ operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
 which both paths read for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
-`ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
+`ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`, a frame pointer's 14 integer
 depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
-scope of its own, around calls with stack arguments, run natively; and the
+scope of its own, around calls with stack arguments, run natively; the frame's
+address (#148): a callee's saved rbp its caller's `FRAME_ADDRESS`, unmoved by an
+allocation, run natively; and the
 aggregates at locations written by hand, 13 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
 SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
@@ -5519,7 +5521,7 @@ Every kind (NONE, X86 and one past the kinds among them) of every class after
 no operand, one or two of every class, with values at its kind's bounds and
 past them, in a function of every kind of local, direct and indirect calls,
 a result object, a long double result, the access column and a label, with
-and without the memory classes (559,200 streams); joins of `?:` and `&&` at
+and without the memory classes (562,944 streams); joins of `?:` and `&&` at
 depths and across blocks, loops, values at the end; values carried across
 64-entry blocks at every depth to 40, calls spanning blocks, the limits, and
 more than 128 locals and calls (the gathers); each stream with its columns
