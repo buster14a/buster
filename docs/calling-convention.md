@@ -1805,6 +1805,17 @@ finisher. It checks both char modes, all supported widths, reserved holes,
 zero/small prefixes, capacities below and around 64, rejected widths/capacities,
 poisoned padding/tails and the first derived type's unchanged scheduling.
 
+The [frozen #442 record](https://github.com/buster14a/buster-performance/tree/d8adf0e6e8cd7eb0c33f49c3df03fced471cb0e7/docs/measurements/builtin-abi-init-442-2026-10-28)
+compares `73b6ba60` with `e7f89091` on the locked 9700X: repeated 64-row
+initialization takes 486.55–503.23 ns before and 18.18–19.42 ns after, excluding
+allocation, type construction and the rest of compilation. The local ELF has
+five 2,752-byte copies, 13,760 bytes of read-only data in total. This trades
+repeated computation for static data and a maintained projection/oracle pair.
+The whole-process controls establish neither a general CLI speedup nor neutral
+equivalence; their mismatched local screens and first-image faults are retained.
+These frozen results do not qualify later main compositions or a demand-driven
+classifier.
+
 Natural typed-column strides and explicit counts/capacities apply;
 assignment's masked tails do not require caller padding. Its padded internal
 scratch is private; scratch allocation failure uses the exact scalar path.
