@@ -5453,14 +5453,14 @@ under a store of their class); and the stack: `tier0_validate`'s rules for
 `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE`, a frame pointer's 14 integer
 depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
 scope of its own, around calls with stack arguments, run natively; and the
-aggregates at locations written by hand, 13 fixtures (each kind of general and
+aggregates at locations written by hand, 14 fixtures (each kind of general and
 XMM part, the high eightbyte alone in each kind of register and on the stack,
-SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
+the low eightbyte alone of a larger one on the stack, SPLIT both ways, an ignored one, aggregates on the stack whole, in place and
 misaligned, and results in each kind and order of register, short ones, a
 vector and through a hidden pointer), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
-copy their parameters out; and `tier0_validate` refusing 57 breaks of their
+copy their parameters out; and `tier0_validate` refusing 61 breaks of their
 rules, as both paths do (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, and registers outside
