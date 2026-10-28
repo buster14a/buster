@@ -816,6 +816,10 @@ arenas. Popping a context gives its tokens back when they are on top.
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
   with clang's values (unsigned with `-funsigned-char`: "The `-f` options").
+  A name left before `(` is diagnosed at that name as Clang 23's undefined
+  function-like macro, including disabled recursive names and short-circuited
+  operands. Names alone still become zero; numeric and parenthesized values
+  followed by `(` retain the invalid-binary-operator diagnostic (#706).
   A line is copied to `pp->arguments` (64 tokens at a time, but for a line of
   up to three) and expanded through a barrier and a capture. A line whose
   expansion would only write its tokens into the capture is expanded straight
@@ -1733,6 +1737,21 @@ scoped to each inclusion. Source bytes, definition locations and scratch
 spellings remain alive for the whole unit. Source excerpts and carets are not
 implemented.
 
+The renderer assembles one diagnostic, its include stack and all expansion or
+definition notes in a 2 KiB stack buffer, growing into temporary scratch only
+for longer text (#636). It publishes the complete bytes with one `fwrite` to
+`PPOptions.diagnostics`, or `stderr` by default. It changes no stream buffering
+mode and retains the existing diagnostic/output ordering. Scratch exhaustion
+flushes the complete prefix and resumes direct printing, preserving the full
+message rather than truncating it. Rendering follows the required note order;
+the optimization removes the per-piece system calls without changing how
+source locations and note identities are computed.
+
+[The frozen #636 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-636/target)
+compares `60ff4b25` with `bc1b4861` on the locked 9700X, with exact bytes,
+file/pipe write counts and diagnostic-heavy compile timings. These numbers
+describe those revisions, rather than a timing qualification of later ports.
+
 `test-preprocessor --clang` compares 36 original diagnostic fixtures with
 Clang, including preprocessor failures and calls to the later-token renderer.
 It checks object/function expansions, arguments, nested and cross-context
@@ -1747,6 +1766,9 @@ scalar/vector history tables.
 Separate checks cover guarded input tails, maximal runs across split copies,
 batched lookups, generated-input lifetimes, growth of all eight initial slices,
 and recording-on/off token equality.
+The diagnostic buffer checks compare 135 combinations of buffer/message sizes
+against independent piecewise printing, including boundary lengths, repeated
+growth, unavailable scratch and bytes written before and after the diagnostic.
 
 `benchmark-preprocessor --history-cost [options] file...` interleaves the same
 vectorized preprocessor with recording enabled and with the history deferred
@@ -2113,6 +2135,22 @@ buffer, written with `fwrite` as it fills, in three steps:
    with branches only for line markers (which `-P` doesn't print), a run of
    blank lines, and spellings longer than 64 bytes.
 
+For `-P`, a batch whose spellings each have 1–64 bytes and which has no pragma
+end or streamed `#embed` computes all output offsets first (#649). Two
+32-word SIMD prefix sums include each spelling and its optional single gap
+byte. The resulting copy addresses are independent; a batch needs at most
+4,160 bytes and is flushed as a whole when necessary. Loads and stores remain
+masked to each spelling's logical length, including a final partial batch.
+Marker output and exceptional batches use the existing per-token route. No
+new output metadata is retained by the preprocessor, and the spelling and
+separation rules are unchanged.
+
+[The frozen #649 record](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-649/target)
+compares `123d22ae` with `bc1b4861` on the locked 9700X. Its printing and
+whole-process results measure `-E -P` on identical frozen input trees; they do
+not establish ordinary `-c` throughput or the timing of later ports. The
+retrospective interference audit excludes the extra reversed main phase pair.
+
 Line markers count lines from the last marked token in the same file
 (`pp_print_line`), not through `pp_line_of`'s per-file cursor and column scan.
 The scalar printer, `pp_print_scalar`, writes a token at a time through stdio.
@@ -2120,6 +2158,13 @@ The two give the same bytes on every test. A variant whose first step had no
 branch on the kind (it looked up both spellings and picked one) was 1–2%
 slower in an A/B: the location lookups it adds for identifiers cost more than
 the mispredictions it saves.
+
+`test-preprocessor` checks every 0–64-token prefix size with guarded input and
+output tails, arbitrary inactive gap bits, and zero/64/65/large lengths. Full
+printer fixtures move a pragma end through all 64 alignments, continue into
+ordinary batches, cross the 1 MiB output buffer, and compare marker and `-P`
+bytes with the independent scalar printer. Long literals, line splices,
+trigraphs, UCNs, generated numbers and embeds cover the exceptional handoffs.
 
 ## The oracle
 

@@ -2060,9 +2060,11 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 }
 
 #include "c_check_program_batch_test.c"
+#include "c_check_literal_table_test.c"
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_source(test,
