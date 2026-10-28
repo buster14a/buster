@@ -149,7 +149,7 @@ static void check_x86_diagnostic_expression(CheckX86DiagnosticWalk* walk, uint32
         if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
             !program->input->static_objects[value.object - 1])
         {
-            const uint32_t selected = program->initializers != NULL ? program->initializers->declaration_plans[value.object - 1] : 0;
+            const uint32_t selected = program->initializers != NULL ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
             if (selected == 0 || selected > program->initializers->count)
             {
                 check_program_fail(program, CHECK_PROGRAM_INVALID, value.object - 1);

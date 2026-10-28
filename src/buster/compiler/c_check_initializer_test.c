@@ -328,6 +328,16 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
         check_test_expect(test, checked == accept, description);
         if (checked)
         {
+            uint32_t cursor = 0;
+            bool indexed = true;
+            for (uint32_t token = 0; indexed && token <= initializers.token_count; token += 1)
+            {
+                const bool present = cursor < initializers.count && initializers.declaration_tokens[cursor] == token;
+                indexed = check_initializers_plan_index(&initializers, token) == (present ? cursor + 1 : 0);
+                cursor += present;
+            }
+            check_test_expect(test, indexed && cursor == initializers.count && check_initializers_plan_index(&initializers, UINT32_MAX) == 0,
+                              "compact initializer lookup equals a source-order merge for every token and both absent ends");
             check_init_test_overload_parts(test, &input, &stream, &parser, &identifiers, &types.table, &initializers, source, clang);
             for (uint32_t i = 0; i < initializers.count; i += 1)
             {
@@ -1164,8 +1174,42 @@ static void check_init_test_vectors(CheckTest* test, const char* clang)
     }
 }
 
+static void check_init_test_index(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mapping = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool valid = mapping != MAP_FAILED && page >= 129 * sizeof(uint32_t);
+    if (valid)
+    {
+        valid = mprotect(mapping + page, page, PROT_NONE) == 0;
+    }
+    for (uint32_t count = 0; valid && count <= 129; count += 1)
+    {
+        uint32_t* tokens = (uint32_t*)(mapping + page) - count;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            tokens[i] = i * 3 + 1;
+        }
+        const CheckInitializers initializers = { .declaration_tokens = tokens, .count = count };
+        uint32_t cursor = 0;
+        for (uint32_t token = 0; valid && token < 400; token += 1)
+        {
+            const bool present = cursor < count && tokens[cursor] == token;
+            valid = check_initializers_plan_index(&initializers, token) == (present ? cursor + 1 : 0);
+            cursor += present;
+        }
+        valid = valid && cursor == count && check_initializers_plan_index(&initializers, UINT32_MAX) == 0;
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, page * 2);
+    }
+    check_test_expect(test, valid, "initializer lookup matches a merge for 0..129 plans with an unreadable tail, missing keys and UINT32_MAX");
+}
+
 static __attribute__((noinline)) void check_test_initializers(CheckTest* test, const char* clang)
 {
+    check_init_test_index(test);
     check_init_test_overload_constraints(test, clang);
     static const char overloads[] =
         "#define O __attribute__((overloadable))\n"
