@@ -713,6 +713,8 @@ static void check_builtin_bit_cast_test_pages(CheckBuiltinBitCastTest* test, Typ
     }
 }
 
+#define BUSTER_BIT_CAST_TEST_STRINGIFY_(value) #value
+#define BUSTER_BIT_CAST_TEST_STRINGIFY(value) BUSTER_BIT_CAST_TEST_STRINGIFY_(value)
 static void check_builtin_bit_cast_test_clang(CheckBuiltinBitCastTest* test, const char* clang)
 {
     static const struct
@@ -721,7 +723,8 @@ static void check_builtin_bit_cast_test_clang(CheckBuiltinBitCastTest* test, con
         bool rejected;
     } cases[] =
     {
-        { "_Static_assert(__clang_major__==23 && __clang_minor__==1 && __clang_patchlevel__==1, \"exact oracle\");\n", false },
+        { "_Static_assert(__clang_major__==" BUSTER_BIT_CAST_TEST_STRINGIFY(__clang_major__) " && __clang_minor__==" BUSTER_BIT_CAST_TEST_STRINGIFY(__clang_minor__)
+          " && __clang_patchlevel__==" BUSTER_BIT_CAST_TEST_STRINGIFY(__clang_patchlevel__) ", \"exact oracle\");\n", false },
         { "enum { A=__builtin_bit_cast(unsigned int,-1) };\n_Static_assert(A==0xffffffffu, \"GNU folded integer\");\n_Static_assert(__builtin_bit_cast(int,0x80000000u)==(-2147483647-1), \"signed bits\");\n", false },
         { "int x=__builtin_choose_expr(__builtin_bit_cast(unsigned,1u),1,0);\n", true },
         { "int x=__builtin_choose_expr(__builtin_bit_cast(unsigned,1.0f),1,0);\n", true },
@@ -787,6 +790,9 @@ static void check_builtin_bit_cast_test_clang(CheckBuiltinBitCastTest* test, con
         rmdir(directory);
     }
 }
+
+#undef BUSTER_BIT_CAST_TEST_STRINGIFY
+#undef BUSTER_BIT_CAST_TEST_STRINGIFY_
 
 static int run_check_builtin_bit_cast_tests(int argc, char** argv)
 {

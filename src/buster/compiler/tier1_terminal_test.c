@@ -158,6 +158,7 @@ static bool tier1_terminal_dominance(Tier1EmitTest* test, const IrFunction* func
 static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shape, const IrFunction* function, Tier1EmitResult* emitted, Tier1TerminalObserved* observed, uint8_t* mapping)
 {
     Tier1SelectCode* code = &emitted->code;
+    bool native = tier1_emit_test_native(test, code->records, code->count);
     const bool calls = shape >= TIER1_TERMINAL_RETURNING_HELPER;
     const bool sink = shape >= TIER1_TERMINAL_SINK;
     const uint32_t last = function->instruction_count - 1;
@@ -255,6 +256,7 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
         };
         helper[1].immediate = 1;
         const uint32_t count = BUSTER_ARRAY_LENGTH(helper);
+        native &= tier1_emit_test_native(test, helper, count);
         const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         ready = helper_capacity <= BUSTER_TIER1_TERMINAL_CODE_BYTES - BUSTER_TIER1_TERMINAL_HELPER_OFFSET && x86_target_validate(test->allowed, helper, count) == count;
         const int64_t helper_length = ready ? x86_encode(helper, count, mapping + BUSTER_TIER1_TERMINAL_HELPER_OFFSET, helper_capacity, 0, 0) : -1;
@@ -298,7 +300,7 @@ static uint8_t* tier1_terminal_load(Tier1EmitTest* test, Tier1TerminalShape shap
     free(scalar_ends);
     free(ends);
     free(offsets);
-    return ready ? mapping : 0;
+    return ready && native ? mapping : 0;
 }
 
 static void tier1_terminal_execute(Tier1EmitTest* test, Tier1TerminalShape shape, const IrFunction* function, Tier1EmitResult* emitted)

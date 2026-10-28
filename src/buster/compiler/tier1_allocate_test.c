@@ -169,7 +169,9 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
             tier1_allocation_test_expect(tally, vector.vector_intervals + vector.scalar_intervals == count, "fallback accounting");
             if (sparse)
             {
-                tier1_allocation_test_expect(tally, vector.spill_count == 0 && vector.vector_intervals == count, "pressure-fitting reuse chains");
+                tier1_allocation_test_expect(tally, vector.spill_count == 0 &&
+                                                    vector.vector_intervals == (BUSTER_HOST_VECTOR ? count : 0) &&
+                                                    vector.scalar_intervals == (BUSTER_HOST_VECTOR ? 0 : count), "pressure-fitting reuse chains");
             }
         }
         arena_pop_to(arena, saved);
@@ -362,7 +364,9 @@ static void tier1_allocation_test_fixed_sparse(Tier1AllocationTestTally* tally, 
         },
     };
     Tier1Allocation output = { 0 };
-    valid = valid && tier1_allocate(&input, arena, &output) == TIER1_ALLOCATION_OK && output.vector_intervals == count && output.spill_count == 0 && output.fragment_count == count;
+    valid = valid && tier1_allocate(&input, arena, &output) == TIER1_ALLOCATION_OK &&
+            output.vector_intervals == (BUSTER_HOST_VECTOR ? count : 0) && output.scalar_intervals == (BUSTER_HOST_VECTOR ? 0 : count) &&
+            output.spill_count == 0 && output.fragment_count == count;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         valid = output.value_registers[i] == 0 && output.starts[i] == starts[i] && output.ends[i] == ends[i];

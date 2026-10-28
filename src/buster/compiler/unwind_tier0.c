@@ -299,9 +299,15 @@ static UnwindError unwind_tier0_build(const Tier0Code* code, const uint32_t* fin
     return error;
 }
 
+static UnwindError unwind_tier0_scalar(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output);
+
 static UnwindError unwind_tier0(const Tier0Code* code, const uint32_t* final_offsets, uint32_t size, UnwindFunction* output)
 {
+#if !BUSTER_HOST_VECTOR
+    return unwind_tier0_scalar(code, final_offsets, size, output);
+#else
     return unwind_tier0_build(code, final_offsets, size, output, false);
+#endif
 }
 
 // Whether a record is a push or a pop (`form`) of `reg`.

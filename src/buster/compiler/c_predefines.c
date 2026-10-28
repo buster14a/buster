@@ -41,7 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <cpuid.h>
-#include <immintrin.h>
+#include "host_isa.h"
 #include "buster/compiler/x86_target.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -722,9 +722,19 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
 #define BUSTER_PREDEFINES_SSP_ON 2 // -fstack-protector
 #define BUSTER_PREDEFINES_SSP_STRONG 3 // -fstack-protector-strong
 #define BUSTER_PREDEFINES_SSP_ALL 4 // -fstack-protector-all
-// This clang's default: the distribution's build turns on -fstack-protector-strong (clang -dM -E defines
-// __SSP_STRONG__ with no option), and -fstack-protector takes the stronger of it and its own level.
+// Clang distributions can enable stack protection by default. The build uses
+// that Clang without an explicit stack-protector option, so its predefined
+// macro records the driver's default. Explicit -fstack-protector takes the
+// stronger of the driver's default and its own level.
+#if defined(__SSP_ALL__)
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_ALL
+#elif defined(__SSP_STRONG__)
 #define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_STRONG
+#elif defined(__SSP__)
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_ON
+#else
+#define BUSTER_PREDEFINES_SSP_DEFAULT BUSTER_PREDEFINES_SSP_OFF
+#endif
 
 #define BUSTER_PREDEFINES_ON 1 // A -fX / -fno-X pair's last: -fX.
 #define BUSTER_PREDEFINES_OFF 2 // -fno-X.
@@ -886,7 +896,8 @@ struct PredefinesOptions
     uint64_t sanitizers;
     uint64_t ubsan_feature_ignored;
     bool sanitize_coverage;
-    // -target's or --target='s triple (predefines_target_valid), or null for clang's default, x86_64-pc-linux-gnu.
+    // -target's or --target='s triple (predefines_target_valid), or null for the build Clang's configured default
+    // (BUSTER_CLANG_DEFAULT_TARGET, x86_64-pc-linux-gnu when a direct build leaves it undefined).
     const char* target;
     // The options clang's driver reads only the last of, which predefines_finish checks (-march's CPU and -mtune are
     // above): the last -mfpmath=, -mcmodel=, -mabi= and -fveclib= value (null for none); the last -O, -fgnuc-version=
@@ -1497,15 +1508,23 @@ static bool predefines_target_valid(const char* triple)
     return rest != 0 && (strcmp(rest, "linux-gnu") == 0 || (vendor_end != 0 && strcmp(vendor_end + 1, "linux-gnu") == 0));
 }
 
+// build.sh records the build Clang driver's default triple. Direct builds without that definition retain the
+// historical default; an explicit target always overrides it.
+#ifndef BUSTER_CLANG_DEFAULT_TARGET
+#define BUSTER_CLANG_DEFAULT_TARGET "x86_64-pc-linux-gnu"
+#endif
+
 // The target triple's vendor name, as clang's __is_target_vendor reads it: the -target's ("unknown" when it names none)
-// or clang's default triple's, x86_64-pc-linux-gnu. *length gets its length.
+// or the build Clang's default triple's. *length gets its length.
 static const char* predefines_target_vendor(const PredefinesOptions* options, uint32_t* length)
 {
-    const char* rest = options->target != 0 ? strchr(options->target, '-') + 1 : 0;
+    const char* target = options->target != 0 ? options->target : BUSTER_CLANG_DEFAULT_TARGET;
+    const char* separator = strchr(target, '-');
+    const char* rest = separator != 0 ? separator + 1 : 0;
     const char* vendor_end = rest != 0 ? strchr(rest, '-') : 0;
-    const bool named = rest != 0 && strcmp(rest, "linux-gnu") != 0 && vendor_end != rest;
-    *length = rest == 0 ? 2 : named ? (uint32_t)(vendor_end - rest) : 7;
-    return rest == 0 ? "pc" : named ? rest : "unknown";
+    const bool named = rest != 0 && vendor_end != 0 && strcmp(rest, "linux-gnu") != 0 && vendor_end != rest;
+    *length = named ? (uint32_t)(vendor_end - rest) : 7;
+    return named ? rest : "unknown";
 }
 
 // The target triple as clang's driver normalizes it (a missing or empty vendor is "unknown"), for its messages.
