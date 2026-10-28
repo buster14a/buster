@@ -395,7 +395,7 @@ static bool x86_match_supported(const X86FormDescription* form)
     {
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(sse); i += 1)
         {
-            allowed |= strcmp(name + 1, sse[i]) == 0;
+            allowed |= name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vzeroupper") == 0;
     }
@@ -404,7 +404,7 @@ static bool x86_match_supported(const X86FormDescription* form)
         // 512-bit floating arithmetic/moves and dword integer arithmetic are AVX-512F. No implicit VL/BW/DQ.
         for (uint32_t i = 0; i < 14; i += 1)
         {
-            allowed |= i != 4 && i != 5 && strcmp(name + 1, sse[i]) == 0;
+            allowed |= i != 4 && i != 5 && name[1] == sse[i][0] && strcmp(name + 1, sse[i]) == 0;
         }
         allowed |= strcmp(name, "vpaddd") == 0 || strcmp(name, "vpsubd") == 0 || strcmp(name, "vpxord") == 0;
         allowed |= strcmp(name, "vmovdqa32") == 0 || strcmp(name, "vmovdqu32") == 0 || strcmp(name, "vmovdqa64") == 0 || strcmp(name, "vmovdqu64") == 0;
@@ -429,11 +429,24 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     x86_target_forms(target, index->allowed);
     bool admitted[BUSTER_X86_FORM_LEGACY_MODES];
     uint16_t buckets[BUSTER_X86_FORM_LEGACY_MODES];
+    const X86FormDescription* previous = 0;
+    bool supported = false;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
         uint8_t roles[4];
-        admitted[f] = index->allowed[f] && x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4;
+        admitted[f] = false;
+        if (index->allowed[f])
+        {
+            // Reuse only identical syntax inputs; keep this key in step with x86_match_supported.
+            // Different spelling pointers recompute, even when their string contents are equal.
+            if (previous == 0 || previous->mnemonic != form->mnemonic || previous->family != form->family || previous->vector_length != form->vector_length || previous->encoding != form->encoding || previous->reg != form->reg || previous->rm != form->rm || previous->syntax != form->syntax)
+            {
+                supported = x86_match_supported(form);
+                previous = form;
+            }
+            admitted[f] = supported && x86_match_roles(form->syntax, roles) <= 4;
+        }
         if (admitted[f])
         {
             const String8 name = x86_match_canonical((String8){.pointer = (char*)form->mnemonic, .length = strlen(form->mnemonic)});
@@ -451,11 +464,11 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
     memcpy(cursors, index->begin, sizeof(cursors));
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
-        const X86FormDescription* form = &x86_form_descriptions[f];
-        uint8_t roles[4];
-        const uint32_t count = x86_match_roles(form->syntax, roles);
         if (admitted[f])
         {
+            const X86FormDescription* form = &x86_form_descriptions[f];
+            uint8_t roles[4];
+            const uint32_t count = x86_match_roles(form->syntax, roles);
             const uint32_t at = cursors[buckets[f]]++;
             index->forms[at] = f;
             index->counts[at] = count;
@@ -778,13 +791,13 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                     memory_width = form->operand_bytes;
                 }
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-                // The indexed builder has already crossed the complete x86_validate boundary. The scalar API
-                // would run that same validation a second time merely to get this length.
-                const int64_t length = vectorized ? encode_one(&instruction, bytes, X86_ENCODER_MODE_64) : x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
+                // Both candidate builders have crossed the complete x86_validate boundary. The scalar API would
+                // repeat that validation merely to get this length; no record changes between the two boundaries.
+                const uint32_t length = encode_one(&instruction, bytes, X86_ENCODER_MODE_64);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
                 // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
-                const uint32_t chosen = result.instruction.form & BUSTER_X86_FORM_NUMBER;
-                const uint32_t number = instruction.form & BUSTER_X86_FORM_NUMBER;
+                const uint32_t chosen = (uint32_t)(x86_form_description(result.instruction.form) - x86_form_descriptions);
+                const uint32_t number = (uint32_t)(x86_form_description(instruction.form) - x86_form_descriptions);
                 const bool movq = (chosen == X86_FORM_MOVQ_X_RM64 || chosen == X86_FORM_MOVQ_RM64_X) && (number == X86_FORM_MOVQ_X_XM64 || number == X86_FORM_MOVQ_XM64_X);
                 if (length > 0 && (!result.found || length < result.length || (length == result.length && movq)))
                 {

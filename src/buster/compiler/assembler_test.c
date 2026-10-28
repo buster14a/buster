@@ -99,6 +99,14 @@ static const char asm_test_function[] =
     ".section .rodata\n.balign 8\n.type bias,@object\n"
     "bias: .quad 3\n.size bias, 8\n";
 
+// High bases or XMM registers make both movq encodings equally long; segment offsets must not hide their row.
+static const char asm_test_segmented_movq[] =
+    "segmented_movq:\n"
+    "movq %fs:(%r8),%xmm0\nmovq %gs:(%r8),%xmm0\n"
+    "movq %fs:(%rax),%xmm8\nmovq %gs:(%rax),%xmm8\n"
+    "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
+    "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
+
 static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
 {
     // GAS appends relaxed branch relocations after ones made during parsing. ELF permits that order; the shared
@@ -576,6 +584,7 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
         (__int128)UINT64_MAX + 1,
         (__int128)INT64_MIN - 1,
     };
+    uint32_t length_checks = 0;
     for (uint32_t f = 0; f < BUSTER_X86_FORM_LEGACY_MODES; f += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[f];
@@ -654,9 +663,20 @@ static void asm_test_matcher(AsmTest* test, uint64_t* random)
                 const X86Match vector = x86_match(test->index, &request, true);
                 const bool same = scalar.found == vector.found && scalar.ambiguous == vector.ambiguous && (!scalar.found || (scalar.length == vector.length && memcmp(&scalar.instruction, &vector.instruction, sizeof(X86Instruction)) == 0));
                 asm_test_check(test, same, "catalogue matcher scalar/vector operands and selected bytes", form->mnemonic);
+                if (scalar.found)
+                {
+                    uint8_t checked[BUSTER_X86_ENCODER_CAPACITY(1)];
+                    uint8_t direct[BUSTER_X86_ENCODER_CAPACITY(1)];
+                    const int64_t checked_length = x86_encode_scalar(&scalar.instruction, 1, checked, sizeof(checked), 0, 0);
+                    const uint32_t direct_length = encode_one(&scalar.instruction, direct, X86_ENCODER_MODE_64);
+                    const bool identical = checked_length > 0 && checked_length == scalar.length && direct_length == scalar.length && direct_length <= BUSTER_X86_MAX_INSTRUCTION_BYTES && memcmp(checked, direct, direct_length) == 0;
+                    asm_test_check(test, identical, "validated matcher length and bytes against checked scalar encoder", form->mnemonic);
+                    length_checks += 1;
+                }
             }
         }
     }
+    asm_test_check(test, length_checks != 0, "catalogue matcher checked-length coverage", "supported forms");
 }
 
 static void asm_test_targets(AsmTest* test)
@@ -668,7 +688,7 @@ static void asm_test_targets(AsmTest* test)
         const X86FormDescription* form = &x86_form_descriptions[f];
         if (x86_match_supported(form) && x86_match_roles(form->syntax, roles) <= 4)
         {
-            asm_test_check(test, x86_target_requirements[f] != 0, "matched form has ISA metadata", form->mnemonic);
+            asm_test_check(test, x86_target_requirement(f) != 0, "matched form has ISA metadata", form->mnemonic);
         }
     }
     const X86Target native = x86_target_native();
@@ -836,6 +856,7 @@ static void asm_test_code(AsmTest* test)
                              "movq $5, 8(%rax)\nfstpt 176(%r12)\nfldt (%rax)\nfstpl 8(%rsp)\nflds 4(%rsp)\nrep movsb\nrep stosq\nrepe cmpsb\nrepnz scasw\n"
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
+    asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
     const AsmCode intel = asm_test_code_pair(test, ".intel_syntax noprefix\nvmovdqu64 zmm0, zmmword ptr [rdi + 192]\nvmovdqa64 zmmword ptr [rdi], zmm15\n"
                                                    "push qword ptr [rdi + 128]\npop qword ptr [rdi + 128]\njmp qword ptr [rip + target]\nrep movsb\n.att_syntax prefix\n",
                                              6, "inline code: naked functions' Intel instructions");
@@ -1365,6 +1386,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        ".intel_syntax noprefix\nvmovdqu64 zmm0,zmmword ptr [rdi+192]\nvmovdqu64 zmmword ptr [rdi+1152],zmm15\n"
                                        "vmovdqa64 zmm1,zmmword ptr [rax]\nvmovdqa64 zmmword ptr [rsp],zmm2\nvmovdqu64 zmm3,zmm4\npush qword ptr [rdi+128]\n"
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
+                asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(reviewed); i += 1)
                 {
                     asm_test_oracle(&test, reviewed[i], directory, 0);

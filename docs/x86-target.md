@@ -44,7 +44,7 @@ a CPU-dispatch mechanism or a promise of support for other compiler hosts.
 Target macros come from that same resolution, without invoking another
 compiler. `test-x86-target` compares the complete preamble with Clang 23 for all
 six target choices, alongside the existing language/optimization configurations
-(22 option sets total), and `test-preprocessor --clang` for every CPU and switch. Only `__BUSTER__` and the three Clang patch-version
+(26 option sets total), and `test-preprocessor --clang` for every CPU and switch. Only `__BUSTER__` and the three Clang patch-version
 macros are excluded from comparison. The preprocessor also queries the explicit
 `x86_target_builtins` table for target-sensitive `__has_builtin` answers. Its
 eleven names are compared with Clang at every target. This extends the existing
@@ -55,9 +55,30 @@ builtin lowering (#148).
 
 Include `x86_target_forms.c` after the encoder and build a byte table with
 `x86_target_forms(&target, allowed)`, where `allowed` has `X86_FORM_COUNT` bytes.
-It visits eight contiguous feature-mask rows at once, using AVX-512 on the host;
+It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host;
 `x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates.
+
+`x86_target_rows.c` is the single source for immutable policy data. The vector
+builder reads the compact32 table (33,408 bytes). The independent scalar
+reference keeps all 64 feature bits densely for 1,667 classified rows (13,336
+bytes), with their form indices (3,334 bytes). It clears all 8,352 output bytes
+then checks those complete requirements directly. Its loop stays scalar to
+avoid widening and extracting indices for byte stores.
+
+A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
+canonical dense slot plus one. Zero means unknown, and the bounded query returns
+zero for out-of-range forms. Forward/inverse/requirement/projection checks cover
+every form; independent named-form expectations and external ISA checks remain.
+The four arrays contain 66,782 payload bytes before alignment, replacing 116,894
+bytes of sparse64, compact32 and dense-reference data. A new requirement outside
+the 32-bit projection or without the classified marker fails at compile time.
+
+The executable's main units share these arrays through the frontend's existing
+hidden policy-data home; standalone inclusions stay static. Kernels read them
+directly, with no initialization, allocation or mutable state. Both builders
+capture the target feature word before any output write, preserving tested
+target/output overlap and exact unknown-form denial.
 
 The assembler builds its mnemonic index for one target, excluding ineligible
 forms before either matching path runs. Its syntax subset remains separate:
@@ -65,6 +86,27 @@ ISA support does not imply that the frontend understands every encoding. Its
 final resolved records pass `x86_target_validate` at the external-input
 boundary. Tests cover every indexed form, all six profiles, `.S` macro-driven
 instruction choices, option order and independent tuning.
+Initialization reuses syntax results only when the spelling pointer, family,
+vector length, encoding, register class, r/m class and syntax are identical, and computes operand roles only for
+admitted rows. ISA filtering and final record validation still apply per form.
+The canonical policy retains #565's baseline string instructions and 512-bit
+quadword moves; the latter require AVX512F, independently of AVX512DQ.
+
+Default64 initialization builds base and FS entries, copies FS entries to GS,
+and patches the optional segment byte in both byte halves. Layout and fallback
+decisions are identical; the direct builder is retained when the expected prefix
+location changes. Other modes and fixup copies keep their existing construction.
+The backend selection/native test compares all 50,112 default64 entries, including segment variants
+and fixups, with direct per-form construction. Frozen before/after comparisons
+cover the complete bytes of all five modes.
+
+The default64 full-store encoder stages its final one-to-fifteen-record tail
+in an inlined source helper. Tails of one to four records use one quad; longer
+tails keep the existing computation, using only one- and four-quad source paths. It returns
+the final byte count and takes the fixup cursor by value; no further encoding
+follows that result. Actual stack retention and spills are checked in compiled
+code and measurements. Full groups, other modes and alternative gather/store
+paths keep their behavior, as do record format, bytes, offsets/fixups and capacity.
 
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,
@@ -73,9 +115,13 @@ the encoder before operand validation, as for its existing validator. Use this
 at external-input boundaries and in every selector test; the trusted encoder
 and branch-sizing loops retain their existing contract.
 
-The requirement table is deliberately explicit and incomplete. It starts with
-the assembler's admitted forms, common scalar integer/control/SSE2 forms and representative v2, BMI/BMI2, AVX,
-AVX2, FMA, AVX-512 and mask-move families. A zero row means **unclassified and
+The requirement table is explicit. It covers the current Tier 0 templates and
+generated deferred/ABI/frame records, including scalar SSE compares, XMM integer
+moves and exchanges; baseline locked arithmetic/bit/atomic operations; x87
+arithmetic, conversions and state operations; SSE3/SSSE3 families and bounded
+SSE4 operations; scalar AVX moves, arithmetic and conversions; and the FMA
+families in VEX and EVEX. `FISTTP` requires SSE3 even though its encoding uses
+x87 registers. A zero row means **unclassified and
 unavailable**, including on `native`; it never means baseline. A newly added
 form therefore cannot silently become eligible. The table is not a claim that
 all of the encoder's catalogue has been classified. Extend it, with independent
@@ -96,6 +142,52 @@ Run each through `EXCLUSIVE_OWNER=... ~/buster-fast-bench/exclusive.sh` on the
 9700X. Tests cover synthetic CPUID/OS state, bounded target names, invalid
 options, all 65,536 encoded form values at six targets, random valid operands
 for every admitted form, scalar/vector table identity and protected page edges.
+They also cover every subset of each distinct requirement mask, each profile
+with each individual feature removed, and first-failure rejection for every
+form at all six profiles. Every raw feature bit alone, reserved target bits,
+unaligned output sentinels and every compact-row round trip are checked too.
+These kernel checks use the requirement table as
+their scalar specification; independent named-form expectations and GNU as's
+architecture gate establish instruction legality. The assembler oracle checks
+every classified form at baseline/v2/v3/v4/Zen 5 and with individual features
+removed, including FMA and AVX512VL/BW/DQ. An unavailable tool, malformed input,
+unknown architecture or unexpected diagnostic fails the oracle.
+GNU as 2.47 has one explicitly reported coverage gap: its dual FMA/AVX512F
+templates accept the 144 packed EVEX XMM/YMM FMA forms with AVX512VL disabled.
+Those cases remain denied by the policy and covered by independent F|VL
+minimal-feature negatives; they are counted separately from external assembler
+comparisons. If a later assembler rejects them, they follow the normal comparison.
+
+`test-x86-target` runs policy, profile and preprocessor checks in the frontend
+unit, with that unit's encoder and preprocessor state. The separate
+`test-x86-target-selection` command runs selector and native-emission fixtures
+in the backend unit, with its encoder and selector state. Each command reaches
+one copy of mutable state, and policy checks can run independently of selectors.
+
+Both matcher paths validate a candidate before encoding it to choose the
+shortest instruction. The scalar matcher does not repeat that same validation
+inside a length-only call. Catalogue tests compare its length and every emitted
+byte with the checked scalar encoder, alongside malformed operands and ISA
+rejection checks.
+
+The policy command compares every matcher's admitted form with the uncached
+syntax predicate and scalar ISA policy over all six profiles, every individual
+feature removal and an all-feature target. These checks have no selector dependency.
+
+`test-x86-target-selection` replays the existing Tier 1 selector and native-emission
+fixtures at baseline/v3/v4, with both covers and both allocation paths. Its
+policy-owned Tier 0 consumer checks every compiled template and generated
+records from both paths, including floating values, calls, aggregate objects,
+indirect/TLS accesses and dynamic frames. The selector fixtures and their command stay in the
+backend translation unit, reaching only one copy of mutable encoder state. These are bounded selector tests, separate
+from full source/corpus acceptance.
+
+Target feature macros are compared with both Clang and GCC for all six profiles,
+including live `native`; compiler-specific macro differences are recorded
+explicitly. GCC 16.2.1 has no `__INVPCID__` or `__RDPRU__` macro, and its named
+`znver5` omits `__SHSTK__`, which its native resolver reports on the 9700X.
+Those macro differences do not remove the actual target capabilities. Full
+predefined-preamble equality remains a Clang contract.
 The benchmark checks table equality before reporting 21 interleaved medians
 for building a whole table, including the scalar source as optimized by Clang.
 `--only scalar|avx512` isolates one path. `--after-predefines MS` emits target
@@ -108,7 +200,12 @@ Compare several independent processes under the lock; a single interleaved
 run does not establish both power states.
 This is configuration work, not an end-to-end compiler speed claim.
 
-## 9700X measurements
+## Historical 9700X measurements
+
+The following 2026-10-21 results describe the earlier 64-bit vector table.
+The compact-table and matcher follow-up is recorded separately with exact
+revisions and qualification status in
+[the optimization campaign](https://github.com/buster14a/buster-performance/tree/codex/180-isa-policy-20261025/docs/measurements/isa-policy-180-optimization-2026-10-26).
 
 Measured on 2026-10-21 UTC with Clang 23.1.1, `build.sh`'s `-O3 -march=native`
 and CPU 2 of the Ryzen 7 9700X, taking the shared lock separately for each
@@ -146,13 +243,21 @@ taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100
 
 ## Remaining acceptance for #180
 
-Tier 0 #136 and Tier 1 #141 have not yet supplied instruction selection on main.
-They must consume this target, extend the requirement table for their emitted
-families, choose legal alternative sequences and run the record check on every
-test. Full builtin availability/lowering remains #148, and per-function target
-attributes remain #147. The c-testsuite and SQLite runs at baseline/v3/v4 need
-the unfinished compiler pipeline (#145/#146). This change does not discharge
-those acceptance items or close #180.
+Tier 0 and the bounded Tier 1 selectors are on main. Tier 1 takes the shared
+eligibility table and refuses denied forms before publishing records; its native
+consumer checks frame/spill records as well. Tier 0's current templates use
+baseline instructions. Its implementation and source driver still need the
+configured target at a final validation boundary, and every Tier 0-owned test
+must adopt the check as families grow. The independent policy test audits the
+current output but does not add that production guard. This integration stays
+with #136/#133; the existing interface and handoff are recorded on
+[#136](https://github.com/buster14a/buster/issues/136#issuecomment-6395663929).
+
+Selectors must choose legal alternative sequences when they adopt optional
+instructions, and extend the explicit requirements with independent negative
+tests. Full target-sensitive builtin lowering remains #148, and per-function
+target attributes remain #147. Complete c-testsuite and SQLite acceptance at
+baseline/v3/v4 remains #145/#146. The bounded policy work does not close #180.
 
 ## Sources and reproduction
 
