@@ -455,7 +455,51 @@ a fraction of these counts: 256 tokens a lane, whatever the top level, read
 every unit of the warm grid (measured on 2 and 8 lanes alone) within +0.0% of
 one lane and forgo 14.9 points, where the rule forgoes 45.
 
-BEFORE_AFTER_TABLE
+Then the rule against main's, each on eight lanes against one lane in the same
+process, on this change merged with main (`54a3b6da`) against that main
+(`cd9c5c9b`), the medians of five rounds (their lowest and highest in
+parentheses), and the readings on eight lanes in nanoseconds per token (the
+record's campaign B2; its campaign B, three rounds of the same comparison on
+the hand-off's base, main `43030b89`, gives every unit the same lanes, its
+medians within 1.7 points of these):
+
+| Unit | Main's lanes | The rule's | Main's rule, 8 against 1 | The rule, 8 against 1 | Main's on 8 | The rule's on 8 |
+| --- | ---: | ---: | --- | --- | ---: | ---: |
+| `00213.c` (5 bodies) | 1 | 1 | +0.0% (−3.4 to +3.5) | +0.1% (−1.8 to +0.3) | 206.15 | 204.01 |
+| `00200.c` (2: 20,420 tokens and 30) | 1 | 1 | +0.3% (−0.3 to +0.9) | +0.5% (−1.1 to +1.2) | 55.07 | 54.81 |
+| `00182.c` (11) | 1 | 1 | −0.2% (−0.5 to +0.3) | +0.2% (−0.6 to +0.8) | 69.33 | 67.87 |
+| `00204.c` (108) | 1 | 2 | +0.4% (−0.4 to +0.5) | −3.3% (−4.6 to −2.5) | 72.94 | 70.35 |
+| `sqlite3.c` (2,608) | 8 | 8 | −14.0% (−14.2 to −13.9) | −15.0% (−15.3 to −14.6) | 82.74 | 81.51 |
+| sixteen bodies of 265 tokens, no headers | 1 | 4 | +0.1% (−1.1 to +0.8) | −9.9% (−10.6 to −8.7) | 60.12 | 54.50 |
+| sixteen of 993, no headers | 2 | 8 | −9.5% (−10.3 to −6.8) | −12.7% (−17.0 to −12.2) | 43.10 | 41.38 |
+| sixteen of 265 | 1 | 2 | +0.1% (+0.0 to +0.2) | +0.9% (+0.7 to +1.7) | 62.90 | 63.21 |
+| sixteen of 993 | 2 | 5 | −0.4% (−2.5 to +1.1) | −3.9% (−4.4 to −3.2) | 57.06 | 54.96 |
+| sixteen of 4,009 | 5 | 8 | −7.7% (−8.3 to −7.2) | −10.9% (−11.5 to −10.5) | 54.50 | 52.47 |
+| sixteen of 993, thirty headers | 2 | 2 | −0.2% (−0.8 to +0.7) | −0.1% (−1.7 to +0.5) | 68.16 | 67.36 |
+| sixty-four of 161 | 1 | 3 | −0.0% (−0.1 to +0.2) | −3.4% (−5.8 to −2.7) | 57.31 | 55.10 |
+| two of 12,485 | 1 | 1 | +0.5% (−0.6 to +0.7) | +0.3% (−0.3 to +0.8) | 56.75 | 56.26 |
+| one of 19,973 beside fifteen of 265 | 1 | 2 | +0.8% (+0.3 to +3.4) | −1.4% (−2.0 to −0.0) | 57.52 | 55.94 |
+| one of 19,973 beside fifteen of 993 | 1 | 5 | +0.6% (−0.4 to +1.1) | −6.3% (−6.8 to −5.6) | 59.08 | 55.21 |
+| one of 19,973 beside fifteen of 1,981 | 1 | 8 | +0.3% (−0.5 to +1.3) | −8.1% (−9.1 to −7.4) | 60.77 | 55.48 |
+| one of 24,965 and one of 12,485 | 1 | 4 | −0.1% (−0.8 to +1.3) | −2.9% (−3.9 to −2.7) | 58.29 | 56.53 |
+
+Of all 43 units, the rule gives 28 more lanes than main's rule and none fewer:
+on them, its eight lanes read −14.1 to +0.9% against one lane, where main's
+rule read them −10.5 to +1.2%, and 3.9% faster than main's eight lanes (the
+median; −9.3 to +0.5%). The three it reads slower on two lanes than on one,
+by +0.3 to +0.9% (sixteen bodies of 265 tokens after three headers the most),
+are within what the same work reads apart: the units both rules read on one
+lane, whose two readings are the same work, came within −3.4 to +3.5% of each
+other in a round. On c-testsuite's 220 programs (three rounds, campaign CT2), the
+rule reads every program on one lane, as main's does, but `00204.c` (two lanes,
+−2.8%); the two readings of the others, the same work, came within −0.7 to
++0.6% of each other on the 61 programs of 1,000 tokens or more (a standard
+deviation of 0.24%), −0.8 to +3.0% on the 27 of 100 to 999 (0.72%) and −2.0 to
++2.6% on the 131 under 100 (0.84%). Its readings on one lane take less time
+than main's, 4.1% (the median) of those under 50 µs and 1.4% of those of 200
+µs to 1 ms: a lane's arenas are one mapping, reserved with one `mmap` and one
+`madvise`, where main's lane made five `mmap`s and ten `madvise`s, though
+builds differ by about 2% for their code's placement alone.
 
 #### #448's rule
 
