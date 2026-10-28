@@ -64,6 +64,13 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },
     { "loop-placement", "void f(int n) {\n#pragma unroll\n n = 1; }\n", false },
     { "loop-conflict-control-error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n while(n--) { L:; L:; } }\n", false },
+    // #619: a unit with #pragma clang section is source order's (its settings and conflicts read the walk's declarations in
+    // order), as is one whose body has a section attribute (a lane refuses its section event); #pragma clang optimize
+    // changes nothing a body's reading does, at the top level or in a body.
+    { "section-pragma", "#pragma clang section text = \".x\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\nint g(void) { return 2; }\n", false },
+    { "section-attribute-in-a-body", "int f(void) { static int s __attribute__((section(\".x\"))) = 1; return s; }\nint g(void) { return 2; }\n", false },
+    { "optimize-pragma", "#pragma clang optimize off\nint f(void) { return 1; }\n#pragma clang optimize on\nint g(void) { return 2; }\n", true },
+    { "optimize-pragma-in-a-body", "int f(void) {\n#pragma clang optimize off\n return 1; }\nint g(void) { return 2; }\n", true },
     // The issue's three: a later declaration and a later completion aren't seen by an earlier body, and an
     // initializer's enumerator is.
     { "later-declaration", "int f(void) { return later; }\nint later = 7;\n", true },
