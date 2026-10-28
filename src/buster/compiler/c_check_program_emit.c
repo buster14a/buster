@@ -778,7 +778,11 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
 {
     (void)scalar;
     const CheckInput* input = program->input;
-    memset(defined, 0, (uint64_t)program->object_count + 1);
+    // Only symbols' objects are consumed below or by the linker's external-name collection.
+    for (uint32_t s = 0; s < program->symbol_count; s += 1)
+    {
+        defined[program->symbol_objects[s]] = 0;
+    }
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         defined[program->bodies[b].object] = 1;
@@ -786,13 +790,12 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
         const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_nonzero(input->defined, first, input->token_count) |
-                                        check_input_scan_nonzero(input->tentative, first, input->token_count);
+                                        check_input_scan_nonzero(input->static_objects, first, input->token_count);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
             const uint32_t object = input->objects[token];
-            if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+            if (input->static_objects[token] && input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
                 (input->defined[token] || input->tentative[token]))
             {
                 defined[object] = 1;
@@ -1076,20 +1079,29 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const uint64_t attributes_mark = scratch->length;
     uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
     valid = valid && alignments != 0 && symbol_names != 0 && retained_objects != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
-    const uint32_t declared_count = valid ? check_program_declaring(program->input->declarations, 0, 0, program->input->token_count, declared, BUSTER_SCALAR_PATH(scalar)) : 0;
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
         memset(symbol_names, 0, ((uint64_t)program->symbol_count + 1) * sizeof(String8));
-        memset(retained_objects, 0, program->object_count);
-        // Of the declaring tokens, those with attributes, which are all the passes below act on: their attributes read
-        // once, and the rest of each token's columns only for these (#592).
+        // Find attribute pointers first, eight at a time, then keep the declaring tokens. This avoids reading every
+        // declaration's attributes and keeps parameters' retain/alias obligations as well as static declarations'.
         uint32_t attributed = 0;
-        for (uint32_t d = 0; d < declared_count; d += 1)
+        for (uint32_t first = 0; first < program->input->token_count; first += 8)
         {
-            const uint32_t token = declared[d];
-            declared[attributed] = token;
-            attributed += program->input->attributes[token] != 0;
+            const uint32_t lanes = check_input_asm_attributed(program->input, first, program->input->token_count, scalar);
+            for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+                if (program->input->declarations[token] == token && program->input->attributes[token] != NULL)
+                {
+                    declared[attributed++] = token;
+                    const uint32_t object = program->input->objects[token];
+                    if (object != 0 && object < program->object_count)
+                    {
+                        retained_objects[object] = 0;
+                    }
+                }
+            }
         }
         for (uint32_t d = 0; d < attributed; d += 1)
         {
