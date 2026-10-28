@@ -902,6 +902,7 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         oracle,
         object,
         "-lm",
+        "-latomic",
         "-o",
         executable,
         0,

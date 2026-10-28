@@ -77,7 +77,7 @@ static void check_builtin_atomic_c11_one(TypeTable* table, const CheckBuiltinAto
     else
     {
         output->runtime_builtin = check_builtin_atomic_c11_runtime(id);
-        output->action.value = (CheckValue){.type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT};
+        output->action.value = (CheckValue){.type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = lock_free ? 0 : BUSTER_CHECK_SIDE_EFFECT};
         output->evaluated_operands = (1u << count) - 1;
         output->compiler_barrier = !lock_free;
         for (uint32_t i = 0; i < count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
@@ -194,8 +194,16 @@ static void check_builtin_atomic_c11_one(TypeTable* table, const CheckBuiltinAto
             }
         }
     }
-    output->action.value.constant_kind = CHECK_CONSTANT_NONE;
+    const bool constant_query = lock_free && output->action.diagnostic == CHECK_DIAG_NONE && values[0].constant_kind == CHECK_CONSTANT_INTEGER &&
+                                values[0].fault == CHECK_FAULT_NONE && values[0].integer <= 8 &&
+                                (values[0].integer == 0 || (values[0].integer & (values[0].integer - 1)) == 0);
+    output->action.value.constant_kind = constant_query ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
+    output->action.value.integer = constant_query;
     output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL);
+    if (constant_query && (values[0].flags & BUSTER_CHECK_ICE) != 0)
+    {
+        output->action.value.flags |= BUSTER_CHECK_ICE;
+    }
 }
 
 #endif

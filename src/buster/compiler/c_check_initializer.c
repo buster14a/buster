@@ -1728,6 +1728,7 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    const TypeId destination = selected->type;
     CheckInitSelection value_selection = *selected;
     if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
     {
@@ -1807,7 +1808,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         {
             CheckAction action = {
                 .op = CHECK_OP_INITIALIZE,
-                .type = selected->type,
+                .type = destination,
                 .node = node,
                 .extensions = check_init_extensions(walker, token),
             };
@@ -2161,7 +2162,11 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .scratch = scratch,
             .result = result,
         };
-        const TypeId value = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC ? type_conversion_operand(types, type) : type;
+        const TypeId plain = type_conversion_operand(types, type);
+        const uint8_t kind = type_kind(types, plain);
+        const bool atomic_record = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC &&
+                                   (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_COMPLEX);
+        const TypeId value = atomic_record ? plain : type;
         valid = check_init_walk(&walker, value, begin, end);
     }
     if (scratch != 0)

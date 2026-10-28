@@ -397,6 +397,34 @@ bits, so a signaling NaN keeps its payload, as the x87's `fabs` keeps it.
 
 ## Atomic and terminal helper calls
 
+`c_check_builtin_atomic_c11.c` supplies the C11 `__c11_atomic_*` family used by
+both `<stdatomic.h>` implementations. Its pointer must address `_Atomic(T)`;
+load removes the atomic wrapper, writes reject const objects, compare-exchange
+takes a pointer to plain `T`, and pointer fetch-add/sub scales by the pointee's
+stride. Init and the weak/strong forms retain their source arities. Every source
+argument, including dynamic orders, is evaluated once. Constant lock-free
+queries for zero and 1/2/4/8 bytes retain Clang's integer-constant-expression
+proof; other sizes use the runtime query.
+
+The C11 scalar forms use the existing GNU raw-bit leaves. Small record and
+complex representations use those same leaves through an owned byte buffer,
+including zeroed atomic storage padding. Other widths or insufficient alignment
+use libatomic's generic size-and-pointer load, store, exchange and compare-exchange
+ABI. Objects wider than eight bytes therefore require `-latomic` when linked;
+this implementation does not advertise a lock-free 16-byte path. The ordinary
+value representation limits still apply to `_Float16`, `_Float128` and arbitrary
+`_BitInt` values.
+
+`c_check_program_atomic.c` also lowers ordinary `_Atomic` lvalue reads, assignment,
+compound assignments and increments. Accesses use sequential consistency;
+compound updates snapshot the address and RHS before a compare-exchange loop,
+including an owned copy of a complex RHS. Failed attempts refresh the expected
+representation without reevaluating source operands. Integer promotions,
+pointer strides, prefix/postfix results, complex arithmetic and 128-bit division
+reuse the ordinary lowering's type and runtime contracts. Atomic locals remain
+addressable, and static-data emission retains the atomic storage size/alignment
+separately from its unwrapped value type.
+
 `c_check_builtin_atomic.c` checks the corpus-driven scalar `load_n`, `store_n`,
 sync fence and atomic thread/signal-fence slice. It retains actual object and
 value types, qualifiers, all argument effects, ordinary `int` order conversions,
@@ -404,7 +432,7 @@ and known/dynamic order metadata. Orders do not generally require ICE. Invalid
 known load/store orders carry warnings; fence handling retains its own rules.
 GNU `_Atomic` wrappers and unsupported families are not treated as ordinary
 integer objects. Read/modify/write checking and runtime leaves are separate
-modules described below; other recognized atomic/sync families remain
+modules described below; other recognized GNU atomic/sync families remain
 explicit refusals.
 The source-domain rules follow the approved Clang 23.1.1 release: real and
 floating-complex `_n` objects are valid, while direct x87 long double and

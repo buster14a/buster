@@ -2612,8 +2612,16 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                         const TypeId value = type_conversion_operand(program->types, object);
                         if (check_action_kind(program->types, value) == BUSTER_TYPE_KIND_POINTER)
                         {
+                            const uint64_t stride = check_lower_stride(writer, value);
                             check_lower_instruction(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
-                            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, type_size(program->types, type_element(program->types, value)));
+                            if (stride == 0)
+                            {
+                                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_SIZE, .type = type_element(program->types, value) });
+                            }
+                            else
+                            {
+                                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, stride);
+                            }
                         }
                     }
                     check_lower_operand(writer, node, source + 3, false, checked);

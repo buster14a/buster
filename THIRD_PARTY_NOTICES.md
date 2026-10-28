@@ -17,6 +17,13 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The C11 atomic adapter (`c_check_builtin_atomic_c11.c`), object lowering
+(`c_check_program_atomic.c`) and the added semantic, native and static-data
+fixtures (#671) are original project material under the default terms. Exact
+Clang/LLVM `llvmorg-23.1.1` Sema and code-generation sources supply behavioral
+facts; Clang and system libatomic run externally as oracles/runtime consumers.
+No external implementation, corpus fixture or generated data is incorporated.
+
 The aggregate return control-flow walk, warning handling and original fixtures
 in `c_check_program.c`, `c_check_program_test.c` and
 `c_check_return_driver_test.c` (#670) use the project default terms. Clang is

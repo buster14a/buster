@@ -288,10 +288,17 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
         }
         if (pointer)
         {
-            const uint64_t stride = type_size(writer->program->types, type_element(writer->program->types, plan->value_type));
+            const uint64_t stride = check_lower_stride(writer, plan->value_type);
             if (stride != 1)
             {
-                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, stride);
+                if (stride == 0)
+                {
+                    check_lower_vla_size(writer, type_element(writer->program->types, plan->value_type), BUSTER_TYPED_CLASS_I64);
+                }
+                else
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, stride);
+                }
                 check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_I64, 0);
             }
             if (subtract)
@@ -333,7 +340,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         if (small)
         {
             const uint64_t bytes = (uint64_t)source->integer;
-            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, bytes != 0 && (bytes & (bytes - 1)) == 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U8, bytes == 0 || (bytes & (bytes - 1)) == 0);
         }
         else
         {
@@ -516,9 +523,20 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
                                      ? check_lower_complex_target(writer, own, converted)
                                      : converted;
             plan->arguments[1] = check_lower_temporary(writer, check_lower_value_class(writer, plan->operand_type));
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_value_class(writer, plan->operand_type),
-                                    plan->arguments[1]);
-            check_lower_operand(writer, node, 1, false, plan->operand_type);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_value_class(writer, plan->operand_type), plan->arguments[1]);
+            if (check_lower_complex(writer, plan->operand_type))
+            {
+                const uint32_t snapshot = check_lower_object(writer, type_size(types, plan->operand_type), type_alignment_log2(types, plan->operand_type));
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, snapshot);
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, plan->operand_type),
+                                                        .volatile_copy = check_lower_copy_node_volatile(writer, graph->operand1[node], plan->operand_type) });
+                check_lower_operand(writer, node, 1, false, plan->operand_type);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, snapshot);
+            }
+            else
+            {
+                check_lower_operand(writer, node, 1, false, plan->operand_type);
+            }
         }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->address);
         check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_EXPRESSION, .node = target, .address = true});

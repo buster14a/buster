@@ -128,6 +128,32 @@ static void check_test_program_atomic_sources(CheckTest* test, const char* clang
             "f=(float)n+0.5f;h=fold(h,(unsigned)(f+=1.5f));h=fold(h,(unsigned)(f*=2.0f));"
             "for(int i=0;i<4;i++){a[i]=n+i;h=fold(h,(unsigned)++a[i]);}return (int)h;}",
         },
+        {
+            "atomic-representation-classes",
+            "struct Tiny{unsigned char a,b,c;};struct Big{unsigned long a,b,c;};"
+            "static _Atomic(struct Tiny) tiny=(struct Tiny){1,2,3};static _Atomic(struct Big) big;"
+            "static _Atomic(unsigned __int128) wide;static _Atomic long double extended;static _Atomic(_Complex double) z;"
+            "static _Atomic double real;static _Atomic _Bool bit;"
+            "struct __attribute__((packed)) Packed{char tag;_Atomic short x;};static struct Packed packed;"
+            "_Static_assert(__c11_atomic_is_lock_free(0),\"zero size query\");"
+            "_Static_assert(__c11_atomic_is_lock_free(4),\"native word query\");"
+            "static int parameter(_Atomic int x){x+=2;return x;}"
+            "int tested(int n){unsigned h=2166136261u;struct Tiny a={(unsigned char)n,5,7},b={(unsigned char)(n+1),9,10};"
+            "tiny=a;a=tiny;h=fold(h,a.a+a.b*3u+a.c*11u);a=__c11_atomic_exchange(&tiny,b,5);h=fold(h,a.a+a.b*13u);"
+            "a=b;h=fold(h,__c11_atomic_compare_exchange_strong(&tiny,&a,b,5,5));a.a=99;"
+            "h=fold(h,__c11_atomic_compare_exchange_weak(&tiny,&a,b,5,0));h=fold(h,a.a+a.c*17u);"
+            "struct Big first={(unsigned)n,7,8},second={9,(unsigned)n,10};__c11_atomic_init(&big,first);"
+            "second=__c11_atomic_exchange(&big,second,5);h=fold(h,second.a+second.b*19+second.c*23);"
+            "wide=((unsigned __int128)(unsigned)n<<80)+123;h=fold(h,(unsigned)__c11_atomic_fetch_add(&wide,31,5));"
+            "h=fold(h,(unsigned)++wide);wide/=3;wide%=17;h=fold(h,(unsigned)wide);"
+            "extended=(long double)n+0.5L;h=fold(h,(unsigned)(int)(extended+=2.5L));"
+            "h=fold(h,(unsigned)(int)__c11_atomic_exchange(&extended,(long double)n*2.0L,5));"
+            "volatile _Complex double rhs=2.0+1.0i;z=(double)n+2.0i;z+=rhs;z*=rhs;_Complex double q=z;"
+            "h=fold(h,(unsigned)(int)(__real__ q*13+__imag__ q*7));real=n;real+=rhs;h=fold(h,(unsigned)(int)real);"
+            "packed.x=(short)n;h=fold(h,(unsigned)__c11_atomic_fetch_add(&packed.x,1,5));h=fold(h,(unsigned)packed.x);"
+            "bit=0;for(int i=0;i<300;i++){h=fold(h,__c11_atomic_fetch_add(&bit,1,5));}h=fold(h,bit);"
+            "h=fold(h,__c11_atomic_is_lock_free(0));h=fold(h,__c11_atomic_is_lock_free(4));h=fold(h,(unsigned)parameter(n));return (int)h;}",
+        },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(programs); i += 1)
     {
