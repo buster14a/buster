@@ -348,7 +348,12 @@ static void foreign_order_test_program(const char* directory, Arena* arena, Fore
         foreign_test_archive(directory, "fo_expanded.a", expanded, BUSTER_ARRAY_LENGTH(expanded), false, arena),
     };
     String8 reference = { 0 };
-    uint32_t original_id = UINT32_MAX;
+    uint32_t* original_ids = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_FOREIGN_ORDER_TEST_SYMBOLS);
+    foreign_test_expect(tally, original_ids != 0, "retain each fixed-spelling name ID for the perturbation witness", 0);
+    for (uint32_t i = 0; original_ids != 0 && i < BUSTER_FOREIGN_ORDER_TEST_SYMBOLS; i += 1)
+    {
+        original_ids[i] = UINT32_MAX;
+    }
     uint32_t original_partitions = 0;
     bool changed_id = false;
     bool changed_partitions = false;
@@ -362,7 +367,7 @@ static void foreign_order_test_program(const char* directory, Arena* arena, Fore
             dynamic ? archives[archive] : 0,
         };
         ForeignCommand command = { 0 };
-        const bool ready = archives[archive] != 0 && foreign_test_command(&command, arguments, dynamic ? 4 : 3, arena);
+        const bool ready = original_ids != 0 && archives[archive] != 0 && foreign_test_command(&command, arguments, dynamic ? 4 : 3, arena);
         foreign_test_expect(tally, ready, "prepare foreign-order command", 0);
         for (uint32_t t = 0; ready && t < BUSTER_ARRAY_LENGTH(targets); t += 1)
         {
@@ -389,10 +394,15 @@ static void foreign_order_test_program(const char* directory, Arena* arena, Fore
                     if (linked)
                     {
                         foreign_test_expect(tally, foreign_order_test_symbols(&foreign, &converted, arena), "globals follow first object record, then library-only records", detail);
-                        const uint32_t id = foreign_test_name(&foreign, "fo_number");
-                        original_id = original_id == UINT32_MAX ? id : original_id;
+                        for (uint32_t i = 0; i < BUSTER_FOREIGN_ORDER_TEST_SYMBOLS; i += 1)
+                        {
+                            char spelling[32];
+                            snprintf(spelling, sizeof(spelling), "fo_data_%u", i);
+                            const uint32_t id = foreign_test_name(&foreign, spelling);
+                            original_ids[i] = original_ids[i] == UINT32_MAX ? id : original_ids[i];
+                            changed_id = changed_id || original_ids[i] != id;
+                        }
                         original_partitions = original_partitions == 0 ? foreign.partition_count : original_partitions;
-                        changed_id = changed_id || original_id != id;
                         changed_partitions = changed_partitions || original_partitions != foreign.partition_count;
                         SymbolId* ids = BUSTER_ARENA_PUSH_ARRAY(arena, SymbolId, converted.link.symbols.count);
                         ExecutableSymbols symbols = {
@@ -441,7 +451,7 @@ static void foreign_order_test_program(const char* directory, Arena* arena, Fore
             }
         }
     }
-    foreign_test_expect(tally, changed_id && changed_partitions, "property matrix actually changes hash partitions and name IDs", 0);
+    foreign_test_expect(tally, changed_id && changed_partitions, "property matrix actually changes hash partitions and name IDs", dynamic ? "PIE" : "static");
     arena_pop_to(arena, saved);
 }
 
