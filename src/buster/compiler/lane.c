@@ -28,8 +28,8 @@
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index, lane_range,
-//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, lane_take, lane_alone
-//     and lane_restore.
+//     lane_range_by_cost, range_part, range_part_by_cost, lane_part_count, lane_parts_by_cost, parts_by_cost, lane_take,
+//     lane_alone and lane_restore.
 //   - Starting lanes: lane_team_start and lane_team_stop own a command's fixed threads; lane_run dispatches a whole
 //     operation to them, and lane_team_keep_scratch has them keep their scratch arenas from one to the next. Without a
 //     team, lane_run starts and joins a fresh group, as the cold-start benchmark needs.
@@ -416,10 +416,11 @@ static __attribute__((unused)) Range64 range_part_by_cost(const uint64_t* cost_p
 static __attribute__((unused)) uint64_t lane_part_count(uint64_t count);
 // Cuts [0, count) by cost into lane_part_count(count) parts, as range_part_by_cost cuts, and returns how many. The
 // parts are contiguous and in canonical order: part i is [boundaries[i], boundaries[i + 1]), and boundaries gets
-// parts + 1 values. order gets the parts in the order to take them: by decreasing cost, to within a factor of two (the
-// cost's bit width), ties in index order. Every lane calls it with the same boundaries, which the lanes fill together
-// and which is read-only once it returns, and with an order of its own, which every lane fills alike. Like lane_sync,
-// it waits for every lane, so it can be the sync that starts a phase. A loop over the parts:
+// parts + 1 values. order gets the parts in the order to take them: the costliest first (the first of them on a tie),
+// then the others by decreasing cost, to within a factor of two (the cost's bit width), ties in index order. Every lane
+// calls it with the same boundaries, which the lanes fill together and which is read-only once it returns, and with an
+// order of its own, which every lane fills alike. Like lane_sync, it waits for every lane, so it can be the sync that
+// starts a phase. A loop over the parts:
 //
 //     const uint64_t parts = lane_parts_by_cost(cost_prefix, count, boundaries, order);
 //     for (uint64_t taken = lane_take(parts); taken < parts; taken = lane_take(parts))
@@ -428,6 +429,11 @@ static __attribute__((unused)) uint64_t lane_part_count(uint64_t count);
 //         ... the items from boundaries[part] to boundaries[part + 1] ...
 //     }
 static __attribute__((unused)) uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
+// lane_parts_by_cost's parts and order for a group of `lanes` lanes (BUSTER_LANE_MAX_COUNT for more, as no group has
+// more), made by the calling thread alone, and how many: for a phase cut before its lanes start, whose lanes then take
+// the parts with no sync before their first take (c_check_deferred.c's first lane reads the costliest part while the
+// others wake). The lanes read boundaries and order as lane_run's dispatch publishes them.
+static __attribute__((unused)) uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the group's lanes, and `parts` or more
 // once they are all taken. Every lane of the group takes until it gets `parts` or more, and then no more until the
 // lanes have synced: the last take of the loop resets the counter for the next one.
@@ -662,40 +668,37 @@ static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count)
     return range_part_by_cost(cost_prefix, count, thread_context.lane.index, thread_context.lane.count);
 }
 
-static uint64_t lane_part_count(uint64_t count)
+// lane_part_count for a group of `lanes` lanes.
+static uint64_t lane_part_count_for(uint64_t count, uint64_t lanes)
 {
-    const uint64_t lanes = thread_context.lane.count;
     const uint64_t parts = lanes == 1 ? 1 : BUSTER_LANE_PARTS_PER_LANE * lanes;
     return count < parts ? count : parts;
 }
 
-// The lanes find the boundaries together, a range of them each, with one binary search per boundary. Then each lane
-// orders the parts with a counting sort by bucket, which keeps index order within a bucket. A part's cost is the prefix
-// at its end less the prefix at the last part's end, so finding the buckets reads the prefix sums once per part.
-static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order)
+static uint64_t lane_part_count(uint64_t count)
 {
-    const uint64_t parts = lane_part_count(count);
+    return lane_part_count_for(count, thread_context.lane.count);
+}
+
+// Part i's boundary, the first item of `parts` parts cut by cost (range_part_by_cost's begin), and `count` for i == parts.
+static uint64_t lane_part_boundary(const uint64_t* cost_prefix, uint64_t count, uint64_t i, uint64_t parts)
+{
     const bool costless = count == 0 || cost_prefix[count - 1] == 0;
-    const Range64 mine = lane_range(parts + 1);
-    for (uint64_t i = mine.begin; i < mine.end; i += 1)
-    {
-        if (i == parts)
-        {
-            boundaries[i] = count;
-        }
-        else if (costless)
-        {
-            boundaries[i] = range_part(count, i, parts).begin;
-        }
-        else
-        {
-            boundaries[i] = i == 0 ? 0 : lane_cost_boundary(cost_prefix, count, i, parts);
-        }
-    }
-    lane_sync();
+    return i == parts ? count : costless ? range_part(count, i, parts).begin : i == 0 ? 0 : lane_cost_boundary(cost_prefix, count, i, parts);
+}
+
+// The parts' order to take them in, from their boundaries: a counting sort by bucket, which keeps index order within a
+// bucket, after the costliest part, which it finds in the same pass: a bucket's costs differ by up to a factor of two,
+// and a caller may give the costliest part to a lane of its choosing (c_check_deferred.c gives it to the first lane,
+// which runs fastest). A part's cost is the prefix at its end less the prefix at the last part's end, so finding the
+// buckets reads the prefix sums once per part.
+static void lane_parts_order(const uint64_t* cost_prefix, const uint64_t* boundaries, uint64_t parts, uint32_t* order)
+{
     uint8_t buckets[BUSTER_LANE_MAX_PARTS];
     uint64_t next[BUSTER_LANE_COST_BUCKETS] = { 0 };
     uint64_t before = 0;
+    uint64_t costliest = 0;
+    uint64_t most = 0;
     for (uint64_t part = 0; part < parts; part += 1)
     {
         const uint64_t end = boundaries[part + 1];
@@ -704,9 +707,18 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
         const uint32_t bucket = cost == 0 ? BUSTER_LANE_COST_BUCKETS - 1 : (uint32_t)__builtin_clzll(cost);
         buckets[part] = (uint8_t)bucket;
         next[bucket] += 1;
+        costliest = cost > most ? part : costliest;
+        most = cost > most ? cost : most;
         before = after;
     }
+    // The costliest part takes the first place, and its bucket counts it no more.
     uint64_t offset = 0;
+    if (parts != 0)
+    {
+        order[0] = (uint32_t)costliest;
+        next[buckets[costliest]] -= 1;
+        offset = 1;
+    }
     for (uint32_t bucket = 0; bucket < BUSTER_LANE_COST_BUCKETS; bucket += 1)
     {
         const uint64_t in_bucket = next[bucket];
@@ -715,9 +727,36 @@ static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, 
     }
     for (uint64_t part = 0; part < parts; part += 1)
     {
-        order[next[buckets[part]]] = (uint32_t)part;
-        next[buckets[part]] += 1;
+        // The costliest part writes its own first place again, and leaves its bucket's next place to the others.
+        const bool first = part == costliest;
+        order[first ? 0 : next[buckets[part]]] = (uint32_t)part;
+        next[buckets[part]] += !first;
     }
+}
+
+// The lanes find the boundaries together, a range of them each, with one binary search per boundary. Then each lane
+// orders the parts (lane_parts_order).
+static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order)
+{
+    const uint64_t parts = lane_part_count(count);
+    const Range64 mine = lane_range(parts + 1);
+    for (uint64_t i = mine.begin; i < mine.end; i += 1)
+    {
+        boundaries[i] = lane_part_boundary(cost_prefix, count, i, parts);
+    }
+    lane_sync();
+    lane_parts_order(cost_prefix, boundaries, parts, order);
+    return parts;
+}
+
+static uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order)
+{
+    const uint64_t parts = lane_part_count_for(count, lanes < BUSTER_LANE_MAX_COUNT ? lanes : BUSTER_LANE_MAX_COUNT);
+    for (uint64_t i = 0; i <= parts; i += 1)
+    {
+        boundaries[i] = lane_part_boundary(cost_prefix, count, i, parts);
+    }
+    lane_parts_order(cost_prefix, boundaries, parts, order);
     return parts;
 }
 
@@ -727,7 +766,8 @@ static uint64_t lane_take(uint64_t parts)
     uint64_t result = 0;
     if (lane.count > 1)
     {
-        // The data the parts are made of was published by the sync before the loop, so the take orders nothing else.
+        // The data the parts are made of was published by the sync before the loop, or by lane_run's dispatch for parts
+        // cut before it (parts_by_cost), so the take orders nothing else.
         result = __atomic_fetch_add(&lane.group->taken, 1, __ATOMIC_RELAXED);
         // Each lane's last take gets `parts` or more, so a loop makes parts + count takes in all, and the one that gets
         // the last number is the loop's last. The next loop's takes come after a sync, which this store precedes.

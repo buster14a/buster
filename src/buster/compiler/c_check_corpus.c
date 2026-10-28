@@ -507,6 +507,8 @@ static void check_corpus_late_diagnostics(CheckCorpusPath* path, const Parser* p
 
 static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, Preprocessor* pp, bool scalar)
 {
+    (void)scalar;
+
     path->repair = BUSTER_ARENA_PUSH_ARRAY(&path->prefix_arena, CheckRepair, 1);
     bool ready = path->repair != NULL;
     if (ready)
@@ -571,7 +573,7 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
             {
                 const CheckOptions options =
                 {
-                    .scalar = scalar,
+                    .scalar = BUSTER_SCALAR_PATH(scalar),
                 };
                 result->checked = check_graph_run(&result->types, &result->input.graph, &result->output_arena, &result->scratch, &options, &result->stream);
                 result->checked = result->checked && check_input_packed_finalize(&result->input, &repair->parser, &result->types, &result->stream, &result->scratch);
@@ -621,20 +623,43 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
 // test-checker-deferred: without check_corpus_deferred_every_lane, the reader's own rule of how many lanes; with
 // check_corpus_deferred_fail_merge, the deferred reader's merge fails after its replay; with
 // check_corpus_deferred_fail_state, the allocation of its state fails, as one that runs out of room does; with
-// check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); and with
-// check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests may also
-// supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team.
+// check_corpus_deferred_hold_lanes, its first lane takes every part (CheckDeferred.hold_lanes); with
+// check_corpus_deferred_late_first, its first lane starts once every other lane has taken (CheckDeferred.late_first);
+// and with check_corpus_deferred_timing, it times its phases and what its lanes cost (CheckDeferred.timing); the tests
+// may also supply check_corpus_deferred_cpus to check one-lane context isolation from a pinned team. With
+// check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
+// what it wrote, or with check_corpus_deferred_poison every byte it pushed poisoned (check_deferred_poison), and the
+// path's reading, on fresh arenas of its own, takes the state's memory over from it: check_corpus_deferred_kept says
+// whether it kept every arena the first reading had.
 static uint32_t check_corpus_deferred_lanes;
 static CheckInputBindingMode check_corpus_deferred_bindings;
 static bool check_corpus_deferred_every_lane = true;
 static bool check_corpus_deferred_fail_merge;
 static bool check_corpus_deferred_fail_state;
 static bool check_corpus_deferred_hold_lanes;
+static bool check_corpus_deferred_late_first;
 static bool check_corpus_deferred_timing;
 static const uint32_t* check_corpus_deferred_cpus;
+static uint32_t check_corpus_deferred_reread;
+static bool check_corpus_deferred_poison;
+static bool check_corpus_deferred_kept;
+static CheckDeferredMemory check_corpus_deferred_before;
+
+// Whether `after` has the memory `before` had: its own arenas, and each lane's mapping that `before` had.
+static bool check_corpus_deferred_same_memory(const CheckDeferredMemory* before, const CheckDeferredMemory* after)
+{
+    bool same = before->arena.base == after->arena.base && before->top.base == after->top.base && before->top_index.base == after->top_index.base;
+    for (uint32_t lane = 0; lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
+    {
+        same &= before->lanes[lane].mapping == 0 || before->lanes[lane].mapping == after->lanes[lane].mapping;
+    }
+    return same;
+}
 
 static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar, bool suppress_warnings)
 {
+    (void)scalar;
+
     path->suppress_warnings = suppress_warnings;
     path->warning_token = BUSTER_CHECK_NONE;
     path->warning_source = BUSTER_CHECK_NONE;
@@ -643,7 +668,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     path->pragma = 0;
     path->phase = "parse";
     const ParseOptions parse_options = {
-        .scalar = scalar,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
     };
     bool ready = parse_initialize(parser, &parse_options, pp->options.language);
     if (ready)
@@ -696,14 +721,43 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
                 path->deferred = check_corpus_deferred_fail_state ? NULL : BUSTER_ARENA_PUSH_ARRAY(&path->deferred_arena, CheckDeferred, 1);
                 if (path->deferred != NULL)
                 {
-                    path->deferred->every_lane = check_corpus_deferred_every_lane;
-                    path->deferred->fail_after_replay = check_corpus_deferred_fail_merge;
-                    path->deferred->hold_lanes = check_corpus_deferred_hold_lanes;
-                    path->deferred->timing = check_corpus_deferred_timing;
-                    path->deferred->cpus = check_corpus_deferred_cpus;
+                    *path->deferred = (CheckDeferred){
+                        .every_lane = check_corpus_deferred_every_lane,
+                        .fail_after_replay = check_corpus_deferred_fail_merge,
+                        .hold_lanes = check_corpus_deferred_hold_lanes,
+                        .late_first = check_corpus_deferred_late_first,
+                        .timing = check_corpus_deferred_timing,
+                        .cpus = check_corpus_deferred_cpus,
+                    };
                 }
-                path->adapted = path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
-                                                                                &path->scratch, path->deferred_lanes, path->deferred_bindings);
+                if (path->deferred != NULL && check_corpus_deferred_reread != 0)
+                {
+                    check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena, &path->scratch, check_corpus_deferred_reread,
+                                         path->deferred_bindings);
+                    if (check_corpus_deferred_poison)
+                    {
+                        check_deferred_poison(path->deferred, 0xa5);
+                    }
+                    check_corpus_deferred_before = path->deferred->memory;
+                    Arena* arenas[] = { &path->types_arena, &path->index_arena, &path->input_arena, &path->scratch };
+                    const uint64_t capacities[] = { type_capacity_bytes(capacity), type_index_capacity_bytes(capacity), UINT64_C(1) << 36, UINT64_C(1) << 36 };
+                    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
+                    {
+                        arena_release(arenas[i]);
+                        *arenas[i] = arena_reserve(capacities[i]);
+                    }
+                    ready = path->input_arena.base != 0 && path->scratch.base != 0 && type_initialize(&path->types, &path->types_arena, &path->index_arena, capacity);
+                    path->resource |= !ready;
+                    if (!ready)
+                    {
+                        // The first reading's input points into the arenas released above.
+                        path->input = (CheckInput){ 0 };
+                    }
+                }
+                path->adapted = ready && path->deferred != NULL && check_input_deferred(path->deferred, &path->input, view, pp, &path->types, &path->input_arena,
+                                                                                         &path->scratch, path->deferred_lanes, path->deferred_bindings);
+                check_corpus_deferred_kept = path->deferred != NULL && check_corpus_deferred_reread != 0 &&
+                                             check_corpus_deferred_same_memory(&check_corpus_deferred_before, &path->deferred->memory);
                 path->resource |= path->deferred == NULL;
             }
             else
@@ -729,7 +783,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     {
         path->phase = path->adapted ? "expression" : path->phase;
         const CheckOptions options = {
-            .scalar = scalar,
+            .scalar = BUSTER_SCALAR_PATH(scalar),
         };
         path->checked = check_graph_run(&path->types, &path->input.graph, &path->output_arena, &path->scratch, &options, &path->stream);
         path->checked = path->checked && check_input_packed_finalize(&path->input, view, &path->types, &path->stream, &path->scratch);
@@ -778,7 +832,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
             .initializers = &path->initializers,
             .asms = &path->asms,
             .identifiers = pp->table,
-            .scalar = scalar,
+            .scalar = BUSTER_SCALAR_PATH(scalar),
         };
         path->programmed = check_program(&path->program, view, &path->input, &path->stream, &path->types, options,
                                          &path->output_arena, &path->scratch);
@@ -833,7 +887,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     if (ready && !path->parsed && !path->resource)
     {
         // Diagnostic-only recovery retains the original parse rejection and uses only whitelisted reports.
-        check_corpus_repair(path, parser, pp, scalar);
+        check_corpus_repair(path, parser, pp, BUSTER_SCALAR_PATH(scalar));
     }
     if (ready && !path->parsed && !path->resource && parser->tokens.pragma_count != 0)
     {
@@ -1232,7 +1286,9 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
 
 static bool check_corpus_check(CheckCorpusPath* path, Parser* parser, Preprocessor* pp, bool scalar)
 {
-    return check_corpus_check_policy(path, parser, pp, scalar, false);
+    (void)scalar;
+
+    return check_corpus_check_policy(path, parser, pp, BUSTER_SCALAR_PATH(scalar), false);
 }
 
 static bool check_corpus_types_equal(const TypeTable* x, const TypeTable* y)
@@ -2072,15 +2128,21 @@ struct CheckCorpusOutcome
     uint64_t vector_nodes;
     uint64_t binding_uses;
     uint64_t binding_fallback_uses;
-    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens and the
-    // largest one's, the lanes they ran on and those that copied its reader, and whether it gave the vector path's result
-    // exactly; and with check_corpus_deferred_timing, the lanes' span, lane_run's dispatch and the other lanes' wake-up
+    // With --deferred: whether the deferred reader merged the unit (not source order's), its bodies, their tokens, the
+    // largest one's and the largest of the others', the lane that read the largest, the parts it cut the bodies into,
+    // the bodies' tokens that paid for a lane, the lanes they ran on and those that copied its reader, and whether it
+    // gave the vector path's result exactly; and
+    // with check_corpus_deferred_timing, the lanes' span, lane_run's dispatch and the other lanes' wake-up
     // (CheckDeferred's), in nanoseconds.
     bool deferred;
     bool deferred_equal;
     uint64_t deferred_bodies;
     uint64_t deferred_body_tokens;
     uint32_t deferred_largest_body;
+    uint32_t deferred_second_body;
+    uint32_t deferred_largest_lane;
+    uint64_t deferred_parts;
+    uint32_t deferred_lane_tokens;
     uint32_t deferred_active;
     uint64_t deferred_copies;
     uint64_t deferred_lanes_ns;
@@ -2141,6 +2203,10 @@ static void check_corpus_measure(const char* file, const PPOptions* options, boo
     outcome->deferred_bodies = outcome->deferred ? paths[2].deferred->bodies : 0;
     outcome->deferred_body_tokens = outcome->deferred ? paths[2].deferred->body_tokens : 0;
     outcome->deferred_largest_body = outcome->deferred ? paths[2].deferred->largest_body : 0;
+    outcome->deferred_second_body = outcome->deferred ? paths[2].deferred->second_body : 0;
+    outcome->deferred_largest_lane = outcome->deferred ? paths[2].deferred->largest_lane : 0;
+    outcome->deferred_parts = outcome->deferred ? paths[2].deferred->parts : 0;
+    outcome->deferred_lane_tokens = outcome->deferred ? paths[2].deferred->lane_tokens : 0;
     outcome->deferred_active = outcome->deferred ? paths[2].deferred->active : 0;
     outcome->deferred_copies = outcome->deferred ? paths[2].deferred->copies : 0;
     outcome->deferred_lanes_ns = outcome->deferred ? paths[2].deferred->lanes_ns : 0;

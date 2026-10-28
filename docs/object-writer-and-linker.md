@@ -4752,9 +4752,12 @@ static Range64 lane_range_by_cost(const uint64_t* cost_prefix, uint64_t count);
 static Range64 range_part(uint64_t count, uint64_t part, uint64_t parts);
 static Range64 range_part_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t part, uint64_t parts);
 // Cuts [0, count) by cost into 64 parts per lane, whose boundaries the lanes find together: part i is
-// [boundaries[i], boundaries[i + 1]). Each lane's order gets the parts costliest first, to within a factor of two. Like
-// lane_sync, it waits for every lane.
+// [boundaries[i], boundaries[i + 1]). Each lane's order gets the costliest part first, then the others costliest first
+// to within a factor of two. Like lane_sync, it waits for every lane.
 static uint64_t lane_parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint64_t* boundaries, uint32_t* order);
+// The same parts and order for a group of `lanes` lanes, by the calling thread alone: for a phase cut before its lanes
+// start, which then take its parts with no sync first.
+static uint64_t parts_by_cost(const uint64_t* cost_prefix, uint64_t count, uint32_t lanes, uint64_t* boundaries, uint32_t* order);
 // The next number this lane takes from its group's counter: 0, 1, 2, ... across the lanes, then parts or more.
 static uint64_t lane_take(uint64_t parts);
 // Starts a command's fixed team, with the calling thread as lane 0; team starts zero-initialized.
@@ -4842,7 +4845,13 @@ The rules for every phase:
    items whose midpoints, in cost, fall in its share of the total. The costs
    are a prefix sum known before the phase: bytes for files, instructions for
    functions. The lanes take the parts from one counter with `lane_take`,
-   costliest first to within a factor of two, until none are left. A lane that
+   costliest first to within a factor of two, until none are left. The order
+   starts with the costliest part exactly, which a caller may give to a lane
+   of its choosing. The deferred reader further promotes the part containing
+   its largest body for the first lane, since a woken lane reads at about half
+   the first lane's speed on the 9700X (#113), and cuts its parts
+   before its lanes start (`parts_by_cost`), so that the first lane starts its
+   part without waiting for the others to wake. A lane that
    runs slower takes fewer parts, and a heavy item starts early rather than
    ending the phase late. A phase with less than about 64 µs of work per lane
    splits once instead, with `lane_range_by_cost`, since taking parts costs it

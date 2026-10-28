@@ -84,8 +84,11 @@ Where it is:
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Do not add other host operating systems, older-CPU
-production fallbacks, or hot-path CPU dispatch. Broader output targets and extra
+ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
+feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
+baseline executable; `native` is the default and `znver5` selects benchmark
+builds. The host choice is made at build time, outside compiler hot paths.
+Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
 
@@ -398,11 +401,16 @@ designs and the compilers already built this way.
   `docs/profiling.md`'s "Placement"): a new one goes there too. The checker
   unit's own tests (`c_checker_test.c` with the sections it includes, and its
   commands' other `*_test.c`) are included between `#pragma clang optimize
-  off` and `on` (#681): the build waits for that unit, and their code was a
-  fifth of its compile (on the 9700X, 33.7 s in the build and 27.4 s
-  unoptimized; the build 33.7 and 28.5 s), while the tests ran as fast,
-  their time being the compiler's code and clang's processes, and `-c` of
-  sqlite3.c as fast too (+0.10% wall). No benchmark's timed code calls them.
+  off` and `on` (#681). On the 9700X, the measured `716c980d` to `4ce693ad`
+  pair's checker-unit mean fell from 33.7 to 27.35 s; compilation-phase wall
+  time fell from 33.7 to 28.5 s (two builds per role, excluding final linking
+  and remaining script overhead). One SQLite compile hold, 21 runs per role,
+  observed +0.10% median wall, +48,704 instructions (+0.00353%) and +380 KiB
+  peak RSS. Four added eager libm imports and layout changes were not isolated
+  from each other; this is no general runtime-neutrality claim or timing of
+  later heads. [The frozen record](https://github.com/buster14a/buster-performance/tree/db74207d9a1a5bd6b59742afc25d53d5e2e03c68/docs/measurements/checker-unit-build-681-2026-10-28)
+  retains the original controller's limitations and correctness scope.
+  No benchmark's timed code calls these tests.
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
 - `--time-stages` (`c_check_clock.c`, #518) makes the C driver report, on standard error after the command, each
@@ -1231,11 +1239,19 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's sources need `-march=native`'s macros (`c_lexer.c` stops with
-`#error` without AVX-512's), which the preprocessor's predefines give as clang's
-do for the same options (`c_predefines.c`).
+The compiler's host path follows the target feature macros, which the
+preprocessor's predefines give as clang's do for the same options
+(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
 
 ## Sharing the 9700X
+
+Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
+Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Non-AVX-512
+CPUs use the scalar fallback. Benchpress runs benchmarks only, after both
+hosted variants pass on the same triggering revision. Failed, cancelled or
+skipped tests cannot start the benchmark job. The existing required check name
+is retained by a hosted aggregation job that fails when either stage fails.
+See [the CI guide](docs/ci.md) for tool and frozen-input setup.
 
 Agent sessions and CI share the 9700X: the buster14a org's self-hosted runner
 runs on the same machine. Its timings only mean something when one thing runs
@@ -2496,11 +2512,17 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - the design's exchange (rule 4 in "Lanes"): records counted per hash
   partition, placed, filled and resolved by partition, byte-identical to the
   reference for every lane count;
-- parts (rules 1 and 3): 12 inputs cut by `lane_parts_by_cost`, whose parts the
+- parts (rules 1 and 3): 13 inputs cut by `lane_parts_by_cost`, whose parts the
   lanes take with `lane_take`, then count, place and fill by part, with a late
   lane in every loop. The output must be byte-identical to the reference,
-  every part must be taken once, and every lane must get the same order,
-  costliest first.
+  every part must be taken once, and every lane must get the same order: the
+  costliest part first, then the others costliest first to within a factor of
+  two (one input's costs grow within one factor of two, so that its costliest
+  part isn't its first). `parts_by_cost`, the same cut by one thread for a phase
+  cut before its lanes start, must give the group's boundaries and order for its
+  lane count, and for 1, 2, 3, 5, 8, 64, 256 and 257 lanes as many parts as such
+  a group cuts (of 256 lanes, the most a group has, for 257),
+  `range_part_by_cost`'s boundaries and every part once in that order.
 
 A watchdog ends the run with status 1 if a group doesn't finish within 60 s,
 which is how a lost wake-up would show. `--rounds N` and `--seed N` change the
@@ -4868,21 +4890,35 @@ transparent union or an intrinsic, a completion of its parameter-list tag, an
 error in a body's walk) is checked in source order, with the reason. The driver still checks in source order.
 
 The reader runs one lane, and one more per `BUSTER_CHECK_DEFERRED_LANE_TOKENS`
-of the bodies' tokens beyond twice the largest body's, no more than its lanes
-or the bodies: a lane's copy of the reader and its wake-up must be paid for by
-its share of the walks, and a woken lane reads at about half the first lane's
-speed.
+(and one per `BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS` of the top level's tokens)
+of the bodies' tokens beyond the larger of the largest body's and twice the
+second largest's, no more than its lanes or the bodies: a lane's copy of the
+reader, which grows with the top level, and its wake-up must be paid for by its
+share of the walks. The calling thread cuts the bodies into parts before the
+lanes start (`parts_by_cost`), stably promotes the part containing the largest
+body, and reads that part at once as the first lane. The others, woken for the
+bodies, take the rest in the remaining cost order from the counter
+and read at about half its speed. The state (`CheckDeferred`, zeroed first)
+keeps its memory across its readings, each lane's arenas one mapping reserved
+on the calling thread before the lanes start, until `check_deferred_release`.
 
-`./build/compiler test-checker-deferred [--keep]` checks 50 fixtures of the
+`./build/compiler test-checker-deferred [--keep]` checks 65 fixtures of the
 issue's cases through the scalar path, the vector path and the deferred reader
 on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct resolution:
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
-and by the lanes' rule, its reader copied only by lanes that take a part. Six
-fixtures of bodies of known tokens must take the rule's lanes on each side of
-its steps. Each that merges must give source order's result again with its
-merge failing after the replay, and count as a resource failure with its
-state's allocation failing; timed, one lane must wait for no other, preserve
+and by the lanes' rule, its reader copied only by lanes that take a part, in
+as many parts as a group of its lanes cuts. Eight fixtures of bodies of known
+tokens must take the rule's lanes on each side of its steps, their largest body
+the first lane's, also when the first lane starts after every other lane's
+first take (`CheckDeferred.late_first`). Six grouped-part fixtures around
+128 and 512 parts also require the first lane to read the largest body, with
+that lane delayed under the reader's rule and with all lanes forced. Each that
+merges must give source
+order's result again with its merge failing after the replay and when a state
+that read it before reads it again (its memory poisoned or as left, and kept),
+and count as a resource failure with its state's allocation failing; timed, one
+lane must wait for no other, preserve
 its lane/counter/running state and affinity inside a live team on distinct
 CPUs, and leave that team usable with the same workers. Eight
 lanes' dispatch and wake-up must fall within their span; and the benchmark's
@@ -4891,11 +4927,15 @@ lanes' dispatch and wake-up must fall within their span; and the benchmark's
 [--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
 left to source order by reason. `./build/compiler benchmark-checker-deferred
-[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [-E's options] file...`
-times source order's reader against the deferred one on one lane and on up to
-N, with the parse, the top level, the bodies' walks, their position checks, the
-lanes' span and the merge apart, and what a lane costs: its copy of the reader,
-the launcher's dispatch and the other lanes' wake-up. One active lane uses
+[--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [-E's options]
+file...` times source order's reader against the deferred one on one lane and
+on up to N, with the parse, the top level, the bodies' walks, their position
+checks, the lanes' span and the merge apart, and what a lane costs: its copy of
+the reader, the launcher's dispatch, the other lanes' wake-up, which no lane
+waits for, and the lanes' arenas before the lanes start; and in how many passes
+the first lane read the largest body. Each deferred reading releases its state,
+as a process's one reading does, or with `--warm` keeps it for the next, as a
+process's later readings do. One active lane uses
 the existing `lane_run_cold(1, ..., NULL)`, which starts no worker, makes no
 affinity calls and isolates the reading without changing generic team validation;
 multiple lanes retain `lane_run` and their CPU list. Its passes take the six

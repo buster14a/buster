@@ -14,6 +14,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,6 +36,18 @@ static bool fixture_write(int descriptor, const char* data, size_t size)
         }
     }
     return valid;
+}
+
+// A piped core_pattern can invoke a crash handler even with RLIMIT_CORE set to zero. These intentional fixture
+// signals need only their signal status, and must not wait for an external core handler before the test's deadline.
+static int fixture_crash(int signal_number)
+{
+    int result = 47;
+    if (prctl(PR_SET_DUMPABLE, 0) == 0)
+    {
+        raise(signal_number);
+    }
+    return result;
 }
 
 static int fixture_flood(void)
@@ -160,7 +173,7 @@ static int fixture_generate(bool yarpgen, const char* scenario, bool seeded, boo
     }
     else if (strcmp(scenario, "generator-crash") == 0)
     {
-        raise(SIGSEGV);
+        result = fixture_crash(SIGSEGV);
     }
     else if (strcmp(scenario, "generator-timeout") == 0)
     {
@@ -213,7 +226,7 @@ static int fixture_compile(const char* output, const char* source, bool buster, 
     }
     else if (buster && tier1 && strcmp(scenario, "compile-crash") == 0)
     {
-        raise(SIGABRT);
+        result = fixture_crash(SIGABRT);
     }
     else if (buster && tier1 && strcmp(scenario, "compile-timeout") == 0)
     {
@@ -265,7 +278,7 @@ static int fixture_execute(const char* sidecar)
     }
     else if (buster && tier1 && strcmp(scenario, "run-crash") == 0)
     {
-        raise(SIGILL);
+        result = fixture_crash(SIGILL);
     }
     else if (buster && tier1 && strcmp(scenario, "run-timeout") == 0)
     {
