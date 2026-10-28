@@ -319,7 +319,8 @@ struct PPOptions
     bool quiet;
     // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
     bool system_header_warnings;
-    // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy.
+    // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
+    // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;
     uint32_t semantic_warning_option_count;
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
@@ -353,6 +354,9 @@ struct PPOptions
     uint32_t window_bytes;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
+    // Source checking collects complete groups before applying the publication budget in expansion order. Other
+    // consumers keep immediate publication. Storage is taken only when a visible diagnostic is collected.
+    bool collect_diagnostics;
 };
 
 // Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
@@ -1252,6 +1256,31 @@ struct PPNested
     PPOperators made;
 };
 
+typedef struct PPDiagnosticRecord PPDiagnosticRecord;
+typedef struct PPDiagnosticSourceNote PPDiagnosticSourceNote;
+struct PPDiagnosticSourceNote
+{
+    uint32_t location;
+    uint32_t origin;
+    const char* message;
+};
+
+struct PPDiagnosticRecord
+{
+    PPDiagnosticRecord* next;
+    Preprocessor* owner;
+    uint64_t position;
+    uint32_t location;
+    uint32_t origin;
+    uint32_t note_location;
+    IdentId note_macro;
+    const char* message;
+    const char* note_message;
+    PPDiagnosticSourceNote* source_notes;
+    uint32_t source_note_count;
+    uint8_t severity;
+};
+
 struct Preprocessor
 {
     PPOptions options;
@@ -1472,6 +1501,15 @@ struct Preprocessor
     uint32_t errors;
     uint32_t warnings;
     bool fatal;
+    PPDiagnosticRecord* diagnostic_first;
+    PPDiagnosticRecord* diagnostic_last;
+    // A consumed file run may have been copied before its raw errors are read. Their insertion points are inside
+    // that run, not after it. NONE uses the current output boundary; standalone consumers ignore both fields.
+    uint32_t diagnostic_position;
+    uint32_t diagnostic_run_first;
+    bool diagnostic_collection_failed;
+    bool diagnostic_source;
+    bool history_failed;
     // What a run leaves open, or closes without its opening: invocations and builtin operands left open where their
     // context ended, conditionals and block comments left open at a file's end, pragma regions (assume_nonnull,
     // arc_cf_code_audited, unsafe_buffer_usage) left open at the main file's end, and #elif, #else or #endif without #if.
@@ -1533,9 +1571,31 @@ typedef enum PPSeverity
     PP_SEVERITY_WARNING,
     PP_SEVERITY_ERROR,
     PP_SEVERITY_FATAL,
+    // Rendered only inside an accepted diagnostic group; never passed through the counting gate.
+    PP_SEVERITY_NOTE,
     // #warning's diagnostic is explicitly visible in system headers, unlike ordinary preprocessing warnings.
     PP_SEVERITY_WARNING_ALWAYS,
+    // Warning policy can promote a group without making it a genuine error for analysis-based warnings.
+    PP_SEVERITY_MAPPED_ERROR,
+    PP_SEVERITY_MAPPED_FATAL,
+    // A genuine delayed error inhibits later analysis after this body's deferred diagnostics are flushed.
+    PP_SEVERITY_DEFERRED_ERROR,
 } PPSeverity;
+
+typedef enum PPDiagnosticPhase
+{
+    PP_DIAGNOSTIC_LEXICAL,
+    PP_DIAGNOSTIC_DEFERRED,
+    PP_DIAGNOSTIC_RETURN,
+    PP_DIAGNOSTIC_SEMANTIC,
+} PPDiagnosticPhase;
+
+typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
+struct PPOutputDiagnosticNote
+{
+    uint32_t token;
+    const char* message;
+};
 
 typedef struct PPDiagnosticNote PPDiagnosticNote;
 struct PPDiagnosticNote
@@ -1552,19 +1612,23 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const char* format, va_list arguments);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Preprocessor* pp);
 
 // Both source and output-token diagnostics pass this gate before rendering their complete group, including notes.
 // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
 static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
 {
+    *severity = (*severity == PP_SEVERITY_MAPPED_ERROR || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
+                *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
     const bool accepted = !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
-    *limited = accepted && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
+    *limited = accepted && !pp->options.collect_diagnostics && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
     if (accepted)
     {
         *severity = *limited ? PP_SEVERITY_FATAL : *severity;
         pp->warnings += *severity == PP_SEVERITY_WARNING;
         pp->errors += *severity != PP_SEVERITY_WARNING;
-        pp->fatal |= *severity == PP_SEVERITY_FATAL;
+        pp->fatal |= *severity == PP_SEVERITY_FATAL && (!pp->options.collect_diagnostics || !pp->diagnostic_source);
     }
     return accepted;
 }
@@ -1598,6 +1662,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
 {
     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
     severity = always ? PP_SEVERITY_WARNING : severity;
+    const PPSeverity requested = severity;
     const bool visible = severity != PP_SEVERITY_WARNING || always || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
     bool limited = false;
     const bool accepted = visible && pp_diagnostic_begin(pp, &severity, &limited);
@@ -1605,11 +1670,19 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     {
         pp_diagnostic_limit(pp);
     }
-    else if (accepted && !pp->options.quiet)
+    else if (accepted && (!pp->options.quiet || (pp->options.collect_diagnostics && !pp->history_deferred)))
     {
         va_list arguments;
         va_start(arguments, format);
-        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, 0, format, arguments);
+        const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
+        if (pp->options.collect_diagnostics)
+        {
+            pp_collect_diagnostic(pp, requested, (uint64_t)position * 4 + PP_DIAGNOSTIC_LEXICAL, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
+        }
+        else
+        {
+            pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+        }
         va_end(arguments);
     }
 }
@@ -6193,6 +6266,11 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
         }
         if (!opaque)
         {
+            const uint32_t saved_position = pp->diagnostic_position;
+            if (pp->diagnostic_run_first != BUSTER_PP_NONE)
+            {
+                pp->diagnostic_position = pp->diagnostic_run_first + error.token - begin;
+            }
             const uint32_t location = pp->ranges[context->range].base + error.offset;
             switch (error.kind)
             {
@@ -6232,6 +6310,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                 case C_RAW_STRING_OK:
                     break;
             }
+            pp->diagnostic_position = saved_position;
         }
     }
 }
@@ -11985,7 +12064,12 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             const uint32_t stop = text            ? pp_copy_file_text_vector(pp, data, base, context->position, run_end, &directs, &runs)
                                   : BUSTER_VECTOR_PATH(pp->vectorized) ? pp_copy_file_run_vector(pp, data, base, context->position, run_end)
                                                    : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
+            if (pp->options.collect_diagnostics && data->raw_error_count != 0 && pp_target(pp) == &pp->output)
+            {
+                pp->diagnostic_run_first = pp->output.count - (stop - context->position);
+            }
             pp_read_raw_errors(pp, context, context->position, stop);
+            pp->diagnostic_run_first = BUSTER_PP_NONE;
             if (pp->capture_count != 0)
             {
                 pp_history_fill(pp, &pp->captures, pp->captures.count - (stop - context->position), pp->captures.count, 0);
@@ -17464,6 +17548,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
 {
     *pp = (Preprocessor){ 0 };
     pp->diagnostic_include_range = BUSTER_PP_NONE;
+    pp->diagnostic_position = BUSTER_PP_NONE;
+    pp->diagnostic_run_first = BUSTER_PP_NONE;
     pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->options = *options;
@@ -17985,6 +18071,10 @@ static void pp_history_record(Preprocessor* pp, bool report)
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
         pp->history_replay = replay;
+        if (pp->options.collect_diagnostics)
+        {
+            pp_diagnostic_take(pp, replay);
+        }
     }
     else
     {
@@ -17992,20 +18082,38 @@ static void pp_history_record(Preprocessor* pp, bool report)
         // published. Its own fatal is already final; otherwise allow the replacement fatal even when the first
         // pass had already stopped silently.
         const bool published_fatal = report && replay != 0 && replay->fatal;
+        // Collected replay groups still own their origin tables. Keep that rejected replay alive for publication,
+        // but never expose it as successful history to source checking. A silent failed replay is replaced as before.
+        const bool retained = pp->options.collect_diagnostics && report && replay != NULL && replay->diagnostic_first != NULL;
+        pp->diagnostic_collection_failed |= pp->options.collect_diagnostics && replay != NULL && replay->diagnostic_collection_failed;
+        const uint32_t replacement_position = retained && replay->output.count > pp->output.count ? replay->output.count : pp->output.count;
+        pp->history_failed = true;
         if (report)
         {
             pp->errors = replay != 0 ? replay->errors : 0;
             pp->warnings = replay != 0 ? replay->warnings : 0;
         }
-        if (replay != 0)
+        if (retained)
+        {
+            pp->history_replay = replay;
+            pp_diagnostic_take(pp, replay);
+        }
+        else if (replay != 0)
         {
             pp_release_unit(replay);
         }
-        arena_release(&pp->history_replay_arena);
+        if (!retained)
+        {
+            arena_release(&pp->history_replay_arena);
+        }
         pp->fatal = published_fatal;
+        const uint32_t saved_position = pp->diagnostic_position;
+        pp->diagnostic_position = replacement_position;
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, !ran         ? "no expansion history: the translation unit wasn't run by pp_run or pp_run_source" :
                                               !initialized ? "can't preprocess the translation unit again for its expansion history (out of memory)" :
                                                              "the translation unit gave another result when preprocessed again for its expansion history");
+        pp->diagnostic_position = saved_position;
+        pp->fatal = true;
     }
 }
 
@@ -18022,7 +18130,7 @@ static void pp_history_report(Preprocessor* pp, bool result)
     if (pp->history_deferred)
     {
         pp->options.quiet = pp->history_quiet;
-        if ((!pp->history_quiet && (pp->errors != 0 || pp->warnings != 0)) || pp->history_warning_filter_deferred)
+        if (((!pp->history_quiet || pp->options.collect_diagnostics) && (pp->errors != 0 || pp->warnings != 0)) || pp->history_warning_filter_deferred)
         {
             pp_history_record(pp, !pp->history_quiet);
         }

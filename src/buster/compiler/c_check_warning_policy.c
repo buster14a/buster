@@ -7,7 +7,10 @@
 
 static bool check_warning_extension(uint32_t id)
 {
-    const bool extension = id == CHECK_WARNING_ID_GNU_CONSTANT;
+    const bool extension = id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_ORDERED_POINTER_INTEGER ||
+                           id == CHECK_WARNING_ID_MISSING_DECLARATIONS || id == CHECK_WARNING_ID_PLAIN_COMPLEX ||
+                           id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
+                           id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER;
     return extension;
 }
 
@@ -19,6 +22,17 @@ static bool check_warning_option(uint32_t id, String8 option)
     if (id == CHECK_WARNING_ID_GNU_CONSTANT)
     {
         matches |= check_diagnostic_option(option, "-Wpedantic");
+    }
+    else if (id == CHECK_WARNING_ID_NON_LITERAL_NULL || id == CHECK_WARNING_ID_LITERAL_RANGE)
+    {
+        matches |= check_diagnostic_option(option, "-Wnon-gcc");
+        matches |= id == CHECK_WARNING_ID_NON_LITERAL_NULL && check_diagnostic_option(option, "-Wconversion");
+    }
+    else if (id == CHECK_WARNING_ID_INITIALIZER_OVERRIDES)
+    {
+        matches |= check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W") ||
+                   check_diagnostic_option(option, "-Wc99-designator") || check_diagnostic_option(option, "-Wc99-extensions") ||
+                   check_diagnostic_option(option, "-Woverride-init") || check_diagnostic_option(option, "-WCL4");
     }
     else if (id == CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION)
     {

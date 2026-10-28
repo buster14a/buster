@@ -60,9 +60,20 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wdeprecated-non-prototype", NULL, "passing arguments to a function without a prototype is deprecated in all versions of C and is not supported in C23" },
     { NULL, NULL, "too few arguments in call" },
     { NULL, NULL, "too many arguments in call" },
+    { "-Wnon-literal-null-conversion", NULL, "expression which evaluates to zero treated as a null pointer constant" },
+    { "-Wliteral-range", NULL, "floating literal is outside the range of its type" },
+    { NULL, NULL, "ordered comparison between pointer and integer" },
+    { "-Wmissing-declarations", NULL, "declaration does not declare anything" },
+    { NULL, NULL, "plain '_Complex' requires a type specifier; assuming '_Complex double'" },
+    { "-Wgnu-variable-sized-type-not-at-end", "-Wgnu", "field with variable sized type is not at the end of a struct or class" },
+    { "-Wstatic-local-in-inline", NULL, "non-constant static local variable in inline function may be different in different files" },
+    { "-Wmany-braces-around-scalar-init", NULL, "too many braces around scalar initializer" },
+    { "-Winitializer-overrides", NULL, "initializer overrides prior initialization of this subobject" },
+    { "-Wundefined-internal", NULL, "function has internal linkage but is not defined" },
+    { "-Wc23-extensions", "-Wc2x-extensions", "omitting the parameter name in a function definition is a C23 extension" },
 };
 
-_Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_BASE_ID_COUNT, "the stable warning policy prefix has one description per ID");
+_Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
 
 static bool check_diagnostic_option(String8 option, const char* expected)
 {
@@ -110,10 +121,7 @@ static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* 
         for (uint32_t visited = 0; !matched && state < history->count && visited < history->count; visited += 1)
         {
             const CheckInputDiagnosticPragma* record = history->records + state;
-            const CheckWarningDescription* description = check_warning_descriptions + index;
-            matched = check_diagnostic_option(record->option, description->option) || check_diagnostic_option(record->option, description->parent) ||
-                      check_diagnostic_option(record->option, "-Weverything") || (index == 1 && check_diagnostic_option(record->option, "-Wpedantic")) ||
-                      (index == CHECK_WARNING_ID_IMPLICIT_FUNCTION_DECLARATION && check_diagnostic_option(record->option, "-Wall"));
+            matched = check_warning_option(index, record->option);
             if (matched)
             {
                 severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :

@@ -2103,7 +2103,7 @@ static void check_test_driver_diagnostic_capacity(CheckTest* test)
         for (uint32_t phase = 0; phase < 2; phase += 1)
         {
             scratch.capacity = mark + phase * 2 * sizeof(uint64_t);
-            const bool ready = check_driver_reports(&parser, &pp, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
+            const bool ready = check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, NULL, NULL, NULL, NULL, 0, NULL, 0, false, &scratch);
             check_test_expect(test, !ready && scratch.length == mark && *sentinel == UINT64_C(0x73516A93) && pp.errors == 0,
                               "diagnostic allocation failure restores scratch and publishes no partial diagnostics");
         }
@@ -2521,7 +2521,7 @@ static void check_test_driver_reports(CheckTest* test)
                 const CheckInput* original = apart ? &pragmas : NULL;
                 outcomes[variant] = memory != NULL &&
                                     (variant == 0 ? check_test_driver_reports_dense(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch) :
-                                                    check_driver_reports(&parser, &pp, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
+                                                    check_driver_reports(&parser, &parser, &pp, pp.output.count, &input, &stream, NULL, original, extra, extra_count, excess, excess_count, quiet, &scratch));
                 pp.options.diagnostics = NULL;
                 if (memory != NULL)
                 {
@@ -2835,6 +2835,7 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
 }
 
 #include "c_checker_driver_limit_test.c"
+#include "c_checker_driver_recovery_test.c"
 
 // An ELF relocatable object's sections and symbols, as the section fixtures compare clang's and -c's (#619): the parts a
 // reader of either needs, every offset checked against the file, nothing else (object_view_open's checks are the
@@ -3820,6 +3821,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary)
     {
         check_test_driver_error_limits(&test, clang, executable, directory);
+        check_test_driver_recovery(&test, clang, executable, directory);
         check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
