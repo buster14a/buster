@@ -575,6 +575,82 @@ static void check_const_test_exhaustion(CheckTest* test, TypeTable* types)
     arena_release(&arena);
 }
 
+static void check_const_test_live_records(CheckTest* test, TypeTable* types)
+{
+    enum { COUNT = 64 };
+    const TypeId leaf = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170020);
+    const TypeId empty = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170021);
+    const TypeMember field = { .name = 170022, .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    bool ready = leaf != 0 && empty != 0 && type_complete_record(types, leaf, &field, 1, (TypeRecordAttributes){ 0 }) &&
+                 type_complete_record(types, empty, NULL, 0, (TypeRecordAttributes){ 0 });
+    TypeMember members[COUNT + 2];
+    members[0] = (TypeMember){ .name = 170100, .type = empty, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    for (uint32_t i = 0; i < COUNT; i += 1)
+    {
+        members[i + 1] = (TypeMember){ .name = 170101 + i, .type = leaf, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    }
+    members[COUNT + 1] = (TypeMember){ .name = 170200, .type = empty, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+    const TypeId root = ready ? type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170023) : 0;
+    ready = ready && root != 0 && type_complete_record(types, root, members, COUNT + 2, (TypeRecordAttributes){ 0 }) &&
+            type_size(types, root) == COUNT * 4 && type_size(types, empty) == 0;
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    check_test_expect(test, ready && scratch.base != NULL, "wide liveness record has real laid-out aggregate members and empty offset ties");
+    for (uint32_t mode = 0; ready && scratch.base != NULL && mode < 3; mode += 1)
+    {
+        CheckInitPart parts[COUNT * 2 + 2] = { { .kind = CHECK_INIT_CLEAR, .type = root, .byte_count = COUNT * 4 } };
+        for (uint32_t i = 0; i < COUNT; i += 1)
+        {
+            parts[i + 1] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = leaf, .bit_offset = (uint64_t)i * 32 };
+            parts[COUNT + 1 + i] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = BUSTER_TYPE_INT, .bit_offset = (uint64_t)i * 32 };
+        }
+        if (mode == 2)
+        {
+            parts[COUNT + 1] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = root, .byte_count = COUNT * 4 };
+        }
+        const CheckInitializer initialized = {
+            .type = root, .status = CHECK_INIT_OK, .object_size = COUNT * 4, .parts = parts,
+            .count = COUNT + 1 + (mode == 1 ? COUNT : mode == 2 ? 1 : 0),
+        };
+        uint8_t* live = NULL;
+        const uint64_t mark = scratch.length;
+        bool exact = check_initializer_live_writes(types, &initialized, &scratch, &live) == CHECK_INIT_OK && live != NULL && !live[0];
+        for (uint32_t i = 0; exact && i < COUNT; i += 1)
+        {
+            exact = live[i + 1] == (mode != 2) && (mode != 1 || live[COUNT + 1 + i]);
+        }
+        check_test_expect(test, exact && (mode != 2 || live[COUNT + 1]),
+                          "wide aggregate evaluations survive child coverage and disappear only under a typed whole replacement");
+        arena_pop_to(&scratch, mark);
+    }
+    if (ready && scratch.base != NULL)
+    {
+        const TypeId nested = type_tag(types, BUSTER_TYPE_KIND_STRUCT, 170024);
+        const TypeMember child = { .name = 170025, .type = leaf, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+        const TypeId choice = type_tag(types, BUSTER_TYPE_KIND_UNION, 170026);
+        const TypeMember alternatives[] = {
+            { .name = 170027, .type = leaf, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+            { .name = 170028, .type = nested, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD },
+        };
+        ready = nested != 0 && choice != 0 && type_complete_record(types, nested, &child, 1, (TypeRecordAttributes){ 0 }) &&
+                type_complete_record(types, choice, alternatives, BUSTER_ARRAY_LENGTH(alternatives), (TypeRecordAttributes){ 0 });
+        CheckInitPart parts[] = {
+            { .kind = CHECK_INIT_VALUE, .type = leaf },
+            { .kind = CHECK_INIT_VALUE, .type = nested },
+        };
+        CheckInitializer initialized = { .type = choice, .status = CHECK_INIT_OK, .object_size = 4, .parts = parts, .count = 2 };
+        uint8_t* live = NULL;
+        check_test_expect(test, ready && check_initializer_live_writes(types, &initialized, &scratch, &live) == CHECK_INIT_OK && live != NULL && live[0] && live[1],
+                          "an uncovered union path preserves evaluation despite another typed covered path at the same offset");
+        parts[0] = (CheckInitPart){ .kind = CHECK_INIT_VALUE, .type = empty };
+        parts[1] = (CheckInitPart){ .kind = CHECK_INIT_CLEAR, .type = root, .byte_count = COUNT * 4 };
+        initialized.type = root;
+        initialized.object_size = COUNT * 4;
+        check_test_expect(test, check_initializer_live_writes(types, &initialized, &scratch, &live) == CHECK_INIT_OK && live != NULL && live[0] && live[1],
+                          "a zero-sized aggregate evaluation remains live under whole byte coverage");
+    }
+    arena_release(&scratch);
+}
+
 static void check_test_const_values(CheckTest* test)
 {
     check_test_expect(test, sizeof(CheckValue) == 96, "subbyte object identity occupies existing CheckValue padding");
@@ -593,6 +669,7 @@ static void check_test_const_values(CheckTest* test)
         check_const_test_bytes(test, &types.table, &buffer);
         check_const_test_history(test, &types.table);
         check_const_test_exhaustion(test, &types.table);
+        check_const_test_live_records(test, &types.table);
     }
     arena_release(&arena);
     check_test_types_close(&types);
