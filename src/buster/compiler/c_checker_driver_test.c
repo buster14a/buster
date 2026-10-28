@@ -2785,6 +2785,8 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+#include "c_checker_driver_limit_test.c"
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -3184,6 +3186,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_error_limits(&test, clang, executable, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);

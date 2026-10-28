@@ -487,11 +487,17 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
 {
     pp_history_ensure(pp);
-    va_list arguments;
-    va_start(arguments, format);
-    pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), format, arguments);
-    va_end(arguments);
-    pp->warnings += severity == PP_SEVERITY_WARNING;
-    pp->errors += severity != PP_SEVERITY_WARNING;
-    pp->fatal |= severity == PP_SEVERITY_FATAL;
+    bool limited;
+    const bool accepted = pp_diagnostic_begin(pp, &severity, &limited);
+    if (accepted && !pp->options.quiet && limited)
+    {
+        pp_diagnostic_limit(pp);
+    }
+    else if (accepted && !pp->options.quiet)
+    {
+        va_list arguments;
+        va_start(arguments, format);
+        pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), format, arguments);
+        va_end(arguments);
+    }
 }

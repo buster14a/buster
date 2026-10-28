@@ -1579,6 +1579,7 @@ static int run_check_command(int count, char** arguments, bool executable)
         }
         // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
         check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+        pp_diagnostic_summary(&pp);
         parse_release(&parser);
         pp_release(&pp);
         intern_release(&identifiers);
