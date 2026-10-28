@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Ordinary expression fragments and ready instruction runs (#624), included by c_check_program_lower.c.
+// Ordinary expression fragments (#624), included by c_check_program_lower.c.
 // Partial vectors classify operators, classes and facts into register words. Reached leaves supply payloads;
 // occupied-slot masks expand their templates into typed columns. The original task loop is the exact twin.
 
@@ -216,36 +216,6 @@ static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWr
                 check_lower_emit(writer, kind, (uint8_t)metadata, bits);
             }
         }
-    }
-    return valid;
-}
-
-// Consecutive instruction tasks have no remaining evaluation or conversion to decide. Transpose up to
-// four compact records in LIFO order, stopping before any other task. Tracked/source emission keeps its twin.
-static __attribute__((noinline)) bool check_lower_instruction_batch(CheckLowerWriter* writer)
-{
-    const uint32_t count = writer->depth < 3 ? writer->depth + 1 : 4;
-    const CheckLowerTaskPacked* first = writer->tasks + writer->depth - (count - 1);
-    const __m512i data = _mm512_maskz_loadu_epi64((__mmask8)((1u << (2 * count)) - 1), first);
-    const __m512i reverse = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(count - 1), _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7)), 1);
-    const __m512i control = _mm512_permutexvar_epi64(reverse, data);
-    const __m512i values = _mm512_permutexvar_epi64(_mm512_add_epi64(reverse, _mm512_set1_epi64(1)), data);
-    const __m512i tags = _mm512_and_si512(_mm512_srli_epi64(control, 32), _mm512_set1_epi64(UINT8_MAX));
-    const __mmask8 active = (__mmask8)((1u << count) - 1);
-    const uint32_t matches = active & _mm512_cmpeq_epi64_mask(tags, _mm512_set1_epi64(CHECK_LOWER_INSTRUCTION));
-    const uint32_t run = (uint32_t)__builtin_ctz(~matches);
-    const __mmask8 take = (__mmask8)((1u << run) - 1);
-    const __m512i classes = _mm512_and_si512(_mm512_srli_epi64(control, 48), _mm512_set1_epi64(UINT8_MAX));
-    const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
-    const bool valid = run >= 3 && (_mm512_cmplt_epu64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASSES)) & take) == take &&
-                       writer->count <= room && run <= room - writer->count;
-    if (valid)
-    {
-        _mm_mask_storeu_epi8(writer->kinds + writer->count, take, _mm512_cvtepi64_epi8(control));
-        _mm_mask_storeu_epi8(writer->classes + writer->count, take, _mm512_cvtepi64_epi8(classes));
-        _mm512_mask_storeu_epi64(writer->values + writer->count, take, values);
-        writer->count += run;
-        writer->depth -= run - 1;
     }
     return valid;
 }

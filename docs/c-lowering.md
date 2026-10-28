@@ -168,8 +168,8 @@ module), so that tools and the comparisons below read them alike.
 
 ## Straight-line expression templates (#624)
 
-`c_check_program_batch.c` handles reached operation fragments and consecutive
-ready instructions before the general task loop expands them. The original
+`c_check_program_batch.c` handles reached operation fragments before the general
+task loop expands them. The original
 scalar expression expansion remains the oracle (`--scalar`).
 
 Ordinary unary and binary operations can join their immediately preceding leaf
@@ -200,14 +200,6 @@ memory classes, floating constants and automatic compound initialization retain
 their existing handling. Operations in tracked functions and source-row
 emission for `-g` also keep scalar expression expansion.
 
-Ready instruction tasks need no further semantic decision. In an untracked
-function without source rows, a consecutive prefix is transposed from one
-vector of at most four compact task records and appended to all three typed
-columns. It stops before any other task. If a class is unsupported or the whole
-prefix does not fit, the original single-entry emitter preserves the exact
-first failure and partial output. Tracked and source-row emission keep that
-emitter for every instruction.
-
 The pending stack uses two words per task instead of a padded 32-byte C record.
 The control word holds the full node identity, kind and flags, and an
 instruction's class. Instructions, address addends, copies and complex
@@ -215,7 +207,9 @@ operations retain all 64 payload bits; other tasks keep their full TypeId and
 32-bit local identity. Dispatch reads those words directly, with expressions
 and instructions separated from the less common task kinds. Expression
 expansion takes its node and flags directly. The codec has an independent
-field-for-field boundary test.
+field-for-field boundary test. Up to 4080 bytes of padding keep the columns
+after the task stack at the same relative offset modulo 4 KB as 32-byte tasks,
+while each active task touches 16 bytes.
 
 Classification reads only immutable checked types and operators. A neighboring
 body's mutable local map is never inspected speculatively. Payloads belong only
@@ -226,17 +220,15 @@ With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
 evaluated expression occurrences, those handled by vector operation fragments,
 their percentage, and records classified. This counts repeated graph uses and
 excludes unevaluated operands and unselected definitions. Scalar leaf templates
-and ready-instruction emission are excluded from the vector expression-node
-share. The optional packed type table costs four bytes per type; failure keeps
-the original expression rules available. Ready-instruction batching needs no
-such table.
+are excluded from the vector expression-node share. The optional packed type table costs four bytes per type; failure keeps
+the original expression rules available.
 
 `test-checker` compares every column, failure and diagnostic token with the
 original expression expansion. Guarded tests cover partial vectors, folds,
 promotions, shared and reordered uses, numeric and boolean conversion chains,
 missing optional workspace, addresses, VLA indirection, compound initialization
-and a neighboring body's local map. Guarded pending stacks check instruction
-prefixes, labels, every entry-capacity limit, invalid classes and untouched
+and a neighboring body's local map. Guarded pending stacks check mixed tasks,
+labels, every entry-capacity limit, invalid classes and untouched
 output tails. Source fixtures also compare native effects with Clang.
 
 ## Against clang -O0's objects

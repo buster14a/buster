@@ -4042,13 +4042,7 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
             }
             else
             {
-                const bool batched = !sources && !writer->scalar && !writer->track && writer->depth >= 2 &&
-                                     ((writer->tasks[writer->depth - 1].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION &&
-                                     ((writer->tasks[writer->depth - 2].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION && check_lower_instruction_batch(writer);
-                if (!batched)
-                {
-                    check_lower_emit(writer, (uint8_t)node, control[6], value);
-                }
+                check_lower_emit(writer, (uint8_t)node, control[6], value);
             }
         }
         else if (kind == CHECK_LOWER_CONVERSION)
@@ -5456,7 +5450,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .provisional_tables = shared->provisional_tables,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
-    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, capacity);
+    // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
+    // records. Padding is at most 4080 bytes, while each active task still touches just 16 bytes.
+    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, (uint64_t)capacity + (capacity & 255u));
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);

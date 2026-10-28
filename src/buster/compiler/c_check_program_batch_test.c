@@ -7,7 +7,7 @@
 #define BUSTER_CHECK_BATCH_TEST_NODES 321u
 #define BUSTER_CHECK_BATCH_TEST_ENTRIES (BUSTER_CHECK_BATCH_TEST_NODES * 4)
 
-static void check_test_program_instruction_batch(CheckTest* test)
+static void check_test_program_task_stack(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
     uint8_t* memory = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -25,7 +25,7 @@ static void check_test_program_instruction_batch(CheckTest* test)
     uint32_t type_templates[256] = { 0 };
     type_classes[type_index(BUSTER_TYPE_INT)] = BUSTER_TYPED_CLASS_I32;
     type_templates[type_index(BUSTER_TYPE_INT)] = BUSTER_TYPED_CLASS_I32;
-    check_test_expect(test, ready, "instruction task batches have a protected stack tail");
+    check_test_expect(test, ready, "pending lowering tasks have a protected stack tail");
     for (uint32_t count = 1; ready && count <= 17; count += 1)
     {
         CheckLowerTaskPacked* tasks = (CheckLowerTaskPacked*)(memory + page - count * sizeof(CheckLowerTaskPacked));
@@ -75,17 +75,6 @@ static void check_test_program_instruction_batch(CheckTest* test)
                         .type_templates = type_templates,
                         .type_count = BUSTER_ARRAY_LENGTH(type_classes),
                     };
-                    if (path == 1 && count == 8 && mode == 0 && capacity == 8)
-                    {
-                        const CheckLowerTaskPacked first = tasks[--writers[path].depth];
-                        const bool batched = check_lower_instruction_batch(writers + path);
-                        check_test_expect(test, batched, "consecutive instruction tasks actually take the vector output kernel");
-                        if (!batched)
-                        {
-                            const CheckLowerTask task = check_lower_task_unpack(first);
-                            check_lower_emit(writers + path, (uint8_t)task.node, (uint8_t)task.type, task.value);
-                        }
-                    }
                     check_lower_drain(writers + path);
                 }
                 check_test_expect(test, status[0].status == status[1].status && status[0].token == status[1].token &&
@@ -94,6 +83,16 @@ static void check_test_program_instruction_batch(CheckTest* test)
                                   memcmp(kinds[0], kinds[1], sizeof(kinds[0])) == 0 && memcmp(classes[0], classes[1], sizeof(classes[0])) == 0 &&
                                   memcmp(values[0], values[1], sizeof(values[0])) == 0,
                                   "guarded instruction batches preserve columns, untouched tails, labels and the first capacity/class failure");
+                if (mode == 0 && capacity == count)
+                {
+                    bool expected = status[0].status == CHECK_PROGRAM_OK && writers[0].count == count;
+                    for (uint32_t i = 0; expected && i < count; i += 1)
+                    {
+                        expected = kinds[0][i] == (i % 2 == 0 ? BUSTER_TYPED_CONST : BUSTER_TYPED_NEG) &&
+                                   classes[0][i] == i % BUSTER_TYPED_CLASSES && values[0][i] == UINT64_C(0x1234567800000000) + i;
+                    }
+                    check_test_expect(test, expected, "hot task-field decoding also agrees with independent full-width entry literals");
+                }
             }
         }
     }
@@ -105,7 +104,7 @@ static void check_test_program_instruction_batch(CheckTest* test)
 
 static void check_test_program_batch(CheckTest* test)
 {
-    check_test_program_instruction_batch(test);
+    check_test_program_task_stack(test);
     for (uint32_t kind = CHECK_LOWER_EXPRESSION; kind <= CHECK_LOWER_COMPLEX_TRUTH; kind += 1)
     {
         for (uint32_t flags = 0; flags < 8; flags += 1)
