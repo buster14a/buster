@@ -1946,8 +1946,8 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     uint64_t batch_nodes = 0;
     const char* coverage = text != NULL ? strstr(text, "lowering-nodes\tevaluated=") : NULL;
     const bool counted = coverage != NULL && sscanf(coverage, "lowering-nodes\tevaluated=%" SCNu64 "\tbatched=%" SCNu64, &expression_nodes, &batch_nodes) == 2;
-    check_test_expect(test, counted && expression_nodes >= batch_nodes && batch_nodes != 0,
-                      "--time-stages reports the templates' nonzero share of evaluated expression occurrences");
+    check_test_expect(test, counted && expression_nodes != 0 && expression_nodes >= batch_nodes && (BUSTER_HOST_VECTOR ? batch_nodes != 0 : batch_nodes == 0),
+                      "--time-stages reports evaluated expressions and the host's template share");
     free(text);
     text = NULL;
     memset(stages, 0, sizeof(stages));
@@ -2307,6 +2307,8 @@ static void check_test_driver_reports(CheckTest* test)
         "void g(char* c) { unsigned char* u = c; (void)u; }\n"
         "int b[2] = { 1, 2, 3 };\n",
         wide_source,
+        "int f(void) { return 1; }\n",
+        "int f(void) { return 1; } int f(void) __asm__(\"late_name\");\n",
     };
     uint64_t state = 0x592;
     uint32_t compared = 0;
@@ -2339,6 +2341,22 @@ static void check_test_driver_reports(CheckTest* test)
         }
         const CheckInput checked = input;
         const CheckStream streamed = stream;
+        uint32_t warning_rows = 0;
+        uint32_t attribute_rows = 0;
+        uint32_t constant_rows = 0;
+        for (uint32_t node = 0; ready && node < stream.count; node += 1)
+        {
+            warning_rows += stream.warnings[node] != 0;
+        }
+        for (uint32_t token = 0; ready && token < count; token += 1)
+        {
+            attribute_rows += check_diagnostic_attribute_warnings(&input, token) != 0;
+            constant_rows += input.constant_warnings[token] != 0;
+        }
+        check_test_expect(test, ready && stream.warnings_prepared && stream.warning_count == warning_rows && input.asm_warnings_prepared &&
+                               (input.ignored_asm_count != 0) == (attribute_rows != 0) && input.constant_warnings_prepared &&
+                               input.constant_warning_count == constant_rows,
+                          "warning producers publish exact node/constant counts and ignored-asm presence for report collection");
         const uint32_t errors = pp.errors;
         const uint32_t warnings = pp.warnings;
         for (uint32_t round = 0; ready && round < 160; round += 1)
@@ -2378,8 +2396,21 @@ static void check_test_driver_reports(CheckTest* test)
                 }
                 input.constant_warnings = constants;
                 input.constant_warning_ignored = check_test_driver_random(&state) % 2 == 0 ? constants_ignored : NULL;
+                input.constant_warnings_prepared = round % 2 == 0;
+                input.constant_warning_count = 0;
+                for (uint32_t token = 0; token < count; token += 1)
+                {
+                    input.constant_warning_count += constants[token] != 0;
+                }
                 stream.warnings = node_warnings;
                 stream.warning_ignored = check_test_driver_random(&state) % 2 == 0 ? node_ignored : NULL;
+                // Alternate completed producer metadata with hand-built streams, whose collector retains the dense fallback.
+                stream.warnings_prepared = round % 2 == 0;
+                stream.warning_count = 0;
+                for (uint32_t node = 0; node < stream.count; node += 1)
+                {
+                    stream.warning_count += node_warnings[node] != 0;
+                }
                 const uint32_t pragma_count = (uint32_t)check_test_driver_random(&state) % 6;
                 CheckInputFpPragma* fp = pragma_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(&records, CheckInputFpPragma, pragma_count) : NULL;
                 for (uint32_t p = 0; fp != NULL && p < pragma_count; p += 1)
@@ -2785,6 +2816,51 @@ static void check_test_driver_loop_hints(CheckTest* test, const char* clang, con
     }
 }
 
+// The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
+// cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
+static void check_test_driver_reuse(CheckTest* test, const char* directory)
+{
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/reused-driver.c", directory);
+    const char text[] = "int reused(int value) { return value + 1; }\n";
+    const bool written = parse_test_write(source, text, sizeof(text) - 1);
+    check_test_expect(test, written, "reusable driver fixture is available");
+    char* check_arguments[] = { "-fsyntax-only", source };
+    char* pp_arguments[] = { "-E", "-P", "-o", "/dev/null", source };
+    for (uint32_t route = 0; written && route < 2; route += 1)
+    {
+        const int warm = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
+                                     run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+        const uint64_t before = parse_test_status_bytes("VmSize:");
+        const int again = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
+                                      run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+        const uint64_t after = parse_test_status_bytes("VmSize:");
+        check_test_expect(test, warm == 0 && again == 0 && before != 0 && after == before,
+                          "reusable source and preprocessor commands release their mappings before returning");
+        char* invalid_arguments[] = { "--buster-invalid-option" };
+        const int saved = dup(STDERR_FILENO);
+        const int quiet = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        int rejected = -1;
+        if (saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO)
+        {
+            rejected = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments, true) :
+                                    run_preprocessor_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments);
+        }
+        if (saved >= 0)
+        {
+            dup2(saved, STDERR_FILENO);
+            close(saved);
+        }
+        if (quiet >= 0)
+        {
+            close(quiet);
+        }
+        check_test_expect(test, rejected == 1 && parse_test_status_bytes("VmSize:") == before,
+                          "a reusable command's rejected options release mappings after an earlier successful compile");
+    }
+    unlink(source);
+}
+
 static int run_checker_driver_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -3184,6 +3260,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     if (temporary)
     {
+        check_test_driver_reuse(&test, directory);
         check_test_driver_large_function(&test, clang, executable, directory);
         check_test_packed_members(&test, clang, executable, directory);
         check_test_driver_lazy(&test, clang, executable, directory);

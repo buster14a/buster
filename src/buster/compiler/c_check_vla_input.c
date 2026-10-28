@@ -545,7 +545,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
     // A unit without a variably modified declaration has no lifetime for a jump to enter, and the scans below would find
     // nothing: the vector path tests the declarations' lifetimes 16 tokens at a time for one, and the scalar reader
     // makes the scans anyway, their twin.
-    bool lifetimes = parser->options.scalar;
+    bool lifetimes = BUSTER_SCALAR_PATH(parser->options.scalar);
     for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
     {
         lifetimes = check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
@@ -610,7 +610,7 @@ static void check_input_vla_finish(CheckInputReader* reader)
             }
             for (uint32_t token = opening + 1; token < closing; token += 1)
             {
-                if (check_input_indirect_goto(parser, token) && reader->output->asm_ids[token] == 0 && (token < low || token >= high))
+                if (check_input_indirect_goto(parser, token) && check_input_asm_id(reader->output, token) == 0 && (token < low || token >= high))
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                 }

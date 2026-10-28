@@ -24,6 +24,8 @@
 //
 // Layout: the counters and the report; the files; the paths and the stages; run_parser_benchmark, called by main.c.
 
+#include "host_isa.h"
+#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -975,7 +977,8 @@ int run_parser_benchmark(int argc, char** argv)
             };
             loaded = bench.tree.roles != 0 && bench.tree.depths != 0 && bench.tree.parents != 0 && bench.typed != 0 && bench.statements != 0 && bench.diagnostics != 0 &&
                      kinds != 0 && token_names != 0 && sources != 0 && flags != 0 && pragma_sources != 0 && pragma_positions != 0 &&
-                     parse_kernels_reserve(&bench.kernels, &shared, largest, names) && parse_vector_buffers_reserve(&bench.buffers, &shared, largest);
+                     parse_kernels_reserve(&bench.kernels, &shared, largest, names) && parse_vector_buffers_reserve(&bench.buffers, &shared, largest) &&
+                     parse_vector_postorder_reserve(&bench.buffers, &shared, largest);
             bench.tree.roles = bench.tree.roles != 0 ? bench.tree.roles + BUSTER_PARSE_TOKEN_PADDING : 0;
             bench.tree.depths = bench.tree.depths != 0 ? bench.tree.depths + BUSTER_PARSE_TOKEN_PADDING : 0;
             bench.tree.parents = bench.tree.parents != 0 ? bench.tree.parents + BUSTER_PARSE_TOKEN_PADDING : 0;
@@ -1001,3 +1004,12 @@ int run_parser_benchmark(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+
+#else
+int run_parser_benchmark(int argc, char** argv)
+{
+    (void)argc;
+    (void)argv;
+    return 1;
+}
+#endif // BUSTER_HOST_VECTOR

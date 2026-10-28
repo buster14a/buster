@@ -87,6 +87,8 @@ struct CheckProgramOptions
 {
     const CheckInitializers* initializers;
     const CheckAsms* asms;
+    // Completed static declarations from the same unit, when emission already prepared them.
+    const CheckDataPrepared* prepared_data;
     // Borrowed for main recognition and compatibility checks before adding target-runtime call symbols.
     const InternTable* identifiers;
     const uint32_t* initializer_references;
@@ -544,9 +546,11 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
 // time, to count the cases and then to check each in order; the rest and the `scalar` path test every token.
 static void check_program_cases(CheckProgram* program, const Parser* parser, uint32_t* first, uint32_t* next, uint32_t* map, Arena* output, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     const CheckInput* input = program->input;
     const uint32_t tokens = input->token_count;
-    const uint32_t vector_end = scalar ? 0 : tokens / 64 * 64;
+    const uint32_t vector_end = BUSTER_SCALAR_PATH(scalar) ? 0 : tokens / 64 * 64;
     uint32_t count = 0;
     for (uint32_t token = 0; token < vector_end; token += 64)
     {
@@ -1402,7 +1406,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
             if (value.object != 0 && value.object < program->object_count && program->input->compound_objects[value.object - 1] &&
                 !program->input->static_objects[value.object - 1])
             {
-                const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value.object - 1] : 0;
+                const uint32_t selected = program->initializers != 0 ? check_initializers_plan_index(program->initializers, value.object - 1) : 0;
                 if (selected == 0 || selected > program->initializers->count)
                 {
                     check_program_fail(program, CHECK_PROGRAM_INVALID, value.object - 1);
@@ -1552,10 +1556,12 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
 // scalar also handles the tail without requiring padding, and is the independent program path's exact twin.
 static void check_program_addressed(const Parser* parser, const CheckInput* input, uint8_t* addressed, bool scalar)
 {
+    (void)scalar;
+
     const uint32_t count = input->token_count;
     memset(addressed, 0, (uint64_t)count + 1);
     uint32_t token = 0;
-    for (; !scalar && count - token >= 64; token += 64)
+    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= 64; token += 64)
     {
         const __m512i kinds = _mm512_loadu_si512(parser->tokens.kinds + token);
         const __m512i roles = _mm512_loadu_si512(parser->tree.roles + token);
@@ -1588,12 +1594,14 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
 // rest and the `scalar` path one at a time. Returns the number of bodies.
 static uint32_t check_program_openings(const CheckInput* input, uint32_t node_count, uint32_t* openings, uint32_t* initializers, bool scalar)
 {
+    (void)scalar;
+
     const uint32_t count = input->token_count;
     const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
     const __m512i nodes = _mm512_set1_epi32((int)node_count);
     uint32_t bodies = 0;
     uint32_t token = 0;
-    for (; !scalar && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
     {
         __mmask16 opened = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(input->body_declarations + token), none);
         if (input->deferred_tokens != 0)
@@ -1663,11 +1671,13 @@ static bool check_program_runtime_object(const CheckInput* input, const TypeTabl
 static void check_program_allocations(CheckProgram* program, const Parser* parser, const TypeTable* types, uint32_t* allocation_first, uint32_t* allocation_next,
                                       uint32_t* vla_blocks, uint32_t* vla_saves, bool scalar)
 {
+    (void)scalar;
+
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     uint32_t token = count;
-    for (; !scalar && token >= BUSTER_CHECK_PROGRAM_LANES; token -= BUSTER_CHECK_PROGRAM_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && token >= BUSTER_CHECK_PROGRAM_LANES; token -= BUSTER_CHECK_PROGRAM_LANES)
     {
         const uint32_t base = token - BUSTER_CHECK_PROGRAM_LANES;
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)base), lanes);
@@ -1712,9 +1722,11 @@ _Static_assert(CHECK_OP_BUILTIN_OVERFLOW > CHECK_OP_BUILTIN_UNARY && CHECK_OP_BU
 // check_program_builtin_op; the rest and the `scalar` path test every node.
 static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* nodes, uint32_t* listed, bool scalar)
 {
+    (void)scalar;
+
     uint32_t found = 0;
     uint32_t node = 0;
-    for (; !scalar && graph->count - node >= BUSTER_CHECK_PROGRAM_LANES; node += BUSTER_CHECK_PROGRAM_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && graph->count - node >= BUSTER_CHECK_PROGRAM_LANES; node += BUSTER_CHECK_PROGRAM_LANES)
     {
         const __m512i ops = _mm512_loadu_si512(graph->ops + node);
         const __mmask16 candidates = _mm512_cmpge_epu32_mask(ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY)) & _mm512_test_epi32_mask(_mm512_loadu_si512(nodes + node), _mm512_set1_epi32(-1));
@@ -1782,12 +1794,14 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
 // column had room.
 static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, bool scalar)
 {
+    (void)scalar;
+
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     bool room = true;
     uint32_t token = 0;
-    for (; !scalar && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
     {
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
         const __mmask16 declared = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
@@ -1803,6 +1817,18 @@ static bool check_program_static_objects(CheckProgram* program, uint8_t* needed,
         {
             room = check_program_static_object(program, needed, token, output, room);
         }
+    }
+    return room;
+}
+
+// Preparation already grouped each object's declarations in their original token order. Different objects have no
+// shared state here: the last declaration, first naked spelling and needed bit are each an object's own reduction.
+static bool check_program_static_prepared(CheckProgram* program, const CheckDataPrepared* prepared, uint8_t* needed, Arena* output)
+{
+    bool room = true;
+    for (uint32_t d = 0; d < prepared->declaration_count; d += 1)
+    {
+        room = check_program_static_object(program, needed, (uint32_t)prepared->declaration_keys[d], output, room);
     }
     return room;
 }
@@ -1827,7 +1853,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                  stream->status == CHECK_STATUS_OK && stream->count == node_count && stream->report_count == 0 && !input->resource && input->report_count == 0;
     valid = valid && (options.initializers == 0 || (options.initializers->status == CHECK_INIT_OK && options.initializers->token_count == count)) &&
             (input->asm_count == 0 || (options.asms != 0 && options.asms->status == CHECK_ASM_OK)) &&
-            (options.initializer_reference_count == 0 || options.initializer_references != 0);
+            (options.initializer_reference_count == 0 || options.initializer_references != 0) &&
+            (options.prepared_data == NULL || (options.prepared_data->status == CHECK_DATA_INPUT_OK &&
+             options.prepared_data->object_count == count + 1 &&
+             (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     const uint32_t capacity = count * 8 + 16;
@@ -1885,7 +1914,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
     uint32_t body_count = 0;
     if (valid)
     {
-        check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, options.scalar);
+        check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
         memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(initializers, 0xff, ((uint64_t)node_count + 1) * sizeof(uint32_t));
@@ -1906,7 +1935,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(needed, 0, (uint64_t)count + 1);
         if (addressed != 0)
         {
-            check_program_addressed(parser, input, addressed, options.scalar);
+            check_program_addressed(parser, input, addressed, BUSTER_SCALAR_PATH(options.scalar));
         }
         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(nodes, 0, ((uint64_t)node_count + 1) * sizeof(uint32_t));
@@ -1924,7 +1953,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 region_first[body] = r;
             }
         }
-        body_count = check_program_openings(input, node_count, openings, initializers, options.scalar);
+        body_count = check_program_openings(input, node_count, openings, initializers, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t node = node_count; node-- > 0;)
         {
             const uint32_t token = input->graph.tokens[node];
@@ -1972,7 +2001,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 memset(program->compound_initializers, 0, options.initializers->count);
             }
         }
-        check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, options.scalar);
+        check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t i = input->vla_count; i-- > 0;)
         {
             const CheckInputVla* vla = input->vlas + i;
@@ -2110,7 +2139,7 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
             }
             // The existing bounded radix kernel sorts high 32-bit keys. Reuse its scalar/vector twins, keeping
             // this body's canonical object IDs compact instead of rescanning the entire translation unit.
-            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !options.scalar, varying);
+            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
             uint32_t* output_references = body->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body->reference_count) : 0;
             if (body->reference_count != 0 && output_references == 0)
             {
@@ -2131,12 +2160,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
     }
     valid = valid && program->status == CHECK_PROGRAM_OK;
-    program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, options.scalar) : 0;
+    program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, BUSTER_SCALAR_PATH(options.scalar)) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
     if (valid && program->builtin_count != 0)
     {
-        check_program_builtins(&input->graph, nodes, program->builtin_nodes, options.scalar);
+        check_program_builtins(&input->graph, nodes, program->builtin_nodes, BUSTER_SCALAR_PATH(options.scalar));
     }
     program->controls = valid && writer.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckControl, writer.count) : 0;
     valid = valid && (writer.count == 0 || program->controls != 0);
@@ -2153,7 +2182,8 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         memset(program->object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one.
-        const bool naked_room = check_program_static_objects(program, needed, output, options.scalar);
+        const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output) :
+                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar));
         for (uint32_t i = 0; i < options.initializer_reference_count; i += 1)
         {
             const uint32_t object = options.initializer_references[i];
@@ -2166,12 +2196,12 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
                 check_program_fail(program, CHECK_PROGRAM_INVALID, 0);
             }
         }
-        program->symbol_count = check_program_needed_count(needed, program->object_count, options.scalar);
+        program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(options.scalar));
         program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
         valid = naked_room && (program->symbol_count == 0 || program->symbol_objects != 0);
         if (valid && program->symbol_count != 0)
         {
-            check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, options.scalar);
+            check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, BUSTER_SCALAR_PATH(options.scalar));
         }
     }
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))

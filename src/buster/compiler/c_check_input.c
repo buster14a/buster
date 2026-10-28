@@ -86,6 +86,14 @@ static __attribute__((unused)) uint32_t check_input_report_source(const Parser* 
 }
 
 typedef struct CheckInput CheckInput;
+typedef struct CheckInputLiteralTable CheckInputLiteralTable;
+struct CheckInputLiteralTable
+{
+    CheckInputLiteralTable* next;
+    uint32_t declaration;
+    CheckInitPart part;
+    CheckInitializer plan;
+};
 typedef struct CheckInputAttributes CheckInputAttributes;
 typedef struct CheckInputRegion CheckInputRegion;
 typedef struct CheckInputVla CheckInputVla;
@@ -181,6 +189,9 @@ struct CheckInput
     uint8_t* thread_local;
     uint8_t* compound_objects;
     CheckInputAttributes** attributes;
+    // Ignored asm labels are the only attribute warnings; their writer publishes this upper bound for report collection.
+    uint32_t ignored_asm_count;
+    bool asm_warnings_prepared;
     uint8_t* linkage;
     uint8_t* defined;
     uint8_t* tentative;
@@ -192,6 +203,8 @@ struct CheckInput
     CheckInputPackedMember* packed_members;
     uint32_t packed_member_count;
     uint8_t* constant_warnings;
+    uint32_t constant_warning_count;
+    bool constant_warnings_prepared;
     uint8_t* constant_warning_ignored;
     uint32_t* body_declarations;
     uint32_t* declaration_bodies;
@@ -211,6 +224,7 @@ struct CheckInput
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
+    // Zero-default token IDs; null when the parsed unit has no asm statement groups. Read through check_input_asm_id.
     uint32_t* asm_ids;
     CheckInitString* strings;
     // Literal index by token, including every part of an adjacent literal sequence; NONE for other tokens.
@@ -218,6 +232,10 @@ struct CheckInput
     uint32_t* string_ids;
     uint32_t string_count;
     uint32_t token_count;
+    // Large, proven file-scope integer literal lists, in declaration order: one immutable bytes part per table.
+    CheckInputLiteralTable* literal_tables;
+    CheckInputLiteralTable* literal_tables_last;
+    uint32_t literal_table_count;
     CBindingStatistics binding_statistics;
     uint32_t binding_event_count;
     CBindingStatistics parser_binding_statistics;
@@ -233,6 +251,11 @@ struct CheckInput
     bool diagnostic_graph;
     bool resource;
 };
+
+static uint32_t check_input_asm_id(const CheckInput* input, uint32_t token)
+{
+    return input->asm_ids != NULL ? input->asm_ids[token] : 0;
+}
 
 // What check_input_resolve_range tests a token for by its syntax alone, as CheckInputReader.syntax keeps it: bits of the
 // tests it would make of the token's name and kind, each a function of the token (and its successor) alone.
@@ -437,6 +460,7 @@ struct CheckInputReader
     TypeTable* types;
     Arena* arena;
     Arena* scratch;
+    bool literal_tables_disabled;
     CBindings bindings;
     TypeId* declared_types;
     TypeId* query_types;
@@ -3292,6 +3316,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+#include "c_check_literal_table_input.c"
 #include "c_check_input_initializer.c"
 #include "c_check_control_input.c"
 #include "c_check_builtin_input.c"
@@ -3320,7 +3345,7 @@ static void check_input_attribute_items(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count < 2 ? 0 : parser->tokens.count - 2;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_attribute_item(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -3601,6 +3626,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 break;
             }
             check_input_initializer_prepare(reader, i);
+            const CheckInputLiteralTable* table = reader->output->literal_tables_last;
+            if (table != NULL && table->declaration == declaration)
+            {
+                i = reader->output->initializer_ends[declaration] - 1;
+                continue;
+            }
         }
         if ((syntactic && !reader->ignored[i] && (role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
              kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || (syntax & BUSTER_CHECK_SYNTAX_ATTRIBUTE) != 0 ||
@@ -3993,7 +4024,7 @@ static bool check_input_expression_sparse(const CheckInputReader* reader, uint32
 {
     const CheckInput* input = reader->output;
     return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
-           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || input->asm_ids[token] != 0;
+           reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
 }
 
 // The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
@@ -4046,7 +4077,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !parser->options.scalar && token < count; token += 64)
+    for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -4070,7 +4101,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
             const __m512i varargs = _mm512_maskz_loadu_epi32(parts, reader->vararg_calls + at);
             const __m512i designators = _mm512_maskz_loadu_epi32(parts, reader->designator_tokens + at);
             const __m512i bounds = _mm512_maskz_loadu_epi32(parts, reader->vla_ends + at);
-            const __m512i statements = _mm512_maskz_loadu_epi32(parts, input->asm_ids + at);
+            const __m512i statements = input->asm_ids != NULL ? _mm512_maskz_loadu_epi32(parts, input->asm_ids + at) : _mm512_setzero_si512();
             const __m512i entries = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(regions, constants), _mm512_or_si512(varargs, designators)),
                                                     _mm512_or_si512(bounds, statements));
             const __mmask16 selected = _mm512_mask_cmplt_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->selected_tokens + at), _mm512_set1_epi32((int32_t)count));
@@ -4105,6 +4136,8 @@ static void check_input_expressions(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
+    // The requested walk controls filtering and value-list accounting. Host ISA
+    // only selects how the classification above is computed.
     const bool scalar = parser->options.scalar;
     // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
     const uint32_t acts = check_input_expression_classes(reader);
@@ -4233,7 +4266,7 @@ static void check_input_expressions(CheckInputReader* reader)
         {
             node = check_input_vla_capture(reader, token);
         }
-        else if (sparse && reader->output->asm_ids[token] != 0)
+        else if (sparse && check_input_asm_id(reader->output, token) != 0)
         {
             if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
             {
@@ -4827,7 +4860,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) : check_input_scan_nonzero(reader->output->tentative, first, count);
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_nonzero(reader->output->tentative, first, count);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_complete_use(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -4865,7 +4898,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     reader->output->resource |= system && pp->output.locations != NULL && levels == NULL;
     if (levels != NULL)
     {
-        if (parser->options.scalar || pp->system_runs_inexact)
+        if (BUSTER_SCALAR_PATH(parser->options.scalar) || pp->system_runs_inexact)
         {
             pp_history_ensure(pp);
             pp_system_levels_history(pp, levels);
@@ -4901,9 +4934,11 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
 // its twin, reads every token's.
 static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t count, bool scalar)
 {
+    (void)scalar;
+
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !scalar && token < count; token += 32)
+    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
     {
         const __mmask32 lanes = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
         const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
@@ -4968,7 +5003,7 @@ static void check_input_constant_contexts(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = parser->options.scalar ? check_input_scan_all(first, count) :
+        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) :
                             check_input_scan_nonzero(reader->output->static_objects, first, count) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_STATIC_ASSERT) |
                             check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_CASE);
@@ -5011,6 +5046,8 @@ struct CheckInputTokenCounts
     // `[`, `asm` and `sizeof` (with _Alignof's, of the same kind) tokens, and `.` as a member operator.
     uint32_t subscripts;
     uint32_t asms;
+    // An asm statement's opening parenthesis, unlike an asm keyword on a declaration's linkage label.
+    uint32_t asm_groups;
     uint32_t size_queries;
     uint32_t vector_members;
     // The operands, and the closing parentheses of calls and function declarators: the overloads' room.
@@ -5039,6 +5076,8 @@ static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
 static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
                                                                               uint32_t name_count, uint8_t* syntax, uint8_t* visits, bool scalar)
 {
+    (void)scalar;
+
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
     static const uint32_t syntax_names[] =
     {
@@ -5068,7 +5107,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
     uint32_t token = 0;
-    for (; !scalar && token < count; token += 64)
+    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -5076,6 +5115,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         const __m512i role = roles != 0 ? _mm512_maskz_loadu_epi8(lanes, roles + token) : _mm512_setzero_si512();
         result.subscripts += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_L_SQUARE)));
         result.asms += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_ASM)));
+        result.asm_groups += roles != NULL ? (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_ASM))) : 0;
         result.size_queries += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_SIZEOF)));
         if (roles != 0)
         {
@@ -5158,6 +5198,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     {
         result.subscripts += kinds[token] == PARSE_KIND_L_SQUARE;
         result.asms += kinds[token] == PARSE_KIND_ASM;
+        result.asm_groups += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ASM;
         result.size_queries += kinds[token] == PARSE_KIND_SIZEOF;
         result.vector_members += roles != 0 && roles[token] == PARSE_ROLE_MEMBER_OPERATOR && kinds[token] == PARSE_KIND_PERIOD;
         result.operands += roles != 0 && roles[token] == PARSE_ROLE_OPERAND;
@@ -5193,11 +5234,35 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     return result;
 }
 
+// Retained uint32 output columns all use UINT32_MAX as their empty value. Fill one bounded column at a time so
+// libc's vector stores replace the aliasing token-wise stores (#628). Dirty and borrowed output storage is cleared
+// explicitly; the scalar reader below retains its original interleaved initialization as the independent twin.
+// The caller has proved all these mandatory reservations. Even count zero owns one sentinel; optional zero-default
+// columns (notably asm_ids) are excluded and keep their existing guarded initialization.
+static void check_input_output_none(CheckInput* input, uint32_t count)
+{
+    _Static_assert(BUSTER_CHECK_NONE == UINT32_MAX, "NONE output columns use all-one bytes");
+    const uint64_t bytes = ((uint64_t)count + 1) * sizeof(uint32_t);
+    memset(input->declarations, 0xff, bytes);
+    memset(input->initializer_nodes, 0xff, bytes);
+    memset(input->initializer_begins, 0xff, bytes);
+    memset(input->initializer_ends, 0xff, bytes);
+    memset(input->token_nodes, 0xff, bytes);
+    memset(input->body_declarations, 0xff, bytes);
+    memset(input->declaration_bodies, 0xff, bytes);
+    memset(input->parameter_next, 0xff, bytes);
+    memset(input->control_owners, 0xff, bytes);
+    memset(input->label_targets, 0xff, bytes);
+    memset(input->case_ranges, 0xff, bytes);
+    memset(input->string_ids, 0xff, bytes);
+    memset(input->parameters, 0xff, bytes);
+}
+
 // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
 // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
 static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
-                            CheckDeferred* deferred, bool environment)
+                            CheckDeferred* deferred, bool environment, bool literal_tables)
 {
     *input = (CheckInput){ 0 };
     // Plain char's signedness, which every phase after the reader reads from the table too.
@@ -5241,7 +5306,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const uint64_t mark = scratch->length;
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
     uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64) : 0;
-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, parser->options.scalar);
+    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, BUSTER_SCALAR_PATH(parser->options.scalar));
     input->vla_capacity = counts.subscripts;
     input->asm_capacity = counts.asms;
     const uint32_t vector_members = counts.vector_members;
@@ -5255,6 +5320,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         .types = types,
         .arena = arena,
         .scratch = scratch,
+        .literal_tables_disabled = !literal_tables,
         .function_body = BUSTER_CHECK_NONE,
         .function_name_body = BUSTER_CHECK_NONE,
         .function_name_ids = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE },
@@ -5332,7 +5398,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(case_ranges, uint32_t);
     BUSTER_CHECK_OUTPUT_ARRAY(regions, CheckInputRegion);
     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
-    BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
+    // Declaration asm labels need no statement IDs. Keep the scalar path's dense column as an exact oracle, and
+    // the old allocation when a handbuilt parser supplies no roles to prove that the column is empty.
+    if (parser->options.scalar || counts.asm_groups != 0 || (parser->tree.roles == NULL && counts.asms != 0))
+    {
+        BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
+    }
     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
     BUSTER_CHECK_OUTPUT_ARRAY(string_ids, uint32_t);
 #undef BUSTER_CHECK_OUTPUT_ARRAY
@@ -5539,6 +5610,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
         memset(input->graph.warning_suppressed, 0, graph_capacity);
         memset(input->constant_warnings, 0, (uint64_t)count + 1);
+        input->constant_warnings_prepared = true;
         memset(input->constant_warning_ignored, 0, (uint64_t)count + 1);
         if (input->deferred_tokens != 0 && deferred == 0)
         {
@@ -5559,7 +5631,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(input->function_flags, 0, (uint64_t)count + 1);
         memset(input->explicit_abis, 0, (uint64_t)count + 1);
         memset(input->expression_regions, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (input->asm_ids != NULL)
+        {
+            memset(input->asm_ids, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         memset(input->attributes, 0, ((uint64_t)count + 1) * sizeof(CheckInputAttributes*));
         memset(reader.linkage, 0, (uint64_t)count + 1);
         memset(reader.objects, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
@@ -5571,27 +5646,45 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
-        for (uint32_t i = 0; i <= count; i += 1)
+        if (parser->options.scalar)
         {
-            input->declarations[i] = BUSTER_CHECK_NONE;
-            input->initializer_nodes[i] = BUSTER_CHECK_NONE;
-            input->initializer_begins[i] = BUSTER_CHECK_NONE;
-            input->initializer_ends[i] = BUSTER_CHECK_NONE;
-            input->token_nodes[i] = BUSTER_CHECK_NONE;
-            input->body_declarations[i] = BUSTER_CHECK_NONE;
-            input->declaration_bodies[i] = BUSTER_CHECK_NONE;
-            input->parameter_next[i] = BUSTER_CHECK_NONE;
-            input->control_owners[i] = BUSTER_CHECK_NONE;
-            input->label_targets[i] = BUSTER_CHECK_NONE;
-            input->case_ranges[i] = BUSTER_CHECK_NONE;
-            reader.string_ids[i] = BUSTER_CHECK_NONE;
-            reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-            reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-            reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-            reader.activate[i] = BUSTER_CHECK_NONE;
-            reader.parameters[i] = BUSTER_CHECK_NONE;
-            reader.first_value[i] = BUSTER_CHECK_NONE;
-            reader.last_value[i] = BUSTER_CHECK_NONE;
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                input->declarations[i] = BUSTER_CHECK_NONE;
+                input->initializer_nodes[i] = BUSTER_CHECK_NONE;
+                input->initializer_begins[i] = BUSTER_CHECK_NONE;
+                input->initializer_ends[i] = BUSTER_CHECK_NONE;
+                input->token_nodes[i] = BUSTER_CHECK_NONE;
+                input->body_declarations[i] = BUSTER_CHECK_NONE;
+                input->declaration_bodies[i] = BUSTER_CHECK_NONE;
+                input->parameter_next[i] = BUSTER_CHECK_NONE;
+                input->control_owners[i] = BUSTER_CHECK_NONE;
+                input->label_targets[i] = BUSTER_CHECK_NONE;
+                input->case_ranges[i] = BUSTER_CHECK_NONE;
+                reader.string_ids[i] = BUSTER_CHECK_NONE;
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.parameters[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
+        }
+        else
+        {
+            check_input_output_none(input, count);
+            // Reader-internal columns keep their token-wise initialization and ownership. Only retained output
+            // columns change their fill order; no reader arena format or walk is changed.
+            for (uint32_t i = 0; i <= count; i += 1)
+            {
+                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
+                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
+                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
+                reader.activate[i] = BUSTER_CHECK_NONE;
+                reader.first_value[i] = BUSTER_CHECK_NONE;
+                reader.last_value[i] = BUSTER_CHECK_NONE;
+            }
         }
         if (traversal != 0)
         {
@@ -5748,7 +5841,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 // Without a _Generic or __builtin_choose_expr token there is nothing to select: the scalar reader
                 // walks every token for them, the twin of this count.
-                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || parser->options.scalar)
+                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || BUSTER_SCALAR_PATH(parser->options.scalar))
                 {
                     check_input_selections(&reader);
                 }
@@ -5780,7 +5873,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         input->graph.transparent_unions = activations;
                     }
                 }
-                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, parser->options.scalar);
+                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
                 if (input->graph.builtin_capacity != 0)
                 {
                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));
@@ -5835,7 +5928,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
 
 static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
+}
+
+// Exact source oracle for the compact literal-table producer: retain ordinary per-expression checking/planning.
+static __attribute__((unused)) bool check_input_tables_reference(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
+{
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, false);
 }
 
 // check_input with another binding handoff (#336), for the tests and benchmark-checker-bindings: every mode must
@@ -5843,7 +5942,7 @@ static bool check_input(CheckInput* input, const Parser* parser, Preprocessor* p
 static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                               Arena* arena, Arena* scratch, CheckInputBindingMode binding_mode)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, 0, binding_mode, 0, true, true);
 }
 
 // The selection owner validates nonoverlapping complete [OPEN_BODY, CLOSE_BODY + 1) masks. All source syntax,
@@ -5852,14 +5951,14 @@ static __attribute__((unused)) bool check_input_bindings_mode(CheckInput* input,
 static __attribute__((unused)) bool check_input_selected(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types,
                                                        Arena* arena, Arena* scratch, const uint8_t* deferred_tokens)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, true, parser->tokens.count, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // A complete syntactic prefix may still acquire later tentative definitions. This entry point is only for
 // selecting an earlier semantic diagnostic when the full parser has already rejected the translation unit.
 static bool check_input_prefix(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, parser->tokens.count, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }
 
 // The C driver's reader (run_check_command): check_input, check_input_prefix, check_input_fragment or check_input_selected
@@ -5869,7 +5968,7 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
                                 bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens)
 {
     return check_input_run(input, parser, pp, types, arena, scratch, complete_translation_unit, original_end, deferred_tokens, CHECK_INPUT_BINDINGS_DEFAULT, 0,
-                           false);
+                           false, true);
 }
 
 // Diagnostic repairs append synthetic closing tokens. Labels may still occur after the retained fragment in
@@ -5877,5 +5976,5 @@ static bool check_input_compile(CheckInput* input, const Parser* parser, Preproc
 static __attribute__((unused)) bool check_input_fragment(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  uint32_t original_end)
 {
-    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true);
+    return check_input_run(input, parser, pp, types, arena, scratch, false, original_end, 0, CHECK_INPUT_BINDINGS_DEFAULT, 0, true, true);
 }

@@ -1854,7 +1854,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         const CheckGraph* graph = &reader->output->graph;
         check_overload_call(reader->types, action, graph->overload_candidates, graph->overload_candidate_count,
-                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, reader->parser->options.scalar, checked, 0, 0);
+                            head == 0 ? BUSTER_CHECK_NONE : head - 1, reader->scratch, BUSTER_SCALAR_PATH(reader->parser->options.scalar), checked, 0, 0);
     }
     else
     {
@@ -1909,7 +1909,7 @@ static bool check_constant_speculative_call(CheckConstantInput* input, uint32_t 
 {
     const uint8_t warnings = input->reader->output->constant_warnings[closing];
     const bool valid = check_constant_arguments(input, arguments, count) && check_constant_call(input, keyword, closing, builtin, type, arguments, count, value);
-    input->reader->output->constant_warnings[closing] = warnings;
+    check_input_constant_warning_set(input->reader->output, closing, warnings);
     check_input_warning_changed(input->reader, closing, warnings);
     return valid;
 }

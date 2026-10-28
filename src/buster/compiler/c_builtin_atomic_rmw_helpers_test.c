@@ -888,8 +888,8 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
     (void)argv;
     CBuiltinAtomicRmwTest test = { 0 };
     bool valid = cbuiltin_atomic_rmw_test_expect(&test, argc == 0, "usage: test-builtin-atomic-rmw-helpers", 0);
-    valid = cbuiltin_atomic_rmw_test_expect(&test, __clang_major__ == 23 && __clang_minor__ == 1 && __clang_patchlevel__ == 1,
-        "direct host builtin oracles require exact Clang23.1.1", 0) && valid;
+    valid = cbuiltin_atomic_rmw_test_expect(&test, __clang_major__ > 23 || (__clang_major__ == 23 && (__clang_minor__ > 1 ||
+        (__clang_minor__ == 1 && __clang_patchlevel__ >= 1))), "direct host builtin oracles require Clang 23.1.1 or newer", 0) && valid;
     Arena arena = arena_reserve(UINT64_C(1) << 25);
     CBuiltinAtomicRmwTestCase items[BUSTER_CBUILTIN_RMW_TEST_CASES] = { 0 };
     uint32_t count = 0;

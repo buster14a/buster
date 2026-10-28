@@ -63,7 +63,7 @@
 #include <dirent.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 // The exchange's partitions per lane: enough that each lane's share of the candidates is about even, few enough that a
 // lane placing its candidates writes to few places at once.
@@ -698,8 +698,13 @@ static void files_take_ids(FilesRun* run, FilesLane* mine)
 // Step 6: a prepared file's identifiers (and its guard) from the lane's ids to the shared table's, 64 tokens at a time:
 // one compare finds the identifiers, and those that aren't predefined names (whose ids every table shares) take their
 // shared ids, 16 at a time by a gather. files_remap_scalar is its twin, a token at a time.
+static void files_remap_scalar(PPFileData* data, const IdentId* shared);
+
 static void files_remap(PPFileData* data, const IdentId* shared)
 {
+#if !BUSTER_HOST_VECTOR
+    files_remap_scalar(data, shared);
+#else
     for (uint32_t i = 0; i < data->token_count; i += 64)
     {
         const __mmask64 valid = _bzhi_u64(~0ull, data->token_count - i < 64 ? data->token_count - i : 64);
@@ -716,6 +721,7 @@ static void files_remap(PPFileData* data, const IdentId* shared)
         }
     }
     data->guard = data->guard >= C_NAME_COUNT ? shared[data->guard] : data->guard;
+#endif
 }
 
 static void files_remap_scalar(PPFileData* data, const IdentId* shared)
@@ -955,7 +961,7 @@ static void files_prepare(FilesRun* run)
             PPFileData* data = &cache->records[run->records[file]];
             if (run->file_status[file] == PP_PREPARE_DONE && room)
             {
-                if (cache->prepare.vectorized)
+                if (BUSTER_VECTOR_PATH(cache->prepare.vectorized))
                 {
                     files_remap(data, mine->shared);
                 }

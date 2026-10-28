@@ -41,7 +41,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include <immintrin.h>
+#include "host_isa.h"
 
 // The linkage of the entry points that main.c's units compile in one of them, their home, and call there (main.c): a
 // unit of its own, such as a benchmark's, has them static, as every other function here.
@@ -550,6 +550,9 @@ static void parse_tokens_from_output_scalar(const PPTokens* output, ParseTokens*
 // pragmas, with the padding on both sides.
 static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
 {
+#if !BUSTER_HOST_VECTOR
+    parse_tokens_from_output_scalar(output, tokens);
+#else
     const __m512i table0 = _mm512_load_si512(parse_kind_table);
     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
     const __m512i table2 = _mm512_load_si512(parse_kind_table + 128);
@@ -594,6 +597,7 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
     }
     tokens->count = written;
     parse_tokens_pad(tokens);
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -8058,18 +8062,6 @@ BUSTER_INLINE __m512i parse_lookup8(const uint8_t* table, __m512i index)
     return _mm512_permutex2var_epi8(_mm512_loadu_si512(table), index, _mm512_loadu_si512(table + 64));
 }
 
-// A stack of search candidates from other blocks: positions and keys, keys increasing upward, with room for the
-// tokens, and BUSTER_PARSE_CANDIDATE_PADDING entries below index 0 that hold key 0 and BUSTER_PARSE_NONE.
-#define BUSTER_PARSE_CANDIDATE_PADDING 32
-
-typedef struct ParseCandidates ParseCandidates;
-struct ParseCandidates
-{
-    uint32_t* positions;
-    uint16_t* keys;
-    uint32_t count;
-};
-
 // ---------------------------------------------------------------------------------------------------------------------
 // K2 in AVX-512
 //
@@ -9235,6 +9227,9 @@ static void parse_classify_mask_avx512(ParseKernels* kernels, const uint8_t* kin
 // the twin's stack), and the depth of their groups is a prefix sum of their deltas, added to each token's depth.
 static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32_t* secondary)
 {
+#if !BUSTER_HOST_VECTOR
+    parse_secondary_scalar(kernels, count, secondary);
+#else
     uint32_t open = 0;
     for (uint32_t block = 0; block < count; block += 64)
     {
@@ -9319,6 +9314,7 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
     }
+#endif
 }
 
 // parse_after_colons over the `{` tokens after a resolved colon only.
@@ -11351,7 +11347,6 @@ struct ParseVectorBuffers
     uint8_t* typed;
     uint32_t* lefts;
     uint16_t* left_keys;
-    ParseCandidates candidates;
     // K4 with the stack's top in registers: each block's in-block work, and the stack's slots.
     ParseBlockWork* works;
     ParseSlots slots;
@@ -11363,8 +11358,8 @@ struct ParseVectorBuffers
     uint32_t* statement_previous;
     uint32_t* statement_owners;
     ParseStatementLevel* statement_levels;
-    // The postorder's, which only benchmark-parser's stages write: the walk's last children (parse_postorder), and the
-    // tree's columns (parse_tree_columns and parse_tree_links) with their temporaries and the subtree sizes.
+    // Only the kernel benchmark uses these traversal buffers. Production tree-only parsing leaves them null;
+    // clients requesting traversal columns build them after popping the vector workspace (#628).
     uint32_t* last_children;
     uint32_t* before;
     uint32_t* postorder;
@@ -11382,27 +11377,6 @@ struct ParseVectorBuffers
     // K6's blocks that its twin took.
     uint64_t check_twins;
 };
-
-// Candidates for K4's searches, with their padding below index 0.
-static bool parse_candidates_reserve(ParseCandidates* candidates, Arena* arena, uint64_t capacity)
-{
-    const uint64_t slots = capacity + BUSTER_PARSE_CANDIDATE_PADDING + 64;
-    uint32_t* positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    uint16_t* keys = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, slots);
-    const bool result = positions != 0 && keys != 0;
-    if (result)
-    {
-        for (uint32_t i = 0; i < BUSTER_PARSE_CANDIDATE_PADDING; i += 1)
-        {
-            positions[i] = BUSTER_PARSE_NONE;
-            keys[i] = 0;
-        }
-        candidates->positions = positions + BUSTER_PARSE_CANDIDATE_PADDING;
-        candidates->keys = keys + BUSTER_PARSE_CANDIDATE_PADDING;
-        candidates->count = 0;
-    }
-    return result;
-}
 
 // The by-depth stacks have BUSTER_PARSE_DEPTH_PADDING entries below depth 0: no opener, role NONE, not typed. K2 reads
 // 128 below a block's starting depth.
@@ -11443,15 +11417,6 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
         .statement_previous = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statement_owners = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .statement_levels = BUSTER_ARENA_PUSH_ARRAY(arena, ParseStatementLevel, slots),
-        .last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .before = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .first_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .next_siblings = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .subtree_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .rounds = { 0 },
         .wide_blocks = 0,
         .statement_counts = { 0 },
@@ -11460,10 +11425,7 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
     bool result = open_stack != 0 && group_roles != 0 && group_typed != 0 && group_keywords != 0 && buffers->typed != 0 && buffers->lefts != 0 && buffers->left_keys != 0 &&
                   buffers->secondary != 0 && buffers->statements != 0 && buffers->contexts != 0 && buffers->statement_previous != 0 && buffers->statement_owners != 0 &&
                   buffers->statement_levels != 0 &&
-                  buffers->last_children != 0 && buffers->before != 0 && buffers->postorder != 0 && buffers->positions != 0 && buffers->subtree_ends != 0 &&
-                  buffers->first_children != 0 && buffers->next_siblings != 0 && buffers->subtree_starts != 0 && buffers->sizes != 0 &&
-                  buffers->works != 0 && parse_candidates_reserve(&buffers->candidates, arena, capacity) &&
-                  parse_slots_reserve(&buffers->slots, arena, capacity);
+                  buffers->works != 0 && parse_slots_reserve(&buffers->slots, arena, capacity);
     if (result)
     {
         for (uint32_t i = 0; i < BUSTER_PARSE_DEPTH_PADDING; i += 1)
@@ -11475,6 +11437,24 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
         }
     }
     return result;
+}
+
+// The benchmark runs traversal kernels while retaining its workspace. Production does not: reserving these nine
+// unused columns there separated K4's active slots and fallback scratch from the prefix reused by checking (#628).
+static bool parse_vector_postorder_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
+{
+    const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+    buffers->last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->before = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->first_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->next_siblings = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->subtree_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    buffers->sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
+    return buffers->last_children != 0 && buffers->before != 0 && buffers->postorder != 0 && buffers->positions != 0 && buffers->subtree_ends != 0 &&
+           buffers->first_children != 0 && buffers->next_siblings != 0 && buffers->subtree_starts != 0 && buffers->sizes != 0;
 }
 
 // The deepest node depth, which decides whether K4's 16-bit keys can hold it.
@@ -11924,7 +11904,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     }
     if (result)
     {
-        if (parser->options.scalar)
+        if (BUSTER_SCALAR_PATH(parser->options.scalar))
         {
             parse_tokens_from_output_scalar(output, &parser->tokens);
         }
@@ -11967,7 +11947,11 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+            // Preserve the requested parser protocol on scalar hosts, using the kernels' scalar twins.
+            // The fallback and its whole-unit retry are part of that protocol, independent of host ISA.
+            const ParseKernelResult vector = BUSTER_HOST_VECTOR ? parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers)
+                                                                 : parse_twins(&parser->kernels, &input, parser->predeclared, parser->buffers.typed,
+                                                                               parser->buffers.statements);
             parser->statistics.fallback_items = vector.fallback.items;
             parser->statistics.fallback_tokens = vector.fallback.tokens;
             parser->statistics.flagged_tokens = vector.flagged_tokens;
@@ -12013,7 +11997,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         const uint64_t bytes = (uint64_t)parser->tokens.count * (sizeof(GnuAttributeGroup) + sizeof(GnuAttribute) + sizeof(GnuAsmLabel)) + 64;
         parser->gnu_arena = arena_reserve(bytes);
         const GnuSyntaxStatus status = parser->gnu_arena.base != 0 ?
-            gnu_syntax_build(&parser->tokens, &parser->tree, &parser->gnu_arena, &parser->gnu, parser->options.scalar) : GNU_SYNTAX_MEMORY;
+            gnu_syntax_build(&parser->tokens, &parser->tree, &parser->gnu_arena, &parser->gnu, BUSTER_SCALAR_PATH(parser->options.scalar)) : GNU_SYNTAX_MEMORY;
         result = status == GNU_SYNTAX_OK;
         if (!result)
         {

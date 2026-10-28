@@ -685,6 +685,16 @@ static bool check_test_program_oracle(const Link* link, const char* source, char
     return valid;
 }
 
+// DAZ is optional even with SSE2; FXSAVE's mask says whether MXCSR bit 6 may be written.
+static bool check_test_program_daz(void)
+{
+    uint8_t state[512] __attribute__((aligned(16)));
+    uint32_t mask;
+    __asm__ volatile("fxsave %0" : "=m"(state));
+    memcpy(&mask, state + 28, sizeof(mask));
+    return (mask & 64u) != 0;
+}
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -699,7 +709,9 @@ static const char check_test_program_harness[] =
     "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
     "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
     "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
-    "int change_daz(int n){unsigned old=_mm_getcsr();_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
+    "int change_daz(int n){struct {unsigned char b[512];} __attribute__((aligned(16))) s;"
+    "__asm__ volatile(\"fxsave %0\":\"=m\"(s));unsigned mask;__builtin_memcpy(&mask,s.b+28,4);"
+    "unsigned old=_mm_getcsr();if(mask&64u)_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
     "double fp_special(int n){const unsigned long b[]={0,0x8000000000000000UL,0x7ff0000000000000UL,0xfff0000000000000UL,"
     "0x7ff8000000000001UL,0x7ff0000000000001UL,1,0x8000000000000001UL,0x3ff8000000000000UL};"
     "union{unsigned long bits;double value;}x={b[(unsigned)n%9]};return x.value;}\n"
@@ -868,7 +880,10 @@ static void check_test_program_build_release(void)
     *build = (CheckTestProgramBuild){ 0 };
 }
 
-static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+// Compile and link every fixture. A CPU-ineligible fixture omits only the final launch and must not publish an
+// execution-result cache entry that a later eligible comparison could mistake for a successful run.
+static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle,
+                                                       bool run_native, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -887,10 +902,27 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     uint8_t* bytes = 0;
     uint64_t size = 0;
     bool same_oracle = false;
-    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size) && check_test_program_oracle(link, source, &text, &length);
+    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size);
+    if (valid && alignment_oracle)
+    {
+        // The direct temporary's stronger alignment is Buster's contract; Clang may give the aligned(1) return
+        // type a less-aligned temporary. Compare against the independently calculated result instead.
+        const char expected[] = "int oracle_tested(int n){return 11*n+52;}\n";
+        length = sizeof(expected) - 1;
+        text = malloc(length + 1);
+        valid = text != 0;
+        if (valid)
+        {
+            memcpy(text, expected, length + 1);
+        }
+    }
+    else if (valid)
+    {
+        valid = check_test_program_oracle(link, source, &text, &length);
+    }
     valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
-    const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
+    const bool same = run_native && valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -910,13 +942,13 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         executable,
         0,
     };
-    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && object_test_run(run, out, err) == 0));
+    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && (!run_native || object_test_run(run, out, err) == 0)));
     if (!same)
     {
         free(build->object);
-        build->object = valid ? bytes : 0;
-        build->object_size = valid ? size : 0;
-        bytes = valid ? 0 : bytes;
+        build->object = valid && run_native ? bytes : 0;
+        build->object_size = valid && run_native ? size : 0;
+        bytes = valid && run_native ? 0 : bytes;
     }
     if (!valid && created)
     {
@@ -954,6 +986,11 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     return valid;
 }
 
+static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+{
+    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, true, scratch);
+}
+
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
 // check_test_program_sparse compares check_data_prepare's records and check_data_latest with.
 typedef struct CheckTestDataPrepared CheckTestDataPrepared;
@@ -972,6 +1009,16 @@ struct CheckTestDataPrepared
     CheckDataInputStatus status;
 };
 
+static uint32_t check_test_initializer_index_dense(const CheckInitializers* initializers, uint32_t token)
+{
+    uint32_t index = 0;
+    for (uint32_t i = 0; i < initializers->count; i += 1)
+    {
+        index = initializers->declaration_tokens[i] == token ? i + 1 : index;
+    }
+    return index;
+}
+
 static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const CheckInput* input, const CheckStream* stream,
                                           const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
 {
@@ -981,7 +1028,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
     const uint32_t count = input->token_count;
     bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
                  stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
-                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && (initializers->count == 0 || (initializers->plans != 0 && initializers->declaration_tokens != 0));
     result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
     result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -1035,7 +1082,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (token != BUSTER_CHECK_NONE)
         {
             object_capacity += 1;
-            const uint32_t plan_index = initializers->declaration_plans[token];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
             reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
@@ -1067,7 +1114,7 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
         if (selected != BUSTER_CHECK_NONE)
         {
             const uint32_t latest = result->latest_declarations[object];
-            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const uint32_t plan_index = check_test_initializer_index_dense(initializers, selected);
             const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
             TypeId type = input->declared_types[latest];
             const TypeId stripped = type_strip_aligned(types, type);
@@ -1284,9 +1331,35 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
+        memset(defined, 0xa5, (uint64_t)program->object_count + 1);
         check_program_object_access(program, access, defined, path == 0);
-        same = memcmp(defined, expected, (uint64_t)program->object_count + 1) == 0;
+        for (uint32_t s = 0; same && s < program->symbol_count; s += 1)
+        {
+            const uint32_t object = program->symbol_objects[s];
+            same = defined[object] == expected[object];
+        }
     }
+    uint8_t* needs[2] = { 0 };
+    CheckProgram reduced[2] = { *program, *program };
+    bool rooms[2] = { false, false };
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        needs[path] = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+        reduced[path].object_declarations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+        reduced[path].object_naked = NULL;
+        same = needs[path] != NULL && reduced[path].object_declarations != NULL;
+        if (same)
+        {
+            memset(needs[path], 0, (uint64_t)count + 1);
+            memset(reduced[path].object_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+            rooms[path] = path == 0 ? check_program_static_objects(reduced + path, needs[path], output, true) :
+                                     check_program_static_prepared(reduced + path, data, needs[path], output);
+        }
+    }
+    same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
+           memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&
+           (reduced[0].object_naked == NULL) == (reduced[1].object_naked == NULL) &&
+           (reduced[0].object_naked == NULL || memcmp(reduced[0].object_naked, reduced[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
     return same;
@@ -1294,8 +1367,8 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
-static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                             int32_t expected_pools, uint32_t entry_limit)
+static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, bool run_native)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1333,6 +1406,7 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
+            .prepared_data = &data,
             .identifiers = &identifiers,
             .initializer_references = data.references,
             .initializer_reference_count = data.reference_count,
@@ -1429,8 +1503,17 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
                                   "backend consumers retain final pooled-data and external memcpy access after runtime symbol numbering");
                 arena_pop_to(&scratch, access_mark);
             }
-            snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
-            check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
+            const bool alignment_oracle = strcmp(name, "hidden-result-direct-temporary-alignment") == 0;
+            if (run_native)
+            {
+                snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
+                         alignment_oracle ? "the independent alignment expectation" : clang);
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "%s: generated object and oracle compile and link; native execution is unavailable on this CPU", name);
+            }
+            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, run_native, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -1442,6 +1525,17 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
     }
     pp_release(&pp);
     intern_release(&identifiers);
+}
+
+static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                             int32_t expected_pools, uint32_t entry_limit)
+{
+    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, true);
+}
+
+static void check_test_program_source_native(CheckTest* test, const char* source, const char* name, const char* clang, bool run_native)
+{
+    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, run_native);
 }
 
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
@@ -1966,9 +2060,11 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
 }
 
 #include "c_check_program_batch_test.c"
+#include "c_check_literal_table_test.c"
 
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_source(test,
@@ -2456,6 +2552,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
         "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
         "fenv-implicit-narrowing-conversion", clang);
+    if (!check_test_program_daz())
+    {
+        printf("  fenv classification: DAZ toggle skipped (MXCSR does not support it)\n");
+    }
     check_test_program_source(test,
         "#pragma STDC FENV_ACCESS ON\n"
         "int clear_fp(void);int fp_state(void);int change_daz(int);double fp_special(int);int tested(int n){"
@@ -2642,9 +2742,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
         "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
-        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "union wide b=external_wide(n+1);union wide c=external_wide(n+2);__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c.c[0]*5+a.c[39]+e.c[7];}"
         "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
         "hidden-result-canonical-alignment", clang);
+    // The direct member access needs a canonical-aligned return temporary too. The helper reports a misaligned
+    // hidden result in its first byte; its Buster-only expected result is independent of Clang's weaker alignment.
+    check_test_program_source(test,
+        "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
+        "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
+        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
+        "hidden-result-direct-temporary-alignment", clang);
     check_test_program_source(test,
         "struct cx{_Complex long double z;};struct cx external_complex(long double a,long double b);"
         "long double external_complex_apply(struct cx(*f)(long double,long double),long double a);"
