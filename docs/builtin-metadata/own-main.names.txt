@@ -1002,6 +1002,7 @@ __builtin_ia32_tzcnt_u64
 __builtin_ia32_ucmpb128_mask
 __builtin_ia32_ucmpb256_mask
 __builtin_ia32_ucmpb512_mask
+__builtin_ia32_ucmpd128_mask
 __builtin_ia32_ucmpd256_mask
 __builtin_ia32_ucmpd512_mask
 __builtin_ia32_ucmpq512_mask

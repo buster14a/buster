@@ -427,6 +427,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/streaming.c"
 #include "buster/compiler/streaming_test.c"
 #include "buster/compiler/streaming_benchmark.c"
+#include "buster/compiler/streaming_benchmark_test.c"
 int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
@@ -473,6 +474,7 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize off
 #include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
+#include "buster/compiler/c_check_constraints_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).

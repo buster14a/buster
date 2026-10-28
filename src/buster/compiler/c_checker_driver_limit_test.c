@@ -47,6 +47,108 @@ static CheckDriverDiagnosticCounts check_test_driver_diagnostic_counts(const cha
     return counts;
 }
 
+// Compose system visibility with the publication budget and attached-note entry point. The second fixture keeps
+// an invocation open across a system-header exit, forcing canonical replay before the final counts are published.
+static void check_test_driver_system_error_limits(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[PATH_MAX];
+    char header[PATH_MAX];
+    char object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/system-error-limit.c", directory);
+    snprintf(header, sizeof(header), "%s/error-limit-system.h", directory);
+    snprintf(object, sizeof(object), "%s/system-error-limit.o", directory);
+    const char* sources[] =
+    {
+        "#include <error-limit-system.h>\nint untouched;\n",
+        "#include <error-limit-system.h>\nb)\n#error first\n#error second\n",
+    };
+    const char* headers[] =
+    {
+        "#define VALUE 1\n#define VALUE 2\n#pragma message(\"message\")\n#warning kept\n#error first\n#pragma GCC warning \"after-first\"\n#error second\n",
+        "#define F(x) _Pragma(\"message(\\\"cross\\\")\")\n#warning kept\nF(a\n",
+    };
+    const char* policies[][2] =
+    {
+        { NULL, NULL },
+        { "-Wsystem-headers", NULL },
+        { "-Wno-system-headers", NULL },
+        { "-Wsystem-headers", "-Wno-system-headers" },
+        { "-Wno-system-headers", "-Wsystem-headers" },
+        { "-Wsystem-headers", "-w" },
+        { "-w", "-Wsystem-headers" },
+        { "-Wsystem-headers", "-fno-caret-diagnostics" },
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(sources); fixture += 1)
+    {
+        const bool made = parse_test_write(source, sources[fixture], strlen(sources[fixture])) &&
+                          parse_test_write(header, headers[fixture], strlen(headers[fixture]));
+        check_test_expect(test, made, "system visibility and error-limit fixtures can be written");
+        for (uint32_t policy = 0; made && policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
+        {
+            for (uint32_t route = 0; route < 6; route += 1)
+            {
+                char* arguments[16] = { (char*)clang, "-std=gnu17", route < 4 ? "-fsyntax-only" : "-E", "-fno-color-diagnostics", "-ferror-limit=1", "-isystem", (char*)directory };
+                uint32_t count = 7;
+                char* checked[16] = { (char*)(executable != NULL ? executable : "/proc/self/exe") };
+                uint32_t used = 1;
+                if (route >= 4)
+                {
+                    checked[used++] = "-E";
+                }
+                checked[used++] = "-std=gnu17";
+                checked[used++] = "-ferror-limit=1";
+                checked[used++] = "-isystem";
+                checked[used++] = (char*)directory;
+                if ((route & 1) != 0)
+                {
+                    checked[used++] = "--scalar";
+                }
+                if (route < 2)
+                {
+                    checked[used++] = "-fsyntax-only";
+                }
+                else if (route < 4)
+                {
+                    checked[used++] = "-c";
+                    checked[used++] = "-o";
+                    checked[used++] = object;
+                }
+                for (uint32_t flag = 0; flag < BUSTER_ARRAY_LENGTH(policies[policy]); flag += 1)
+                {
+                    if (policies[policy][flag] != NULL)
+                    {
+                        arguments[count++] = (char*)policies[policy][flag];
+                        checked[used++] = (char*)policies[policy][flag];
+                    }
+                }
+                arguments[count++] = source;
+                checked[used++] = source;
+                char* text = NULL;
+                const int oracle = check_test_driver_spawn(arguments, &text);
+                const CheckDriverDiagnosticCounts expected = check_test_driver_diagnostic_counts(text);
+                free(text);
+                text = NULL;
+                const int status = check_test_driver_spawn(checked, &text);
+                const CheckDriverDiagnosticCounts actual = check_test_driver_diagnostic_counts(text);
+                const bool show = policy == 1 || policy == 4 || policy == 7;
+                const bool quiet = policy == 5 || policy == 6;
+                const uint32_t warnings = quiet ? 0 : show ? (fixture == 0 ? 4u : 2u) : 1u;
+                char description[192];
+                snprintf(description, sizeof(description), "system visibility before fatal publication fixture=%u policy=%u route=%u", fixture, policy, route);
+                check_test_expect(test, oracle == 1 && status == oracle && expected.errors == 2 && expected.fatal == 1 && expected.warnings == warnings &&
+                                  (expected.notes != 0) == show && actual.warnings == expected.warnings && actual.errors == expected.errors &&
+                                  actual.fatal == expected.fatal && actual.notes == expected.notes && actual.last_error_line == expected.last_error_line &&
+                                  !actual.after_fatal && strcmp(actual.summary, expected.summary) == 0 && access(object, F_OK) != 0, description);
+                free(text);
+                unlink(object);
+            }
+        }
+    }
+    unlink(source);
+    unlink(header);
+    unlink(object);
+}
+
 static void check_test_driver_error_limits(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     const uint32_t sizes[] = { 0, 1, 19, 20, 21, 2000 };
@@ -318,4 +420,5 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     }
     unlink(source);
     unlink(object);
+    check_test_driver_system_error_limits(test, clang, executable, directory);
 }

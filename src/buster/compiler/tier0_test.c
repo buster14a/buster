@@ -729,6 +729,197 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     return same;
 }
 
+// A prefix value remains live below the call's arguments. The byte effects wrap at the signed boundary,
+// but their true post-call depths are two (prefix plus result), or an explicit depth refusal at240.
+static void tier0_test_wide_call_depths(Tier0TestTally* tally)
+{
+    static const uint32_t counts[] = { 127, 128, 129, 130, 237, 238 };
+    Arena scratch = arena_reserve(UINT64_C(1) << 20);
+    const bool ready = tier0_test_expect(tally, scratch.base != NULL, "wide call depths", "no selector scratch");
+    for (uint32_t floating = 0; ready && floating < 2; floating += 1)
+    {
+        for (uint32_t indirect = 0; indirect < 2; indirect += 1)
+        {
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+            {
+                arena_pop_to(&scratch, 0);
+                const uint32_t arguments = counts[c];
+                const uint8_t kind = BUSTER_TYPED_CALL;
+                const uint8_t class = floating != 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+                const uint64_t value = 0;
+                const SymbolId target = indirect != 0 ? 0 : 1;
+                uint8_t absorbed = 0;
+                uint16_t template = 0;
+                const uint32_t before_integer = floating != 0 ? indirect : arguments + 1 + indirect;
+                const uint32_t before_floating = floating != 0 ? arguments + 1 : 0;
+                int8_t integer_effect = (int8_t)(floating != 0 ? -(int32_t)indirect : 1 - (int32_t)arguments - (int32_t)indirect);
+                int8_t floating_effect = (int8_t)(floating != 0 ? 1 - (int32_t)arguments : 0);
+                uint8_t integer_depth = (uint8_t)before_integer;
+                uint8_t floating_depth = (uint8_t)before_floating;
+                Tier0Entries entries =
+                {
+                    .absorbed = &absorbed,
+                    .templates = &template,
+                    .integer_effects = &integer_effect,
+                    .floating_effects = &floating_effect,
+                    .depths = &integer_depth,
+                    .floating_depths = &floating_depth,
+                };
+                const Tier0Function function =
+                {
+                    .count = 1,
+                    .kinds = &kind,
+                    .classes = &class,
+                    .values = &value,
+                    .call_count = 1,
+                    .call_targets = &target,
+                    .call_argument_counts = &arguments,
+                };
+                Tier0Frame frame = { .depth_count = 15 };
+                uint32_t deep_count = 0;
+                const Tier0Error error = tier0_select_deep(&function, &entries, &frame, &scratch, false, &deep_count);
+                const bool refused = before_integer >= BUSTER_TIER0_MAX_DEPTH;
+                bool correct = refused ? error == TIER0_ERROR_DEPTH : error == TIER0_OK;
+                if (correct && !refused)
+                {
+                    const Tier0DeepEntry deep = tier0_deep_entry(&function, &entries, 0);
+                    const uint32_t flags = entries.deep[0];
+                    correct = deep_count == 1 && deep.before[0] == before_integer && deep.before[1] == before_floating &&
+                              deep.exit[0] == (floating != 0 ? 0u : 2u) && deep.exit[1] == (floating != 0 ? 2u : 0u) &&
+                              (flags & (BUSTER_TIER0_DEEP_CALL | BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING)) ==
+                              (BUSTER_TIER0_DEEP_CALL | BUSTER_TIER0_DEEP_FILL_INTEGER | BUSTER_TIER0_DEEP_FILL_FLOATING);
+                }
+                tier0_test_expect(tally, correct, "wide call depths", "%u arguments, %s result, %s target: modulo effects preserve the prefix and result", arguments,
+                                  floating != 0 ? "floating" : "integer", indirect != 0 ? "indirect" : "direct");
+            }
+        }
+    }
+    arena_release(&scratch);
+}
+
+// Scalar per-entry lengths must hold a whole call's copies, not only one argument's. Exercise the 16-bit
+// crossing in ordinary and deep calls without executing their source addresses; both encoders must agree too.
+static void tier0_test_large_call_records(Tier0TestTally* tally)
+{
+    enum { ARGUMENTS = 16, ENTRIES = ARGUMENTS + 2 };
+    uint8_t kinds[ENTRIES] = { 0 };
+    uint8_t classes[ENTRIES] = { 0 };
+    uint64_t values[ENTRIES] = { 0 };
+    uint8_t argument_classes[ARGUMENTS];
+    uint32_t sizes[ARGUMENTS];
+    AbiLocation locations[ARGUMENTS];
+    const uint32_t first = 0;
+    const SymbolId target = 1;
+    const uint8_t variadic = 0;
+    static const uint32_t counts[] = { 7, 8, 16 };
+    Arena arena = arena_reserve(UINT64_C(1) << 27);
+    const bool ready = tier0_test_expect(tally, arena.base != NULL, "large call records", "no output arena");
+    for (uint32_t c = 0; ready && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        arena_pop_to(&arena, 0);
+        const uint32_t arguments = counts[c];
+        for (uint32_t a = 0; a < arguments; a += 1)
+        {
+            kinds[a] = BUSTER_TYPED_CONST;
+            classes[a] = BUSTER_TYPED_CLASS_U64;
+            values[a] = 0x1000 + a * 8;
+            argument_classes[a] = BUSTER_TYPED_CLASS_U64;
+            sizes[a] = BUSTER_TIER0_MAX_ARGUMENT_BYTES;
+            locations[a] = (AbiLocation)
+            {
+                .kind = BUSTER_ABI_LOCATION_STACK,
+                .stack_offset = a * BUSTER_TIER0_MAX_ARGUMENT_BYTES,
+                .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE },
+            };
+        }
+        kinds[arguments] = BUSTER_TYPED_CALL;
+        classes[arguments] = BUSTER_TYPED_CLASS_VOID;
+        values[arguments] = 0;
+        kinds[arguments + 1] = BUSTER_TYPED_RETURN;
+        classes[arguments + 1] = BUSTER_TYPED_CLASS_VOID;
+        values[arguments + 1] = 0;
+        const AbiCall call =
+        {
+            .stack_bytes = arguments * BUSTER_TIER0_MAX_ARGUMENT_BYTES,
+            .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+            .result = { .kind = BUSTER_ABI_RESULT_IGNORE },
+        };
+        const Tier0Function function =
+        {
+            .count = arguments + 2,
+            .kinds = kinds,
+            .classes = classes,
+            .values = values,
+            .call_count = 1,
+            .calls = &call,
+            .call_targets = &target,
+            .call_first = &first,
+            .call_argument_counts = &arguments,
+            .call_variadic = &variadic,
+            .argument_count = arguments,
+            .argument_classes = argument_classes,
+            .argument_locations = locations,
+            .argument_sizes = sizes,
+            .symbol_count = 2,
+            .result = { .kind = BUSTER_ABI_RESULT_IGNORE },
+            .entry_records = true,
+        };
+        const Tier0Check checked = tier0_validate(&function);
+        const Tier0Code scalar = checked.error == TIER0_OK ? tier0_compile_scalar(&function, &arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+        const Tier0Code vector = checked.error == TIER0_OK ? tier0_compile(&function, &arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+        bool same = scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
+                    (arguments == 7 ? scalar.count < UINT16_MAX : scalar.count > UINT16_MAX) && (arguments != 16 || scalar.deep != 0) &&
+                    x86_validate(scalar.records, scalar.count) == scalar.count;
+        const uint64_t capacity = same ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
+        uint8_t* a = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
+        uint8_t* b = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
+        uint32_t* ends = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : NULL;
+        same = same && a != NULL && b != NULL && ends != NULL;
+        const int64_t a_length = same ? x86_encode(scalar.records, scalar.count, a, capacity, 0, ends) : -1;
+        const int64_t b_length = same ? x86_encode_scalar(vector.records, vector.count, b, capacity, 0, ends) : -1;
+        tier0_test_expect(tally, same && a_length >= 0 && a_length == b_length && memcmp(a, b, (uint64_t)a_length) == 0,
+                          "large call records", "%u maximum-size aggregates: validation %u, scalar %u/%u records, vector %u/%u", arguments,
+                          checked.error, scalar.error, scalar.count, vector.error, vector.count);
+    }
+    arena_release(&arena);
+}
+
+// Prefix totals and the epilogue must be checked before narrowed positions can allocate or publish output. The
+// maximum representable boundary reaches the real arena-capacity check; an unrepresentable total touches nothing.
+static void tier0_test_record_count_bounds(Tier0TestTally* tally)
+{
+    uint32_t lengths[] = { UINT32_MAX - 64, 32, 64 };
+    uint32_t positions[4] = { 0 };
+    Tier0Entries entries = { .lengths = lengths, .positions = positions };
+    const Tier0Function function = { .count = BUSTER_ARRAY_LENGTH(lengths) };
+    tier0_positions_scalar(&function, &entries, 7);
+    const uint64_t expected = (uint64_t)UINT32_MAX + 39;
+    tier0_test_expect(tally, entries.record_count == expected && positions[0] == 7 && positions[1] == UINT32_MAX - 57 && positions[2] == UINT32_MAX - 25,
+                      "record count bounds", "the scalar prefix retains its full cumulative count");
+    Arena arena = arena_reserve(4096);
+    const bool ready = tier0_test_expect(tally, arena.base != NULL, "record count bounds", "no small output arena");
+    if (ready)
+    {
+        const uint64_t limit = UINT32_MAX - BUSTER_TIER0_TEMPLATE_RECORDS;
+        Tier0Code boundary = { 0 };
+        const bool room = tier0_push_output(&boundary, &arena, limit, (Tier0Counts){ 0 }, NULL, 0);
+        tier0_test_expect(tally, !room && boundary.count == limit, "record count bounds", "the exact representable boundary reaches real capacity checking");
+        arena_pop_to(&arena, 0);
+        const uint64_t counts[] = { limit + 1, entries.record_count, (uint64_t)UINT32_MAX - 3 + 4, UINT64_MAX };
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+        {
+            Tier0Code code = { .count = 19, .node = 27 };
+            uint8_t before[sizeof(code)];
+            memcpy(before, &code, sizeof(code));
+            const uint64_t mark = arena.length;
+            const bool accepted = tier0_push_output(&code, &arena, counts[c], (Tier0Counts){ 0 }, NULL, 0);
+            tier0_test_expect(tally, !accepted && arena.length == mark && memcmp(before, &code, sizeof(code)) == 0,
+                              "record count bounds", "unrepresentable total %" PRIu64 " is rejected before allocation or publication", counts[c]);
+        }
+    }
+    arena_release(&arena);
+}
+
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
@@ -2167,6 +2358,161 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         arena_pop_to(&arena, mark);
     }
     arena_release(&arena);
+}
+
+// The full stable order's key: descending unsigned reference count, then ascending local identity. Unlike the
+// production bounded prefixes, this oracle sorts all locals. Small cases also check the old insertion sort exactly.
+static int tier0_test_home_key_compare(const void* left, const void* right)
+{
+    const uint64_t a = *(const uint64_t*)left;
+    const uint64_t b = *(const uint64_t*)right;
+    return (a > b) - (a < b);
+}
+
+static void tier0_test_home_oracle(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, const uint64_t* keys)
+{
+    uint32_t taken = frame->clobbers | 1u << X86_REGISTER_RSP | (frame->pointer ? 1u << X86_REGISTER_RBP : 0) | (frame->based ? 1u << X86_REGISTER_R15 : 0);
+    memset(homes, 0, (uint64_t)function->local_count * sizeof(*homes));
+    for (uint32_t k = 0; k < function->local_count; k += 1)
+    {
+        const uint32_t local = (uint32_t)keys[k];
+        const bool eligible = references[local] != 0 && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0;
+        uint32_t chosen = UINT32_MAX;
+        const bool floating = tier0_class_floating(function->local_classes[local]);
+        for (uint32_t x = 0; x < 16 && floating && eligible && chosen == UINT32_MAX; x += 1)
+        {
+            chosen = (taken & 1u << BUSTER_TIER0_XMM(x)) == 0 ? x : UINT32_MAX;
+        }
+        for (uint32_t d = 0; d < BUSTER_TIER0_CALLER_SAVED_DEPTHS && !floating && eligible && chosen == UINT32_MAX; d += 1)
+        {
+            const uint32_t reg = tier0_integer_depths[d];
+            chosen = (taken & 1u << reg) == 0 ? reg : UINT32_MAX;
+        }
+        for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED && !floating && eligible && references[local] >= 2 && chosen == UINT32_MAX; c += 1)
+        {
+            const uint32_t reg = tier0_callee_saved[c];
+            if ((taken & 1u << reg) == 0)
+            {
+                chosen = reg;
+                frame->saved |= 1u << c;
+            }
+        }
+        if (chosen != UINT32_MAX)
+        {
+            homes[local].is_register = 1;
+            homes[local].reg = (uint8_t)chosen;
+            taken |= 1u << (floating ? BUSTER_TIER0_XMM(chosen) : chosen);
+        }
+    }
+    for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+    {
+        frame->saved |= (frame->clobbers & 1u << tier0_callee_saved[c]) != 0 ? 1u << c : 0;
+    }
+    frame->saved |= frame->based ? 1u << BUSTER_TIER0_SAVED_R15 : 0;
+    frame->pushes = (uint32_t)__builtin_popcount(frame->saved) + (frame->pointer ? 1u : 0u);
+}
+
+// All columns end at protected pages: tails around 16 and 64, then up to 100,000 locals. The keys cover ties, zeros,
+// arbitrary u32 counts, increasing/decreasing orders and the alternating references builtin recipes produce. Check
+// each prefix against the full order, then both complete home assignments against the original greedy policy.
+static void tier0_test_home_candidates(Tier0TestTally* tally, uint64_t seed)
+{
+    const uint32_t maximum = 100000;
+    const uint64_t span = ((uint64_t)maximum * sizeof(uint64_t) + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE;
+    const uint64_t stride = span + BUSTER_TIER0_TEST_PAGE;
+    uint8_t* pages = mmap(0, 7 * stride, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED;
+    for (uint32_t column = 0; column < 7 && guarded; column += 1)
+    {
+        guarded = mprotect(pages + column * stride + span, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
+    }
+    tier0_test_expect(tally, guarded, "home candidates", "no guarded columns");
+    uint64_t random = seed ^ UINT64_C(0x363634686f6d6573);
+    static const uint32_t sizes[] = { 81, 127, 255, 1024, 4097, 16384, 65536, 100000 };
+    for (uint32_t test = 0; test < 81 + BUSTER_ARRAY_LENGTH(sizes) && guarded; test += 1)
+    {
+        const uint32_t locals = test < 81 ? test : sizes[test - 81];
+        uint32_t* references = (uint32_t*)(pages + span) - locals;
+        uint8_t* classes = pages + stride + span - locals;
+        uint8_t* flags = pages + 2 * stride + span - locals;
+        Tier0Home* expected = (Tier0Home*)(pages + 3 * stride + span) - locals;
+        Tier0Home* scalar = (Tier0Home*)(pages + 4 * stride + span) - locals;
+        Tier0Home* vector = (Tier0Home*)(pages + 5 * stride + span) - locals;
+        uint64_t* keys = (uint64_t*)(pages + 6 * stride + span) - locals;
+        for (uint32_t pattern = 0; pattern < 10; pattern += 1)
+        {
+            for (uint32_t local = 0; local < locals; local += 1)
+            {
+                static const uint32_t recipe[] = { 2, 26, 17, 1 };
+                const uint32_t generated = tier0_generate_below(&random, UINT32_MAX);
+                references[local] = pattern == 0 ? 0 : pattern == 1 ? 1 : pattern == 2 ? 2 : pattern == 3 ? local + 1 :
+                                    pattern == 4 ? locals - local : pattern == 5 ? recipe[local % 4] : pattern == 6 ? generated % 7 :
+                                    pattern == 7 ? UINT32_MAX - generated % 7 : pattern == 8 ? generated : (local % 97 == 0 ? generated : 0);
+                classes[local] = pattern == 3 || pattern == 5 ? BUSTER_TYPED_CLASS_I64 : pattern == 4 ? BUSTER_TYPED_CLASS_F64 :
+                                 local % 3 == 0 ? BUSTER_TYPED_CLASS_F32 : local % 3 == 1 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_I64;
+                flags[local] = pattern % 2 == 0 && generated % 5 == 0 ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+                keys[local] = (uint64_t)(UINT32_MAX - references[local]) << 32 | local;
+                expected[local] = (Tier0Home){ .is_register = (uint8_t)(pattern % 3 == 0 && generated % 7 == 0) };
+            }
+            qsort(keys, locals, sizeof(*keys), tier0_test_home_key_compare);
+            uint32_t old[1024];
+            for (uint32_t local = 0; local < locals && locals <= BUSTER_ARRAY_LENGTH(old); local += 1)
+            {
+                uint32_t at = local;
+                while (at > 0 && references[old[at - 1]] < references[local])
+                {
+                    old[at] = old[at - 1];
+                    at -= 1;
+                }
+                old[at] = local;
+            }
+            bool stable = true;
+            for (uint32_t local = 0; local < locals && locals <= BUSTER_ARRAY_LENGTH(old); local += 1)
+            {
+                stable &= old[local] == (uint32_t)keys[local];
+            }
+            tier0_test_expect(tally, stable, "home candidates", "%u locals, pattern %u: full-order oracle differs from old stable sort", locals, pattern);
+            Tier0Function function = { .local_count = locals, .local_classes = classes, .local_flags = flags };
+            uint32_t wanted[2 * BUSTER_TIER0_HOME_CANDIDATES];
+            uint32_t count = 0;
+            for (uint32_t kind = 0; kind < 2; kind += 1)
+            {
+                uint32_t kept = 0;
+                for (uint32_t k = 0; k < locals && kept < BUSTER_TIER0_HOME_CANDIDATES; k += 1)
+                {
+                    const uint32_t local = (uint32_t)keys[k];
+                    if (references[local] != 0 && expected[local].is_register == 0 && (flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 &&
+                        tier0_class_floating(classes[local]) == (kind != 0))
+                    {
+                        wanted[count] = local;
+                        count += 1;
+                        kept += 1;
+                    }
+                }
+            }
+            uint32_t orders[2][2 * BUSTER_TIER0_HOME_CANDIDATES + 1];
+            memset(orders, 0x9d, sizeof(orders));
+            const uint32_t scalar_count = tier0_register_locals(&function, expected, references, orders[0]);
+            const uint32_t vector_count = tier0_register_locals_vector(&function, expected, references, orders[1]);
+            const bool same = scalar_count == count && vector_count == count && memcmp(wanted, orders[0], count * sizeof(*wanted)) == 0 &&
+                              memcmp(wanted, orders[1], count * sizeof(*wanted)) == 0 && orders[0][count] == UINT32_C(0x9d9d9d9d) && orders[1][count] == UINT32_C(0x9d9d9d9d);
+            tier0_test_expect(tally, same, "home candidates", "%u locals, pattern %u: eligible prefixes differ", locals, pattern);
+            Tier0Frame frame = { .clobbers = pattern % 3 == 0 ? 0 : pattern % 3 == 1 ? UINT32_MAX : tier0_generate_below(&random, UINT32_MAX),
+                                 .pointer = pattern % 2 != 0, .based = pattern % 4 == 3 };
+            Tier0Frame scalar_frame = frame;
+            Tier0Frame vector_frame = frame;
+            tier0_test_home_oracle(&function, &frame, expected, references, keys);
+            tier0_assign_homes(&function, &scalar_frame, scalar, references, orders[0], false);
+            tier0_assign_homes(&function, &vector_frame, vector, references, orders[1], true);
+            const bool homes = memcmp(expected, scalar, (uint64_t)locals * sizeof(*expected)) == 0 && memcmp(expected, vector, (uint64_t)locals * sizeof(*expected)) == 0 &&
+                               frame.saved == scalar_frame.saved && frame.saved == vector_frame.saved && frame.pushes == scalar_frame.pushes && frame.pushes == vector_frame.pushes;
+            tier0_test_expect(tally, homes, "home candidates", "%u locals, pattern %u: complete homes or save masks differ from greedy oracle", locals, pattern);
+        }
+    }
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, 7 * stride);
+    }
 }
 
 // The frame's alignment, tier0_frame_alignment and its vector twin, against the test's own most: for every count of
@@ -3955,9 +4301,9 @@ static uint32_t tier0_test_aggregate_driver(X86Instruction* records, uint64_t pr
 typedef struct Tier0TestCaller Tier0TestCaller;
 struct Tier0TestCaller
 {
-    uint8_t kinds[16];
-    uint8_t classes[16];
-    uint64_t values[16];
+    uint8_t kinds[128];
+    uint8_t classes[128];
+    uint64_t values[128];
     uint8_t argument_classes[BUSTER_TIER0_TEST_PASSED];
     uint32_t argument_sizes[BUSTER_TIER0_TEST_PASSED];
     AbiLocation locations[BUSTER_TIER0_TEST_PASSED];
@@ -3974,10 +4320,20 @@ struct Tier0TestCaller
     Tier0Function function;
 };
 
-static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0TestPassing* fixture, const uint64_t* addresses, uint64_t probe, uint64_t out)
+static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0TestPassing* fixture, const uint64_t* addresses, uint64_t probe, uint64_t out, bool deep)
 {
     memset(caller, 0, sizeof(*caller));
     uint32_t count = 0;
+    for (uint32_t stack = 0; deep && stack < 2; stack += 1)
+    {
+        for (uint32_t value = 0; value < 16; value += 1)
+        {
+            caller->kinds[count] = BUSTER_TYPED_CONST;
+            caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64;
+            caller->values[count] = UINT64_C(0x3ff0000000000000) + value;
+            count += 1;
+        }
+    }
     caller->kinds[count] = BUSTER_TYPED_CONST;
     caller->classes[count] = BUSTER_TYPED_CLASS_U64;
     caller->values[count] = probe;
@@ -4007,6 +4363,21 @@ static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0Test
         caller->classes[count + 2] = BUSTER_TYPED_CLASS_VOID;
         caller->values[count + 2] = fixture->result_size;
         count += 3;
+    }
+    for (uint32_t stack = 0; deep && stack < 2; stack += 1)
+    {
+        // Adding zero establishes postorder's last class after CALL/COPY, and when the two stacks change class.
+        caller->kinds[count] = BUSTER_TYPED_CONST;
+        caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+        caller->kinds[count + 1] = BUSTER_TYPED_ADD;
+        caller->classes[count + 1] = caller->classes[count];
+        count += 2;
+        for (uint32_t value = 0; value < 16; value += 1)
+        {
+            caller->kinds[count] = BUSTER_TYPED_DISCARD;
+            caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+            count += 1;
+        }
     }
     caller->kinds[count] = BUSTER_TYPED_RETURN;
     caller->classes[count] = BUSTER_TYPED_CLASS_VOID;
@@ -4254,9 +4625,10 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
     uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1ull << 26);
     bool ready = tier0_test_expect(tally, shared != MAP_FAILED && data != 0 && code != MAP_FAILED && arena.base != 0, check, "no memory");
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
+    for (uint32_t f = 0; f < 2 * BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
     {
-        const Tier0TestPassing* fixture = &tier0_test_passings[f];
+        const Tier0TestPassing* fixture = &tier0_test_passings[f % BUSTER_ARRAY_LENGTH(tier0_test_passings)];
+        const bool deep = f >= BUSTER_ARRAY_LENGTH(tier0_test_passings);
         arena_pop_to(&arena, 0);
         ready = mprotect(code, pages, PROT_READ | PROT_WRITE) == 0;
         const uint8_t* bytes[2][BUSTER_TIER0_TEST_PASSED];
@@ -4270,7 +4642,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
             }
             Tier0TestCaller caller;
             tier0_test_aggregate_caller(&caller, fixture, addresses, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE),
-                                        (uint64_t)(uintptr_t)shared->runs[0].out);
+                                        (uint64_t)(uintptr_t)shared->runs[0].out, deep);
             ready = tier0_test_aggregate_encode(tally, check, fixture->name, &caller.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
         }
         // What the probe returns: registers of bytes of their own, and for a hidden result its bytes.
@@ -4821,7 +5193,7 @@ static void tier0_test_aggregate_errors(Tier0TestTally* tally)
         Tier0TestCaller caller;
         Tier0TestCallee callee;
         AbiCall incoming;
-        tier0_test_aggregate_caller(&caller, fixture, addresses, 0x1000, 0x2000);
+        tier0_test_aggregate_caller(&caller, fixture, addresses, 0x1000, 0x2000, false);
         tier0_test_aggregate_callee(&callee, fixture, 0x3000, 0x4000);
         const Tier0Function* function = broken->callee ? &callee.function : &caller.function;
         const Tier0Check before = tier0_validate(function);
@@ -5189,6 +5561,37 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 
+static void tier0_test_entry_repetitions(Tier0TestTally* tally)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 27);
+    static Tier0Program ordinary;
+    static Tier0Program once;
+    static Tier0Program repeated;
+    static Tier0Program invalid;
+    Tier0ProgramOptions options = { .functions = 3, .statements = 4, .expression_nodes = 6, .calls = true, .loops = true, .defined = true };
+    bool same = arena.base != NULL && tier0_generate_program(&ordinary, &arena, 88, options, "c_");
+    options.entry_repetitions = 1;
+    same = same && tier0_generate_program(&once, &arena, 88, options, "c_") &&
+           ordinary.entry_count == once.entry_count && ordinary.local_count == once.local_count && ordinary.text_length == once.text_length &&
+           memcmp(ordinary.kinds, once.kinds, ordinary.entry_count) == 0 && memcmp(ordinary.classes, once.classes, ordinary.entry_count) == 0 &&
+           memcmp(ordinary.values, once.values, (uint64_t)ordinary.entry_count * sizeof(uint64_t)) == 0 &&
+           memcmp(ordinary.text, once.text, ordinary.text_length) == 0;
+    tier0_test_expect(tally, same, "entry repetitions", "default and one repetition must preserve the ordinary typed stream and generated C");
+    options.entry_repetitions = BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS;
+    bool callees = same && tier0_generate_program(&repeated, &arena, 88, options, "c_");
+    const uint32_t before_entry = same ? ordinary.functions[ordinary.function_count - 1].first_entry : 0;
+    callees = callees && repeated.function_count == ordinary.function_count &&
+              repeated.functions[repeated.function_count - 1].first_entry == before_entry &&
+              memcmp(ordinary.kinds, repeated.kinds, before_entry) == 0 && memcmp(ordinary.classes, repeated.classes, before_entry) == 0 &&
+              memcmp(ordinary.values, repeated.values, (uint64_t)before_entry * sizeof(uint64_t)) == 0;
+    tier0_test_expect(tally, callees, "entry repetitions", "the repeated entry must retain every existing callee's typed body");
+    const uint64_t mark = arena.length;
+    options.entry_repetitions = BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS + 1;
+    tier0_test_expect(tally, !tier0_generate_program(&invalid, &arena, 88, options, "c_") && arena.length == mark,
+                      "entry repetitions", "work past the fixed repetition bound must reject before reserving storage");
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5251,6 +5654,7 @@ static int run_tier0_tests(int argc, char** argv)
         Tier0TestTally total = { 0, 0 };
         if (tier0_tables_open(&tables))
         {
+            tier0_test_entry_repetitions(&total);
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
@@ -5262,12 +5666,13 @@ static int run_tier0_tests(int argc, char** argv)
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             // The larger shape with records passed and returned by value (#137): a program of its own seed for seed. And
-            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions. And with
+            // past the depth tables (tier0_select_deep): calls of up to 127 arguments, records and deeper expressions. And with
             // objects aligned past 16 bytes too, in realigned frames, with and without variable-length arrays.
             Tier0ProgramOptions records = shapes[3];
             records.records = &tables.records;
             Tier0ProgramOptions deep = shapes[3];
             deep.deep = true;
+            deep.records = &tables.records;
             Tier0ProgramOptions aligned = deep;
             aligned.over_aligned = true;
             {
@@ -5323,6 +5728,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_objects(&tally, seed);
                 tier0_test_report("objects", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_home_candidates(&tally, seed);
+                tier0_test_report("home candidates", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -5392,6 +5804,9 @@ static int run_tier0_tests(int argc, char** argv)
             {
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_aggregate_calls(&tally);
+                tier0_test_wide_call_depths(&tally);
+                tier0_test_large_call_records(&tally);
+                tier0_test_record_count_bounds(&tally);
                 tier0_test_report("aggregate calls", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
@@ -5414,7 +5829,7 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
                 tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : aligned, &instructions, &entries,
                                     &deferred, &deep_entries, frames, coverage);
-                if (s == 4)
+                if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
                     // shape is meant to (but an ignored argument with bytes, and an XMM part through a temporary, which
@@ -5431,7 +5846,7 @@ static int run_tier0_tests(int argc, char** argv)
                                   "%" PRIu64 " deep entries among %" PRIu64, deep_entries, entries);
                 // Frames are realigned for objects aligned past 16 alone, and for the records' aligned to 32: with the default
                 // count, the last shape has many, a base among them (with variable-length arrays).
-                tier0_test_expect(&tally, s < 4 || s == 5 ? frames[0] == 0 : s == 4 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
+                tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
                 tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : "programs: aligned past 16 bytes", tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
@@ -5472,6 +5887,17 @@ static int run_tier0_tests(int argc, char** argv)
             }
             if (cross)
             {
+                Tier0TestTally repetitions = { 0, 0 };
+                Tier0ProgramOptions repeated = { .functions = 3, .statements = 4, .expression_nodes = 6, .calls = true, .loops = true, .defined = true };
+                static const uint32_t counts[] = { 2, BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS };
+                for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(counts); at += 1)
+                {
+                    repeated.entry_repetitions = counts[at];
+                    tier0_test_cross(&repetitions, &tables, seed, 1, repeated, clang, keep);
+                }
+                tier0_test_report("cross-check: entry repetitions", repetitions);
+                total.checks += repetitions.checks;
+                total.failures += repetitions.failures;
                 Tier0TestTally tally = { 0, 0 };
                 Tier0ProgramOptions defined = shapes[3];
                 defined.defined = true;

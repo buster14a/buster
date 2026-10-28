@@ -1842,6 +1842,8 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     walker->constants = previous_constants;
 }
 
+#include "c_check_initializer_embed.c"
+
 static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin, uint32_t end)
 {
     walker->flexible_storage = walker->static_storage && walker->parser->tree.roles[begin] != PARSE_ROLE_OPEN_COMPOUND_BODY;
@@ -1979,12 +1981,27 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                     const uint32_t stop = check_init_expression_end(walker->parser, token, end);
                     const uint32_t node = check_init_node(walker, token, stop);
                     const CheckInitString* string = check_init_string(walker, token, stop, node);
+                    uint32_t embed_length = 0;
+                    const uint8_t* embed = parse_embed_bytes(walker->parser, token, &embed_length);
                     const TypeId element = type_unqualified(type_strip_aligned(walker->types, selected.type));
                     const TypeId string_element = string != 0 ? type_unqualified(type_element(walker->types, string->type)) : 0;
                     const bool string_elements = element == string_element || (check_init_character(element) && check_init_character(string_element));
                     if (stop == token)
                     {
                         check_init_fail(walker, CHECK_INIT_INVALID, token);
+                    }
+                    else if (embed != NULL && embed_length > 1)
+                    {
+                        if (stop != token + 1)
+                        {
+                            check_init_fail(walker, CHECK_INIT_UNSUPPORTED, token);
+                        }
+                        else
+                        {
+                            const bool excess_embed = check_init_embed(walker, embed, embed_length, token);
+                            token = excess_embed ? check_init_excess_end(walker->parser, stop, end) : stop;
+                            after_value = true;
+                        }
                     }
                     else if (string != 0 && string_elements && !designated && frame->braced && frame->next == 0 &&
                              (type_kind(walker->types, type_strip_aligned(walker->types, frame->type)) == BUSTER_TYPE_KIND_ARRAY ||
