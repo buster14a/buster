@@ -100,10 +100,10 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
     uint8_t required[96];
     uint32_t use_offsets[97];
     uint32_t use_positions[96];
-    const uint32_t fixed_start[] = { 23, 70, 90 };
-    const uint32_t fixed_end[] = { 25, 71, 96 };
-    const uint32_t fixed_regs[] = { 0x3, 0xf, 0x80000000u };
-    const uint8_t fixed_classes[] = { 0, 0, 1 };
+    const uint32_t fixed_start[] = { 23, 70, 90, 24, 0, 90, 128 };
+    const uint32_t fixed_end[] = { 25, 71, 96, 26, 2, 97, 129 };
+    const uint32_t fixed_regs[] = { 0x3, 0xf, 0x80000000u, 0x2, 0, 0x80000001u, 0x1 };
+    const uint8_t fixed_classes[] = { 0, 0, 1, 0, 1, 1, 0 };
     for (uint32_t iteration = 0; iteration < iterations; iteration += 1)
     {
         const uint64_t saved = arena->length;
@@ -150,7 +150,7 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
                 .ends = fixed_end,
                 .registers = fixed_regs,
                 .classes = fixed_classes,
-                .count = constrained ? 3 : 0,
+                .count = constrained ? 7 : 0,
             },
         };
         Tier1Allocation vector = { 0 };
@@ -174,6 +174,201 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
         }
         arena_pop_to(arena, saved);
     }
+}
+
+// A position bitmap is independent of the prefix-maximum query and of the scalar overlap predicate. Compare
+// masks directly, then require the whole allocator to match an explicitly prefiltered no-fixed input exactly.
+static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
+{
+    uint32_t starts[96];
+    uint32_t ends[96];
+    uint32_t values[96];
+    uint32_t allowed[96];
+    uint8_t classes[96];
+    uint32_t fixed_starts[96];
+    uint32_t fixed_ends[96];
+    uint32_t fixed_registers[96];
+    uint8_t fixed_classes[96];
+    uint32_t use_offsets[97];
+    uint32_t use_positions[96];
+    uint8_t use_required[96];
+    for (uint32_t iteration = 0; iteration < 388; iteration += 1)
+    {
+        const uint64_t saved = arena->length;
+        const uint32_t count = iteration % 97;
+        const uint32_t fixed_count = (iteration * 17) % 97;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            starts[i] = iteration % 4 == 0 ? i * 2 : tier1_allocation_test_random(&seed) % 192;
+            ends[i] = iteration % 4 == 0 ? starts[i] + 1 : starts[i] + 1 + tier1_allocation_test_random(&seed) % (192 - starts[i]);
+            values[i] = i;
+            classes[i] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
+            allowed[i] = tier1_allocation_test_random(&seed) & (classes[i] == 0 ? 0xffff : UINT32_MAX);
+            use_offsets[i] = i;
+            use_positions[i] = starts[i];
+            use_required[i] = allowed[i] != 0;
+        }
+        use_offsets[count] = count;
+        uint32_t occupied[BUSTER_TIER1_ALLOCATE_CLASSES][192] = { 0 };
+        for (uint32_t f = 0; f < fixed_count; f += 1)
+        {
+            fixed_starts[f] = iteration % 4 == 0 ? f * 2 + 1 : tier1_allocation_test_random(&seed) % 192;
+            fixed_ends[f] = iteration % 4 == 0 ? fixed_starts[f] + 1 : fixed_starts[f] + 1 + tier1_allocation_test_random(&seed) % (192 - fixed_starts[f]);
+            if (iteration % 4 == 1)
+            {
+                fixed_starts[f] = 23;
+                fixed_ends[f] = 24 + f;
+            }
+            fixed_classes[f] = (uint8_t)(tier1_allocation_test_random(&seed) & 1);
+            fixed_registers[f] = tier1_allocation_test_random(&seed) & (fixed_classes[f] == 0 ? 0xffff : UINT32_MAX);
+            for (uint32_t p = fixed_starts[f]; p < fixed_ends[f]; p += 1)
+            {
+                occupied[fixed_classes[f]][p] |= fixed_registers[f];
+            }
+        }
+        uint32_t expected[96];
+        uint32_t actual[96];
+        uint32_t scalar[96];
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            uint32_t blocked = 0;
+            for (uint32_t p = starts[i]; p < ends[i]; p += 1)
+            {
+                blocked |= occupied[classes[i]][p];
+            }
+            expected[i] = allowed[i] & ~blocked;
+            actual[i] = allowed[i];
+            scalar[i] = allowed[i];
+        }
+        uint32_t events[288];
+        uint32_t event_count = 0;
+        for (uint32_t p = 0; p <= 192; p += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (ends[i] == p)
+                {
+                    events[event_count++] = i * 2;
+                }
+                if (starts[i] == p)
+                {
+                    events[event_count++] = i * 2 + 1;
+                    events[event_count++] = BUSTER_TIER1_ALLOCATE_USE_EVENT | i;
+                }
+            }
+        }
+        uint32_t buckets[194];
+        Tier1AllocationInput input = {
+            .starts = starts,
+            .ends = ends,
+            .values = values,
+            .allowed_registers = allowed,
+            .classes = classes,
+            .use_offsets = iteration % 4 == 0 ? use_offsets : 0,
+            .use_positions = iteration % 4 == 0 ? use_positions : 0,
+            .use_required = iteration % 4 == 0 ? use_required : 0,
+            .use_count = iteration % 4 == 0 ? count : 0,
+            .count = count,
+            .value_count = count,
+            .position_count = 192,
+            .registers = { 0xffff, UINT32_MAX },
+            .fixed = {
+                .starts = fixed_starts,
+                .ends = fixed_ends,
+                .registers = fixed_registers,
+                .classes = fixed_classes,
+                .count = fixed_count,
+            },
+        };
+        const bool filtered = tier1_allocation_filter_fixed(&input, arena, true, events, event_count, buckets, actual);
+        tier1_allocation_filter_fixed_simple(&input, false, scalar);
+        tier1_allocation_test_expect(tally, filtered && memcmp(expected, actual, count * 4) == 0 && memcmp(expected, scalar, count * 4) == 0, "fixed masks match independent position bitmap and cross-product");
+        arena_pop_to(arena, saved);
+        Tier1AllocationInput prefiltered = input;
+        prefiltered.allowed_registers = expected;
+        prefiltered.fixed.count = 0;
+        Tier1Allocation output = { 0 };
+        Tier1Allocation reference = { 0 };
+        const bool produced = tier1_allocate(&input, arena, &output) == TIER1_ALLOCATION_OK && tier1_allocate(&prefiltered, arena, &reference) == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &output, &reference), "fixed filtering preserves complete allocation decisions");
+        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_occupancy(&input, &output), "fixed allocation satisfies independent position occupancy");
+        arena_pop_to(arena, saved);
+        if (count == 96)
+        {
+            uint8_t memory[32768];
+            bool succeeded = false;
+            memset(memory, 0x6d, 19);
+            for (uint32_t capacity = 19; capacity <= sizeof(memory); capacity += 31)
+            {
+                Arena small = {
+                    .base = memory,
+                    .length = 19,
+                    .capacity = capacity,
+                };
+                Tier1Allocation before = { .splits = 1234 };
+                Tier1Allocation limited = before;
+                const Tier1AllocationError error = tier1_allocate(&input, &small, &limited);
+                succeeded |= error == TIER1_ALLOCATION_OK;
+                bool prefix = true;
+                for (uint32_t i = 0; i < 19; i += 1)
+                {
+                    prefix &= memory[i] == 0x6d;
+                }
+                tier1_allocation_test_expect(tally, prefix && (error == TIER1_ALLOCATION_OK || (error == TIER1_ALLOCATION_CAPACITY && small.length == 19 && memcmp(&limited, &before, sizeof(before)) == 0)), "fixed-index capacity failure preserves prefix, arena and result");
+            }
+            tier1_allocation_test_expect(tally, succeeded, "fixed-index capacity sweep reaches success");
+        }
+    }
+}
+
+static void tier1_allocation_test_fixed_sparse(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint64_t saved = arena->length;
+    const uint32_t count = 8192;
+    uint32_t* starts = arena_push_array(arena, count, 4, 4);
+    uint32_t* ends = arena_push_array(arena, count, 4, 4);
+    uint32_t* values = arena_push_array(arena, count, 4, 4);
+    uint32_t* allowed = arena_push_array(arena, count, 4, 4);
+    uint32_t* fixed_ends = arena_push_array(arena, count, 4, 4);
+    uint32_t* fixed_registers = arena_push_array(arena, count, 4, 4);
+    uint8_t* classes = arena_push_array(arena, count, 1, 1);
+    bool valid = starts != 0 && ends != 0 && values != 0 && allowed != 0 && fixed_ends != 0 && fixed_registers != 0 && classes != 0;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        starts[i] = i * 2;
+        ends[i] = i * 2 + 1;
+        values[i] = i;
+        allowed[i] = 3;
+        fixed_ends[i] = i * 2 + 2;
+        fixed_registers[i] = 1;
+        classes[i] = 0;
+    }
+    const Tier1AllocationInput input = {
+        .starts = starts,
+        .ends = ends,
+        .values = values,
+        .allowed_registers = allowed,
+        .classes = classes,
+        .count = count,
+        .value_count = count,
+        .position_count = count * 2,
+        .registers = { 3, 0 },
+        .fixed = {
+            .starts = ends,
+            .ends = fixed_ends,
+            .registers = fixed_registers,
+            .classes = classes,
+            .count = count,
+        },
+    };
+    Tier1Allocation output = { 0 };
+    valid = valid && tier1_allocate(&input, arena, &output) == TIER1_ALLOCATION_OK && output.vector_intervals == count && output.spill_count == 0 && output.fragment_count == count;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        valid = output.value_registers[i] == 0 && output.starts[i] == starts[i] && output.ends[i] == ends[i];
+    }
+    tier1_allocation_test_expect(tally, valid, "8192 adjacent half-open fixed ranges remove no registers");
+    arena_pop_to(arena, saved);
 }
 
 static void tier1_allocation_test_failures(Tier1AllocationTestTally* tally, Arena* arena)
@@ -301,6 +496,13 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
             destinations[i] = i;
             sources[i] = iteration % 2 == 0 ? (i + 1) % count : tier1_allocation_test_random(&seed) % 32;
         }
+        for (uint32_t i = count; i > 1; i -= 1)
+        {
+            const uint32_t other = tier1_allocation_test_random(&seed) % i;
+            const uint32_t swap = destinations[i - 1];
+            destinations[i - 1] = destinations[other];
+            destinations[other] = swap;
+        }
         const Tier1ParallelMoves input = {
             .sources = sources,
             .destinations = destinations,
@@ -309,6 +511,9 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
         };
         Tier1ResolvedMoves output = { 0 };
         bool valid = tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
+        Tier1ResolvedMoves oracle = { 0 };
+        valid = valid && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
+        valid = valid && oracle.count == output.count && memcmp(oracle.sources, output.sources, output.count * 4) == 0 && memcmp(oracle.destinations, output.destinations, output.count * 4) == 0;
         for (uint32_t i = 0; valid && i < output.count; i += 1)
         {
             valid = output.sources[i] < 33 && output.destinations[i] < 33;
@@ -422,9 +627,9 @@ static void tier1_allocation_test_required(Tier1AllocationTestTally* tally, Aren
 static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena* arena)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mapping[8] = { 0 };
+    uint8_t* mapping[12] = { 0 };
     bool mapped = page >= 4096;
-    for (uint32_t c = 0; c < 8; c += 1)
+    for (uint32_t c = 0; c < 12; c += 1)
     {
         mapping[c] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         mapped = mapped && mapping[c] != MAP_FAILED;
@@ -445,6 +650,10 @@ static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena
         uint8_t* operations = mapping[5] + page - count;
         uint8_t* widths = mapping[6] + page - count;
         uint64_t* constants = (uint64_t*)(mapping[7] + page - count * 8);
+        uint32_t* fixed_starts = (uint32_t*)(mapping[8] + page - count * 4);
+        uint32_t* fixed_ends = (uint32_t*)(mapping[9] + page - count * 4);
+        uint32_t* fixed_registers = (uint32_t*)(mapping[10] + page - count * 4);
+        uint8_t* fixed_classes = mapping[11] + page - count;
         for (uint32_t i = 0; i < count; i += 1)
         {
             starts[i] = i;
@@ -455,11 +664,11 @@ static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena
             operations[i] = BUSTER_TIER1_REMAT_INTEGER;
             widths[i] = 8;
             constants[i] = i;
+            fixed_starts[i] = i;
+            fixed_ends[i] = i + 1;
+            fixed_registers[i] = 1;
+            fixed_classes[i] = 0;
         }
-        const uint32_t fixed_start = 2;
-        const uint32_t fixed_end = 3;
-        const uint32_t fixed_regs = 1;
-        const uint8_t fixed_class = 0;
         const Tier1AllocationInput input = {
             .starts = starts,
             .ends = ends,
@@ -471,11 +680,11 @@ static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena
             .position_count = 66,
             .registers = { 3, 0 },
             .fixed = {
-                .starts = &fixed_start,
-                .ends = &fixed_end,
-                .registers = &fixed_regs,
-                .classes = &fixed_class,
-                .count = 1,
+                .starts = fixed_starts,
+                .ends = fixed_ends,
+                .registers = fixed_registers,
+                .classes = fixed_classes,
+                .count = count,
             },
         };
         Tier1Allocation output = { 0 };
@@ -491,7 +700,7 @@ static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena
         tier1_allocation_test_expect(tally, tier1_rematerialization_marks(&recipes, marks) && tier1_rematerialization_marks_scalar(&recipes, marks), "rematerialization input columns end at guard pages");
         arena_pop_to(arena, saved);
     }
-    for (uint32_t c = 0; c < 8; c += 1)
+    for (uint32_t c = 0; c < 12; c += 1)
     {
         if (mapping[c] != MAP_FAILED)
         {
@@ -894,6 +1103,8 @@ static void tier1_allocation_test_native(Tier1AllocationTestTally* tally, Arena*
     }
 }
 
+#include "buster/compiler/tier1_moves_test.c"
+
 static int run_tier1_allocate_tests(int argc, char** argv)
 {
     uint64_t seed = 140;
@@ -926,8 +1137,11 @@ static int run_tier1_allocate_tests(int argc, char** argv)
     if (valid)
     {
         tier1_allocation_test_generated(&tally, &arena, seed, count);
+        tier1_allocation_test_fixed(&tally, &arena, seed);
+        tier1_allocation_test_fixed_sparse(&tally, &arena);
         tier1_allocation_test_failures(&tally, &arena);
         tier1_allocation_test_moves(&tally, &arena, seed);
+        tier1_allocation_test_move_scaling(&tally);
         tier1_allocation_test_required(&tally, &arena);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);

@@ -16,7 +16,7 @@ static bool check_graph_overload_capacity(const CheckGraph* graph, Arena* scratc
         const CheckOp op = (CheckOp)graph->ops[node];
         const uint32_t first = graph->operand0[node];
         const bool preserve = op == CHECK_OP_VALUE || op == CHECK_OP_SELECT || op == CHECK_OP_ADDRESS;
-        heads[node] = op == CHECK_OP_VALUE ? graph->leaves[node].overload_head :
+        heads[node] = op == CHECK_OP_VALUE ? check_graph_leaf_of(graph, node)->overload_head :
                       preserve && first != BUSTER_CHECK_NONE ? heads[first] : 0;
         valid = heads[node] <= graph->overload_candidate_count;
         if (!preserve)

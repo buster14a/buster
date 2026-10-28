@@ -1409,12 +1409,23 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     return equal;
 }
 
+// `graph` cut to its first `count` nodes, with the leaves of the VALUE nodes among them.
+static __attribute__((unused)) void check_test_graph_cut(CheckGraph* graph, uint32_t count)
+{
+    graph->count = count;
+    graph->leaf_count = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        graph->leaf_count += graph->ops[node] == CHECK_OP_VALUE;
+    }
+}
+
 static uint32_t check_test_leaf(CheckGraph* graph, uint32_t token, CheckValue value)
 {
     const uint32_t node = check_graph_add(graph, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
     if (node != BUSTER_CHECK_NONE)
     {
-        graph->leaves[node] = value;
+        *check_graph_leaf_of(graph, node) = value;
     }
     return node;
 }
@@ -1472,7 +1483,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         const uint32_t selected = check_graph_add(&graph, CHECK_OP_LOGICAL_OR, 8, zero, divide, BUSTER_CHECK_NONE);
         graph.contexts[selected] = BUSTER_CHECK_CONTEXT_ICE;
         const uint32_t assertion = check_graph_add(&graph, CHECK_OP_VALUE, 7, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-        graph.leaves[assertion] = check_test_integer(BUSTER_TYPE_INT, 0);
+        *check_graph_leaf_of(&graph, assertion) = check_test_integer(BUSTER_TYPE_INT, 0);
         graph.contexts[assertion] = BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_ICE;
         // Both children are checked even when evaluation selects only one: invalid operand types remain errors.
         const uint32_t floating = check_test_leaf(&graph, 9, check_test_float(BUSTER_TYPE_FLOAT, 1));
@@ -1502,6 +1513,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         }
         arena_pop_to(output, output_mark);
         graph.count = 0;
+        graph.leaf_count = 0;
         // All expressions would have the same bracket depth in `a+b+c`. Edges, not parser depths, carry readiness.
         uint32_t previous = check_test_leaf(&graph, 0, check_test_integer(BUSTER_TYPE_UINT, 0));
         for (uint32_t i = 1; i <= 127; i += 1)
@@ -1514,6 +1526,7 @@ static __attribute__((noinline)) void check_test_graph_fixtures(CheckTest* test,
         check_test_expect(test, chain_valid && stream.values[previous].integer == 127, "same-bracket-depth dependency chain was evaluated too early");
         arena_pop_to(output, output_mark);
         graph.count = 0;
+        graph.leaf_count = 0;
         for (uint32_t i = 0; i < 257; i += 1)
         {
             const uint32_t a = check_test_leaf(&graph, i * 3, check_test_integer(BUSTER_TYPE_ULONG, i));
@@ -1546,6 +1559,7 @@ static __attribute__((noinline)) void check_test_graph_random(CheckTest* test, T
     for (uint32_t world = 0; initialized && world < 12; world += 1)
     {
         graph.count = 0;
+        graph.leaf_count = 0;
         for (uint32_t i = 0; i < graph.capacity; i += 1)
         {
             if (i < 2 || (check_test_random(test) & 7) == 0)
@@ -1583,7 +1597,7 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
         const uint32_t full_count = graph.count;
         const uint32_t over = check_graph_add(&graph, CHECK_OP_POSITIVE, graph.count, previous, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         check_test_expect(test, over == BUSTER_CHECK_NONE && graph.count == full_count, "full graph append did not fail atomically");
-        graph.count = 2;
+        check_test_graph_cut(&graph, 2);
         CheckStream stream;
         const CheckOptions options = { 0 };
         const uint64_t output_mark = output->length;
@@ -1600,6 +1614,8 @@ static __attribute__((noinline)) void check_test_graph_limits(CheckTest* test, T
         valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
         check_test_expect(test, !valid && stream.status == CHECK_STATUS_INVALID_GRAPH, "invalid operation was not rejected");
         graph.ops[1] = CHECK_OP_POSITIVE;
+        graph.leaf_slots[1] = BUSTER_CHECK_NONE;
+        graph.leaf_count = 1;
         graph.operand0[1] = BUSTER_CHECK_NONE;
         valid = check_graph_run(table, &graph, output, scratch, &options, &stream);
         check_test_expect(test, !valid && stream.status == CHECK_STATUS_INVALID_GRAPH, "missing operand was not rejected");
@@ -1768,6 +1784,7 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
         sizeof(uint8_t),
         sizeof(uint32_t),
         sizeof(uint32_t),
+        sizeof(uint32_t),
     };
     uint8_t* mappings[BUSTER_ARRAY_LENGTH(widths)];
     uint64_t readable[BUSTER_ARRAY_LENGTH(widths)];
@@ -1785,10 +1802,12 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
     check_test_expect(test, ready, "guarded graph column allocation");
     for (uint32_t count = 0; ready && count <= 33; count += 1)
     {
+        // The leaves are the VALUE nodes' alone: every even node's.
+        const uint32_t leaf_count = (count + 1) / 2;
         void* columns[BUSTER_ARRAY_LENGTH(widths)];
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(widths); i += 1)
         {
-            columns[i] = mappings[i] + readable[i] - widths[i] * count;
+            columns[i] = mappings[i] + readable[i] - widths[i] * (i == 5 ? leaf_count : count);
         }
         CheckGraph graph = {
             .ops = columns[0],
@@ -1797,6 +1816,8 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             .operand1 = columns[3],
             .operand2 = columns[4],
             .leaves = columns[5],
+            .leaf_slots = columns[11],
+            .leaf_count = leaf_count,
             .types = columns[6],
             .members = columns[7],
             .contexts = columns[8],
@@ -1813,7 +1834,11 @@ static __attribute__((noinline)) void check_test_graph_guarded(CheckTest* test, 
             graph.operand0[node] = leaf ? BUSTER_CHECK_NONE : node - 1;
             graph.operand1[node] = leaf ? BUSTER_CHECK_NONE : 0;
             graph.operand2[node] = BUSTER_CHECK_NONE;
-            graph.leaves[node] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
+            graph.leaf_slots[node] = leaf ? node / 2 : BUSTER_CHECK_NONE;
+            if (leaf)
+            {
+                graph.leaves[node / 2] = check_test_integer(BUSTER_TYPE_UINT, node + 1);
+            }
             graph.types[node] = 0;
             graph.members[node] = 0;
             graph.contexts[node] = 0;
@@ -3668,6 +3693,58 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // Operators' values: pointer arithmetic under an indirection, GNU's vector operators with a cast's or a negated
+        // operand, vectors past a difference and compares of pointers, which are scalars (#555's review), and scalars,
+        // which brace elision takes into the vector.
+        {
+            "operators' values in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef short v16hi __attribute__((vector_size(32)));\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, int n, v16hi h, v16hi k, long* l, long* m, v4di d)\n{\n    S a[] = { *(p + 1), *(1 + p), p[0], *(p - n), *(p + (l - m)), p[l == m] };\n    _Static_assert(sizeof a == 6 * sizeof(S), \"six\");\n    v16hi b[] = { h + (short)n, -h, ~k, h * k + (short)1, (short)n * h, -h + (short)n, h << 2 };\n    _Static_assert(sizeof b == 7 * sizeof(v16hi), \"seven\");\n    v16hi c[] = { (short)n + (short)1, 2 };\n    _Static_assert(sizeof c == sizeof(v16hi), \"one\");\n    v4di e[] = { (l - m) * d, d, (l == m) * d, (l < m) + d };\n    _Static_assert(sizeof e == 4 * sizeof(v4di), \"four vectors past pointers' differences and compares\");\n    return a[5].b + b[6][0] + c[0][1] + (int)e[3][0];\n}\n",
+            false,
+            false
+        },
+        // Casts' types (the reader's, at their `)`s), on either side; an operand the walk has no type for (a call through a
+        // pointer's expression), which leaves a difference with a pointer open, not a pointer (#555's second review); and
+        // constants, `sizeof` and `!`, scalars on a difference's right.
+        {
+            "casts and operands of no type in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef long v4di __attribute__((vector_size(32)));\nint f(S* p, S* q, long* l, long* m, v4di d, long* (*get)(void))\n{\n    S x[] = { *(p + (p - (S*)q)), p[0], *((S*)q + (l - m)), *(p + (l - (*get)())), *((S*)l + 1), *(p - 1), *(p - sizeof(S)), *(p - !m), *(p - 'a') };\n    _Static_assert(sizeof x == 9 * sizeof(S), \"nine\");\n    v4di e[] = { (v4di)d * (l - m), (l - (long*)q) * d, d };\n    _Static_assert(sizeof e == 3 * sizeof(v4di), \"three\");\n    return x[8].a + (int)e[2][0];\n}\n",
+            false,
+            false
+        },
+        // A ?:'s value from both of its arms (#555's third review): a vector where either arm is one, a scalar arm
+        // converted to it; a scalar where both are; a pointer or a record where either is, a null pointer constant or
+        // GNU's `a ?: b` the other.
+        {
+            "a conditional's arms in an inferred array",
+            "typedef struct { int a, b; } S;\ntypedef int v4si __attribute__((vector_size(16)));\nint f(int n, v4si v, v4si w, S* p, S* q, S s, S t)\n{\n    v4si a[] = { n ? v : 0, n ? 0 : v, n ? v : w, n ? (v + w) : 1, v };\n    _Static_assert(sizeof a == 5 * sizeof(v4si), \"five\");\n    v4si b[] = { n ? 1 : 2, 3 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one\");\n    S x[] = { *(n ? p : 0), *(n ? 0 : q), n ? s : t, *(p ?: q), s };\n    _Static_assert(sizeof x == 5 * sizeof(S), \"five\");\n    return a[4][0] + b[0][1] + x[4].a;\n}\n",
+            false,
+            false
+        },
+        // A vector's lane, its element type's scalar (#555's fourth review): under a ?: beside a scalar, in a binary
+        // operator's operand, through a member and of an operator's value.
+        {
+            "vector lanes in an inferred array",
+            "typedef int v4si __attribute__((vector_size(16)));\ntypedef struct { v4si v; int k; } H;\nint f(int n, v4si v, H h)\n{\n    v4si a[] = { n ? v[0] : 2, 3 };\n    _Static_assert(sizeof a == sizeof(v4si), \"one\");\n    v4si b[] = { v[0] + 1, 2 };\n    _Static_assert(sizeof b == sizeof(v4si), \"one too\");\n    v4si c[] = { h.v[1], (v + v)[2], n ? 1 : v[3], 4, v };\n    _Static_assert(sizeof c == 2 * sizeof(v4si), \"four lanes, then a vector\");\n    return a[0][1] + b[0][0] + c[1][3];\n}\n",
+            false,
+            false
+        },
+        // A ?: of an extension vector's condition, element by element a vector whatever its arms (#555's fifth review):
+        // the condition a vector, a vector's compare, and a lane of one beside pointer arms.
+        {
+            "a vector condition's ?: in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef struct { int a, b; } S;\nint f(int n, e4 mask, g4 x, S* p, S* q)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(mask ? 1 : 2), e4), \"vector-valued conditional\");\n    g4 a[] = { mask ? 1 : 2, x };\n    _Static_assert(sizeof a == 2 * sizeof(g4), \"two elements\");\n    g4 d[] = { (mask < 2) ? 3 : 4, x, n ? 5 : 6, 7 };\n    _Static_assert(sizeof d == 3 * sizeof(g4), \"a compare's mask, a vector, then two scalars braced into one\");\n    S c[] = { *(n ? p : q), *(mask[0] ? p : q) };\n    _Static_assert(sizeof c == 2 * sizeof(S), \"two records\");\n    return a[1][0] + d[2][1] + c[1].a;\n}\n",
+            false,
+            false
+        },
+        // An extension vector's !, && and ||, vectors element by element, and its swizzles: one lane a scalar, more a
+        // vector, an odd-length vector's halves rounded up, and swizzles of swizzles by their own lanes (#555's sixth to
+        // eighth reviews).
+        {
+            "an extension vector's logic and swizzles in an inferred array",
+            "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int e2 __attribute__((ext_vector_type(2)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef int e3 __attribute__((ext_vector_type(3)));\ntypedef int g2 __attribute__((vector_size(8)));\nint f(int n, e4 v, e4 w, e2 t, g4 x, e3 u, g2 z)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(!v), e4), \"not vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v && w), e4), \"and vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v || w), e4), \"or vector\");\n    g4 a[] = { !v, v && w, v || w, x };\n    _Static_assert(sizeof a == 4 * sizeof(g4), \"four\");\n    g4 b[] = { v.x, 2, 3, 4, x, v.s3, t.lo, !v.x, n && v.y };\n    _Static_assert(sizeof b == 3 * sizeof(g4), \"lanes braced into vectors\");\n    g4 c[] = { v.xyzw, v.wzyx, x, !n };\n    _Static_assert(sizeof c == 4 * sizeof(g4), \"two swizzled vectors, a vector, then a scalar\");\n    g2 d[] = { u.lo, u.hi, u.even, u.odd, z };\n    _Static_assert(sizeof d == 5 * sizeof(g2), \"odd lanes' halves round up\");\n    g4 e[] = { v.xy.lo, 2, 3, 4, x, v.xy.hi, v.zw.lo, v.xyz.lo.x, 0 };\n    _Static_assert(sizeof e == 3 * sizeof(g4), \"nested swizzles' lanes braced into vectors\");\n    g2 h[] = { v.xyzw.lo, z, v.wzyx.hi };\n    _Static_assert(sizeof h == 3 * sizeof(g2), \"nested swizzles' vectors whole\");\n    return a[3][0] + b[2][1] + c[3][0] + d[4][0] + e[2][0] + h[2][0];\n}\n",
+            false,
+            false
+        },
         {
             "compound literals in static initializers",
             "typedef struct { char* pointer; unsigned long length; } S8;\n#define T(text) ((S8){ .pointer = (char*)(text), .length = sizeof(text) - 1, })\nstatic const S8 file_scope[] = { T(\" \"), T(\"/**/\") };\nint f(void)\n{\n    static const S8 gaps[] = { T(\" \"), T(\"/**/\"), T(\" \\\\\\n\") };\n    _Static_assert(sizeof gaps == 3 * sizeof(S8), \"three\");\n    static const S8 one = (S8){ \"a\", 1 };\n    return (int)(gaps[1].length + file_scope[1].length + one.length);\n}\n",
@@ -4095,6 +4172,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
 #include "c_check_overload_address_test.c"
 #include "c_types_function_abi_test.c"
 #include "c_check_constant_test.c"
+#include "c_check_generic_test.c"
 #include "c_check_enum_test.c"
 #include "c_check_vla_test.c"
 #include "c_check_data_test.c"
@@ -4183,6 +4261,9 @@ static void check_test_x86_diagnostics(CheckTest* test, const char* clang);
 
 static int run_checker_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     CheckTest test = {
         .random = 133
     };
@@ -4210,6 +4291,8 @@ static int run_checker_tests(int argc, char** argv)
     }
     CheckTestTypes types = { 0 };
     check_test_expect(&test, options, "usage: test-checker [--seed N] [--clang PATH]");
+    // The process's oracle cache, set up before any check runs clang through it (oracle_cache.c, #542).
+    OracleCache* oracle = oracle_cache();
     if (options)
     {
         const bool initialized = check_test_types_open(&types);
@@ -4245,6 +4328,8 @@ static int run_checker_tests(int argc, char** argv)
             check_test_overload_addresses(&test, clang);
             check_test_function_abis(&test, clang);
             check_test_constant_sources(&test, clang);
+            check_test_generic_index(&test);
+            check_test_generic_sources(&test, clang);
             check_test_enum_sources(&test, clang);
             check_test_vla_sources(&test, clang);
             check_test_type_capacity(&test);
@@ -4292,6 +4377,9 @@ static int run_checker_tests(int argc, char** argv)
         }
         check_test_types_close(&types);
     }
+    oracle_cache_report(oracle, "test-checker");
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
-    return test.failures != 0;
+    const int returned = test.failures != 0;
+    oracle_epoch_end(epoch);
+    return returned;
 }

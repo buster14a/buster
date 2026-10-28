@@ -42,7 +42,7 @@ static __attribute__((noinline)) void check_test_source_benchmark(CheckTest* tes
             {
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(dependencies); i += 1)
                 {
-                    if (original->leaves[node].constant_kind == CHECK_CONSTANT_INTEGER && original->leaves[node].integer == 9 + 2 * i)
+                    if (check_graph_leaf_of(original, node)->constant_kind == CHECK_CONSTANT_INTEGER && check_graph_leaf_of(original, node)->integer == 9 + 2 * i)
                     {
                         dependencies[i] = node;
                     }

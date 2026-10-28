@@ -143,7 +143,7 @@ static bool check_test_program_atomic_lowered(CheckTest* test, const char* sourc
                 check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &options, &stream) && stream.report_count == 0 &&
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
-                check_data_prepare(&data, &input, &stream, &initializers, &types.table, &input_arena, &scratch);
+                check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,

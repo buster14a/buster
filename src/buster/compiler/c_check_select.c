@@ -123,10 +123,8 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
     const TypeId control_type = check_constant_control_type(reader, control);
-    TypeId* seen = arena_push_array(reader->scratch, close - separator, sizeof(TypeId), 4);
-    reader->output->resource |= seen == 0;
-    bool valid = seen != 0 && control_type != 0;
-    uint32_t seen_count = 0;
+    CheckGenericSet seen;
+    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, close - separator, control_type, close + 1);
     uint32_t chosen = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t association = separator + 1;
@@ -146,19 +144,11 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
         {
             const TypeId type = reader->selection_types[colon];
             valid = type != 0;
-            for (uint32_t prior = 0; valid && prior < seen_count; prior += 1)
-            {
-                const TypeAnswer answer = type_compatible_at(reader->types, type, seen[prior], reader->transparent_unions, reader->types->tags.count, close + 1);
-                reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                valid = answer == TYPE_ANSWER_NO;
-            }
+            bool matches = false;
+            valid = valid && check_generic_association(reader, &seen, type, &matches);
             if (valid)
             {
-                seen[seen_count++] = type;
-                const TypeAnswer answer = type_compatible_at(reader->types, type, control_type, reader->transparent_unions, reader->types->tags.count, close + 1);
-                reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                valid = answer != TYPE_ANSWER_FULL;
-                if (answer == TYPE_ANSWER_YES)
+                if (matches)
                 {
                     valid &= chosen == BUSTER_CHECK_NONE;
                     chosen = root;
@@ -194,7 +184,7 @@ static bool check_input_selections(CheckInputReader* reader)
     bool valid = true;
     for (uint32_t position = 0; position < parser->tokens.count; position += 1)
     {
-        const uint32_t close = parser->postorder[position];
+        const uint32_t close = reader->postorder[position];
         const uint32_t keyword = reader->first_child[close];
         const uint32_t name = keyword < parser->tokens.count ? parser->tokens.names[keyword] : 0;
         if (reader->ends[close] < reader->expression_limit && !reader->ignored[close] && parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD &&
