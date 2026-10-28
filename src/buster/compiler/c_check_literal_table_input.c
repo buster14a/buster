@@ -14,14 +14,15 @@
 // across blocks, including a minus at lane 63. Only the outer braces have been removed from [begin,end).
 static uint32_t check_literal_table_shape(const uint8_t* kinds, uint32_t begin, uint32_t end, bool scalar)
 {
+    (void)scalar;
     uint32_t count = 0;
     uint32_t previous = PARSE_KIND_COMMA;
     bool valid = begin < end;
     for (uint32_t first = begin; valid && first < end;)
     {
         const uint32_t left = end - first;
-        const uint32_t take = scalar ? 1 : left < 64 ? left : 64;
-        if (scalar)
+        const uint32_t take = BUSTER_SCALAR_PATH(scalar) ? 1 : left < 64 ? left : 64;
+        if (BUSTER_SCALAR_PATH(scalar))
         {
             const uint32_t kind = kinds[first];
             valid = kind == PARSE_KIND_NUMBER ? previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS :
@@ -141,7 +142,7 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
         }
     }
     const __mmask16 lanes = (__mmask16)((1u << count) - 1);
-    const __mmask16 small = valid && !reader->parser->options.scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
+    const __mmask16 small = valid && BUSTER_VECTOR_PATH(!reader->parser->options.scalar) ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
     for (uint32_t lane = 0; valid && lane < count; lane += 1)
     {
         const bool negative = reader->parser->tokens.kinds[tokens[lane] - 1] == PARSE_KIND_MINUS;
@@ -156,11 +157,11 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
             valid = check_literal_table_value(reader, spellings[lane], lengths[lane], negative, width, is_signed, values + lane);
         }
     }
-    for (uint32_t lane = 0; valid && reader->parser->options.scalar && lane < count; lane += 1)
+    for (uint32_t lane = 0; valid && BUSTER_SCALAR_PATH(reader->parser->options.scalar) && lane < count; lane += 1)
     {
         memcpy(destination + (uint64_t)lane * (width / 8), values + lane, width / 8);
     }
-    for (uint32_t first = 0; valid && !reader->parser->options.scalar && first < count; first += 8)
+    for (uint32_t first = 0; valid && BUSTER_VECTOR_PATH(!reader->parser->options.scalar) && first < count; first += 8)
     {
         const uint32_t left = count - first;
         const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);

@@ -9,7 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_IR_OPTIMIZE_BATCH 16
 #define BUSTER_IR_OPTIMIZE_DEFAULT_SWEEPS 64
@@ -227,6 +227,9 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_scalar(IrOptimizeFoldBa
 
 static __attribute__((unused)) uint16_t ir_optimize_fold_vector(IrOptimizeFoldBatch batch, uint16_t active)
 {
+#if !BUSTER_HOST_VECTOR
+    return ir_optimize_fold_scalar(batch, active);
+#else
     uint16_t folded = 0;
     if (batch.count <= BUSTER_IR_OPTIMIZE_BATCH)
     {
@@ -355,6 +358,7 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_vector(IrOptimizeFoldBa
         }
     }
     return folded;
+#endif
 }
 
 // Up to 64 block ids fit four registers. A masked tail load authorizes only the logical source entries, and every
@@ -402,6 +406,8 @@ static __m512i ir_optimize_lookup_blocks(const uint32_t* values, const uint32_t*
 // Both implementations write exactly the same targets. Failure leaves targets and scratch.length unchanged.
 static __attribute__((unused)) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets, bool scalar)
 {
+    (void)scalar;
+
     const uint64_t saved = scratch->length;
     bool valid = count == 0 || (direct != 0 && targets != 0);
     for (uint32_t block = 0; valid && block < count; block += 1)
@@ -420,7 +426,7 @@ static __attribute__((unused)) bool ir_optimize_thread_targets(Arena* scratch, c
         next_minimum = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
         valid = current != 0 && minimum != 0 && next != 0 && next_minimum != 0;
     }
-    if (valid && count != 0 && scalar)
+    if (valid && count != 0 && BUSTER_SCALAR_PATH(scalar))
     {
         for (uint32_t block = 0; block < count; block += 1)
         {
@@ -1149,7 +1155,7 @@ static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
             {
                 memset(work->live + first, 1, end - first);
             }
-            else if (options.scalar)
+            else if (BUSTER_SCALAR_PATH(options.scalar))
             {
                 for (uint32_t i = first; i < end; i += 1)
                 {
@@ -1173,7 +1179,7 @@ static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
     }
     if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0)
     {
-        if (options.scalar)
+        if (BUSTER_SCALAR_PATH(options.scalar))
         {
             ir_optimize_dce_worklist(work);
         }
@@ -1217,8 +1223,10 @@ static void ir_optimize_dce(IrOptimizeWork* work, IrOptimizeOptions options)
 
 static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     work->function = function;
-    IrCheck check = scalar ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
     // Entry phis are forbidden by the shared IR contract: initial invocation has no predecessor value.
     // Pruning their dead predecessors cannot invent an undef value or emit a zero-input phi.
     if (check.error == IR_OK && function->block_count != 0 && function->op[0] == IR_PHI)
@@ -1246,7 +1254,7 @@ static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* funct
         };
         DominatorOptions options = dominators_options();
         options.outputs = 0;
-        options.path = scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
+        options.path = BUSTER_SCALAR_PATH(scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }
@@ -1318,7 +1326,7 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
             direct[block] = target;
         }
     }
-    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads, options.scalar))
+    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads, BUSTER_SCALAR_PATH(options.scalar)))
     {
         error = IR_ERROR_MEMORY;
     }
@@ -1515,9 +1523,11 @@ static IrError ir_optimize_rewrite(IrOptimizeWork* work, Arena* output, Arena* s
 
 static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* output, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     const uint64_t mark = scratch->length;
     IrOptimizeWork verification = { 0 };
-    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, scalar);
+    IrCheck check = ir_optimize_prepare(&verification, function, output, scratch, BUSTER_SCALAR_PATH(scalar));
     if (check.error == IR_OK)
     {
         const IrDominance dominance = {
@@ -1525,7 +1535,7 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
             .leave = verification.dominators.subtree_end,
             .block_count = function->block_count,
         };
-        check = scalar ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
+        check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, &dominance) : ir_verify(function, scratch, &dominance);
     }
     arena_pop_to(scratch, mark);
     return check;
@@ -1539,7 +1549,7 @@ static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scr
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
     if (output != scratch && (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG)) == 0)
     {
-        check = ir_optimize_prepare(&work, function, output, scratch, options.scalar);
+        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {
@@ -1549,7 +1559,7 @@ static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scr
         }
         if ((options.passes & BUSTER_IR_OPTIMIZE_SCCP) != 0)
         {
-            if (options.scalar)
+            if (BUSTER_SCALAR_PATH(options.scalar))
             {
                 ir_optimize_sccp_worklist(&work);
             }
@@ -1582,7 +1592,7 @@ static IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scr
     }
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, options.scalar);
+        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {

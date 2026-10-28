@@ -51,7 +51,7 @@ static uint16_t check_input_warning_block(CheckInputReader* reader, uint32_t blo
     uint8_t* ignored = warnings != 0 ? reader->output->constant_warning_ignored : 0;
     uint8_t* suppressed = reader->warning_suppressed;
     uint16_t summary = 0;
-    if (reader->parser->options.scalar)
+    if (BUSTER_SCALAR_PATH(reader->parser->options.scalar))
     {
         for (uint32_t token = begin; token < finish; token += 1)
         {

@@ -822,8 +822,10 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
 // general registers 0 to 15, as x86_encode does.
 static uint64_t x86_register_resource(uint8_t value, bool vector)
 {
+    (void)vector;
+
     const uint32_t general = (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3) : (value & 15);
-    return vector ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
+    return BUSTER_VECTOR_PATH(vector) ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
 }
 
 // What one record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
@@ -904,6 +906,9 @@ static __attribute__((unused)) void x86_instructions_effects_scalar(const X86Ins
 // lane computes as x86_instruction_effects_scalar does, with masks for its branches.
 static __attribute__((unused)) void x86_instructions_effects(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes)
 {
+#if !BUSTER_HOST_VECTOR
+    x86_instructions_effects_scalar(instructions, count, reads, writes);
+#else
     const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
     const __m512i odd = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
     const __m512i bytes = _mm512_set1_epi64(0xff);
@@ -1032,6 +1037,7 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
         _mm512_mask_storeu_epi64(reads + first, live, read);
         _mm512_mask_storeu_epi64(writes + first, live, write);
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1357,6 +1363,9 @@ static __m512i x86_choice_classes(__m512i value, __m512i info)
 // with masked loads and stores, so nothing past them is touched. Requires x86_semantics_initialize.
 static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const int64_t* values, const uint16_t* contexts, uint64_t count, uint16_t* forms)
 {
+#if !BUSTER_HOST_VECTOR
+    x86_choose_forms_scalar(rows, values, contexts, count, forms);
+#else
     const __m512i info_low = _mm512_load_si512(x86_choice_row_info);
     const __m512i info_high = _mm512_load_si512(x86_choice_row_info + 32);
     const __m512i flags = _mm512_set1_epi16(BUSTER_X86_CONTEXT_LIVE_FLAGS);
@@ -1400,6 +1409,7 @@ static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const
         }
         _mm512_mask_storeu_epi16(forms + first, lanes, result);
     }
+#endif
 }
 
 // The record for a chosen form: `destination` holds the destination operand as the row's operation takes it (a register

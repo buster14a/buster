@@ -211,6 +211,8 @@ static bool check_input_binding_columns(CheckInputReader* reader, const ParseBin
 // reader's use events. Kept for measurement and as an oracle; the reader's events already hold these answers.
 static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
 {
+    (void)scalar;
+
     CheckInput* output = reader->output;
     const uint64_t mark = reader->arena->length;
     Parser parser = *reader->parser;
@@ -239,7 +241,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
             }
         }
     }
-    valid = valid && parse_bindings_build(&parsed, &parser, reader->arena) && parse_bindings_resolve(&parsed, scalar, reader->scratch);
+    valid = valid && parse_bindings_build(&parsed, &parser, reader->arena) && parse_bindings_resolve(&parsed, BUSTER_SCALAR_PATH(scalar), reader->scratch);
     output->resource |= !valid;
     if (valid)
     {
@@ -254,7 +256,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
 static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode mode)
 {
     const CheckInputBindingMode selected = mode != CHECK_INPUT_BINDINGS_DEFAULT ? mode :
-                                           reader->parser->options.scalar ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
+                                           BUSTER_SCALAR_PATH(reader->parser->options.scalar) ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
     const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
     return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
 }

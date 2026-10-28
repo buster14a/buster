@@ -81,7 +81,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <immintrin.h>
+#include "host_isa.h"
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_INLINE static inline __attribute__((always_inline))
@@ -7317,6 +7317,9 @@ BUSTER_INLINE uint32_t x86_measure_group(const X86Instruction* instructions, uin
 
 static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, uint32_t* offsets)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_measure_scalar(instructions, count, offsets);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7340,6 +7343,7 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
         result = length;
     }
     return result;
+#endif
 }
 
 // Encodes the 4 * `quads` instructions at `instructions` (quads is 1, 2 or 4, and a constant), appending their
@@ -7382,7 +7386,9 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
     __m512i immediate = _mm512_unpacklo_epi64(low01, low23);
     // Opaque to clang, which otherwise sees that each of Phase III's unpacks of it takes half and merges one with
     // low23 into a vpermt2d: a µop on FP1 and FP2, with an index to load, on Phase III's path.
+#if BUSTER_HOST_VECTOR
     __asm__("" : "+v"(immediate));
+#endif
     const __m512i displacement = _mm512_unpackhi_epi64(low01, low23);
     const __m512i operands = _mm512_unpacklo_epi64(high01, high23);
     const __m512i extension = _mm512_unpackhi_epi64(high01, high23);
@@ -7616,6 +7622,9 @@ BUSTER_X86_ENCODE_VARIANT(x86_encode_16_mode16, 4, 1, X86_GATHER_INSERTS, X86_ST
 // points take the same width.
 static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_encode_scalar(instructions, count, output, capacity, offsets, fixup_ends);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7630,11 +7639,15 @@ static int64_t x86_encode(const X86Instruction* instructions, uint64_t count, ui
         result = x86_encode_16(instructions, count, output, offsets, fixup_ends);
     }
     return result;
+#endif
 }
 
 static int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets,
                                     uint32_t* fixup_ends)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_encode_scalar_address32(instructions, count, output, capacity, offsets, fixup_ends);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7649,10 +7662,14 @@ static int64_t x86_encode_address32(const X86Instruction* instructions, uint64_t
         result = x86_encode_16_address32(instructions, count, output, offsets, fixup_ends);
     }
     return result;
+#endif
 }
 
 static int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_encode_scalar_apx(instructions, count, output, capacity, offsets, fixup_ends);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7667,10 +7684,14 @@ static int64_t x86_encode_apx(const X86Instruction* instructions, uint64_t count
         result = x86_encode_16_apx(instructions, count, output, offsets, fixup_ends);
     }
     return result;
+#endif
 }
 
 static int64_t x86_encode_mode32(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_encode_scalar_32(instructions, count, output, capacity, offsets, fixup_ends);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7685,10 +7706,14 @@ static int64_t x86_encode_mode32(const X86Instruction* instructions, uint64_t co
         result = x86_encode_16_mode32(instructions, count, output, offsets, fixup_ends);
     }
     return result;
+#endif
 }
 
 static int64_t x86_encode_mode16(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
+#if !BUSTER_HOST_VECTOR
+    return x86_encode_scalar_16(instructions, count, output, capacity, offsets, fixup_ends);
+#else
     int64_t result;
     if (count > BUSTER_X86_ENCODER_MAX_INSTRUCTIONS)
     {
@@ -7703,4 +7728,5 @@ static int64_t x86_encode_mode16(const X86Instruction* instructions, uint64_t co
         result = x86_encode_16_mode16(instructions, count, output, offsets, fixup_ends);
     }
     return result;
+#endif
 }

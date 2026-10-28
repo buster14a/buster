@@ -211,9 +211,9 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                 work->available[i] = !inside && dominators_dominates(&work->loops, work->destination[i], preheader);
             }
             // AVX-512 dword gather indices are signed. Larger value spaces use the exact worklist path.
-            if (options.scalar || f->instruction_count > INT32_MAX)
+            if (BUSTER_SCALAR_PATH(options.scalar) || f->instruction_count > INT32_MAX)
             {
-                work->statistics.fallback = work->statistics.fallback || !options.scalar;
+                work->statistics.fallback = work->statistics.fallback || !BUSTER_SCALAR_PATH(options.scalar);
                 ir_licm_worklist(work);
             }
             else
@@ -396,7 +396,7 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, options.scalar);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {
@@ -411,7 +411,7 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         };
         DominatorOptions dom = dominators_options();
         dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        dom.path = options.scalar ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
+        dom.path = BUSTER_SCALAR_PATH(options.scalar) ? DOMINATOR_SCALAR : DOMINATOR_AUTO;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
     }
@@ -458,12 +458,12 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = 0;
-        rewrite.scalar = options.scalar;
+        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
     if (check.error == IR_OK)
     {
-        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, options.scalar);
+        check = ir_optimize_verify_result(&work.statistics.function, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
     }
     if (check.error == IR_OK)
     {

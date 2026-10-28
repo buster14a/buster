@@ -739,6 +739,8 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
 
 static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* request, bool vectorized)
 {
+    (void)vectorized;
+
     X86Match result = {0};
     const uint32_t bucket = x86_match_bucket(index, request->mnemonic);
     uint32_t memory_width = 0;
@@ -752,7 +754,7 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
         const uint32_t left = index->begin[bucket + 1] - first;
         const uint32_t n = left < 16 ? left : 16;
         uint32_t mask = 0;
-        if (vectorized)
+        if (BUSTER_VECTOR_PATH(vectorized))
         {
             mask = x86_match_candidates_vector(index, request, first, n);
         }
@@ -768,7 +770,7 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
             const uint32_t at = first + __builtin_ctz(mask);
             mask &= mask - 1;
             X86Instruction instruction;
-            const bool accepted = vectorized ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
+            const bool accepted = BUSTER_VECTOR_PATH(vectorized) ? x86_match_candidate_indexed(index, request, at, &instruction) : x86_match_candidate(request, index->forms[at], &instruction);
             if (accepted)
             {
                 const X86FormDescription* form = x86_form_description(instruction.form);
@@ -780,7 +782,7 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
                 // The indexed builder has already crossed the complete x86_validate boundary. The scalar API
                 // would run that same validation a second time merely to get this length.
-                const int64_t length = vectorized ? encode_one(&instruction, bytes, X86_ENCODER_MODE_64) : x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
+                const int64_t length = BUSTER_VECTOR_PATH(vectorized) ? encode_one(&instruction, bytes, X86_ENCODER_MODE_64) : x86_encode_scalar(&instruction, 1, bytes, sizeof(bytes), 0, 0);
                 // At the same length, GNU as's choice: SSE2's movq between memory and an XMM register in its own form
                 // (F3 0F 7E, 66 0F D6), not in the general register's (REX.W 66 0F 6E and 7E), which takes memory too.
                 const uint32_t chosen = result.instruction.form & BUSTER_X86_FORM_NUMBER;
