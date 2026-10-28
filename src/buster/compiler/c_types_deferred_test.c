@@ -326,19 +326,21 @@ static void type_deferred_run_op(TypeTable* table, const TypeDeferredOp* op, uin
 static bool type_deferred_same_tables(const TypeTable* a, const TypeTable* b)
 {
     bool same = type_test_same_tables(a, b) && a->tags.count == b->tags.count && a->tags.completions == b->tags.completions &&
-                a->members.count == b->members.count && a->last_error == b->last_error;
+                a->members.count == b->members.count && a->lookup.count == b->lookup.count && a->last_error == b->last_error;
     const uint64_t tags = a->tags.count;
     same = same && memcmp(a->tags.type, b->tags.type, tags * sizeof(TypeId)) == 0 && memcmp(a->tags.name, b->tags.name, tags * sizeof(uint32_t)) == 0 &&
            memcmp(a->tags.member_begin, b->tags.member_begin, tags * sizeof(uint32_t)) == 0 &&
            memcmp(a->tags.member_count, b->tags.member_count, tags * sizeof(uint32_t)) == 0 &&
            memcmp(a->tags.completion, b->tags.completion, tags * sizeof(uint32_t)) == 0 && memcmp(a->tags.packed, b->tags.packed, tags) == 0 &&
-           memcmp(a->tags.pack_log2, b->tags.pack_log2, tags) == 0 && memcmp(a->tags.alignment_log2, b->tags.alignment_log2, tags) == 0;
+           memcmp(a->tags.pack_log2, b->tags.pack_log2, tags) == 0 && memcmp(a->tags.alignment_log2, b->tags.alignment_log2, tags) == 0 &&
+           memcmp(a->tags.lookup, b->tags.lookup, tags * sizeof(uint32_t)) == 0 && memcmp(a->tags.lookup_log2, b->tags.lookup_log2, tags) == 0;
     const uint64_t members = a->members.count;
     same = same && memcmp(a->members.name, b->members.name, members * sizeof(uint32_t)) == 0 &&
            memcmp(a->members.type, b->members.type, members * sizeof(TypeId)) == 0 &&
            memcmp(a->members.bit_width, b->members.bit_width, members * sizeof(uint32_t)) == 0 &&
            memcmp(a->members.alignment_log2, b->members.alignment_log2, members) == 0 && memcmp(a->members.flags, b->members.flags, members) == 0 &&
            memcmp(a->members.offset, b->members.offset, members * sizeof(uint64_t)) == 0;
+    same = same && memcmp(a->lookup.buckets, b->lookup.buckets, (uint64_t)a->lookup.count * sizeof(TypeLookupBucket)) == 0;
     return same;
 }
 
