@@ -240,6 +240,14 @@ static const CheckSourceFixture check_const_alias_fixtures[] =
         .name = "a discarded flexible decay cannot taint the selected pointer path",
         .source = "struct I{int x;int a[];};struct P{struct I i;int tail;};\nconst struct P p={{0},0};const int k=3;\nconst int* const q=(p.i.a,&k);\nenum{E=*q};\n_Static_assert(E==3,\"discarded flexible decay\");\n",
     },
+    {
+        .name = "a completed later array declaration supplies its actual bound",
+        .source = "extern const int a[];\nconst int a[2]={3,4};\nenum{E=a[1]};\n_Static_assert(E==4,\"completed array\");\n",
+    },
+    {
+        .name = "an earlier symbolic array pointer can read a subsequently completed target",
+        .source = "extern const int a[];\nconst int* const p=a;\nconst int a[2]={3,4};\nenum{E=p[1]};\n_Static_assert(E==4,\"completed target\");\n",
+    },
 };
 
 static void check_test_const_alias_sources(CheckTest* test, const char* clang)
