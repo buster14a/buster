@@ -100,6 +100,14 @@ The backend selection/native test compares all 50,112 default64 entries, includi
 and fixups, with direct per-form construction. Frozen before/after comparisons
 cover the complete bytes of all five modes.
 
+The default64 full-store encoder stages its final one-to-fifteen-record tail
+in an inlined source helper. Tails of one to four records use one quad; longer
+tails keep the existing computation, using only one- and four-quad source paths. It returns
+the final byte count and takes the fixup cursor by value; no further encoding
+follows that result. Actual stack retention and spills are checked in compiled
+code and measurements. Full groups, other modes and alternative gather/store
+paths keep their behavior, as do record format, bytes, offsets/fixups and capacity.
+
 `x86_target_form_allowed` tests a form including its FS/GS and fixup flags.
 `x86_target_validate` checks both ISA eligibility and `x86_validate`'s operands,
 returning the first failing record index, or the count on success. Initialize

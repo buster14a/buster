@@ -7552,6 +7552,28 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
 
 #undef BUSTER_X86_SPLAT
 
+// Stage the final default64 tail and return its byte count; no later encoding uses the helper's local cursor.
+// Specialize only tails of one quad; longer tails keep four quads. Check actual stack retention and spills in compiled code.
+BUSTER_INLINE int64_t encode_tail64(const X86Instruction* instructions, uint8_t* out, const uint8_t* output, uint32_t* offsets,
+                                                             uint32_t count, uint32_t* fixup_ends)
+{
+    X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
+    memcpy(tail, instructions, count * sizeof(X86Instruction));
+    uint32_t* cursor = fixup_ends;
+    uint32_t** fixups = fixup_ends != 0 ? &cursor : 0;
+    const uint32_t lanes = (1u << count) - 1;
+    uint8_t* end;
+    if (count <= 4)
+    {
+        end = encode_group(tail, 1, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
+    }
+    else
+    {
+        end = encode_group(tail, 4, out, output, offsets, lanes, fixups, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
+    }
+    return (int64_t)(end - output);
+}
+
 // The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), then the
 // whole groups left, then the last partial group from a zeroed copy, so that no load reads past the instructions.
 // Returns the number of bytes. The instructions must be valid (see x86_encode): then it writes nothing past
@@ -7586,14 +7608,23 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
         out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
         i += group_instructions;
     }
+    int64_t result = (int64_t)(out - output);
     if (i < count)
     {
-        X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
-        memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
-        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
-                           encoder);
+        if (encoder == X86_ENCODER_MODE_64 && quads == 4 && gather == X86_GATHER_INSERTS && store == X86_STORE_FULL && fixup_store == X86_FIXUP_STORE_FULL)
+        {
+            result = encode_tail64(instructions + i, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)(count - i), fixup_cursor);
+        }
+        else
+        {
+            X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
+            memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
+            out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
+                               encoder);
+            result = (int64_t)(out - output);
+        }
     }
-    return (int64_t)(out - output);
+    return result;
 }
 
 // The instantiations, by instructions per iteration, and for the benchmark, with the other gathers and stores. All of
