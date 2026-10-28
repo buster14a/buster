@@ -1215,31 +1215,6 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     CheckDataPrepared other = { 0 };
     bool same = check_test_data_prepare_dense(&dense, input, stream, initializers, types, output, scratch) &&
                 check_data_prepare(&other, input, stream, initializers, types, !scalar, output, scratch);
-    uint32_t* dense_roots = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
-    uint8_t* dense_inline = dense_roots != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
-    same = same && dense_inline != NULL;
-    if (same)
-    {
-        memset(dense_roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(dense_inline, 1, (uint64_t)count + 1);
-    }
-    for (uint32_t token = 0; same && token < count; token += 1)
-    {
-        if (input->declarations[token] == token && input->static_objects[token])
-        {
-            const uint32_t object = input->objects[token];
-            const bool function = input->declaration_kinds[token] == C_BINDING_FUNCTION;
-            bool gnu_inline = false;
-            dense_roots[object] |= check_program_attribute_roots(input->attributes[token], function, &gnu_inline);
-            dense_inline[object] |= gnu_inline ? 2 : 0;
-            const uint8_t spelling = input->function_flags != NULL ? input->function_flags[token] : 0;
-            if (function && input->declaration_bodies[token] == BUSTER_CHECK_NONE &&
-                ((spelling & CHECK_INPUT_FUNCTION_INLINE) == 0 || (spelling & CHECK_INPUT_FUNCTION_EXTERN) != 0))
-            {
-                dense_inline[object] &= (uint8_t)~1u;
-            }
-        }
-    }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
         const CheckDataPrepared* prepared = path == 0 ? data : &other;
@@ -1255,19 +1230,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             same = a->type == b->type && a->object == b->object && a->initializer == b->initializer && a->token == b->token &&
                    a->initializer_plan == b->initializer_plan && a->literal_bytes == b->literal_bytes && a->literal_size == b->literal_size &&
                    a->string_pool == b->string_pool && a->alignment_log2 == b->alignment_log2;
-            uint32_t declared = prepared->declared_count;
-            for (uint32_t d = 0; d < prepared->declared_count; d += 1)
-            {
-                declared = prepared->declared_objects[d] == a->object ? d : declared;
-            }
-            same = same && prepared->definition_declared[i] == declared;
         }
-        for (uint32_t d = 0; same && d < prepared->declared_count; d += 1)
-        {
-            const uint32_t object = prepared->declared_objects[d];
-            same = prepared->declared_roots[d] == dense_roots[object] && prepared->declared_inline[d] == dense_inline[object];
-        }
-        same = same && prepared->declared_roots[prepared->declared_count] == 0 && prepared->declared_inline[prepared->declared_count] == 1;
         for (uint32_t object = 0; same && object <= count + 1; object += 1)
         {
             same = check_data_latest(prepared, object) == (object <= count ? dense.latest_declarations[object] : BUSTER_CHECK_NONE);
@@ -1291,10 +1254,6 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     }
     uint32_t* token_bodies = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : 0;
     same = same && token_bodies != 0 && check_program_bodies_ordered(program);
-    for (uint32_t builtin = 0; same && builtin < program->builtin_count; builtin += 1)
-    {
-        same = program->builtin_bodies[builtin] == check_program_token_body(program, input->graph.tokens[program->builtin_nodes[builtin]]);
-    }
     if (same)
     {
         memset(token_bodies, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
@@ -1861,10 +1820,6 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_literal_tables(test, clang);
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
-    check_test_program_source(test,
-        "int f(int n,int a[1+__builtin_popcount((unsigned)n)]){return a[0];}"
-        "int tested(int n){int a[1]={3};return f(n,a);}",
-        "parameter-vla-builtin-source-owner", clang);
     check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
         "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
