@@ -957,13 +957,16 @@ designs and the compilers already built this way.
   source bodies by the scalar schedule, the vector path's postorder batches and its level order
   (`levels`, `CheckOptions.level_order`): #133's question of which order wins, which the postorder
   batches did on the 9700X (`docs/c-checker.md`, "Level order or postorder").
-  `test-checker [--seed N] [--clang PATH] [--program-initializers]` compares fresh scalar/vector tables,
+  `test-checker [--seed N] [--clang PATH] [--program-initializers|--embed-initializers]` compares fresh scalar/vector tables,
   protected tails and original source fixtures against Clang, and checks the constraint catalogue
   (`c_check_constraints_test.c`): for every Constraints paragraph of C17's 6.4 to 6.10 a violation of each rule and
   a valid twin, and the conversions, constant expressions and initializers, each checked as the corpus check checks a
   file and against clang (`docs/c-checker.md`, "The constraint catalogue").
   `--program-initializers` selects the automatic-initializer native regressions alone: threshold and odd tails,
   wide strings, embedded NULs, truncation, partial zeroing, constant lists and ordered runtime/volatile writes.
+  `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
+  initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
+  exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `benchmark-checker --shape wide|chain` measures synthetic graph checking,
