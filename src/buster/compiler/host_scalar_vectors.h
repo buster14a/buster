@@ -482,7 +482,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_permutexvar_epi32(__m256i index, __m256i a
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_set1_epi16(int16_t a)
+BUSTER_HOST_INLINE __m256i host_mm256_set1_epi16(int a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
@@ -502,7 +502,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_set1_epi32(int32_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m256i host_mm256_set1_epi8(int8_t a)
+BUSTER_HOST_INLINE __m256i host_mm256_set1_epi8(int a)
 {
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -2419,7 +2419,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi64(__m512i src, __mmask8 k, i
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi8(__m512i src, __mmask64 k, int8_t a)
+BUSTER_HOST_INLINE __m512i host_mm512_mask_set1_epi8(__m512i src, __mmask64 k, int a)
 {
     HostV512 src_ __attribute__((unused)) = { .value = src };
     HostV512 r = { 0 };
@@ -3183,7 +3183,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi64(__mmask8 k, int64_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi8(__mmask64 k, int8_t a)
+BUSTER_HOST_INLINE __m512i host_mm512_maskz_set1_epi8(__mmask64 k, int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3514,7 +3514,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sad_epu8(__m512i a, __m512i b)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi16(int16_t a)
+BUSTER_HOST_INLINE __m512i host_mm512_set1_epi16(int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
@@ -3544,7 +3544,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set1_epi64(int64_t a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set1_epi8(int8_t a)
+BUSTER_HOST_INLINE __m512i host_mm512_set1_epi8(int a)
 {
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 64; i += 1)
@@ -3600,7 +3600,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_set_epi64(int64_t a0, int64_t a1, int64_t 
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m512i host_mm512_set_epi8(int8_t a0, int8_t a1, int8_t a2, int8_t a3, int8_t a4, int8_t a5, int8_t a6, int8_t a7, int8_t a8, int8_t a9, int8_t a10, int8_t a11, int8_t a12, int8_t a13, int8_t a14, int8_t a15, int8_t a16, int8_t a17, int8_t a18, int8_t a19, int8_t a20, int8_t a21, int8_t a22, int8_t a23, int8_t a24, int8_t a25, int8_t a26, int8_t a27, int8_t a28, int8_t a29, int8_t a30, int8_t a31, int8_t a32, int8_t a33, int8_t a34, int8_t a35, int8_t a36, int8_t a37, int8_t a38, int8_t a39, int8_t a40, int8_t a41, int8_t a42, int8_t a43, int8_t a44, int8_t a45, int8_t a46, int8_t a47, int8_t a48, int8_t a49, int8_t a50, int8_t a51, int8_t a52, int8_t a53, int8_t a54, int8_t a55, int8_t a56, int8_t a57, int8_t a58, int8_t a59, int8_t a60, int8_t a61, int8_t a62, int8_t a63)
+BUSTER_HOST_INLINE __m512i host_mm512_set_epi8(int a0, int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40, int a41, int a42, int a43, int a44, int a45, int a46, int a47, int a48, int a49, int a50, int a51, int a52, int a53, int a54, int a55, int a56, int a57, int a58, int a59, int a60, int a61, int a62, int a63)
 {
     HostV512 r = { 0 };
     r.u8[0] = (uint8_t)a63;
@@ -4400,7 +4400,7 @@ BUSTER_HOST_INLINE __m128i host_mm_maskz_mov_epi8(__mmask16 k, __m128i a)
     return r.value;
 }
 
-BUSTER_HOST_INLINE __m128i host_mm_maskz_set1_epi8(__mmask16 k, int8_t a)
+BUSTER_HOST_INLINE __m128i host_mm_maskz_set1_epi8(__mmask16 k, int a)
 {
     HostV128 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)

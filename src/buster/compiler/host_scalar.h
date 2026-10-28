@@ -51,6 +51,22 @@ BUSTER_HOST_INLINE uint64_t host_pext(uint64_t value, uint64_t mask)
 #define _pext_u32(value, mask) ((uint32_t)host_pext((uint32_t)(value), (uint32_t)(mask)))
 #endif
 #if !defined(__BMI__)
+BUSTER_HOST_INLINE uint64_t host_blsmsk64(uint64_t value)
+{
+    return value ^ (value - 1);
+}
+BUSTER_HOST_INLINE uint32_t host_blsmsk32(uint32_t value)
+{
+    return value ^ (value - 1u);
+}
+#undef _blsmsk_u64
+#undef _blsmsk_u32
+#undef __blsmsk_u64
+#undef __blsmsk_u32
+#define _blsmsk_u64(value) host_blsmsk64(value)
+#define _blsmsk_u32(value) host_blsmsk32(value)
+#define __blsmsk_u64(value) host_blsmsk64(value)
+#define __blsmsk_u32(value) host_blsmsk32(value)
 BUSTER_HOST_INLINE unsigned host_ctz64(uint64_t value)
 {
     return value != 0 ? (unsigned)__builtin_ctzll(value) : 64u;
@@ -63,6 +79,57 @@ BUSTER_HOST_INLINE unsigned host_ctz32(uint32_t value)
 #undef _tzcnt_u32
 #define _tzcnt_u64(value) host_ctz64(value)
 #define _tzcnt_u32(value) host_ctz32(value)
+#endif
+
+BUSTER_HOST_INLINE uint64_t host_mask_shift64(uint64_t value, unsigned count)
+{
+    return count >= 64 ? 0 : value << count;
+}
+BUSTER_HOST_INLINE uint16_t host_mask_shift16(uint16_t value, unsigned count)
+{
+    return count >= 16 ? 0 : (uint16_t)((uint32_t)value << count);
+}
+BUSTER_HOST_INLINE uint64_t host_load_mask64(const void* memory)
+{
+    uint64_t result;
+    memcpy(&result, memory, sizeof(result));
+    return result;
+}
+#undef _cvtu64_mask64
+#undef _cvtmask64_u64
+#undef _kadd_mask16
+#undef _kand_mask16
+#undef _mm512_kand
+#undef _kor_mask64
+#undef _kxor_mask64
+#undef _ktestz_mask64_u8
+#undef _kshiftli_mask16
+#undef _kshiftli_mask64
+#undef _load_mask64
+#define _cvtu64_mask64(value) ((__mmask64)(value))
+#define _cvtmask64_u64(value) ((uint64_t)(value))
+#define _kadd_mask16(a, b) ((__mmask16)((uint32_t)(a) + (uint32_t)(b)))
+#define _kand_mask16(a, b) ((__mmask16)((a) & (b)))
+#define _mm512_kand(a, b) ((__mmask16)((a) & (b)))
+#define _kor_mask64(a, b) ((__mmask64)((a) | (b)))
+#define _kxor_mask64(a, b) ((__mmask64)((a) ^ (b)))
+#define _ktestz_mask64_u8(a, b) ((unsigned char)(((a) & (b)) == 0))
+#define _kshiftli_mask16(value, count) host_mask_shift16((value), (uint8_t)(count))
+#define _kshiftli_mask64(value, count) host_mask_shift64((value), (uint8_t)(count))
+#define _load_mask64(memory) host_load_mask64(memory)
+
+#if !defined(__XSAVE__)
+// Callers check CPUID.OSXSAVE before reading XCR0. Keep the instruction in
+// that guarded path without requiring XSAVE for the entire baseline build.
+BUSTER_HOST_INLINE uint64_t host_xgetbv(unsigned index)
+{
+    uint32_t low;
+    uint32_t high;
+    __asm__ volatile ("xgetbv" : "=a"(low), "=d"(high) : "c"(index));
+    return (uint64_t)low | (uint64_t)high << 32;
+}
+#undef _xgetbv
+#define _xgetbv(index) host_xgetbv(index)
 #endif
 #if !defined(__LZCNT__)
 BUSTER_HOST_INLINE unsigned host_clz64(uint64_t value)
