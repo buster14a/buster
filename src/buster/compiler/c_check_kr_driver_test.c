@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Original CLI/source/system-policy controls. Clang independently supplies counts, status and the emission barrier.
 
-static void check_test_driver_kr_policy(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_kr_policy(CheckTest* test, const char* clang, const char* executable, const char* directory, bool lazy)
 {
     static const char definition[] = "int f(a)int a;{return a;}\n";
     static const char arity[] = "#pragma clang diagnostic ignored \"-Wdeprecated-non-prototype\"\n"
@@ -55,6 +55,10 @@ static void check_test_driver_kr_policy(CheckTest* test, const char* clang, cons
             char* arguments[16] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", mode == 0 ? "-fsyntax-only" : "-c",
                                     source, "-o", objects[0], "-isystem", (char*)directory };
             uint32_t count = 9;
+            if (lazy)
+            {
+                arguments[count++] = "-flazy-system-headers";
+            }
             if (cases[c].first != NULL)
             {
                 arguments[count++] = (char*)cases[c].first;

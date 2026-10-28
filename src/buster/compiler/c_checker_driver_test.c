@@ -3833,7 +3833,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_libraries(&test, executable, directory);
             check_test_driver_visibility(&test, clang, executable, directory);
             check_test_driver_implicit(&test, clang, executable, directory);
-            check_test_driver_kr_policy(&test, clang, executable, directory);
+            check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
             check_test_driver_returns(&test, clang, executable, directory);
             check_test_driver_libgcc(&test, executable, directory);
             check_test_driver_complex(&test, executable, directory);
