@@ -84,11 +84,15 @@ struct IrLowerTestFrame
     uint64_t* values;
     uint64_t* slots;
     uint64_t arguments[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
+    // The function's own copies of its aggregate parameters' bytes (IrPassed.size), which those parameters point to.
+    uint64_t* copies;
     uint64_t arena_mark;
     uint32_t instruction;
     uint32_t destination;
 };
 
+// A frame of `function` called with `arguments`: an aggregate parameter's argument is the address of the caller's bytes,
+// which the frame copies for the callee to own, as a by-value aggregate's callee does.
 static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* function, const uint64_t* arguments, uint32_t count, uint32_t destination, Arena* arena)
 {
     memset(frame, 0, sizeof(*frame));
@@ -98,20 +102,47 @@ static bool ir_lower_test_frame(IrLowerTestFrame* frame, const IrFunction* funct
     frame->instruction = function->block_offsets[0];
     frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->instruction_count + 1);
     frame->slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->slot_count + 1);
-    bool ok = frame->values != 0 && frame->slots != 0 && count == function->parameter_count && count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+    bool ok = frame->values != 0 && frame->slots != 0 && (count == function->parameter_count || (function->variadic && count > function->parameter_count)) &&
+              count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     if (ok)
     {
         memset(frame->values, 0, ((uint64_t)function->instruction_count + 1) * sizeof(uint64_t));
         memcpy(frame->arguments, arguments, (size_t)count * sizeof(uint64_t));
         for (uint32_t s = 0; s < function->slot_count && ok; s += 1)
         {
-            void* slot = arena_push(arena, function->slots[s].size, function->slots[s].alignment);
+            // A variadic definition's anchors, as an all-integer call lays them out: the arguments' first six in the
+            // register save area's general slots, in order, and the rest where the overflow area starts.
+            const uint8_t flags = function->slots[s].flags;
+            const uint64_t size = (flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0 ? 8 * (count > 6 ? count - 6 : 1) : function->slots[s].size;
+            uint8_t* slot = arena_push(arena, size, function->slots[s].alignment);
             ok = slot != 0;
             if (ok)
             {
-                memset(slot, 0, function->slots[s].size);
+                memset(slot, 0, size);
+                for (uint32_t p = 0; (flags & BUSTER_IR_SLOT_REGISTER_SAVE_AREA) != 0 && p < count && p < 6; p += 1)
+                {
+                    memcpy(slot + 8 * p, &arguments[p], 8);
+                }
+                for (uint32_t p = 6; (flags & BUSTER_IR_SLOT_OVERFLOW_AREA) != 0 && p < count; p += 1)
+                {
+                    memcpy(slot + 8 * (p - 6), &arguments[p], 8);
+                }
                 frame->slots[s] = (uintptr_t)slot;
             }
+        }
+        frame->copies = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)count + 1);
+        ok = ok && frame->copies != 0;
+        for (uint32_t p = 0; ok && p < count; p += 1)
+        {
+            const uint32_t size = function->parameter_passed != 0 && p < function->parameter_count ? function->passed[function->parameter_passed - 1 + p].size : 0;
+            uint8_t* copy = size != 0 ? arena_push(arena, size, 16) : 0;
+            ok = size == 0 || copy != 0;
+            if (ok && size != 0)
+            {
+                memcpy(copy, (const void*)(uintptr_t)arguments[p], size);
+                frame->arguments[p] = (uintptr_t)copy;
+            }
+            frame->copies[p] = (uintptr_t)copy;
         }
     }
     return ok;
@@ -129,6 +160,12 @@ static bool ir_lower_test_memory(const IrLowerTestFrame* frames, uint32_t depth,
             const uint64_t start = frame->slots[s];
             const uint64_t size = frame->function->slots[s].size;
             found = address >= start && address - start <= size && bytes <= size - (address - start);
+        }
+        for (uint32_t p = 0; frame->function->parameter_passed != 0 && p < frame->function->parameter_count && !found; p += 1)
+        {
+            const uint64_t start = frame->copies[p];
+            const uint64_t size = frame->function->passed[frame->function->parameter_passed - 1 + p].size;
+            found = size != 0 && address >= start && address - start <= size && bytes <= size - (address - start);
         }
     }
     return found;
@@ -427,14 +464,27 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
                 const uint64_t callee = op == IR_CALL ? (uint64_t)a - global_count - 1 : offset / sizeof(IrFunction);
                 uint64_t passed[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
                 ok = (op == IR_CALL_INDIRECT || a > global_count) && element && callee < function_count && depth < BUSTER_IR_LOWER_TEST_FRAMES &&
-                     call->argument_count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+                     call->argument_count < BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+                // A callee that returns an aggregate through a hidden pointer takes the call's destination as parameter 0;
+                // an aggregate argument's bytes must be the caller's to read.
+                const IrFunction* target = ok ? &functions[(uint32_t)callee] : 0;
+                const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+                const bool hidden = ok && c != BUSTER_IR_NONE && target->parameter_passed != 0 && target->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
+                uint32_t count = 0;
+                if (hidden)
+                {
+                    passed[count++] = frame->values[c];
+                }
                 for (uint32_t p = 0; ok && p < call->argument_count; p += 1)
                 {
-                    passed[p] = frame->values[function->extra[call->argument_first + p]];
+                    const uint32_t size = abi != 0 ? function->passed[abi->passed + p].size : 0;
+                    passed[count] = frame->values[function->extra[call->argument_first + p]];
+                    ok = size == 0 || ir_lower_test_memory(frames, depth, globals, data->size, passed[count], size);
+                    count += 1;
                 }
                 if (ok)
                 {
-                    ok = ir_lower_test_frame(&frames[depth], &functions[(uint32_t)callee], passed, call->argument_count, i, arena);
+                    ok = ir_lower_test_frame(&frames[depth], target, passed, count, i, arena);
                     depth += ok;
                 }
                 has_value = false;
@@ -450,6 +500,22 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
             {
                 const uint32_t destination = frame->destination;
                 const uint64_t returned = a == BUSTER_IR_NONE ? 0 : av;
+                // An aggregate returned in registers: its bytes (IrFunction.result_size, at most the call's destination's)
+                // go where the call's c points, before this frame's slots go.
+                if (depth > 1 && function->result_size != 0)
+                {
+                    const IrLowerTestFrame* caller = &frames[depth - 2];
+                    const IrCall* call = &caller->function->calls[caller->function->b[destination]];
+                    const uint32_t into = caller->function->c[destination];
+                    const uint32_t room = call->abi != 0 ? caller->function->abi_calls[call->abi - 1].result_size : 0;
+                    const uint32_t bytes = function->result_size < room ? function->result_size : room;
+                    ok = into != BUSTER_IR_NONE && ir_lower_test_memory(frames, depth, globals, data->size, returned, bytes) &&
+                         ir_lower_test_memory(frames, depth, globals, data->size, caller->values[into], bytes);
+                    if (ok)
+                    {
+                        memmove((void*)(uintptr_t)caller->values[into], (const void*)(uintptr_t)returned, bytes);
+                    }
+                }
                 arena_pop_to(arena, frame->arena_mark);
                 depth -= 1;
                 if (depth == 0)
@@ -654,7 +720,22 @@ static uint64_t ir_lower_test_dynamic_interpret(const IrFunction* functions, con
     return result.value.low;
 }
 
-static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, const char* name)
+// A generated function's semantic result type: its RETURN entries' class, which a record's makes its address (U64),
+// or the class the generator gave it.
+static IrType ir_lower_test_result_type(const Tier0Function* source, uint8_t result_class)
+{
+    uint8_t class = result_class;
+    bool found = false;
+    for (uint32_t i = 0; !found && i < source->count; i += 1)
+    {
+        found = source->kinds[i] == BUSTER_TYPED_RETURN;
+        class = found ? source->classes[i] : class;
+    }
+    return (IrType)ir_typed_types[class];
+}
+
+// With `records`, the generator's catalog of structs and unions passed and returned by value (#137) joins `options`.
+static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint32_t count, Tier0ProgramOptions options, bool records, const char* name)
 {
     Tier0Tables tables =
     {
@@ -673,7 +754,13 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && promoted.base != 0 &&
                  twin_promoted.base != 0 && code != 0 && code_bytes != 0 && tier0_tables_open(&tables);
     ready = ir_lower_test_expect(tally, ready, "program arenas and ABI tables", seed, 0);
+    options.records = records && ready ? &tables.records : 0;
     const uint64_t native_mark = native.length;
+    // What the records' lowering covered: calls with ABI records, aggregate parameters, and both kinds of result.
+    uint64_t aggregate_calls = 0;
+    uint64_t aggregate_parameters = 0;
+    uint64_t register_results = 0;
+    uint64_t hidden_results = 0;
     uint64_t entries = 0;
     uint64_t instructions = 0;
     uint64_t functions_seen = 0;
@@ -694,7 +781,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
         ok = ir_lower_test_expect(tally, ok, "generated typed program", program_seed, 0);
         for (uint32_t f = 0; ok && f < sources->count; f += 1)
         {
-            const IrType result_type = (IrType)ir_typed_types[program->functions[f].result_class];
+            const IrType result_type = ir_lower_test_result_type(&sources->functions[f], program->functions[f].result_class);
             ok = ir_lower_test_lower(tally, &sources->functions[f], result_type, program->global_count + program->function_count + 1, &output, &twin_output, &scratch, &functions[f], program_seed, f);
             if (ok)
             {
@@ -718,6 +805,13 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 {
                     indirect_calls += functions[f].op[i] == IR_CALL_INDIRECT;
                 }
+                aggregate_calls += functions[f].abi_call_count;
+                for (uint32_t parameter = 0; functions[f].parameter_passed != 0 && parameter < functions[f].parameter_count; parameter += 1)
+                {
+                    aggregate_parameters += functions[f].passed[functions[f].parameter_passed - 1 + parameter].size != 0;
+                }
+                register_results += functions[f].result_size != 0;
+                hidden_results += functions[f].parameter_passed != 0 && functions[f].result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
                 ir_lower_test_promote(tally, &functions[f], &promoted, &twin_promoted, &scratch, program_seed, f);
             }
             arena_pop_to(&twin_output, 0);
@@ -774,6 +868,13 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     {
         ir_lower_test_expect(tally, indirect_calls != 0, "generated execution covers indirect calls", seed, count);
     }
+    if (records)
+    {
+        ir_lower_test_expect(tally, aggregate_calls != 0 && aggregate_parameters != 0 && register_results != 0 && hidden_results != 0,
+                             "generated execution covers aggregate calls, parameters and both kinds of result", seed, count);
+        printf("IR lowering generated programs (%s): %" PRIu64 " calls with ABI records, %" PRIu64 " aggregate parameters, %" PRIu64 " results in registers, %" PRIu64
+               " through hidden pointers\n", name, aggregate_calls, aggregate_parameters, register_results, hidden_results);
+    }
     printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies, %" PRIu64
            " indirect calls; stack ops=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n", name, functions_seen, entries, instructions, objects, copies, indirect_calls, stack_ops[0],
            stack_ops[1], stack_ops[2]);
@@ -786,6 +887,157 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     arena_release(&twin_output);
     arena_release(&scratch);
     arena_release(&execution);
+}
+
+// The shared IR's interpreter on one lowered body of Tier 0's wide programs: its parameters the addresses of `count`
+// buffers, each bound as writable memory, and the x87 programs' C functions as natives at their addresses.
+static bool ir_lower_test_wide_run(const IrFunction* function, uint8_t* const* buffers, const uint64_t* sizes, uint32_t count, Arena* execution)
+{
+    const IrInterpreterFunction code = { .symbol = 1, .function = function };
+    InterpreterBinding bindings[4];
+    InterpreterValue arguments[4];
+    for (uint32_t b = 0; b < count; b += 1)
+    {
+        bindings[b] = (InterpreterBinding){ .symbol = 2 + b, .bytes = buffers[b], .size = sizes[b], .writable = true };
+        arguments[b] = (InterpreterValue){ .low = (uintptr_t)buffers[b] };
+    }
+    const InterpreterNativeBinding natives[2] = {
+        { .symbol = 8, .address = (void*)&tier0_test_x87_mix },
+        { .symbol = 9, .address = (void*)&tier0_test_x87_scale },
+    };
+    const IrInterpreterProgram program = { .functions = &code, .function_count = 1, .bindings = bindings, .binding_count = count, .natives = natives, .native_count = 2 };
+    const InterpreterResult result = ir_interpret(&program, 1, arguments, count, 0, execution);
+    if (result.status != INTERPRETER_OK)
+    {
+        fprintf(stderr, "  shared IR status %u, instruction %u\n", result.status, result.entry);
+    }
+    return result.status == INTERPRETER_OK;
+}
+
+// Long double and the 128-bit integers (#131): Tier 0's own random programs of each class (tier0_x87_test.c and
+// tier0_int128_test.c, their inputs drawn as those tests draw them) lowered by both paths and promoted, then run by the
+// shared IR's interpreter, every output slot they write compared with their stack machines': the x87 programs' calls of C
+// functions through their addresses, NaNs alike, conversions both ways, and the wide integers' arithmetic, shifts,
+// compares and conversions, in frame objects and across ?:'s blocks.
+static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t count)
+{
+    Tier0Tables tables =
+    {
+        0
+    };
+    Tier0TestInt128Abi int128_abi;
+    Tier0TestX87Abi x87_abi;
+    Tier0TestInt128Program* wide = calloc(1, sizeof(Tier0TestInt128Program));
+    Tier0TestX87Program* x87 = calloc(1, sizeof(Tier0TestX87Program));
+    Arena output = arena_reserve(1ull << 26);
+    Arena twin_output = arena_reserve(1ull << 26);
+    Arena promoted = arena_reserve(1ull << 26);
+    Arena twin_promoted = arena_reserve(1ull << 26);
+    Arena scratch = arena_reserve(1ull << 26);
+    Arena execution = arena_reserve(1ull << 26);
+    const bool ready = wide != 0 && x87 != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 &&
+                       execution.base != 0 && tier0_tables_open(&tables) && tier0_test_int128_abi(&tables, &int128_abi) && tier0_test_x87_abi(&tables, &x87_abi);
+    ir_lower_test_expect(tally, ready, "wide program arenas and signatures", seed, 0);
+    uint64_t checked[2] = { 0 };
+    for (uint32_t p = 0; ready && p < count; p += 1)
+    {
+        uint64_t state = seed ^ (0x128ull << 32) ^ p;
+        tier0_test_int128_program(wide, &state);
+        const Tier0Function source = tier0_test_int128_function(wide, &int128_abi);
+        IrFunction function =
+        {
+            0
+        };
+        if (!wide->overflow && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
+        {
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
+            Tier0TestWide in[BUSTER_TIER0_TEST_INT128_IN];
+            uint64_t ints[BUSTER_TIER0_TEST_INT128_INTS];
+            uint8_t out[BUSTER_TIER0_TEST_INT128_OUTPUTS * 16];
+            uint8_t expected[sizeof(out)];
+            for (uint32_t k = 0; k < BUSTER_TIER0_TEST_INT128_IN; k += 1)
+            {
+                in[k] = tier0_test_int128_random(&state);
+            }
+            for (uint32_t k = 0; k < BUSTER_TIER0_TEST_INT128_INTS; k += 1)
+            {
+                ints[k] = tier0_test_int128_random64(&state);
+            }
+            memset(out, 0xa5, sizeof(out));
+            memset(expected, 0xa5, sizeof(expected));
+            const uint64_t parameters[3] = { (uintptr_t)in, (uintptr_t)ints, (uintptr_t)expected };
+            uint8_t visited[BUSTER_TIER0_TEST_INT128_ENTRIES];
+            uint8_t* buffers[3] = { (uint8_t*)in, (uint8_t*)ints, out };
+            const uint64_t sizes[3] = { sizeof(in), sizeof(ints), sizeof(out) };
+            const bool interpreted = tier0_test_int128_interpret(wide, parameters, visited);
+            const bool ran = interpreted && ir_lower_test_wide_run(&function, buffers, sizes, 3, &execution);
+            bool same = ir_lower_test_expect(tally, interpreted && ran, "the shared IR's interpreter runs a 128-bit program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_INT128_OUTPUTS; o += 1)
+            {
+                same = memcmp(out + 16 * o, expected + 16 * o, tier0_class_bytes(wide->outputs[o])) == 0;
+            }
+            checked[0] += ir_lower_test_expect(tally, same, "a 128-bit program's outputs are its stack machine's", seed, p);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+        state = seed ^ (0x87ull << 32) ^ p;
+        tier0_test_x87_program(x87, &x87_abi, &state);
+        const Tier0Function long_double = tier0_test_x87_function(x87, &x87_abi);
+        if (!x87->overflow && ir_lower_test_lower(tally, &long_double, IR_VOID, 1, &output, &twin_output, &scratch, &function, seed, p))
+        {
+            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
+            long double in[BUSTER_TIER0_TEST_X87_IN];
+            uint64_t ints[BUSTER_TIER0_TEST_X87_INTS];
+            uint64_t floats[BUSTER_TIER0_TEST_X87_FLOATS];
+            uint8_t out[BUSTER_TIER0_TEST_X87_OUTPUTS * 16];
+            uint8_t expected[sizeof(out)];
+            memset(in, 0, sizeof(in));
+            for (uint32_t k = 0; k < BUSTER_TIER0_TEST_X87_IN; k += 1)
+            {
+                in[k] = tier0_test_x87_random(&state, true);
+            }
+            for (uint32_t k = 0; k < BUSTER_TIER0_TEST_X87_INTS; k += 1)
+            {
+                const uint64_t random = tier0_generate_random(&state);
+                ints[k] = k < 4 ? random % 9 : random;
+            }
+            for (uint32_t k = 0; k < BUSTER_TIER0_TEST_X87_FLOATS; k += 1)
+            {
+                const double d = (double)(int64_t)tier0_generate_random(&state) / 4096.0;
+                const float f = (float)d;
+                uint32_t f_bits = 0;
+                memcpy(&f_bits, &f, sizeof(f_bits));
+                floats[k] = 0;
+                memcpy(&floats[k], k >= 8 ? (const void*)&f_bits : (const void*)&d, k >= 8 ? 4 : 8);
+            }
+            memset(out, 0xa5, sizeof(out));
+            memset(expected, 0xa5, sizeof(expected));
+            const uint64_t parameters[4] = { (uintptr_t)in, (uintptr_t)ints, (uintptr_t)floats, (uintptr_t)expected };
+            uint8_t visited[BUSTER_TIER0_TEST_X87_ENTRIES];
+            uint8_t* buffers[4] = { (uint8_t*)in, (uint8_t*)ints, (uint8_t*)floats, out };
+            const uint64_t sizes[4] = { sizeof(in), sizeof(ints), sizeof(floats), sizeof(out) };
+            const bool interpreted = tier0_test_x87_interpret(x87, parameters, visited);
+            const bool ran = interpreted && ir_lower_test_wide_run(&function, buffers, sizes, 4, &execution);
+            bool same = ir_lower_test_expect(tally, interpreted && ran, "the shared IR's interpreter runs a long double program", seed, p);
+            for (uint32_t o = 0; same && o < BUSTER_TIER0_TEST_X87_OUTPUTS; o += 1)
+            {
+                same = tier0_test_x87_same_output(x87->outputs[o], out + 16 * o, expected + 16 * o);
+            }
+            checked[1] += ir_lower_test_expect(tally, same, "a long double program's outputs are its stack machine's", seed, p);
+        }
+        arena_pop_to(&output, 0);
+        arena_pop_to(&twin_output, 0);
+    }
+    printf("IR lowering wide programs: %" PRIu64 " of 128-bit integers and %" PRIu64 " of long doubles checked against their stack machines\n", checked[0], checked[1]);
+    tier0_tables_close(&tables);
+    arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
+    arena_release(&twin_promoted);
+    arena_release(&scratch);
+    arena_release(&execution);
+    free(x87);
+    free(wide);
 }
 
 static void ir_lower_test_fixture(IrLowerTestTally* tally, const char* name, const Tier0Function* source, IrType result_type, const uint64_t* arguments, uint64_t expected)
@@ -1124,214 +1376,390 @@ static void ir_lower_test_failures(IrLowerTestTally* tally)
     arena_release(&scratch);
 }
 
-// Local flags past ADDRESS_TAKEN (frame roles the adapter doesn't model) are
-// refused by both paths before validation or allocation, leaving the caller's
-// result and both arenas as they were; ordinary and address-taken locals lower.
+// A variadic definition's frame (#148): long f(long n, ...), whose va_list's overflow_arg_area takes the overflow area's
+// address and whose result is the register save area's second general slot, its first unnamed argument. Both paths
+// give the IR its frame and its three anchors as their slots, which promotion keeps and an all-integer call fills; each
+// break of the roles' rules is tier0_validate's, refused before allocation.
 static void ir_lower_test_local_roles(IrLowerTestTally* tally)
 {
     Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
+    Arena promoted = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    const uint8_t kinds[] =
+    Arena execution = arena_reserve(1ull << 20);
+    static const uint8_t kinds[] =
     {
+        BUSTER_TYPED_LOCAL_ADDRESS,
         BUSTER_TYPED_CONST,
+        BUSTER_TYPED_PTR_ADD,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_SET,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_PTR_ADD,
+        BUSTER_TYPED_LOAD,
         BUSTER_TYPED_RETURN
     };
-    const uint8_t classes[] =
+    static const uint8_t classes[] =
     {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_I64,
+        BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_I64,
         BUSTER_TYPED_CLASS_I64
     };
-    const uint64_t values[] =
+    static const uint64_t values[] =
     {
-        7,
+        1,
+        1,
+        8,
+        3,
+        0,
+        2,
+        1,
+        8,
+        0,
         0
     };
-    const uint8_t local_classes[] =
+    uint8_t local_classes[4] =
     {
         BUSTER_TYPED_CLASS_I64,
         BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
         BUSTER_TYPED_CLASS_U64
     };
-    uint8_t local_flags[3] =
+    uint8_t local_flags[4] =
     {
         0
+    };
+    const AbiLocation parameter =
+    {
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+        .registers =
+        {
+            X86_REGISTER_RDI,
+            BUSTER_ABI_REGISTER_NONE
+        },
+    };
+    const AbiCall incoming =
+    {
+        .stack_alignment_log2 = 4,
+        .integer_registers = 1,
+        .result =
+        {
+            .kind = BUSTER_ABI_RESULT_REGISTERS,
+            .part_bytes = 8,
+            .registers =
+            {
+                BUSTER_ABI_RAX,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE,
+                BUSTER_ABI_REGISTER_NONE
+            },
+        },
     };
     Tier0Function source =
     {
         .kinds = kinds,
         .classes = classes,
         .values = values,
-        .count = 2,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
         .local_classes = local_classes,
         .local_flags = local_flags,
-        .local_count = 3,
+        .local_count = 4,
+        .parameter_count = 1,
+        .parameters = &parameter,
+        .incoming_variadic = &incoming,
     };
     const IrFunction preserved =
     {
         .instruction_count = 123,
         .block_count = 17,
     };
-    void* incoming = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    ir_lower_test_expect(tally, incoming != MAP_FAILED, "protected incoming variadic page", 0, 0);
-    // Nonzero marks, so that a rollback to zero would show.
-    const bool ready = BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
-    ir_lower_test_expect(tally, ready, "local role arenas", 0, 0);
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    ir_lower_test_expect(tally, ready, "variadic frame arenas", 0, 0);
+    const uint8_t roles[3] =
+    {
+        BUSTER_TYPED_LOCAL_VA_LIST,
+        BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA,
+        BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA
+    };
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        local_flags[1 + r] = roles[r] | BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+    }
+    IrFunction function =
+    {
+        0
+    };
+    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 1, &output, &twin_output, &scratch, &function, 0, 0))
+    {
+        const IrSlot list = function.slots[1];
+        const IrSlot save = function.slots[2];
+        const IrSlot overflow = function.slots[3];
+        ir_lower_test_expect(tally, function.variadic && memcmp(&function.incoming, &incoming, sizeof(incoming)) == 0, "the incoming variadic frame is the stream's", 0, 0);
+        ir_lower_test_expect(tally, list.size == sizeof(AbiVaList) && list.alignment == 8 && list.type == IR_VOID && list.flags == BUSTER_IR_SLOT_ADDRESS_TAKEN &&
+                                        save.size == BUSTER_ABI_SAVE_AREA_BYTES && save.alignment == 16 && save.type == IR_VOID &&
+                                        save.flags == (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_REGISTER_SAVE_AREA) && overflow.size == 0 && overflow.alignment == 16 &&
+                                        overflow.type == IR_VOID && overflow.flags == (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_OVERFLOW_AREA),
+                             "a va_list is its 24 bytes, and the anchors their slots", 0, 0);
+        const uint64_t arguments[2] =
+        {
+            5,
+            42
+        };
+        bool fault = false;
+        const Tier0TestData data =
+        {
+            0
+        };
+        uint8_t globals[1] =
+        {
+            0
+        };
+        const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, arguments, 2, &execution, &fault);
+        ir_lower_test_expect(tally, !fault && actual == 42, "the register save area holds the first unnamed argument", 0, 0);
+        IrFunction promotion =
+        {
+            0
+        };
+        const IrCheck check = ssa_ir_promote(&function, &promoted, &scratch, &promotion);
+        bool anchors = check.error == IR_OK && promotion.variadic;
+        for (uint32_t slot = 0; anchors && slot < promotion.slot_count; slot += 1)
+        {
+            anchors = promotion.slots[slot].flags != (BUSTER_IR_SLOT_ADDRESS_TAKEN | BUSTER_IR_SLOT_REGISTER_SAVE_AREA) || promotion.slots[slot].size == BUSTER_ABI_SAVE_AREA_BYTES;
+        }
+        ir_lower_test_expect(tally, anchors && promotion.slot_count >= 3, "promotion keeps the frame and its anchors", 0, 0);
+    }
+    // Each break of the roles' rules: a role on a parameter, without ADDRESS_TAKEN, two roles at once, an anchor without
+    // the incoming frame, a role on a local of another class.
     for (uint32_t vector = 0; ready && vector < 2; vector += 1)
     {
-        const uint64_t output_mark = output.length;
-        const uint64_t scratch_mark = scratch.length;
-        local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-        IrFunction result = preserved;
-        IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_OK && scratch.length == scratch_mark, "ordinary and address-taken locals lower", 0, vector);
-        arena_pop_to(&output, output_mark);
-        // Each role bit #148's frames define, alone and with ADDRESS_TAKEN, on
-        // every local, and a bit past them.
-        const uint8_t roles[] =
+        for (uint32_t breach = 0; breach < 5; breach += 1)
         {
-            BUSTER_TYPED_LOCAL_VA_LIST,
-            BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA,
-            BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA,
-            0x10,
-            0x80
-        };
-        for (uint32_t r = 0; r < sizeof(roles); r += 1)
-        {
-            for (uint32_t local = 0; local < 3; local += 1)
+            for (uint32_t r = 0; r < 3; r += 1)
             {
-                for (uint32_t taken = 0; taken < 2; taken += 1)
-                {
-                    local_flags[0] = 0;
-                    local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-                    local_flags[2] = 0;
-                    local_flags[local] = (uint8_t)(roles[r] | (taken != 0 ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0));
-                    result = preserved;
-                    check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-                    ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == local && output.length == output_mark &&
-                                                    scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                         "local frame role refused without allocation", r, vector * 8 + local * 2 + taken);
-                }
+                local_flags[1 + r] = roles[r] | BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
             }
+            local_flags[0] = breach == 0 ? BUSTER_TYPED_LOCAL_VA_LIST | BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
+            local_flags[2] = breach == 1 ? BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA : breach == 2 ? local_flags[2] | BUSTER_TYPED_LOCAL_VA_LIST : local_flags[2];
+            source.incoming_variadic = breach == 3 ? 0 : &incoming;
+            local_classes[3] = breach == 4 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64;
+            const uint64_t output_mark = output.length;
+            const uint64_t scratch_mark = scratch.length;
+            IrFunction result = preserved;
+            const IrCheck check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
+                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                 "a break of the frame roles' rules refused without allocation", breach, vector);
         }
-        // A role on a local the stream never names is refused too, but the
-        // earlier count and pointer checks keep their precedence.
+        source.incoming_variadic = &incoming;
+        local_classes[3] = BUSTER_TYPED_CLASS_U64;
         local_flags[0] = 0;
-        local_flags[1] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-        local_flags[2] = BUSTER_TYPED_LOCAL_VA_LIST;
-        source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT, "count limit precedes local roles", 0, vector);
-        source.count = 2;
-        source.kinds = 0;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE, "missing column precedes local roles", 0, vector);
-        source.kinds = kinds;
-        source.local_count = 2;
-        check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, check.error == IR_OK, "flags past local_count are not read", 0, vector);
-        arena_pop_to(&output, output_mark);
-        source.local_count = 3;
-        local_flags[2] = 0;
-        // An incoming variadic frame is refused by its pointer alone: it points
-        // at a PROT_NONE page, so a read of it faults. With and without role
-        // locals, with no locals or entries, and after the count check.
-        if (incoming != MAP_FAILED)
-        {
-            source.incoming_variadic = (const AbiCall*)incoming;
-            for (uint32_t shape = 0; shape < 3; shape += 1)
-            {
-                local_flags[2] = shape == 1 ? BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA | BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
-                source.count = shape == 2 ? 0 : 2;
-                source.local_count = shape == 2 ? 0 : 3;
-                result = preserved;
-                check = ir_lower_typed_path(&source, shape == 2 ? IR_VOID : IR_I64, 1, &output, &scratch, &result, vector != 0);
-                ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == BUSTER_IR_NONE && output.length == output_mark &&
-                                                scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                                     "incoming variadic frame refused without reading it", shape, vector);
-            }
-            source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT, "count limit precedes the incoming variadic frame", 0, vector);
-            source.count = 2;
-            source.local_count = 3;
-            local_flags[2] = 0;
-            source.incoming_variadic = 0;
-        }
-    }
-    if (incoming != MAP_FAILED)
-    {
-        munmap(incoming, 4096);
     }
     arena_release(&output);
+    arena_release(&twin_output);
+    arena_release(&promoted);
     arena_release(&scratch);
+    arena_release(&execution);
 }
 
-// Structs and unions by value (#137): a result's size, an argument's and a call's result object, each alone, are refused
-// by both paths before validation or allocation, leaving the caller's result and both arenas as they were. A null input
-// is a structural error, and after a structural or limit error, or an incoming variadic frame, the aggregates' columns
-// aren't read: they point at a PROT_NONE page.
+// Structs and unions by value (#137): struct S f(struct S s, long x) { struct S t = g(s); return t; }, S of 16 bytes in
+// rdi and rsi, returned in rax and rdx. Both paths give the IR the function's records (its parameters' locations and
+// sizes, its result's ABI and size) and the call's (its totals, its argument's, its result object's size), s a ptr whose
+// bytes the preheader copies into s's object, the call's destination t's slot address, and a ptr result. A null input
+// is a structural error, and so are aggregates without their calls' columns and each break of the aggregates' rules,
+// tier0_validate's, refused before allocation.
 static void ir_lower_test_aggregates(IrLowerTestTally* tally)
 {
     Arena output = arena_reserve(1ull << 20);
+    Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
-    const uint8_t kinds[] =
+    static const uint8_t kinds[] =
     {
-        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_LOCAL_ADDRESS,
+        BUSTER_TYPED_CALL,
+        BUSTER_TYPED_LOCAL_ADDRESS,
         BUSTER_TYPED_RETURN
     };
-    const uint8_t classes[] =
+    static const uint8_t classes[] =
     {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64
+    };
+    static const uint64_t values[] =
+    {
+        0,
+        0,
+        2,
+        0
+    };
+    static const uint8_t local_classes[3] =
+    {
+        BUSTER_TYPED_CLASS_VOID,
         BUSTER_TYPED_CLASS_I64,
-        BUSTER_TYPED_CLASS_I64
+        BUSTER_TYPED_CLASS_VOID
     };
-    const uint64_t values[] =
+    static const uint8_t local_flags[3] =
     {
-        7,
-        0
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+        0,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN
     };
-    // One call's metadata, which the structural checks require of a call count; the stream never makes the call.
-    const SymbolId call_targets[] =
+    static const uint32_t local_sizes[3] =
+    {
+        16,
+        0,
+        16
+    };
+    static const uint8_t local_alignments[3] =
+    {
+        3,
+        0,
+        3
+    };
+    const AbiLocation pair =
+    {
+        .kind = BUSTER_ABI_LOCATION_REGISTERS,
+        .registers =
+        {
+            X86_REGISTER_RDI,
+            X86_REGISTER_RSI
+        },
+    };
+    const AbiLocation parameters[2] =
+    {
+        pair,
+        {
+            .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            .registers =
+            {
+                X86_REGISTER_RDX,
+                BUSTER_ABI_REGISTER_NONE
+            },
+        },
+    };
+    const AbiReturn returned =
+    {
+        .kind = BUSTER_ABI_RESULT_REGISTERS,
+        .part_bytes = 8,
+        .registers =
+        {
+            BUSTER_ABI_RAX,
+            BUSTER_ABI_RDX,
+            BUSTER_ABI_REGISTER_NONE,
+            BUSTER_ABI_REGISTER_NONE
+        },
+    };
+    AbiCall calls[1] =
+    {
+        {
+            .stack_alignment_log2 = 4,
+            .integer_registers = 2,
+            .result = returned,
+        },
+    };
+    static const SymbolId call_targets[1] =
     {
         1
     };
-    const uint32_t call_first[] =
+    static const uint32_t call_first[1] =
     {
         0
     };
-    const uint32_t call_argument_counts[] =
+    static const uint32_t call_argument_counts[1] =
     {
         1
     };
-    const uint8_t call_variadic[] =
+    static const uint8_t call_variadic[1] =
     {
         0
     };
-    const uint8_t argument_classes[] =
+    static const uint8_t argument_classes[1] =
     {
         BUSTER_TYPED_CLASS_U64
     };
-    uint32_t argument_sizes[1] =
+    AbiLocation argument_locations[1] =
     {
-        0
+        pair
+    };
+    static const uint32_t argument_sizes[1] =
+    {
+        16
     };
     uint32_t call_result_objects[1] =
     {
-        0
+        3
     };
-    const AbiCall incoming_variadic =
+    Tier0Function source =
     {
-        0
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_count = 3,
+        .parameter_count = 2,
+        .parameters = parameters,
+        .result = returned,
+        .call_targets = call_targets,
+        .call_first = call_first,
+        .call_argument_counts = call_argument_counts,
+        .call_variadic = call_variadic,
+        .calls = calls,
+        .argument_locations = argument_locations,
+        .argument_classes = argument_classes,
+        .call_count = 1,
+        .argument_count = 1,
+        .local_sizes = local_sizes,
+        .local_alignments = local_alignments,
+        .argument_sizes = argument_sizes,
+        .call_result_objects = call_result_objects,
+        .result_size = 16,
     };
     const IrFunction preserved =
     {
         .instruction_count = 123,
         .block_count = 17,
     };
-    void* page = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    ir_lower_test_expect(tally, page != MAP_FAILED, "protected page for the aggregates' columns", 0, 0);
-    // Nonzero marks, so that a rollback to zero would show.
-    const bool ready = page != MAP_FAILED && BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 24) != 0 && BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 40) != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && scratch.base != 0;
     ir_lower_test_expect(tally, ready, "aggregate arenas", 0, 0);
+    IrFunction function =
+    {
+        0
+    };
+    if (ready && ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &twin_output, &scratch, &function, 0, 0))
+    {
+        const IrPassed* own = function.parameter_passed != 0 ? &function.passed[function.parameter_passed - 1] : 0;
+        ir_lower_test_expect(tally, own != 0 && function.parameter_types[0] == IR_PTR && function.parameter_types[1] == IR_I64 && own[0].size == 16 &&
+                                        memcmp(&own[0].location, &pair, sizeof(pair)) == 0 && own[1].size == 0 && memcmp(&own[1].location, &parameters[1], sizeof(pair)) == 0 &&
+                                        function.result_type == IR_PTR && function.result_size == 16 && memcmp(&function.result_abi, &returned, sizeof(returned)) == 0,
+                             "the function's own records are the stream's parameters and result", 0, 0);
+        uint32_t call = BUSTER_IR_NONE;
+        uint32_t copies = 0;
+        for (uint32_t i = 0; i < function.instruction_count; i += 1)
+        {
+            call = function.op[i] == IR_CALL ? i : call;
+            copies += function.op[i] == IR_STORE && i < function.block_offsets[1];
+        }
+        const IrCall* descriptor = call != BUSTER_IR_NONE ? &function.calls[function.b[call]] : 0;
+        const IrAbiCall* abi = descriptor != 0 && descriptor->abi != 0 ? &function.abi_calls[descriptor->abi - 1] : 0;
+        ir_lower_test_expect(tally, abi != 0 && memcmp(&abi->call, &calls[0], sizeof(AbiCall)) == 0 && abi->result_size == 16 && function.passed[abi->passed].size == 16 &&
+                                        memcmp(&function.passed[abi->passed].location, &pair, sizeof(pair)) == 0 && function.type[call] == IR_VOID && function.c[call] == 2 &&
+                                        function.op[function.c[call]] == IR_STACK_ADDR && function.a[function.c[call]] == 2 &&
+                                        function.type[function.extra[descriptor->argument_first]] == IR_PTR,
+                             "the call's records, its aggregate argument a ptr and its result object's slot its destination", 0, 0);
+        // Two pieces of s's bytes, and x's value.
+        ir_lower_test_expect(tally, copies == 3 && function.slots[0].size == 16 && function.slots[2].size == 16, "the parameter's 16 bytes copied in two pieces into its object", 0, 0);
+    }
     for (uint32_t vector = 0; ready && vector < 2; vector += 1)
     {
         const uint64_t output_mark = output.length;
@@ -1341,57 +1769,27 @@ static void ir_lower_test_aggregates(IrLowerTestTally* tally)
         ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
                                         result.instruction_count == preserved.instruction_count,
                              "null input refused as a structural error", 0, vector);
-        for (uint32_t part = 0; part < 3; part += 1)
+        // A result object that isn't an object, an argument past its call's stack area, a result in registers without
+        // their result, and aggregates without the calls' totals.
+        for (uint32_t breach = 0; breach < 4; breach += 1)
         {
-            Tier0Function source =
-            {
-                .kinds = kinds,
-                .classes = classes,
-                .values = values,
-                .count = 2,
-                .call_targets = call_targets,
-                .call_first = call_first,
-                .call_argument_counts = call_argument_counts,
-                .call_variadic = call_variadic,
-                .argument_classes = argument_classes,
-                .call_count = 1,
-                .argument_count = 1,
-                .argument_sizes = argument_sizes,
-                .call_result_objects = call_result_objects,
-                .result_size = part == 0 ? 8 : 0,
-            };
-            argument_sizes[0] = part == 1 ? 16 : 0;
-            call_result_objects[0] = part == 2 ? 1 : 0;
+            call_result_objects[0] = breach == 0 ? 2 : 3;
+            argument_locations[0] = breach == 1 ? (AbiLocation){ .kind = BUSTER_ABI_LOCATION_STACK, .registers = { BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE } } : pair;
+            source.result.kind = breach == 2 ? BUSTER_ABI_RESULT_MEMORY : BUSTER_ABI_RESULT_REGISTERS;
+            source.calls = breach == 3 ? 0 : calls;
             result = preserved;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && check.detail == BUSTER_IR_NONE && output.length == output_mark &&
-                                            scratch.length == scratch_mark && result.instruction_count == preserved.instruction_count &&
-                                            result.block_count == preserved.block_count,
-                                 "aggregate refused without allocation", part, vector);
-            // The columns past every earlier error: a count past the limit, a missing column, an incoming variadic frame.
-            source.argument_sizes = (const uint32_t*)page;
-            source.call_result_objects = (const uint32_t*)page;
-            source.count = BUSTER_TIER0_MAX_ENTRIES + 1;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_LIMIT && output.length == output_mark && scratch.length == scratch_mark,
-                                 "count limit precedes the aggregates' columns", part, vector);
-            source.count = 2;
-            source.call_first = 0;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark,
-                                 "missing column precedes the aggregates' columns", part, vector);
-            source.call_first = call_first;
-            source.incoming_variadic = &incoming_variadic;
-            check = ir_lower_typed_path(&source, IR_I64, 1, &output, &scratch, &result, vector != 0);
-            ir_lower_test_expect(tally, check.error == IR_ERROR_METADATA && output.length == output_mark && scratch.length == scratch_mark,
-                                 "incoming variadic frame precedes the aggregates' columns", part, vector);
+            check = ir_lower_typed_path(&source, IR_I64, 2, &output, &scratch, &result, vector != 0);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && output.length == output_mark && scratch.length == scratch_mark &&
+                                            result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
+                                 "a break of the aggregates' rules refused without allocation", breach, vector);
         }
-    }
-    if (page != MAP_FAILED)
-    {
-        munmap(page, 4096);
+        call_result_objects[0] = 3;
+        argument_locations[0] = pair;
+        source.result.kind = BUSTER_ABI_RESULT_REGISTERS;
+        source.calls = calls;
     }
     arena_release(&output);
+    arena_release(&twin_output);
     arena_release(&scratch);
 }
 
@@ -1983,16 +2381,20 @@ static int run_ir_lower_tests(int argc, char** argv)
         // Calls through pointers to functions: locals that hold a function's address, and the address itself.
         Tier0ProgramOptions indirect = values;
         indirect.indirect = true;
-        ir_lower_test_programs(&tally, seed, count, values, "values");
-        ir_lower_test_programs(&tally, seed, count, objects, "objects");
-        ir_lower_test_programs(&tally, seed, count, indirect, "indirect calls");
+        ir_lower_test_programs(&tally, seed, count, values, false, "values");
+        ir_lower_test_programs(&tally, seed, count, objects, false, "objects");
+        ir_lower_test_programs(&tally, seed, count, indirect, false, "indirect calls");
+        // Structs and unions passed and returned by value: the IR's ABI records, its aggregate parameters' copies and
+        // its results' destinations, run against the typed interpreter and Tier 0's native code.
+        ir_lower_test_programs(&tally, seed, count, objects, true, "records");
         // Strict execution keeps undefined-byte checking enabled. Full representation COPY can include uninitialized
         // struct padding, and the older generator's FP->integer cases include the documented CVTT oracle boundary.
         // These are independent acceptance gaps, not grounds to weaken the dynamic storage checks.
         Tier0ProgramOptions dynamic = values;
         dynamic.vlas = true;
         dynamic.floating = false;
-        ir_lower_test_programs(&tally, seed, count, dynamic, "dynamic stack (strict shared IR / Tier 0 native)");
+        ir_lower_test_programs(&tally, seed, count, dynamic, false, "dynamic stack (strict shared IR / Tier 0 native)");
+        ir_lower_test_wide(&tally, seed, 4 * count);
         printf("test-ir-lowering: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);
         result = tally.failures != 0;
     }

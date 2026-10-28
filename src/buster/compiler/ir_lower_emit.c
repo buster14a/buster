@@ -26,16 +26,41 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         },
     };
     const uint32_t slots = input->local_count + plan->maximum_spill_depth;
+    // A function that takes or returns an aggregate by value has its own ABI records (IrFunction.parameter_passed):
+    // each parameter's location and size (an object's, its bytes'), and its result's. Its result in registers is the
+    // address of its bytes, a ptr.
+    const bool own = ir_typed_own_records(input);
+    const uint32_t own_passed = (uint32_t)sink.sizes.passed_count;
+    sink.sizes.passed_count += own ? input->parameter_count : 0;
     // Block zero is a genuine preheader. A source backedge to entry zero goes
     // to block one and never executes parameter initialization again.
     if (output != 0)
     {
         output->block_offsets[0] = 0;
-        output->result_type = (uint8_t)result_type;
+        output->result_type = (uint8_t)(input->result_size != 0 ? IR_PTR : result_type);
         // Label k's block: its entry's source block, after the preheader.
         for (uint32_t k = 0; k < input->label_count; k += 1)
         {
             output->labels[k] = plan->entry_blocks[input->label_entries[k]] + 1;
+        }
+        if (own)
+        {
+            output->parameter_passed = own_passed + 1;
+            output->result_size = input->result_size;
+            output->result_abi = input->result;
+            for (uint32_t p = 0; p < input->parameter_count; p += 1)
+            {
+                output->passed[own_passed + p] = (IrPassed){
+                    .location = input->parameters[p],
+                    .size = tier0_is_object(input, p) ? input->local_sizes[p] : 0,
+                };
+            }
+        }
+        // A variadic definition's incoming frame, which its anchors reach.
+        if (input->incoming_variadic != 0)
+        {
+            output->variadic = true;
+            output->incoming = *input->incoming_variadic;
         }
     }
     for (uint32_t s = 0; s < slots; s += 1)
@@ -45,26 +70,54 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
         {
             const bool local = s < input->local_count;
             const uint8_t class = local ? input->local_classes[s] : BUSTER_TYPED_CLASS_U64;
-            // tier0_validate established that an object is an address-taken VOID local aligned to at most 16.
+            // tier0_validate established that an object is an address-taken VOID local aligned to at most 16, and that a
+            // role is an address-taken U64 local: a va_list's bytes, or one of the incoming frame's anchors.
             const bool object = local && tier0_is_object(input, s);
-            output->slots[s] = (IrSlot){
-                .size = object ? input->local_sizes[s] : tier0_class_bytes(class),
-                .alignment = 1u << (object ? input->local_alignments[s] : ir_typed_alignment(class)),
-                .type = local ? ir_typed_types[class] : IR_VOID,
-                .flags = local ? ((input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
+            const uint32_t role = local ? input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY : 0;
+            const bool flags = local && (input->local_flags[s] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
+            IrSlot slot = {
+                .size = object ? input->local_sizes[s] : local ? tier0_class_bytes(class) : plan->spill_bytes,
+                .alignment = object ? 1u << input->local_alignments[s] : local ? 1u << ir_typed_alignment(class) : plan->spill_bytes,
+                .type = local && !object ? ir_typed_types[class] : IR_VOID,
+                .flags = local ? (flags ? BUSTER_IR_SLOT_ADDRESS_TAKEN : 0) : BUSTER_IR_SLOT_TEMPORARY,
             };
+            if (role == BUSTER_TYPED_LOCAL_VA_LIST)
+            {
+                slot = (IrSlot){ .size = sizeof(AbiVaList), .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+            }
+            else if (role != 0)
+            {
+                const bool save = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA;
+                slot = (IrSlot){
+                    .size = save ? BUSTER_ABI_SAVE_AREA_BYTES : 0,
+                    .alignment = 16,
+                    .type = IR_VOID,
+                    .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN | (save ? BUSTER_IR_SLOT_REGISTER_SAVE_AREA : BUSTER_IR_SLOT_OVERFLOW_AREA),
+                };
+            }
+            output->slots[s] = slot;
         }
     }
     for (uint32_t p = 0; p < input->parameter_count; p += 1)
     {
+        // An aggregate (an object parameter: a struct, a union, a long double, an __int128) arrives as a ptr to its
+        // bytes, which the preheader copies into its object; any other parameter's value is stored in its local's slot.
+        const bool object = tier0_is_object(input, p);
         const uint8_t class = input->local_classes[p];
-        const IrType type = (IrType)ir_typed_types[class];
+        const IrType type = object ? IR_PTR : (IrType)ir_typed_types[class];
         if (output != 0)
         {
             output->parameter_types[p] = (uint8_t)type;
         }
         const uint32_t parameter = ir_typed_emit(&sink, IR_PARAM, type, p, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_emit(&sink, IR_STORE, IR_VOID, p, parameter, BUSTER_IR_NONE, ir_typed_alignment(class));
+        if (object)
+        {
+            ir_typed_copy_pointers(&sink, p, parameter, input->local_sizes[p]);
+        }
+        else
+        {
+            ir_typed_emit(&sink, IR_STORE, IR_VOID, p, parameter, BUSTER_IR_NONE, ir_typed_alignment(class));
+        }
     }
     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
 
@@ -96,7 +149,16 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             switch (kind)
             {
             case BUSTER_TYPED_CONST:
-                stack[depth] = ir_typed_constant(&sink, type, value);
+                // An __int128's low 64 bits, sign-extended (I128) or zero-extended (U128); a long double's an index into
+                // x87_constants, its 64-bit significand then its sign and exponent; any other's, its bits.
+                if (class == BUSTER_TYPED_CLASS_F80)
+                {
+                    stack[depth] = ir_typed_wide_constant(&sink, type, input->x87_constants[value * 2], input->x87_constants[value * 2 + 1]);
+                }
+                else
+                {
+                    stack[depth] = ir_typed_wide_constant(&sink, type, value, class == BUSTER_TYPED_CLASS_I128 && (int64_t)value < 0 ? UINT64_MAX : 0);
+                }
                 classes[depth] = class;
                 depth += 1;
                 break;
@@ -234,7 +296,12 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             case BUSTER_TYPED_RETURN:
             {
-                const uint32_t returned = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_IR_NONE : stack[--depth];
+                // An aggregate returned in registers returns the address of its bytes (U64), as a ptr.
+                uint32_t returned = class == BUSTER_TYPED_CLASS_VOID ? BUSTER_IR_NONE : stack[--depth];
+                if (input->result_size != 0)
+                {
+                    returned = ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                }
                 ir_typed_emit(&sink, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 terminated = true;
                 break;
@@ -259,11 +326,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 if (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE)
                 {
                     uint32_t predicate = kind - BUSTER_TYPED_EQ;
-                    if (predicate >= IR_LT && !tier0_class_floating(operand_class) && !tier0_class_signed(operand_class))
+                    if (predicate >= IR_LT && !ir_typed_floating(operand_class) && !ir_typed_signed(operand_class))
                     {
                         predicate += IR_ULT - IR_LT;
                     }
-                    const uint32_t comparison = ir_typed_emit(&sink, tier0_class_floating(operand_class) ? IR_FCMP : IR_ICMP, IR_I1, left, right, predicate, 0);
+                    const uint32_t comparison = ir_typed_emit(&sink, ir_typed_floating(operand_class) ? IR_FCMP : IR_ICMP, IR_I1, left, right, predicate, 0);
                     stack[depth - 1] = ir_typed_emit(&sink, IR_ZEXT, IR_I32, comparison, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 }
                 else
@@ -284,7 +351,8 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 // The typed endpoint denotes an epilogue. An explicit semantic
                 // result type is required from the producer; nonvoid fallthrough
                 // returns undef, as the old stream leaves its result unspecified.
-                const uint32_t returned = result_type == IR_VOID ? BUSTER_IR_NONE : ir_typed_emit(&sink, IR_UNDEF, result_type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                const IrType returns = input->result_size != 0 ? IR_PTR : result_type;
+                const uint32_t returned = returns == IR_VOID ? BUSTER_IR_NONE : ir_typed_emit(&sink, IR_UNDEF, returns, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
                 ir_typed_emit(&sink, IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
             }
             else
