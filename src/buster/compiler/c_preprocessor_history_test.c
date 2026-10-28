@@ -552,6 +552,8 @@ static bool pp_test_history_publication(void)
             static InternTable identifiers;
             static Preprocessor pp;
             static const char source[] = "#error first\n#error second\n";
+            identifiers = (InternTable){ 0 };
+            pp = (Preprocessor){ 0 };
             bool ready = diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers);
             ready = ready && !pp_run_source(&pp, "fatal-first.c", (const uint8_t*)source, sizeof(source) - 1) &&
                     pp.fatal && pp.errors == 2 && pp.warnings == 0 && pp.history_deferred;
