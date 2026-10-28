@@ -1575,8 +1575,9 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
 }
 
 // The member of a record that a name finds, through its anonymous members, with its bit offset and the qualifiers it
-// inherits: by the records' lookups (type_lookup_member), or on the scalar path by its exact twin. Its cost depends on
-// neither the type table's size nor the record's (#591). Every member access runs it, inlined into check_action_member;
+// inherits: by the records' lookups (type_lookup_member), or on the scalar path by its exact twin. The usual scan/index
+// paths avoid a whole-table clear and a linear member scan; collision chains, anonymous depth and the capacity fallback
+// still determine their worst-case work (#591). Every member access runs it, inlined into check_action_member;
 // the atomic alignment walk calls its copy (check_action_member_lookup), so that a second caller doesn't take it out of
 // check_action_member's code.
 static inline __attribute__((always_inline)) uint32_t check_action_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset,

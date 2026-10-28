@@ -183,8 +183,9 @@ cleared a byte per type of the table at every access (3,434 types in
 `sqlite3.c`, about 200 MB of `memset` a compile), to guard against records that
 hold one anonymous record more than once, and then compared the record's names
 one at a time. Now each record's lookup is decided when its members are written
-(`type_record_define`), and its cost depends on neither the table's size nor the
-record's:
+(`type_record_define`). Ordinary scans and indexed probes avoid the whole-table
+clear and the linear member search. Their worst case still depends on collision
+chains and anonymous-record depth; the capacity fallback below walks members.
 
 - **A scan**, for a record of at most 16 members (`BUSTER_TYPE_LOOKUP_SCAN`),
   none of them an anonymous struct or union: its names, contiguous in the
@@ -208,12 +209,40 @@ record's:
 
 `type_lookup_member` takes the scan and the probe in vectors;
 `type_lookup_member_scalar`, its twin, compares one name at a time over the
-same indices, and the checker's scalar path takes it (`CheckAction.scalar`), so
-that each comparison of the checker's two paths checks the kernels on every
-member access of its corpus. The index is built once a record, scalar, one
+same indices, and the checker's scalar graph-action path takes it (`CheckAction.scalar`), so
+that comparisons of those graph actions check both kernels. Other callers,
+including atomic-alignment helpers, keep the vector wrapper. The index is built once a record, scalar, one
 insertion a name: it is the lookups that every access runs. The checker keeps
 each access's offset in its stream (`CheckStream.member_offsets`), which the
 lowering reads instead of looking the member up again.
+
+**Measured together with the consumers.** On the locked 9700X, CPU 2, main
+`92c025e7` against `7a0597bf`, eight alternating `perf stat -r 3` rounds of
+the frozen SQLite `-c` configuration give median task clock 147.135 →
+145.660 ms (paired median −0.94%), user cycles 695.423 → 686.176 M and
+instructions 1,552.459 → 1,534.564 M. Objects are byte-identical.
+Fifteen alternating stage runs give lowering 15.974 → 15.034 ms and
+check-expressions 15.799 → 15.381 ms. The full [record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/member-591-2026-10-27)
+retains every run, source/binary/input identity, scaling units and commands.
+
+This trades memory for work: median peak RSS rises 512,908 → 516,968 KB
+(+4,060 KB, +0.79%). Default lookup capacity reserves one 64-byte bucket
+per member capacity, and `member_offsets` reserves eight bytes per graph-node
+capacity, including non-member nodes. Fallback and modifiability sparse sets
+reserve storage indexed by the table even though they clear only visited
+records. These reservations are distinct from written/resident pages; this
+PR claims no memory reduction and does not offset them against #572's
+separately measured savings.
+
+The target lookup benchmark at `3e0070f2` gives 9.91–9.92 ns per access,
+18.92–18.94 for its scalar twin, 36.03 for the old walk, and 3.25–3.26 ns
+per member to build the indices. All construction/consumer costs remain in
+the complete compile above. A 2,500 → 40,000-member source compiles in
+5.29 → 51.39 ms, against baseline's 10.10 → 1,282.43 ms; the record retains
+the intermediate points and many-record case. The test suite also requires
+the graph-action finder to succeed with no remaining scratch after 512
+unrelated types, detecting restoration of the old per-access allocation
+independently of its generous timing bounds.
 
 ### clang's layout
 

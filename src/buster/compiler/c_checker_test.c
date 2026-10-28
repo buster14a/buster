@@ -487,6 +487,28 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
         },
     };
     check_test_expect(test, type_complete_record(table, record, members, 1, (TypeRecordAttributes){ 0 }), "plain record fixture construction");
+    // A direct small-record access needs no scratch, independently of how many unrelated types the unit has.
+    // The previous per-access frame/visited allocation fails this structural check even when its timing test passes.
+    TypeId pointer_chain = record;
+    for (uint32_t depth = 0; depth < 512 && pointer_chain != 0; depth += 1)
+    {
+        pointer_chain = type_pointer(table, pointer_chain);
+    }
+    Scratch member_scratch = scratch_begin(NULL);
+    const uint64_t member_capacity = member_scratch.arena->capacity;
+    member_scratch.arena->capacity = member_scratch.arena->length;
+    bool allocation_free = pointer_chain != 0;
+    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    {
+        CheckActionResult lookup_result = { 0 };
+        uint64_t offset = UINT64_MAX;
+        uint32_t qualifiers = UINT32_MAX;
+        const uint32_t member = check_action_find_member(table, record, 82, &offset, &qualifiers, scalar != 0, &lookup_result);
+        allocation_free &= member != 0 && lookup_result.diagnostic == CHECK_DIAG_NONE && offset == 0 && qualifiers == 0;
+    }
+    member_scratch.arena->capacity = member_capacity;
+    scratch_end(member_scratch);
+    check_test_expect(test, allocation_free, "small-record action lookup needs no scratch after 512 unrelated pointer types on either path");
     action = (CheckAction){
         .op = CHECK_OP_ASSIGN,
         .operands = {
