@@ -1516,12 +1516,20 @@ typedef enum PPSeverity
     PP_SEVERITY_FATAL,
 } PPSeverity;
 
+typedef struct PPDiagnosticNote PPDiagnosticNote;
+struct PPDiagnosticNote
+{
+    uint32_t location;
+    const char* message;
+    IdentId macro;
+};
+
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
-static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const char* format, va_list arguments);
+static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
 
 // Prints "file:line:column: error: message" to stderr for `location` (0 for none): the presumed file and line, as #line
 // gives them, and the column. PPOptions.quiet only counts it.
@@ -1531,7 +1539,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     {
         va_list arguments;
         va_start(arguments, format);
-        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, format, arguments);
+        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, 0, format, arguments);
         va_end(arguments);
     }
     pp->warnings += severity == PP_SEVERITY_WARNING;
@@ -5420,13 +5428,12 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
         // that '(' with it), with a note at the '('.
         char name[64];
         pp_token_name(pp, data, end - 1 == va_opt_open ? va_opt_open - 1 : end - 1, name, sizeof(name));
-        pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, macro->base, end - 1), "missing ')' after %s", name);
-        if (!pp->fatal && !pp->options.quiet)
+        const PPDiagnosticNote note =
         {
-            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-            pp_diagnostic_place(pp, stream, pp_define_location(pp, data, macro->base, va_opt_open, end));
-            fprintf(stream, "note: to match this '('\n");
-        }
+            .location = pp_define_location(pp, data, macro->base, va_opt_open, end),
+            .message = "to match this '('",
+        };
+        pp_diagnose_note(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, macro->base, end - 1), &note, "missing ')' after %s", name);
         result = false;
     }
     return result;
@@ -5716,13 +5723,12 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             }
             else if (previous != 0 && !(pp->macros[previous].flags & BUSTER_PP_MACRO_REDEFINABLE) && !pp_same_definition(pp, &pp->macros[previous], &macro))
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                if (!pp->fatal && !pp->options.quiet)
+                const PPDiagnosticNote note =
                 {
-                    FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-                    pp_diagnostic_place(pp, stream, pp->macros[previous].location);
-                    fprintf(stream, "note: previous definition is here\n");
-                }
+                    .location = pp->macros[previous].location,
+                    .message = "previous definition is here",
+                };
+                pp_diagnose_note(pp, PP_SEVERITY_WARNING, location, &note, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
             }
             const PPMacroId id = pp_new_macro(pp, name);
             if (id != 0)
@@ -8242,6 +8248,11 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
     {
         pp->in_macro_arguments = false;
         const PPMacro* macro = &pp->macros[invocation->macro];
+        const PPDiagnosticNote note =
+        {
+            .location = macro->location,
+            .macro = macro->name,
+        };
         const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
         const uint32_t parameter_count = macro->parameter_count;
         uint32_t count = pp->argument_record_count - invocation->arguments;
@@ -8249,7 +8260,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
         pp->unterminated += !closed;
         if (!closed && !pp->fatal)
         {
-            pp_diagnose(pp, PP_SEVERITY_ERROR, invocation->name_location, "unterminated function-like macro invocation");
+            pp_diagnose_note(pp, PP_SEVERITY_ERROR, invocation->name_location, &note, "unterminated function-like macro invocation");
         }
         if (valid)
         {
@@ -8289,16 +8300,10 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
                         pp->diagnostic_origin = pp->arguments.origins != 0 ? pp->arguments.origins[first] : 0;
                     }
                 }
-                pp_diagnose(pp, PP_SEVERITY_ERROR, where, "too %s arguments provided to function-like macro invocation",
+                pp_diagnose_note(pp, PP_SEVERITY_ERROR, where, &note, "too %s arguments provided to function-like macro invocation",
                             count > parameter_count ? "many" : "few");
                 valid = false;
             }
-        }
-        if (!valid && !pp->fatal && !pp->options.quiet)
-        {
-            FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
-            pp_diagnostic_place(pp, stream, macro->location);
-            fprintf(stream, "note: macro '%.*s' defined here\n", (int)intern_length(pp->table, macro->name), intern_bytes(pp->table, macro->name));
         }
         pp->diagnostic_origin = saved_origin;
         invocation->argument_count = count;

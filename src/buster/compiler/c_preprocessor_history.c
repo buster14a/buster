@@ -363,7 +363,87 @@ static __attribute__((unused)) void pp_history_lookup(const Preprocessor* pp, co
     }
 }
 
-static void pp_diagnostic_place(Preprocessor* pp, FILE* stream, uint32_t location)
+// One logical diagnostic, including its include stack and notes, is rendered before its single fwrite. The usual
+// diagnostic fits in the caller's stack buffer; exceptional long messages grow in temporary scratch. If scratch
+// cannot grow, flush the complete prefix and keep printing directly, so memory exhaustion never drops or truncates
+// a diagnostic. No FILE buffering mode changes, deferred output, or per-diagnostic heap allocation is needed.
+#define BUSTER_PP_DIAGNOSTIC_BYTES 2048
+
+typedef struct PPDiagnostic PPDiagnostic;
+struct PPDiagnostic
+{
+    FILE* stream;
+    Arena* arena;
+    char* bytes;
+    uint64_t count;
+    uint64_t capacity;
+    bool direct;
+};
+
+static void pp_diagnostic_flush(PPDiagnostic* diagnostic)
+{
+    if (diagnostic->count != 0)
+    {
+        fwrite(diagnostic->bytes, 1, diagnostic->count, diagnostic->stream);
+        diagnostic->count = 0;
+    }
+}
+
+static void pp_diagnostic_format(PPDiagnostic* diagnostic, const char* format, va_list arguments)
+{
+    va_list copy;
+    va_copy(copy, arguments);
+    const int length = diagnostic->direct ? -1 : vsnprintf(diagnostic->bytes + diagnostic->count, diagnostic->capacity - diagnostic->count, format, copy);
+    va_end(copy);
+    if (!diagnostic->direct && length >= 0 && (uint64_t)length < diagnostic->capacity - diagnostic->count)
+    {
+        diagnostic->count += (uint32_t)length;
+    }
+    else
+    {
+        uint64_t needed = 0;
+        const bool sized = length >= 0 && !__builtin_add_overflow(diagnostic->count, (uint64_t)(uint32_t)length + 1, &needed);
+        const uint64_t doubled = diagnostic->capacity <= UINT64_MAX / 2 ? diagnostic->capacity * 2 : 0;
+        const uint64_t capacity = needed > doubled ? needed : doubled;
+        char* grown = !diagnostic->direct && sized && diagnostic->arena != 0 ? arena_push(diagnostic->arena, capacity, 1) : 0;
+        if (grown != 0)
+        {
+            memcpy(grown, diagnostic->bytes, diagnostic->count);
+            diagnostic->bytes = grown;
+            diagnostic->capacity = capacity;
+            va_copy(copy, arguments);
+            const int written = vsnprintf(grown + diagnostic->count, capacity - diagnostic->count, format, copy);
+            va_end(copy);
+            if (written == length)
+            {
+                diagnostic->count += (uint32_t)written;
+            }
+            else
+            {
+                diagnostic->direct = true;
+            }
+        }
+        else
+        {
+            diagnostic->direct = true;
+        }
+        if (diagnostic->direct)
+        {
+            pp_diagnostic_flush(diagnostic);
+            vfprintf(diagnostic->stream, format, arguments);
+        }
+    }
+}
+
+static __attribute__((format(printf, 2, 3))) void pp_diagnostic_append(PPDiagnostic* diagnostic, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_diagnostic_format(diagnostic, format, arguments);
+    va_end(arguments);
+}
+
+static void pp_diagnostic_place(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location)
 {
     const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
@@ -374,15 +454,15 @@ static void pp_diagnostic_place(Preprocessor* pp, FILE* stream, uint32_t locatio
         const char* name;
         uint32_t length;
         const uint32_t line = pp_presumed(pp, location, &name, &length);
-        fprintf(stream, "%.*s:%u:%u: ", (int)length, name, line, column);
+        pp_diagnostic_append(diagnostic, "%.*s:%u:%u: ", (int)length, name, line, column);
     }
     else if (location != 0)
     {
-        fprintf(stream, "<scratch space>:1:1: ");
+        pp_diagnostic_append(diagnostic, "<scratch space>:1:1: ");
     }
 }
 
-static void pp_diagnostic_includes(Preprocessor* pp, FILE* stream, uint32_t location)
+static void pp_diagnostic_includes(Preprocessor* pp, PPDiagnostic* diagnostic, uint32_t location)
 {
     uint32_t chain[BUSTER_PP_MAX_INCLUDE_DEPTH + 1];
     uint32_t count = 0;
@@ -399,14 +479,21 @@ static void pp_diagnostic_includes(Preprocessor* pp, FILE* stream, uint32_t loca
         const char* name;
         uint32_t length;
         const uint32_t line = pp_presumed(pp, chain[i - 1], &name, &length);
-        fprintf(stream, "In file included from %.*s:%u:\n", (int)length, name, line);
+        pp_diagnostic_append(diagnostic, "In file included from %.*s:%u:\n", (int)length, name, line);
     }
 }
 
-static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const char* format, va_list arguments)
+static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments)
 {
-    FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
     Scratch scratch = scratch_begin(0);
+    char bytes[BUSTER_PP_DIAGNOSTIC_BYTES];
+    PPDiagnostic diagnostic =
+    {
+        .stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr,
+        .arena = scratch.arena,
+        .bytes = bytes,
+        .capacity = sizeof(bytes),
+    };
     uint64_t capacity = 0;
     uint32_t cursor = origin;
     while (cursor != 0)
@@ -462,26 +549,53 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             origin = expansion->parent;
         }
     }
-    pp_diagnostic_includes(pp, stream, location);
-    pp_diagnostic_place(pp, stream, location);
-    fprintf(stream, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
-    vfprintf(stream, format, arguments);
-    fputc('\n', stream);
+    pp_diagnostic_includes(pp, &diagnostic, location);
+    pp_diagnostic_place(pp, &diagnostic, location);
+    pp_diagnostic_append(&diagnostic, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : "fatal error");
+    pp_diagnostic_format(&diagnostic, format, arguments);
+    pp_diagnostic_append(&diagnostic, "\n");
     for (uint32_t i = count; i > 0; i -= 1)
     {
         const PPSource note = notes[i - 1];
-        pp_diagnostic_place(pp, stream, note.location);
+        pp_diagnostic_place(pp, &diagnostic, note.location);
         if (note.origin != 0)
         {
             const IdentId name = pp->history[note.origin - 1].name;
-            fprintf(stream, "note: expanded from macro '%.*s'\n", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+            pp_diagnostic_append(&diagnostic, "note: expanded from macro '%.*s'\n", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
         }
         else
         {
-            fprintf(stream, "note: expanded from here\n");
+            pp_diagnostic_append(&diagnostic, "note: expanded from here\n");
         }
     }
+    if (note != 0 && !pp->fatal)
+    {
+        pp_diagnostic_place(pp, &diagnostic, note->location);
+        if (note->macro != 0)
+        {
+            pp_diagnostic_append(&diagnostic, "note: macro '%.*s' defined here\n", (int)intern_length(pp->table, note->macro), intern_bytes(pp->table, note->macro));
+        }
+        else
+        {
+            pp_diagnostic_append(&diagnostic, "note: %s\n", note->message);
+        }
+    }
+    pp_diagnostic_flush(&diagnostic);
     scratch_end(scratch);
+}
+
+static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor* pp, PPSeverity severity, uint32_t location, const PPDiagnosticNote* note, const char* format, ...)
+{
+    if (!pp->options.quiet)
+    {
+        va_list arguments;
+        va_start(arguments, format);
+        pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, note, format, arguments);
+        va_end(arguments);
+    }
+    pp->warnings += severity == PP_SEVERITY_WARNING;
+    pp->errors += severity != PP_SEVERITY_WARNING;
+    pp->fatal |= severity == PP_SEVERITY_FATAL;
 }
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_diagnose_output(Preprocessor* pp, PPSeverity severity, uint32_t token, const char* format, ...)
@@ -489,7 +603,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 4, 5))) void pp_
     pp_history_ensure(pp);
     va_list arguments;
     va_start(arguments, format);
-    pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), format, arguments);
+    pp_render_diagnostic(pp, severity, token < pp->output.count ? pp->output.locations[token] : 0, pp_history_at(pp, token), 0, format, arguments);
     va_end(arguments);
     pp->warnings += severity == PP_SEVERITY_WARNING;
     pp->errors += severity != PP_SEVERITY_WARNING;
