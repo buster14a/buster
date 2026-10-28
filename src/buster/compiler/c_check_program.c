@@ -1435,9 +1435,19 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                         }
                         const CheckOp op = graph->ops[node];
                         warning_safe = op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_MISC && op != CHECK_OP_BUILTIN_QUERY;
-                        if (op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
+                        if (warning_safe && op != CHECK_OP_VALUE && op != CHECK_OP_SIZEOF && op != CHECK_OP_ALIGNOF)
                         {
                             uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+                            if (op == CHECK_OP_VARARGS)
+                            {
+                                const uint32_t effect = graph->argument_offsets[node];
+                                warning_safe = effect < program->stream->varargs_count && program->stream->varargs[effect].node == node;
+                                const uint32_t evaluated = warning_safe ? program->stream->varargs[effect].evaluated_operands : 0;
+                                for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                                {
+                                    operands[o] = (evaluated & (1u << o)) != 0 ? operands[o] : BUSTER_CHECK_NONE;
+                                }
+                            }
                             bool truth = false;
                             if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) &&
                                 check_program_runtime_truth(program, node, operands[0], &truth))
@@ -1451,7 +1461,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                                     operands[1] = BUSTER_CHECK_NONE;
                                 }
                             }
-                            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
+                            for (uint32_t o = 0; warning_safe && o < BUSTER_ARRAY_LENGTH(operands); o += 1)
                             {
                                 const uint32_t operand = operands[o];
                                 if (operand < graph->count && node_seen[operand] != epoch)
