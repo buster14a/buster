@@ -524,6 +524,101 @@ static void tier1_allocation_color(const Tier1AllocationInput* input, uint32_t c
     }
 }
 
+// Keep the cross-product for tiny fixed sets and as an independent scalar reference. All borrowed tails are masked.
+static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, bool vector, uint32_t* allowed)
+{
+    for (uint32_t f = 0; f < input->fixed.count; f += 1)
+    {
+        for (uint32_t first = 0; first < input->count; first += vector ? 16 : 1)
+        {
+            if (vector)
+            {
+                const uint32_t remaining = input->count - first;
+                const uint32_t length = remaining < 16 ? remaining : 16;
+                const __mmask16 lanes = (__mmask16)((1u << length) - 1);
+                const __m512i start = _mm512_maskz_loadu_epi32(lanes, input->starts + first);
+                const __m512i end = _mm512_maskz_loadu_epi32(lanes, input->ends + first);
+                const __m128i classes = _mm_maskz_loadu_epi8(lanes, input->classes + first);
+                const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)input->fixed.classes[f]));
+                const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)input->fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)input->fixed.starts[f]));
+                const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
+                const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)input->fixed.registers[f]), current);
+                _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
+            }
+            else if (input->classes[first] == input->fixed.classes[f] && input->starts[first] < input->fixed.ends[f] && input->ends[first] > input->fixed.starts[f])
+            {
+                allowed[first] &= ~input->fixed.registers[f];
+            }
+        }
+    }
+}
+
+// Query intervals in end-event order. Before [start,end)'s query, incorporate exactly fixed.starts < end;
+// register r overlaps iff its prefix maximum fixed end is > start. Ends at start and starts at end do not overlap.
+// Reuse the dead event buckets as start-position lists. Work is O(positions + fixed + events), with 32 register
+// lanes per class; scratch is one u32 per fixed range. Required-use/start events do not query or advance the sweep.
+static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, bool vector, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
+{
+    bool valid = true;
+    if (input->fixed.count != 0 && input->count != 0)
+    {
+        // Avoid index overhead when the cross-product fits sixteen comparisons per input row plus the already-paid
+        // position domain. This keeps tiny functions/small fixed sets simple while bounding that work linearly too.
+        const uint64_t simple_budget = input->position_count + 16ull * (input->count + input->fixed.count);
+        const bool simple = !vector || (uint64_t)input->fixed.count * input->count <= simple_budget;
+        if (simple)
+        {
+            tier1_allocation_filter_fixed_simple(input, vector, allowed);
+        }
+        else
+        {
+            uint32_t* next = arena_push_array(arena, input->fixed.count, sizeof(uint32_t), 4);
+            valid = next != 0;
+            if (valid)
+            {
+                uint32_t maximum_ends[BUSTER_TIER1_ALLOCATE_CLASSES][32] = { 0 };
+                memset(buckets, 0, ((uint64_t)input->position_count + 2) * sizeof(uint32_t));
+                for (uint32_t f = 0; f < input->fixed.count; f += 1)
+                {
+                    const uint32_t start = input->fixed.starts[f];
+                    next[f] = buckets[start];
+                    buckets[start] = f + 1;
+                }
+                uint32_t position = 0;
+                for (uint32_t e = 0; e < event_count; e += 1)
+                {
+                    if ((events[e] & (BUSTER_TIER1_ALLOCATE_USE_EVENT | 1)) == 0)
+                    {
+                        const uint32_t i = events[e] >> 1;
+                        while (position < input->ends[i])
+                        {
+                            for (uint32_t link = buckets[position]; link != 0; link = next[link - 1])
+                            {
+                                const uint32_t f = link - 1;
+                                uint32_t* maximum = maximum_ends[input->fixed.classes[f]];
+                                const __m512i end = _mm512_set1_epi32((int32_t)input->fixed.ends[f]);
+                                for (uint32_t r = 0; r < 32; r += 16)
+                                {
+                                    const __m512i previous = _mm512_loadu_si512(maximum + r);
+                                    const __m512i updated = _mm512_mask_max_epu32(previous, (__mmask16)(input->fixed.registers[f] >> r), previous, end);
+                                    _mm512_storeu_si512(maximum + r, updated);
+                                }
+                            }
+                            position += 1;
+                        }
+                        const uint32_t* maximum = maximum_ends[input->classes[i]];
+                        const __m512i start = _mm512_set1_epi32((int32_t)input->starts[i]);
+                        const uint32_t low = _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(maximum), start);
+                        const uint32_t high = _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(maximum + 16), start);
+                        allowed[i] &= ~(low | (high << 16));
+                    }
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
 {
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
@@ -680,31 +775,9 @@ static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* inpu
                 value_active_end[value] = input->ends[i];
             }
         }
-        // Compare one fixed range against sixteen interval lanes. The uncommon constraint loop stays outside the
-        // common no-fixed case; it conservatively excludes every intersecting physical register for the full range.
-        for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < input->fixed.count; f += 1)
+        if (error == TIER1_ALLOCATION_OK && input->fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, vector, events, event_count, buckets, allowed))
         {
-            for (uint32_t first = 0; first < input->count; first += vector ? 16 : 1)
-            {
-                if (vector)
-                {
-                    const uint32_t remaining = input->count - first;
-                    const uint32_t length = remaining < 16 ? remaining : 16;
-                    const __mmask16 lanes = (__mmask16)((1u << length) - 1);
-                    const __m512i start = _mm512_maskz_loadu_epi32(lanes, input->starts + first);
-                    const __m512i end = _mm512_maskz_loadu_epi32(lanes, input->ends + first);
-                    const __m128i classes = _mm_maskz_loadu_epi8(lanes, input->classes + first);
-                    const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)input->fixed.classes[f]));
-                    const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)input->fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)input->fixed.starts[f]));
-                    const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
-                    const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)input->fixed.registers[f]), current);
-                    _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
-                }
-                else if (input->classes[first] == input->fixed.classes[f] && input->starts[first] < input->fixed.ends[f] && input->ends[first] > input->fixed.starts[f])
-                {
-                    allowed[first] &= ~input->fixed.registers[f];
-                }
-            }
+            error = TIER1_ALLOCATION_CAPACITY;
         }
         for (uint32_t class = 0; error == TIER1_ALLOCATION_OK && class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
         {

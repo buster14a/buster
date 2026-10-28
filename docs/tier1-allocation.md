@@ -63,6 +63,29 @@ The current implementation removes intersecting reservations for the whole
 input interval. Producers may split around constraints to recover registers.
 It does not yet search for optimal split positions around fixed ranges.
 
+Fixed filtering reuses the position-sorted end events and the dead event buckets.
+It sweeps fixed starts strictly before each value interval's end and keeps the
+maximum fixed end for each of the two classes' 32 physical registers. Two
+16-register vector comparisons identify the reservations whose maximum end is
+strictly greater than the value interval's start. This preserves half-open
+boundaries and removes the same union of masks from the entire interval,
+including unsorted, nested and duplicate fixed ranges and multibit clobbers.
+
+Preparation costs O(positions + fixed ranges + events), including required-use
+events, with four temporary bytes per fixed range and a 256-byte register table.
+The existing sixteen-interval vector cross-product handles pair counts no larger
+than `positions + 16*(intervals + fixed ranges)`. This keeps tiny functions and
+small fixed sets on the simple path while bounding its work linearly as well.
+The scalar allocator keeps its independent cross-product reference. Empty fixed
+sets allocate no additional scratch.
+
+The current native caller receives its input from `tier1_liveness_build`, whose
+allocation initializer leaves `fixed` empty. `tier1_emit_prepare` copies that
+input and adds allowed masks and required uses; calls save and restore live
+caller registers separately. Thus this change addresses the allocator API's
+fixed-range scaling; it does not establish a speedup in the current native
+pipeline or the default Tier 0 compiler.
+
 `tier1_allocate` and `tier1_allocate_scalar` return an explicit status and an
 arena-owned `Tier1Allocation`. Each input interval owns the compact range
 `fragment_offsets[i] .. fragment_offsets[i+1]` in the output's start/end,
@@ -249,6 +272,11 @@ oracle compares interval fragments pairwise; another expands them into a
 per-position register occupancy map. A move oracle executes sequential output
 against an independent snapshot of the parallel assignment. Guard-page tests
 end every input column at an inaccessible page through 65 elements.
+Fixed filtering also compares exact masks with an independent per-position
+bitmap, compares complete allocations with explicitly prefiltered inputs, and
+exercises indexed capacity rollback after an existing arena prefix. The 8,192
+nonoverlapping fixed/value interval fixture checks every resulting register
+without invoking the deliberately quadratic allocation verifier.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
@@ -279,6 +307,15 @@ this benchmark. Default samples alternate variant order; isolated and
 scalar-conditioned modes expose different host power states. Run repeated
 processes through the per-run 9700X lock, pinned to CPU 2, before retaining a
 performance claim. No performance acceptance is asserted by adding the tool.
+
+The [#609 fixed-filtering record](https://github.com/buster14a/buster-performance/tree/11051131ad5c4ae57c65d170fb38c6f5f3154796/docs/measurements/tier1-fixed-609-2026-10-27)
+compares compiler code `9a652c02` with `92c025e7` under the shared 9700X lock.
+At 8,192 sparse value/fixed intervals, filtering takes 6.954 ms versus 57.849 us
+(120.21x), and complete allocation 7.131 ms versus 263.745 us (27.04x).
+It covers dense/call/mixed constraints, no-fixed/tiny controls, scalar conditioning,
+exact output checks and native/guard/rollback qualification. Indexed scratch adds
+4*F bytes; all tiny samples, including slower ones, are retained in the record.
+These are allocator API measurements; the current native producer supplies F=0.
 
 Both issues remain open until source-corpus interval production and native
 spill/reload/phi/call lowering are integrated and qualified. Required remaining
