@@ -2053,6 +2053,10 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
     {
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COMPLEX_TRUTH, .type = type, .address = negate });
     }
+    else if (class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        check_lower_unsupported(writer, "vector logical operators and conditions");
+    }
     else
     {
         check_lower_instruction(writer, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
@@ -4418,7 +4422,15 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // A vector's element, at its index's place in the vector's bytes: the vector's own place when it is an lvalue, or
         // a temporary's that the value is stored into.
         const TypeId vector = stream->values[a].type;
-        if (!address && !address_value)
+        const CheckValue* base = stream->values + a;
+        if (base->category == CHECK_LVALUE && check_lower_copy_volatile(writer, base, 0))
+        {
+            // Clang reads the whole volatile vector, and writes an element through a whole-vector read/insert/store.
+            // A scalar access at the element's address cannot preserve that access width. Rvalues already captured
+            // their volatile vector before extraction, so their owned temporary remains supported.
+            check_lower_unsupported(writer, "element access through volatile vectors");
+        }
+        else if (!address && !address_value)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
         }

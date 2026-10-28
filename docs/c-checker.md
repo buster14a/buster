@@ -1020,7 +1020,12 @@ What the lowering covers past scalars (#145's programs):
   same bytes changes no bits. Integer division and remainder, and 8-bit
   multiplication and shifts, which clang computes an element at a time, are
   refused by name, and so are a cast between a vector and an integer, vectors of
-  other sizes and of `bool`. A vector local or parameter aligned past 16 bytes,
+  other sizes and of `bool`, logical vector operators and vector conditions.
+  Element access through a volatile vector lvalue is also refused: Clang uses
+  a whole-vector volatile load, and a read/insert/store for an element write,
+  which a scalar access at the element's address cannot preserve. Whole-vector
+  volatile values and extraction from an already captured rvalue remain supported.
+  A vector local or parameter aligned past 16 bytes,
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
