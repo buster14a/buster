@@ -5733,8 +5733,8 @@ result type is its RETURNs' class, or its declared result's
 refuses a feature by name, is left out with its reason; any other failure, and
 any function refused, lowered apart or unpromoted, fails the command, naming the
 function and the first error. `--print NAME` prints that function's IR as lowered
-and as promoted. The 9700X job runs it on c-testsuite's subset and the frozen
-`sqlite3.c`.
+and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
+`sqlite3.c` and the frozen musl's units.
 
 `./build/compiler benchmark-ir-source [--only lower|lower-scalar|verify|
 verify-scalar|promote|promote-scalar] [--after-scalar MS] [preprocessor options]

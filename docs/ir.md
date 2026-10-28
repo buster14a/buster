@@ -20,8 +20,10 @@ lowers every function `-c` compiles of a set of C files by both paths, which mus
 agree column for column and verify, and promotes each by both of `ssa_ir.c`'s
 paths, whose results verify with dominance checked ("Tests and measurements"
 below). Every function of the frozen `sqlite3.c` (2,602 of them), of c-testsuite's
-subset (430, in its 220 programs) and of Lua 5.4.8's 32 files but `lua.c` and
-`luac.c` (1,052) passes.
+subset (430, in its 220 programs), of Lua 5.4.8's 32 files but `lua.c` and
+`luac.c` (1,052) and of the 1,049 of musl 1.2.5's 1,355 units that `-c` compiles
+(1,914; it refuses the others' features by name, `alias` and `weak` attributes
+and explicit register variables as `asm` operands among them) passes.
 `benchmark-ir-source` measures the IR's bytes per source token on `sqlite3.c`
 ("Bytes per source token" below).
 
