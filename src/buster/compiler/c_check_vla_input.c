@@ -288,7 +288,9 @@ static bool check_input_vla_query(CheckInputReader* reader, uint32_t first, uint
     return valid;
 }
 
-static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first, uint32_t declaration, TypeId type, uint32_t point, uint32_t storage, bool is_typedef, bool initialized, bool thread_local)
+// Only this declaration's specifiers and declarator can introduce its bounds. Earlier typedef captures retain their
+// original owners and scope; a suspended typeof specifier keeps its append mark across the source walk's resume.
+static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first, uint32_t vla_begin, uint32_t declaration, TypeId type, uint32_t point, uint32_t storage, bool is_typedef, bool initialized, bool thread_local)
 {
     bool valid = true;
     if (check_input_vla_modified(reader->types, type))
@@ -302,7 +304,7 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first
         if (valid)
         {
             reader->vla_scope_ends[declaration] = reader->scope_count != 0 ? reader->scope_ends[reader->scope_count - 1] + 1 : point + 1;
-            for (uint32_t i = 0; i < reader->output->vla_count; i += 1)
+            for (uint32_t i = vla_begin; i < reader->output->vla_count; i += 1)
             {
                 CheckInputVla* vla = &reader->output->vlas[i];
                 if (vla->declaration == BUSTER_CHECK_NONE && vla->bound_begin >= first && vla->bound_end < declaration)
@@ -332,7 +334,8 @@ static void check_input_vla_parameters(CheckInputReader* reader, uint32_t body)
         first = p < first ? p : first;
         last = p > last ? p : last;
     }
-    for (uint32_t i = 0; first != BUSTER_CHECK_NONE && i < reader->output->vla_count; i += 1)
+    // Deferred lanes see all top-level headers' records. Use the header's saved span, not the lane's total count.
+    for (uint32_t i = reader->parameter_vla_begin; first != BUSTER_CHECK_NONE && i < reader->parameter_vla_end; i += 1)
     {
         CheckInputVla* vla = &reader->output->vlas[i];
         const uint32_t declaration = vla->declaration;
@@ -398,7 +401,7 @@ static uint32_t check_input_vla_scale(CheckInputReader* reader, uint32_t token, 
         const uint32_t constant = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
         if (constant != BUSTER_CHECK_NONE)
         {
-            graph->leaves[constant] = (CheckValue)
+            *check_graph_leaf_of(graph, constant) = (CheckValue)
             {
                 .type = BUSTER_TYPE_ULONG,
                 .category = CHECK_RVALUE,

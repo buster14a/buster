@@ -137,9 +137,10 @@ static void check_lanes_test_function(char* text, uint64_t capacity, uint64_t* u
     else if (kind == 6)
     {
         check_lanes_test_append(text, capacity, used,
-                                "    long r = 0;\n    switch (a & 7)\n    {\n"
+                                "    long image[65] = { [0 ... 64] = 17 };\n    long r = 0;\n    switch (a & 7)\n    {\n"
                                 "        case 0: r = b; break;\n        case 1: r = b * 2; break;\n        case 2: r = b - a; break;\n"
-                                "        case 3: r = a * a; break;\n        case 5: r = b ^ 5; break;\n        default: r = -b; break;\n    }\n");
+                                "        case 3: r = a * a; break;\n        case 5: r = b ^ 5; break;\n        default: r = -b; break;\n    }\n"
+                                "    r += image[(unsigned long)b & 63];\n");
     }
     else if (kind == 7)
     {
@@ -268,7 +269,7 @@ static void check_lanes_test_compile(CheckLanesTestUnit* unit, Preprocessor* pp,
             check_graph_run(&unit->types, &unit->input.graph, &unit->output, &unit->scratch, &check_options, &unit->stream) && unit->stream.report_count == 0 &&
             check_asms_run(&unit->asms, &unit->input, &unit->stream, &unit->types, &unit->output, &unit->scratch) &&
             check_initializers_run(&unit->initializers, &unit->input, &unit->stream, parser, &unit->types, &unit->output, &unit->scratch) &&
-            check_data_prepare(&unit->data, &unit->input, &unit->stream, &unit->initializers, &unit->types, &unit->output, &unit->scratch);
+            check_data_prepare(&unit->data, &unit->input, &unit->stream, &unit->initializers, &unit->types, scalar, &unit->output, &unit->scratch);
     const CheckProgramOptions program_options = {
         .initializers = &unit->initializers,
         .asms = &unit->asms,

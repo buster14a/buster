@@ -172,6 +172,10 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/c_preprocessor.c"
 #include "buster/compiler/c_builtin_catalog.c"
 #include "buster/compiler/test_process.c"
+// The clang and gcc runs the tests compare with, kept between runs (#542), and its tests, for the test-oracle-cache
+// command.
+#include "buster/compiler/oracle_cache.c"
+#include "buster/compiler/oracle_cache_test.c"
 #include "buster/compiler/c_preprocessor_test.c"
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
@@ -431,7 +435,15 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_repair.c"
 #include "buster/compiler/c_checker_driver.c"
 #pragma clang section text = ""
+// The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681): the build waits for that
+// unit, which reaches the whole compiler, and their code was a fifth of its compile (on the 9700X, 33.7 s in the build,
+// 27.4 s so, the build 33.7 and 28.5 s), while their time is the compiler's code they call and clang's processes, which
+// run as fast (test-checker, its asm, driver, debug and lanes tests, the deferred reader's, the corpus's and
+// c-testsuite's). No benchmark's timed code calls them: they generate inputs and compare results outside the samples.
+// A new test of the checker's goes inside.
+#pragma clang optimize off
 #include "buster/compiler/c_checker_test.c"
+#pragma clang optimize on
 #include "buster/compiler/c_builtin_intrinsic_types_test.c"
 #include "buster/compiler/c_builtin_intrinsic_features_test.c"
 #include "buster/compiler/c_builtin_intrinsic_catalog_test.c"
@@ -450,6 +462,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #include "buster/compiler/c_check_corpus.c"
+#pragma clang optimize off
 #include "buster/compiler/c_check_deferred_test.c"
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
@@ -458,6 +471,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_lanes_test.c"
 #include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
+#pragma clang optimize on
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
 #include "buster/compiler/c_check_deferred_benchmark.c"
@@ -469,10 +483,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_lanes_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
 #include "buster/compiler/c_check_debug_benchmark.c"
+#pragma clang optimize off
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
+#pragma clang optimize on
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
 #include "buster/compiler/ir.c"
@@ -1317,6 +1333,10 @@ static int main_command(int argc, char** argv, bool* found)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
+    {
+        result = run_oracle_cache_tests(argc - 2, argv + 2);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-c-testsuite") == 0)
     {

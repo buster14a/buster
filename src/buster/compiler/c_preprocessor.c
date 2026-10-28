@@ -1218,6 +1218,24 @@ struct PPHistoryRun
 };
 _Static_assert(sizeof(PPHistoryRun) == 8, "an output history run is eight bytes");
 
+// The most invocations in one invocation's arguments that pp_finish_simple expands in place (Preprocessor.nested).
+#define BUSTER_PP_NESTED_PLANS 8
+
+// An invocation in an argument that pp_argument_in_place takes (pp_nested_invocation): its macro and template, its ')'
+// in pp->arguments, its arguments' records (into the argument's tokens), how many arguments it was given and whether its
+// variadic one was left out, and what its ## and # make.
+typedef struct PPNested PPNested;
+struct PPNested
+{
+    PPMacroId macro;
+    PPTemplate* template;
+    uint32_t close;
+    uint32_t count;
+    bool omitted;
+    PPArgument records[BUSTER_PP_TEMPLATE_TOKENS];
+    PPOperators made;
+};
+
 struct Preprocessor
 {
     PPOptions options;
@@ -1236,6 +1254,11 @@ struct Preprocessor
     // The output, and the three stacks of buffers.
     PPTokens output;
     PPTokens arguments;
+    // Lazy delimiter links for immutable raw argument slices, indexed through argument_indexed. A write after a
+    // stack rewind invalidates its suffix (pp_room); live contexts retain their bounded, unchanged prefix.
+    uint32_t* argument_links;
+    uint32_t argument_indexed;
+    Arena argument_link_arena;
     PPTokens captures;
     PPTokens expansions;
     // Files: the cache they're read through (PPOptions.files, or one of the unit's own, in `arena`), this unit's data of
@@ -1342,6 +1365,11 @@ struct Preprocessor
     uint32_t diagnostic_origin;
     uint32_t diagnostic_include_range;
     uint32_t origin_peak[3];
+    // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
+    // planned them, in the order pp_expand_argument_in_place takes them (nested_taken).
+    PPNested nested[BUSTER_PP_NESTED_PLANS];
+    uint32_t nested_count;
+    uint32_t nested_taken;
     // A test's fault (pp_test_direct_argument_failures): the next growth of a stack's origins fails, as when its arena
     // can't be reserved.
     bool fail_origin_growth;
@@ -1521,6 +1549,10 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_history_ensure(Preproc
 // Room for `more` tokens in a stack, or a fatal error.
 static bool pp_room(Preprocessor* pp, PPTokens* tokens, uint32_t more)
 {
+    if (tokens == &pp->arguments && more != 0 && tokens->count < pp->argument_indexed)
+    {
+        pp->argument_indexed = tokens->count;
+    }
     const bool result = (uint64_t)tokens->count + more <= tokens->capacity;
     if (!result && !pp->fatal)
     {
@@ -4972,14 +5004,202 @@ static void pp_token_name(const Preprocessor* pp, const PPFileData* data, uint32
     }
 }
 
-// Whether `id` names a parameter of a function-like macro being defined: an identifier of its parameter list, or
-// __VA_ARGS__ when it is variadic.
+// A large definition's ordered validation and its # checks share this temporary name-to-ordinal index. First
+// expansion rebuilds it while retaining the parameter ids; later expansions use PPItems directly. Up to 16 names
+// fit inline and are compared in one vector (or by the scalar twin); further names use a half-full hash table,
+// grown geometrically even for invalid lists past the parameter limit, so the first diagnostic stays ordered.
+#define BUSTER_PP_SMALL_PARAMETERS 16
+
+typedef struct PPParameterIndex PPParameterIndex;
+struct PPParameterIndex
+{
+    IdentId names[BUSTER_PP_SMALL_PARAMETERS];
+    uint32_t ordinals[BUSTER_PP_SMALL_PARAMETERS];
+    uint64_t* slots; // High half: IdentId; low half: ordinal + 1. Zero is empty.
+    uint32_t capacity;
+    uint32_t count;
+    bool vectorized;
+    bool repeated; // The preceding large definition insertion found an earlier ordinal.
+    Scratch scratch;
+};
+
+static void pp_parameter_index_begin(PPParameterIndex* index, bool vectorized)
+{
+    // Only the occupied prefix is read. Clearing the inline arrays would add stores to every small definition.
+    index->slots = 0;
+    index->capacity = 0;
+    index->count = 0;
+    index->vectorized = vectorized;
+    index->repeated = false;
+    index->scratch.arena = 0;
+}
+
+// Only large macros allocate even the index's descriptor. Keep its arrays out of the ordinary compiler stack frame.
+static PPParameterIndex* pp_parameter_index_allocate(bool vectorized)
+{
+    Scratch scratch = scratch_begin(0);
+    PPParameterIndex* result = arena_push(scratch.arena, sizeof(PPParameterIndex), _Alignof(PPParameterIndex));
+    if (result != 0)
+    {
+        pp_parameter_index_begin(result, vectorized);
+        result->scratch = scratch;
+    }
+    else
+    {
+        scratch_end(scratch);
+    }
+    return result;
+}
+
+static uint32_t pp_parameter_slot(const uint64_t* slots, uint32_t capacity, IdentId id)
+{
+    // Mix high identifier bits too: ids separated by a table's capacity must not all start at one slot.
+    const uint64_t hash = (uint64_t)id * 0x9E3779B97F4A7C15ull;
+    uint32_t result = (uint32_t)(hash >> 32) & (capacity - 1);
+    while (slots[result] != 0 && (IdentId)(slots[result] >> 32) != id)
+    {
+        result = (result + 1) & (capacity - 1);
+    }
+    return result;
+}
+
+static __attribute__((noinline)) uint32_t pp_parameter_index(const PPParameterIndex* index, IdentId id)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    if (index->slots != 0)
+    {
+        const uint32_t slot = pp_parameter_slot(index->slots, index->capacity, id);
+        const uint32_t ordinal = (uint32_t)index->slots[slot];
+        result = ordinal != 0 ? ordinal - 1 : BUSTER_PP_NONE;
+    }
+    else if (index->vectorized)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, index->count);
+        const __m512i names = _mm512_maskz_loadu_epi32(lanes, index->names);
+        const uint32_t matches = _mm512_mask_cmpeq_epi32_mask(lanes, names, _mm512_set1_epi32((int)id));
+        if (matches != 0)
+        {
+            result = index->ordinals[__builtin_ctz(matches)];
+        }
+    }
+    else
+    {
+        for (uint32_t p = 0; result == BUSTER_PP_NONE && p < index->count; p += 1)
+        {
+            result = index->names[p] == id ? index->ordinals[p] : BUSTER_PP_NONE;
+        }
+    }
+    return result;
+}
+
+// Inserts only the first occurrence, returning its previous ordinal in *previous. In particular, an explicit
+// __VA_ARGS__ parameter precedes the implicit one from `...`, as clang's parameter lookup requires.
+static bool pp_parameter_insert(PPParameterIndex* index, IdentId id, uint32_t ordinal, uint32_t* previous)
+{
+    *previous = pp_parameter_index(index, id);
+    bool result = true;
+    if (*previous == BUSTER_PP_NONE)
+    {
+        if (index->slots == 0 && index->count < BUSTER_PP_SMALL_PARAMETERS)
+        {
+            index->names[index->count] = id;
+            index->ordinals[index->count] = ordinal;
+        }
+        else
+        {
+            if (index->count >= index->capacity / 2)
+            {
+                if (index->scratch.arena == 0)
+                {
+                    index->scratch = scratch_begin(0);
+                }
+                const uint32_t capacity = index->capacity == 0 ? 4 * BUSTER_PP_SMALL_PARAMETERS : index->capacity * 2;
+                uint64_t* slots = capacity > index->capacity ? arena_push_array(index->scratch.arena, capacity, sizeof(uint64_t), 8) : 0;
+                result = slots != 0;
+                if (result)
+                {
+                    memset(slots, 0, (uint64_t)capacity * sizeof(uint64_t));
+                    const uint32_t end = index->slots != 0 ? index->capacity : index->count;
+                    for (uint32_t p = 0; p < end; p += 1)
+                    {
+                        const uint64_t entry = index->slots != 0 ? index->slots[p] : ((uint64_t)index->names[p] << 32) | (index->ordinals[p] + 1ull);
+                        if (entry != 0)
+                        {
+                            slots[pp_parameter_slot(slots, capacity, (IdentId)(entry >> 32))] = entry;
+                        }
+                    }
+                    index->slots = slots;
+                    index->capacity = capacity;
+                }
+            }
+            if (result)
+            {
+                index->slots[pp_parameter_slot(index->slots, index->capacity, id)] = ((uint64_t)id << 32) | (ordinal + 1ull);
+            }
+        }
+        index->count += result;
+    }
+    return result;
+}
+
+static void pp_parameter_index_end(PPParameterIndex* index)
+{
+    if (index->scratch.arena != 0)
+    {
+        scratch_end(index->scratch);
+    }
+}
+
+// Return the descriptor directly: passing the address of the caller's local pointer would force it onto the stack
+// and add a stack-protector check to every ordinary macro. Keep this cold construction in its own frame.
+static __attribute__((noinline)) PPParameterIndex* pp_parameter_index_build(const IdentId* names, uint32_t count, bool vectorized)
+{
+    PPParameterIndex* result = pp_parameter_index_allocate(vectorized);
+    bool complete = result != 0;
+    for (uint32_t p = 0; complete && p < count; p += 1)
+    {
+        uint32_t previous;
+        complete = pp_parameter_insert(result, names[p], p, &previous);
+    }
+    if (!complete && result != 0)
+    {
+        pp_parameter_index_end(result);
+        result = 0;
+    }
+    return result;
+}
+
+// Small compiled lists already have contiguous ids. Keep 0--4 names on the original bounded scalar lookup; a wider
+// list takes one masked comparison. The caller selects the mode once per macro. Neither path copies the list.
+BUSTER_INLINE uint32_t pp_parameter_index_small(const IdentId* names, uint32_t count, IdentId id, bool vectorized)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    if (vectorized)
+    {
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, count);
+        const __m512i ids = _mm512_maskz_loadu_epi32(lanes, names);
+        const uint32_t matches = _mm512_mask_cmpeq_epi32_mask(lanes, ids, _mm512_set1_epi32((int)id));
+        if (matches != 0)
+        {
+            result = (uint32_t)__builtin_ctz(matches);
+        }
+    }
+    else
+    {
+        for (uint32_t p = 0; result == BUSTER_PP_NONE && p < count; p += 1)
+        {
+            result = names[p] == id ? p : BUSTER_PP_NONE;
+        }
+    }
+    return result;
+}
+
+// A small definition's source list, including the implicit name of `...`. Its length is bounded by 16 parameters.
 static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, IdentId id)
 {
     bool result = false;
     for (uint32_t t = macro->parameters_begin; !result && t < macro->body_begin; t += 1)
     {
-        // `...` alone is __VA_ARGS__; a named variadic parameter is its name (as pp_compile_macro has them).
         const uint8_t kind = data->kinds[t] & 0x7F;
         const bool unnamed = kind == C_TOKEN_ELLIPSIS && (data->kinds[t - 1] & 0x7F) != C_TOKEN_RAW_IDENTIFIER;
         result = (kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == id) || (unnamed && id == C_NAME_VA_ARGS);
@@ -4991,7 +5211,7 @@ static bool pp_names_parameter(const PPFileData* data, const PPMacro* macro, Ide
 // expansion: # not followed by a parameter (or by __VA_OPT__ and its '('), __VA_OPT__ not followed by '(', inside
 // another, or left open, and ## at either end of its content. Returns false after a diagnostic. As in clang, __VA_OPT__
 // is read in a macro that isn't variadic too.
-static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, const PPMacro* macro)
+static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, const PPMacro* macro, const PPParameterIndex* parameters)
 {
     const uint32_t end = macro->body_end;
     bool result = true;
@@ -5003,7 +5223,10 @@ static bool pp_check_replacement_list(Preprocessor* pp, const PPFileData* data, 
         const bool next_is_identifier = t + 1 < macro->body_end && (data->kinds[t + 1] & 0x7F) == C_TOKEN_RAW_IDENTIFIER;
         const bool va_opt = kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
         const bool next_va_opt = next_is_identifier && data->values[t + 1] == C_NAME_VA_OPT;
-        if (kind == C_TOKEN_HASH && !(next_is_identifier && pp_names_parameter(data, macro, data->values[t + 1])) && !next_va_opt)
+        const bool names_parameter = kind == C_TOKEN_HASH && next_is_identifier &&
+                                     (macro->parameter_count <= BUSTER_PP_SMALL_PARAMETERS ? pp_names_parameter(data, macro, data->values[t + 1])
+                                                                                        : pp_parameter_index(parameters, data->values[t + 1]) != BUSTER_PP_NONE);
+        if (kind == C_TOKEN_HASH && !names_parameter && !next_va_opt)
         {
             // At the token after '#' (the line's end after the last), as clang reports it.
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t + 1, end), "'#' is not followed by a macro parameter");
@@ -5078,13 +5301,45 @@ static bool pp_language_defined(const Preprocessor* pp, const PPMacro* macro)
     return result;
 }
 
+// The cold continuation once the preceding 16 identifiers have passed their bounded duplicate/grammar checks.
+static __attribute__((noinline)) PPParameterIndex* pp_define_parameter_large(Preprocessor* pp, const PPFileData* data, const PPMacro* macro, PPParameterIndex* parameters, IdentId name, uint32_t ordinal)
+{
+    PPParameterIndex* result = parameters;
+    if (result == 0)
+    {
+        result = pp_parameter_index_allocate(pp->vectorized);
+        if (result != 0)
+        {
+            for (uint32_t p = 0; p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
+            {
+                result->names[p] = data->values[macro->parameters_begin + 2 * p];
+                result->ordinals[p] = p;
+            }
+            result->count = BUSTER_PP_SMALL_PARAMETERS;
+        }
+    }
+    if (result != 0)
+    {
+        uint32_t previous;
+        const bool complete = pp_parameter_insert(result, name, ordinal, &previous);
+        result->repeated = previous != BUSTER_PP_NONE;
+        if (!complete)
+        {
+            pp_parameter_index_end(result);
+            result = 0;
+        }
+    }
+    return result;
+}
+
 // The parameter list of a function-like macro being defined, from its '(' at `open`, as clang reads it
 // (ReadMacroParameterList): identifiers (keywords too) separated by commas, then `...` or GNU's `name...`, or none.
 // Sets the macro's parameters, flags and body start, or reports the first error where clang does and returns false.
-static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end)
+BUSTER_INLINE bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end, PPParameterIndex** parameters)
 {
     bool result = true;
     bool closed = false;
+    uint32_t parameter_count = 0;
     uint32_t t = open + 1;
     macro->flags |= BUSTER_PP_MACRO_FUNCTION;
     macro->parameters_begin = t;
@@ -5096,7 +5351,7 @@ static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMac
             pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "missing ')' in macro parameter list");
             result = false;
         }
-        else if (kind == C_TOKEN_R_PAREN && macro->parameter_count == 0)
+        else if (kind == C_TOKEN_R_PAREN && parameter_count == 0)
         {
             closed = true;
         }
@@ -5109,10 +5364,19 @@ static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMac
         else if (kind == C_TOKEN_ELLIPSIS)
         {
             macro->flags |= BUSTER_PP_MACRO_VARIADIC;
-            macro->parameter_count += 1;
+            if (parameter_count >= BUSTER_PP_SMALL_PARAMETERS)
+            {
+                *parameters = pp_define_parameter_large(pp, data, macro, *parameters, C_NAME_VA_ARGS, parameter_count);
+                result = *parameters != 0;
+            }
+            if (!result)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");
+            }
+            parameter_count += 1;
             t += 1;
             closed = t < end && (data->kinds[t] & 0x7F) == C_TOKEN_R_PAREN;
-            if (!closed)
+            if (result && !closed)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, macro->base, t, end), "missing ')' in macro parameter list");
                 result = false;
@@ -5127,9 +5391,23 @@ static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMac
         {
             const IdentId parameter = data->values[t];
             bool repeated = false;
-            for (uint32_t p = macro->parameters_begin; p < t; p += 1)
+            if (parameter_count < BUSTER_PP_SMALL_PARAMETERS)
             {
-                repeated |= (data->kinds[p] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[p] == parameter;
+                // Every preceding parameter was an identifier followed by a comma. This bounded path needs no index.
+                for (uint32_t p = macro->parameters_begin; p < t; p += 2)
+                {
+                    repeated |= data->values[p] == parameter;
+                }
+            }
+            else
+            {
+                *parameters = pp_define_parameter_large(pp, data, macro, *parameters, parameter, parameter_count);
+                result = *parameters != 0;
+                repeated = result && (*parameters)->repeated;
+            }
+            if (!result)
+            {
+                pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");
             }
             if (repeated)
             {
@@ -5137,7 +5415,7 @@ static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMac
                             (int)intern_length(pp->table, parameter), intern_bytes(pp->table, parameter));
                 result = false;
             }
-            macro->parameter_count += 1;
+            parameter_count += 1;
             t += 1;
             const uint8_t next = t < end ? data->kinds[t] & 0x7F : C_TOKEN_UNKNOWN;
             if (result && t < end && next == C_TOKEN_COMMA)
@@ -5168,12 +5446,31 @@ static bool pp_define_parameters(Preprocessor* pp, const PPFileData* data, PPMac
         }
         t += 1;
     }
-    if (result && macro->parameter_count > BUSTER_PP_MAX_PARAMETERS)
+    if (result && parameter_count > BUSTER_PP_MAX_PARAMETERS)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, macro->location, "too many macro parameters (more than %u)", BUSTER_PP_MAX_PARAMETERS);
         result = false;
     }
+    macro->parameter_count = result ? (uint16_t)parameter_count : 0;
     macro->body_begin = t;
+    return result;
+}
+
+// The frequent empty and one-name lists need neither a duplicate scan nor the general grammar loop. Only complete,
+// valid shapes take this path; variadics and every malformed list keep the ordered reader and its first diagnostic.
+BUSTER_INLINE bool pp_define_parameters_tiny(const PPFileData* data, PPMacro* macro, uint32_t open, uint32_t end)
+{
+    const uint32_t first = open + 1;
+    const uint8_t kind = first < end ? data->kinds[first] & 0x7F : C_TOKEN_UNKNOWN;
+    const bool named = kind == C_TOKEN_RAW_IDENTIFIER;
+    const bool result = kind == C_TOKEN_R_PAREN || (named && first + 1 < end && (data->kinds[first + 1] & 0x7F) == C_TOKEN_R_PAREN);
+    if (result)
+    {
+        macro->flags |= BUSTER_PP_MACRO_FUNCTION;
+        macro->parameters_begin = first;
+        macro->parameter_count = named;
+        macro->body_begin = first + 1 + named;
+    }
     return result;
 }
 
@@ -5208,10 +5505,11 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             .location = location,
         };
         bool valid = true;
+        PPParameterIndex* parameters = 0;
         // Function-like when '(' follows the name with no whitespace or comment between them (a line splice is none).
         if (begin + 1 < end && (data->kinds[begin + 1] & 0x7F) == C_TOKEN_L_PAREN && !pp_file_space(data, begin + 1))
         {
-            valid = pp_define_parameters(pp, data, &macro, begin + 1, end);
+            valid = pp_define_parameters_tiny(data, &macro, begin + 1, end) || pp_define_parameters(pp, data, &macro, begin + 1, end, &parameters);
         }
         else if (begin + 1 < end && !pp_file_space(data, begin + 1))
         {
@@ -5256,7 +5554,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             // A function-like macro with a '#' or __VA_OPT__ gets the whole check: clang reads __VA_OPT__ in any
             // function-like macro (with a warning in one that isn't variadic, where its content is never used).
             const bool to_check = hashes || va_opt;
-            valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro));
+            valid = valid && (!to_check || !(macro.flags & BUSTER_PP_MACRO_FUNCTION) || pp_check_replacement_list(pp, data, &macro, parameters));
             if (valid && (data->kinds[macro.body_end - 1] & 0x7F) == C_TOKEN_HASHHASH)
             {
                 pp_diagnose(pp, PP_SEVERITY_ERROR, pp_define_location(pp, data, base, macro.body_end - 1, end), "'##' cannot appear at end of macro expansion");
@@ -5287,19 +5585,11 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 pp_set_macro(pp, name, id);
             }
         }
+        if (parameters != 0)
+        {
+            pp_parameter_index_end(parameters);
+        }
     }
-}
-
-// The index of `parameter` among a macro's parameters (__VA_ARGS__ is the variadic one), or BUSTER_PP_NONE.
-static uint32_t pp_parameter_index(const Preprocessor* pp, const PPMacro* macro, IdentId id)
-{
-    uint32_t result = BUSTER_PP_NONE;
-    const IdentId* parameters = pp->parameters + macro->parameters;
-    for (uint32_t p = 0; result == BUSTER_PP_NONE && p < macro->parameter_count; p += 1)
-    {
-        result = parameters[p] == id ? p : BUSTER_PP_NONE;
-    }
-    return result;
 }
 
 // Whether clang's substitution, reading body token t, sets NextTokGetsSpace (TokenLexer::ExpandFunctionArguments): it
@@ -5317,10 +5607,11 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
 {
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
-    const bool substitutes = (macro->flags & BUSTER_PP_MACRO_FUNCTION) != 0 && macro->parameter_count != 0;
+    const uint32_t parameter_count = macro->parameter_count;
+    const bool substitutes = (macro->flags & BUSTER_PP_MACRO_FUNCTION) != 0 && parameter_count != 0;
     const bool variadic = (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0;
     bool result = pp->item_count + (macro->body_end - macro->body_begin) <= BUSTER_PP_MAX_ITEMS &&
-                  pp->parameter_count + macro->parameter_count <= BUSTER_PP_MAX_ITEMS;
+                  pp->parameter_count + parameter_count <= BUSTER_PP_MAX_ITEMS;
     // The parameters' ids: the identifiers of the parameter list, and __VA_ARGS__ for `...`.
     macro->parameters = pp->parameter_count;
     uint32_t parameter = 0;
@@ -5338,7 +5629,19 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             parameter += 1;
         }
     }
-    pp->parameter_count += macro->parameter_count;
+    pp->parameter_count += parameter_count;
+    const IdentId* parameter_ids = result ? pp->parameters + macro->parameters : 0;
+    PPParameterIndex* parameters = 0;
+    if (result && parameter_count > BUSTER_PP_SMALL_PARAMETERS)
+    {
+        parameters = pp_parameter_index_build(parameter_ids, parameter_count, pp->vectorized);
+        result = parameters != 0;
+        if (!result)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");
+        }
+    }
+    const bool vector_parameters = pp->vectorized && parameter_count > 4;
     macro->items_begin = pp->item_count;
     macro->expanded_parameters = 0;
     uint32_t va_opt_item = BUSTER_PP_NONE; // The open __VA_OPT__'s item,
@@ -5351,7 +5654,10 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         PPItem item = { .kind = PP_ITEM_TOKEN, .flags = flags, .token = t };
         // __VA_OPT__ is the operator even when a parameter has its name, as in clang.
         const bool va_opt = substitutes && kind == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT;
-        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && substitutes && !va_opt ? pp_parameter_index(pp, macro, data->values[t]) : BUSTER_PP_NONE;
+        const uint32_t index = kind == C_TOKEN_RAW_IDENTIFIER && substitutes && !va_opt
+                                   ? parameters != 0 ? pp_parameter_index(parameters, data->values[t])
+                                                     : pp_parameter_index_small(parameter_ids, parameter_count, data->values[t], vector_parameters)
+                                   : BUSTER_PP_NONE;
         if (index != BUSTER_PP_NONE)
         {
             item.kind = PP_ITEM_PARAMETER;
@@ -5378,7 +5684,10 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         {
             const uint32_t next = t + 1;
             const bool next_va_opt = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[next] == C_NAME_VA_OPT;
-            const uint32_t next_index = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && !next_va_opt ? pp_parameter_index(pp, macro, data->values[next]) : BUSTER_PP_NONE;
+            const uint32_t next_index = next < macro->body_end && (data->kinds[next] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && !next_va_opt
+                                            ? parameters != 0 ? pp_parameter_index(parameters, data->values[next])
+                                                              : pp_parameter_index_small(parameter_ids, parameter_count, data->values[next], vector_parameters)
+                                            : BUSTER_PP_NONE;
             if (next_index != BUSTER_PP_NONE)
             {
                 item.kind = PP_ITEM_STRINGIZE;
@@ -5453,7 +5762,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         }
     }
     Scratch scratch = scratch_begin(0);
-    const uint64_t words = ((uint64_t)macro->parameter_count + 63) / 64;
+    const uint64_t words = ((uint64_t)parameter_count + 63) / 64;
     uint64_t* listed = arena_push_array(scratch.arena, words, sizeof(uint64_t), 8);
     if (listed != 0)
     {
@@ -5483,7 +5792,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         else if (items[i].kind == PP_ITEM_VA_OPT || items[i].kind == PP_ITEM_STRINGIZE_VA_OPT)
         {
             // __VA_OPT__ tests whether the expanded variadic argument has tokens (a macro that isn't variadic has none).
-            const uint32_t variadic_index = macro->parameter_count - 1U;
+            const uint32_t variadic_index = parameter_count - 1U;
             macro->expanded_parameters |= variadic ? 1ull << (variadic_index < 63 ? variadic_index : 63) : 0;
             content_end = i + 1 + items[i].parameter;
             in_order = false;
@@ -5526,7 +5835,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
             const uint8_t left = inside ? items[i - 1].kind : PP_ITEM_PASTE;
             const uint8_t right = inside ? items[i + 1].kind : PP_ITEM_PASTE;
             operators = (left == PP_ITEM_TOKEN || left == PP_ITEM_PARAMETER) && (right == PP_ITEM_TOKEN || right == PP_ITEM_PARAMETER) &&
-                        !(variadic && right == PP_ITEM_PARAMETER && items[i + 1].parameter == macro->parameter_count - 1u);
+                        !(variadic && right == PP_ITEM_PARAMETER && items[i + 1].parameter == parameter_count - 1u);
             // A chain starts at the operand before a ## that has no ## before it.
             chains |= inside && (i < 2 || !((pastes >> (i - 2)) & 1)) ? 1u << (i - 1) : 0;
             pastes |= 1u << i;
@@ -5538,7 +5847,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     // (pp_initialize): the scalar twins and the history's runs take pp_emit_simple_write and pp_substitute_simple, their
     // twin, or for a macro with ## and # the invocation stack and pp_substitute.
     const bool templated = (simple || operators) && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS &&
-                           macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
+                           parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < BUSTER_PP_MAX_TEMPLATES;
     if (templated)
     {
         PPTemplate* template = &pp->templates[pp->template_count];
@@ -5586,6 +5895,10 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     if (!result)
     {
         pp->item_count = macro->items_begin;
+    }
+    if (parameters != 0)
+    {
+        pp_parameter_index_end(parameters);
     }
     return result;
 }
@@ -7476,6 +7789,134 @@ static bool pp_new_argument(Preprocessor* pp)
 #define BUSTER_PP_FAST_SEPARATORS 64
 // The deepest nesting of parentheses pp_collect_arguments' 8-bit depths hold.
 #define BUSTER_PP_FAST_DEPTH 63
+// Small arguments keep the existing collectors; indexing pays when nested invocations would copy long suffixes.
+#define BUSTER_PP_ARGUMENT_INDEX_MIN 128
+
+// Index each newly written argument token once. At '(' the link is its matching ')'; at ')' it is the first comma
+// at that depth, or itself; each comma links to the next comma or ')'. While building, openers and commas form an
+// explicit backwards stack. Closing a level reverses its commas once, so all pairing work is linear. An unmatched
+// opener retains a backwards link, which cannot be mistaken for a matching closer. Delimiter masks batch the scan;
+// only delimiters need ordered pairing, with exactly the same pairing on the scalar path.
+// Each appended segment is a complete argument collection, not a continuation of an unmatched indexed opener:
+// pp_invoke calls this only after collection has closed, while prescanning its retained argument buffer. A rewind
+// keeps a live owner's complete prefix and later collections append complete segments after it. Restarting previous
+// at NONE therefore never needs to connect a new closer to an opener before argument_indexed. Unmatched delimiters
+// may occur in an argument's tokens, but only complete invocations inside its own context are borrowed.
+static bool pp_index_arguments(Preprocessor* pp)
+{
+    if (pp->argument_links == 0)
+    {
+        const uint64_t bytes = (uint64_t)BUSTER_PP_MAX_STACK_TOKENS * sizeof(uint32_t);
+        pp->argument_link_arena = arena_reserve_small(bytes, BUSTER_PP_TABLE_SMALL_BYTES);
+        pp->argument_links = arena_push_array(&pp->argument_link_arena, BUSTER_PP_MAX_STACK_TOKENS, sizeof(uint32_t), 64);
+        if (pp->argument_links == 0)
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory indexing macro arguments");
+        }
+    }
+    const bool result = pp->argument_links != 0;
+    const uint8_t* kinds = pp->arguments.kinds;
+    uint32_t* links = pp->argument_links;
+    uint32_t previous = BUSTER_PP_NONE;
+    for (uint32_t t = pp->argument_indexed; result && t < pp->arguments.count; t += 64)
+    {
+        const uint32_t count = pp->arguments.count - t < 64 ? pp->arguments.count - t : 64;
+        uint64_t delimiters = 0;
+        if (pp->vectorized)
+        {
+            const __mmask64 valid = _bzhi_u64(~0ull, count);
+            const __m512i plain = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+            delimiters = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_L_PAREN)) |
+                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_R_PAREN)) |
+                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_COMMA));
+        }
+        else
+        {
+            for (uint32_t j = 0; j < count; j += 1)
+            {
+                const uint8_t kind = kinds[t + j] & 0x7F;
+                delimiters |= (uint64_t)(kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA) << j;
+            }
+        }
+        for (uint64_t bits = delimiters; bits != 0; bits &= bits - 1)
+        {
+            const uint32_t at = t + (uint32_t)__builtin_ctzll(bits);
+            const uint8_t kind = kinds[at] & 0x7F;
+            if (kind == C_TOKEN_L_PAREN || (kind == C_TOKEN_COMMA && previous != BUSTER_PP_NONE))
+            {
+                links[at] = previous;
+                previous = at;
+            }
+            else if (kind == C_TOKEN_R_PAREN && previous != BUSTER_PP_NONE)
+            {
+                uint32_t first = at;
+                while ((kinds[previous] & 0x7F) == C_TOKEN_COMMA)
+                {
+                    const uint32_t before = links[previous];
+                    links[previous] = first;
+                    first = previous;
+                    previous = before;
+                }
+                const uint32_t parent = links[previous];
+                links[previous] = at;
+                links[at] = first;
+                previous = parent;
+            }
+        }
+    }
+    pp->argument_indexed = result ? pp->arguments.count : pp->argument_indexed;
+    return result;
+}
+
+// Borrow a nested invocation's raw arguments from its current argument buffer. No token, flag or origin is changed;
+// each record names a slice that stays alive until the owning outer invocation is substituted. The context must
+// contain the whole invocation: barriers, expansion boundaries and directives still use the ordinary collectors.
+// A new invocation saves the unchanged stack count, so finishing it frees only its own appended tokens and records.
+static bool pp_collect_argument_slice(Preprocessor* pp, PPInvocation* invocation, bool variadic, uint32_t parameter_count)
+{
+    PPContext* context = &pp->contexts[pp->context_count - 1];
+    const uint32_t open = context->position;
+    bool result = context->kind == BUSTER_PP_CONTEXT_BUFFER && context->barrier && context->tokens == &pp->arguments && context->pending_flags == 0 &&
+                  pp->capture_count != 0 && pp->capture_frames[pp->capture_count - 1].kind == BUSTER_PP_CAPTURE_ARGUMENT &&
+                  open < context->end && pp->arguments.kinds[open] == C_TOKEN_L_PAREN &&
+                  (context->end - open >= BUSTER_PP_ARGUMENT_INDEX_MIN || context->end <= pp->argument_indexed);
+    result = result && pp_index_arguments(pp);
+    const uint32_t close = result ? pp->argument_links[open] : BUSTER_PP_NONE;
+    result = result && close > open && close < context->end;
+    if (result)
+    {
+        const uint32_t first = pp->argument_record_count - 1;
+        uint32_t record = first;
+        uint32_t begin = open + 1;
+        uint32_t next = pp->argument_links[close];
+        while (result && next < close && !(variadic && record - first + 1 >= parameter_count))
+        {
+            pp->argument_records[record] = (PPArgument){ .raw_begin = begin, .raw_end = next };
+            result = record + 1 < BUSTER_PP_MAX_STACK_TOKENS;
+            record += result;
+            begin = next + 1;
+            next = pp->argument_links[next];
+        }
+        if (result)
+        {
+            pp->argument_records[record] = (PPArgument){ .raw_begin = begin, .raw_end = close };
+            pp->argument_record_count = record + 1;
+            const PPToken token = pp_stack_token(&pp->arguments, close);
+            invocation->expansion_end = (token.flags & BUSTER_PP_FROM_MACRO) ? context->expansion_end : token.location;
+            if (invocation->history != 0)
+            {
+                pp->history[invocation->history - 1].end = token.location;
+                pp->history[invocation->history - 1].end_origin = token.origin;
+            }
+            context->position = close + 1;
+        }
+        else
+        {
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many macro arguments");
+        }
+    }
+    return result;
+}
 
 // The byte indices 0 to 63, for pp_prefix_sum_bytes' permutes.
 static const uint8_t pp_byte_indices[64] __attribute__((aligned(64))) = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 };
@@ -9385,10 +9826,170 @@ static void pp_finish_operators(Preprocessor* pp, const PPInvocation* invocation
     }
 }
 
-// Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
-// Whether every enabled macro that tokens [begin, end) of pp->arguments name is a direct object (pp_direct_object): then
-// the argument's expansion is its tokens with each such name replaced by its body, which names no macro.
-static bool pp_direct_argument(const Preprocessor* pp, uint32_t begin, uint32_t end)
+
+// Whether the name of a function-like macro at token `name` of pp->arguments, in an argument that ends at `end`, opens an
+// invocation that pp_expand_argument_in_place can expand, as the main loop would behind the argument's barrier (pp_invoke
+// and pp_finish_simple, which substitutes it into the expansions there, since a capture keeps it from going straight
+// out), then read back: its macro has a template (a vectorized run with its history deferred), its '(' follows its name
+// and its ')' is in the argument, it is given as many arguments as it takes, none naming an enabled macro, and its
+// expansion has 1 to BUSTER_PP_TEMPLATE_TOKENS tokens (a template with ## and # may make none) and names no macro its
+// rescan would expand: its body's names (found again by pp_template_names where the expansions under way changed them)
+// and its pastes' (pp_template_operators) are of the invoked macro or of disabled macros, which that rescan paints, or no
+// macro's. Fills `nested` for the expansion, compiling the macro as pp_invoke does, and changes nothing else.
+static bool pp_nested_invocation(Preprocessor* pp, uint32_t name, uint32_t end, PPNested* nested)
+{
+    const PPMacroId id = pp->macro_of[pp->arguments.values[name]];
+    PPMacro* macro = &pp->macros[id];
+    bool result = pp->templates != 0 && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN)) == BUSTER_PP_MACRO_FUNCTION &&
+                  name + 1 < end && pp->arguments.kinds[name + 1] == C_TOKEN_L_PAREN &&
+                  pp->argument_record_count + BUSTER_PP_TEMPLATE_TOKENS < BUSTER_PP_MAX_STACK_TOKENS;
+    if (result && !(macro->flags & BUSTER_PP_MACRO_COMPILED))
+    {
+        result = pp_compile_macro(pp, id);
+    }
+    PPTemplate* template = result ? pp_template_of(pp, macro) : 0;
+    PPScan scan;
+    result = template != 0 && macro->parameter_count <= BUSTER_PP_TEMPLATE_TOKENS;
+    if (result)
+    {
+        pp_scan_arguments(pp->arguments.kinds, name + 1, end, (macro->flags & BUSTER_PP_MACRO_VARIADIC) != 0, macro->parameter_count, &scan);
+        result = scan.close != BUSTER_PP_NONE && scan.separator_count < BUSTER_PP_TEMPLATE_TOKENS;
+    }
+    if (result)
+    {
+        // pp_collect_arguments' records, but into the argument's tokens, and pp_finish_simple's count of them.
+        uint32_t begin = name + 2;
+        for (uint32_t s = 0; s < scan.separator_count; s += 1)
+        {
+            nested->records[s] = (PPArgument){ .raw_begin = begin, .raw_end = scan.separators[s] };
+            begin = scan.separators[s] + 1;
+        }
+        nested->records[scan.separator_count] = (PPArgument){ .raw_begin = begin, .raw_end = scan.close };
+        uint32_t count = scan.separator_count + 1;
+        count = macro->parameter_count == 0 && count == 1 && begin == scan.close ? 0 : count;
+        const bool omitted = (macro->flags & BUSTER_PP_MACRO_VARIADIC) && count + 1 == macro->parameter_count;
+        if (omitted)
+        {
+            nested->records[count] = (PPArgument){ .raw_begin = scan.close, .raw_end = scan.close };
+        }
+        result = count + omitted == macro->parameter_count;
+        for (uint32_t a = 0; result && a < count; a += 1)
+        {
+            result = !pp_needs_expansion(pp, &pp->arguments, nested->records[a].raw_begin, nested->records[a].raw_end);
+        }
+        pp_template_names(pp, id, template);
+        result = result && template->expanding == 0;
+        if (result && (template->pastes | template->strings) != 0)
+        {
+            result = pp_template_operators(pp, id, template, nested->records, count, 0, 0, &nested->made) && !nested->made.rescan &&
+                     nested->made.size <= BUSTER_PP_TEMPLATE_TOKENS;
+        }
+        else if (result)
+        {
+            // pp_template_size's, from these records.
+            uint32_t size = (uint32_t)template->count - (uint32_t)__builtin_popcount(template->parameter_mask);
+            for (uint32_t bits = template->parameter_mask; bits != 0; bits &= bits - 1)
+            {
+                const PPArgument* argument = &nested->records[template->parameters[__builtin_ctz(bits)]];
+                size += argument->raw_end - argument->raw_begin;
+            }
+            result = size != 0 && size <= BUSTER_PP_TEMPLATE_TOKENS;
+        }
+        nested->macro = id;
+        nested->template = template;
+        nested->close = scan.close;
+        nested->count = count;
+        nested->omitted = omitted;
+    }
+    return result;
+}
+
+// Expands an invocation that pp_nested_invocation took, at the end of pp->arguments (`name` its name, with the flags
+// pending before it), as the main loop's path leaves it in the argument's capture: pp_invoke's history record, then
+// pp_finish_simple's statistics and substitution into the expansions there (pp_finish_operators' pastes and strings,
+// pp_template_write), the expansion's first token with the name's flags; then the buffer it pushes read back by a run of
+// pp_step_buffer's, which paints the names of the invoked macro and of disabled ones, and its trailing flags left pending
+// for the next token, as the buffer's pop leaves them (pp_pop_context); or for an empty expansion, the name's flags left
+// pending as pp_finish_simple leaves them. Returns false, after a fatal error, if there is no room.
+static bool pp_expand_nested(Preprocessor* pp, PPNested* nested, PPToken name, uint8_t* pending)
+{
+    PPTokens* out = &pp->arguments;
+    const PPTemplate* template = nested->template;
+    const uint32_t given = nested->count + nested->omitted;
+    const uint32_t base = pp->argument_record_count;
+    const bool result = pp_room(pp, out, BUSTER_PP_TEMPLATE_TOKENS);
+    if (result)
+    {
+        memcpy(&pp->argument_records[base], nested->records, (uint64_t)given * sizeof(PPArgument));
+        pp->argument_record_count = base + given;
+        const PPInvocation invocation = {
+            .macro = nested->macro,
+            .history = pp_history_expansion(pp, nested->macro, name.location, name.origin),
+            .arguments = base,
+            .argument_count = given,
+            .name_location = name.location,
+            .name_flags = (uint8_t)(name.flags | pp_name_line(pp, name.flags, name.location)),
+        };
+        if (pp->options.timing)
+        {
+            pp->statistics.invocations += 1;
+            pp->statistics.arguments += given;
+        }
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = invocation.history != 0 ? pp->history[invocation.history - 1].parent : 0;
+        const uint32_t at = out->count;
+        uint8_t trailing;
+        if ((template->pastes | template->strings) != 0)
+        {
+            pp_template_make(pp, template, &pp->argument_records[base], given, &nested->made);
+            if (nested->made.size != 0)
+            {
+                pp_template_write(pp, &invocation, template, 0, 0, out, 0, 0, false, &nested->made, &trailing);
+            }
+            else
+            {
+                trailing = (template->spaces & ~template->pastes) != 0 ? BUSTER_PP_SPACE : 0;
+                pp->history_anchor = template->locations[template->anchor];
+                pp->history_spelling = template->locations[template->spelling];
+            }
+        }
+        else
+        {
+            pp_template_write(pp, &invocation, template, 0, 0, out, 0, 0, false, 0, &trailing);
+        }
+        pp->diagnostic_origin = saved_origin;
+        const uint8_t name_flags = invocation.name_flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE);
+        if (at < out->count)
+        {
+            out->flags[at] = (uint8_t)((out->flags[at] & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags |
+                                       BUSTER_PP_NAME_SPACE);
+            for (uint32_t t = at; t < out->count; t += 1)
+            {
+                const PPMacroId named = out->kinds[t] == C_TOKEN_RAW_IDENTIFIER && !(out->flags[t] & BUSTER_PP_NO_EXPAND) ? pp->macro_of[out->values[t]] : 0;
+                out->flags[t] |= named != 0 && (named == nested->macro || pp->macros[named].disabled != 0) ? BUSTER_PP_NO_EXPAND : 0;
+            }
+            if (pp->options.timing)
+            {
+                pp->statistics.buffer_runs += 1;
+                pp->statistics.buffer_run_tokens += out->count - at;
+            }
+            *pending = (uint8_t)(trailing & ~((trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE : 0));
+        }
+        else
+        {
+            const uint8_t name_space = (name_flags & BUSTER_PP_SPACE) && !(trailing & BUSTER_PP_SPACE) ? BUSTER_PP_NAME_SPACE : 0;
+            *pending |= (uint8_t)((name_flags & ~(name_space != 0 ? 0 : BUSTER_PP_NAME_LINE)) | trailing | name_space);
+        }
+        pp->argument_record_count = base;
+    }
+    return result;
+}
+
+// Whether every enabled macro that tokens [begin, end) of pp->arguments name is a direct object (pp_direct_object) or opens
+// an invocation pp_nested_invocation takes: then the argument's expansion is its tokens with each such name replaced by
+// its body, or with each invocation replaced by its expansion, which names no macro that expands. Each invocation's plan
+// is kept in pp->nested (BUSTER_PP_NESTED_PLANS of them for one invocation's arguments).
+static bool pp_argument_in_place(Preprocessor* pp, uint32_t begin, uint32_t end)
 {
     bool result = true;
     for (uint32_t i = begin; result && i < end; i += 1)
@@ -9396,52 +9997,90 @@ static bool pp_direct_argument(const Preprocessor* pp, uint32_t begin, uint32_t 
         const IdentId id = pp->arguments.values[i];
         const bool name = pp->arguments.kinds[i] == C_TOKEN_RAW_IDENTIFIER && !(pp->arguments.flags[i] & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, id) &&
                           pp->macros[pp->macro_of[id]].disabled == 0;
-        result = !name || pp_direct_object(pp, &pp->macros[pp->macro_of[id]]);
+        if (name && (pp->macros[pp->macro_of[id]].flags & BUSTER_PP_MACRO_FUNCTION))
+        {
+            result = pp->nested_count < BUSTER_PP_NESTED_PLANS && pp_nested_invocation(pp, i, end, &pp->nested[pp->nested_count]);
+            i = result ? pp->nested[pp->nested_count].close : i;
+            pp->nested_count += result;
+        }
+        else
+        {
+            result = !name || pp_direct_object(pp, &pp->macros[pp->macro_of[id]]);
+        }
     }
     return result;
 }
 
-// An argument that pp_direct_argument takes, expanded as the main loop expands it behind its barrier, at the end of
+// An argument that pp_argument_in_place takes, expanded as the main loop expands it behind its barrier, at the end of
 // pp->arguments, which the argument's record then names: its runs of other tokens copied (pp_step_buffer's, but for
 // their names of disabled macros, which the main loop paints there and the expansion's rescan or pp_emit_simple paints
-// as surely, as pp_finish_simple leaves the arguments that need no expansion), and each direct object's body in its
-// name's place under an expansion record of its own, its first token with the name's flags (pp_expand_object's direct
-// expansion). With the statistics the main loop counts: a buffer run where the argument starts and after each name it
-// expands, while tokens are left. Returns false, after a fatal error, if there is no room.
-static bool pp_expand_direct_argument(Preprocessor* pp, PPArgument* argument)
+// as surely, as pp_finish_simple leaves the arguments that need no expansion), each with the flags pending before it on
+// its first token (pp_take_pending_flags), each direct object's body in its name's place under an expansion record of its
+// own, its first token with the name's flags (pp_expand_object's direct expansion), and each invocation's expansion in
+// its place (pp_expand_nested). With the statistics the main loop counts: a buffer run where the argument starts and
+// after each name it expands and each invocation, while tokens are left. Returns false, after a fatal error, if there is
+// no room.
+static bool pp_expand_argument_in_place(Preprocessor* pp, PPArgument* argument)
 {
     PPTokens* out = &pp->arguments;
     const uint32_t begin = out->count;
     uint64_t runs = 1;
     uint64_t copied = 0;
     uint32_t run = argument->raw_begin;
+    uint8_t pending = 0;
     bool result = true;
     for (uint32_t i = argument->raw_begin; result && i < argument->raw_end; i += 1)
     {
-        const PPToken token = pp_stack_token(out, i);
+        PPToken token = pp_stack_token(out, i);
         const PPMacroId id = token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) ? pp->macro_of[token.value] : 0;
         if (id != 0 && pp->macros[id].disabled == 0)
         {
             const PPMacro* macro = &pp->macros[id];
+            const uint32_t first = out->count;
             result = pp_append_stack_tokens(pp, out, out, run, i);
-            copied += i - run;
-            const uint32_t saved_history = pp->history_current;
-            pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
-            const uint32_t at = out->count;
-            result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
-            pp->history_current = saved_history;
-            if (result)
+            if (result && pending != 0 && run < i)
             {
-                const uint8_t name_flags = (uint8_t)((token.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, token.flags, token.location));
-                uint8_t* flags = &out->flags[at];
-                *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
-                pp->statistics.direct_expansions += pp->options.timing;
+                out->flags[first] = pp_with_pending(out->flags[first], pending, false);
+                pending = 0;
             }
-            runs += i + 1 < argument->raw_end;
-            run = i + 1;
+            copied += i - run;
+            token.flags = pending != 0 ? pp_with_pending(token.flags, pending, false) : token.flags;
+            pending = 0;
+            if (macro->flags & BUSTER_PP_MACRO_FUNCTION)
+            {
+                // pp_argument_in_place planned it, and nothing its plan reads has changed since.
+                PPNested* nested = &pp->nested[pp->nested_taken];
+                pp->nested_taken += 1;
+                result = result && pp_expand_nested(pp, nested, token, &pending);
+                runs += nested->close + 1 < argument->raw_end;
+                run = nested->close + 1;
+                i = nested->close;
+            }
+            else
+            {
+                const uint32_t saved_history = pp->history_current;
+                pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
+                const uint32_t at = out->count;
+                result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
+                pp->history_current = saved_history;
+                if (result)
+                {
+                    const uint8_t name_flags = (uint8_t)((token.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, token.flags, token.location));
+                    uint8_t* flags = &out->flags[at];
+                    *flags = (uint8_t)((*flags & ~(BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE | BUSTER_PP_NAME_LINE)) | name_flags | BUSTER_PP_NAME_SPACE);
+                    pp->statistics.direct_expansions += pp->options.timing;
+                }
+                runs += i + 1 < argument->raw_end;
+                run = i + 1;
+            }
         }
     }
+    const uint32_t first = out->count;
     result = result && pp_append_stack_tokens(pp, out, out, run, argument->raw_end);
+    if (result && pending != 0 && run < argument->raw_end)
+    {
+        out->flags[first] = pp_with_pending(out->flags[first], pending, false);
+    }
     copied += argument->raw_end - run;
     argument->raw_begin = begin;
     argument->raw_end = out->count;
@@ -9454,10 +10093,12 @@ static bool pp_expand_direct_argument(Preprocessor* pp, PPArgument* argument)
     return result;
 }
 
+// Finishes an invocation pp_collect_arguments collected, as pp_close_invocation, pp_continue_invocation and
 // pp_finish_invocation would, when that is simple: a BUSTER_PP_MACRO_SIMPLE macro, or one whose template has ## and #
 // and plans the invocation (pp_plan_operators), given as many arguments as it takes, none of the ones it expands naming
-// an enabled macro (so each is its own expansion) but, for a simple macro, direct objects, whose bodies take their names'
-// places (pp_expand_direct_argument), read while no stream or capture with a limit is open. Then it isn't
+// an enabled macro (so each is its own expansion) but, for a simple macro, direct objects and invocations of templates
+// whose expansions name no macro that expands, which take their places (pp_expand_argument_in_place), read while no
+// stream or capture with a limit is open. Then it isn't
 // pushed on the invocation stack: its expansion is substituted at once (pp_substitute_simple, pp_finish_operators) and
 // pushed as a buffer, or written straight into the output. Returns false, having changed nothing, when the invocation
 // isn't simple. (Copying an expansion that names no macro straight to the target, rather than pushing it, saved 75
@@ -9477,13 +10118,16 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
     bool result = ((macro->flags & BUSTER_PP_MACRO_SIMPLE) || operators) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal &&
                   count + omitted == macro->parameter_count && pp->argument_record_count < BUSTER_PP_MAX_STACK_TOKENS;
     const PPItem* order = pp->items + macro->items_begin + macro->item_count;
-    // The arguments to expand in place, by their places in the order (a macro expands at most 64 so).
+    // The arguments to expand in place, by their places in the order (a macro expands at most 64 so), and the plans of
+    // the invocations in them.
     uint64_t direct = 0;
+    pp->nested_count = 0;
+    pp->nested_taken = 0;
     for (uint32_t k = 0; result && k < macro->order_count; k += 1)
     {
         const uint32_t parameter = order[k].parameter;
         const bool needs = parameter < count && pp_needs_expansion(pp, &pp->arguments, records[parameter].raw_begin, records[parameter].raw_end);
-        const bool expands = needs && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && k < 64 && pp_direct_argument(pp, records[parameter].raw_begin, records[parameter].raw_end);
+        const bool expands = needs && (macro->flags & BUSTER_PP_MACRO_SIMPLE) && k < 64 && pp_argument_in_place(pp, records[parameter].raw_begin, records[parameter].raw_end);
         result = !needs || expands;
         direct |= expands ? 1ull << k : 0;
     }
@@ -9510,7 +10154,7 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
         // In the order the general path expands them in (pp_continue_invocation's), each record then naming its expansion.
         for (uint64_t pending = direct; pending != 0 && !pp->fatal; pending &= pending - 1)
         {
-            pp_expand_direct_argument(pp, &records[order[__builtin_ctzll(pending)].parameter]);
+            pp_expand_argument_in_place(pp, &records[order[__builtin_ctzll(pending)].parameter]);
         }
         if (pp->fatal)
         {
@@ -9769,8 +10413,9 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
     }
     valid = valid && pp_new_argument(pp);
-    const bool collected = valid && pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count);
-    const bool finished = collected && pp_finish_simple(pp, &invocation);
+    const bool collected = valid && (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
+                                    (pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count)));
+    const bool finished = collected && pp->vectorized && pp_finish_simple(pp, &invocation);
     valid = valid && !finished;
     if (valid && !collected)
     {
@@ -16871,6 +17516,7 @@ static void pp_release_unit(Preprocessor* pp)
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
     pp_tokens_release(&pp->expansions);
+    arena_release(&pp->argument_link_arena);
     // The cache's records own the files' mappings, and a unit's own cache is in its arena.
     if (pp->owns_cache)
     {
@@ -19215,12 +19861,16 @@ static void pp_clang_remove_links(const char* links)
 }
 
 // What --buster-headers searches after buster's directory `ours`, for clang: a new directory, made from the template
-// `links` (mkdtemp's, which gives it its name), with a link to each entry of clang's resource directory that `ours`
-// hasn't. Returns whether it made it; if not, it leaves nothing.
+// `links` (mkdtemp's, which gives it its name, where it ends in XXXXXX, and otherwise the name itself: a test's, in a
+// directory of its own, whose clang runs the oracle cache keeps only when their arguments are the same from one test
+// run to the next), with a link to each entry of clang's resource directory that `ours` hasn't. Returns whether it made
+// it; if not, it leaves nothing.
 static bool pp_clang_fallback_links(const char* ours, char* links)
 {
     char resource[PATH_MAX];
-    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && mkdtemp(links) != 0;
+    const size_t length = strlen(links);
+    const bool template = length >= 6 && strcmp(links + length - 6, "XXXXXX") == 0;
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && (template ? mkdtemp(links) != 0 : mkdir(links, 0700) == 0);
     DIR* directory = made ? opendir(resource) : 0;
     bool result = directory != 0;
     for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
@@ -19269,8 +19919,8 @@ static bool pp_option_takes_value(const char* argument)
 // directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
 // (whose decisions, by identity and a system directory over a user's, clang's links would hide from it) with its
 // option, -iquote, -I, -isystem or -idirafter, and in clang's resource directory's place, when it is kept, a new
-// directory of links made from the template `links` (pp_clang_fallback_links, with buster's directory in `ours`,
-// PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
+// directory of links made from `links`, a template or a name (pp_clang_fallback_links, with buster's directory in
+// `ours`, PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
 // /usr/include, after the -isystem ones, as ours has them. `*linked` says whether the links were made, for
 // pp_clang_remove_links.
 static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* options, int count, char** arguments, char* ours, char* links, bool* linked, int* clang_count)

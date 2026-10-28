@@ -121,13 +121,18 @@ struct CheckRegionProof
 struct CheckGraph
 {
     // Every column has count logical entries. Operands are earlier nodes or BUSTER_CHECK_NONE. Arrays are not
-    // padded; optional columns may be null. VALUE uses leaves[node]. Other nodes use types/member as action data.
+    // padded; optional columns may be null. VALUE uses its leaf (check_graph_leaf_of). Other nodes use types/member as
+    // action data.
     CheckOp* ops;
     uint32_t* tokens;
     uint32_t* operand0;
     uint32_t* operand1;
     uint32_t* operand2;
+    // The VALUE nodes' values, leaf_count of them in node order: a VALUE node's is leaves[leaf_slots[node]], and every
+    // other node's slot is BUSTER_CHECK_NONE. Only a VALUE node reads a value, and in a column of every node's the 96
+    // bytes of the others' were most of the graph's memory (#572).
     CheckValue* leaves;
+    uint32_t* leaf_slots;
     TypeId* types;
     uint32_t* members;
     uint8_t* contexts;
@@ -150,6 +155,7 @@ struct CheckGraph
     uint32_t extensions;
     uint32_t count;
     uint32_t capacity;
+    uint32_t leaf_count;
     // CALL's arguments are contiguous, disjoint slices appended to argument_nodes in call postorder, consuming
     // argument_count entries exactly; offsets/counts have count logical entries. Argument nodes are earlier than
     // their call. The callee is operand0; operand1 and operand2 are absent. Each argument owns its conversion slot.
@@ -441,6 +447,9 @@ struct CheckStream
     CheckDiagnostic* diagnostics;
     // The operand each diagnostic names, as CheckActionResult.diagnostic_operand has it (a CALL's argument i is 1 + i).
     uint32_t* diagnostic_operands;
+    // A MEMBER or ARROW node's member's offset in bits from its record's start (CheckActionResult.member_offset), which
+    // the lowering takes rather than looking the member up again (#591); 0 for every other node.
+    uint64_t* member_offsets;
     uint32_t* warnings;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
@@ -485,6 +494,12 @@ struct CheckOptions
     uint32_t batch_size;
 };
 
+// A VALUE node's leaf (CheckGraph.leaves).
+static CheckValue* check_graph_leaf_of(const CheckGraph* graph, uint32_t node)
+{
+    return graph->leaves + graph->leaf_slots[node];
+}
+
 #include "c_check_builtin_graph_metadata.c"
 
 static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t capacity, uint32_t argument_capacity);
@@ -504,13 +519,14 @@ static bool check_graph_initialize(CheckGraph* graph, Arena* arena, uint32_t cap
         graph->operand1 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->operand2 = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->leaves = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, capacity);
+        graph->leaf_slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->types = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, capacity);
         graph->members = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity);
         graph->source_positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->argument_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
         graph->argument_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity);
-        result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaves != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
+        result = graph->ops != 0 && graph->tokens != 0 && graph->operand0 != 0 && graph->operand1 != 0 && graph->operand2 != 0 && graph->leaves != 0 && graph->leaf_slots != 0 && graph->types != 0 && graph->members != 0 && graph->contexts != 0 && graph->source_positions != 0 && graph->argument_offsets != 0 && graph->argument_counts != 0;
     }
     if (result && argument_capacity != 0)
     {
@@ -541,7 +557,14 @@ static uint32_t check_graph_add(CheckGraph* graph, CheckOp op, uint32_t token, u
         graph->operand0[node] = operand0;
         graph->operand1[node] = operand1;
         graph->operand2[node] = operand2;
-        graph->leaves[node] = (CheckValue){ 0 };
+        // A VALUE node takes the next leaf, cleared for its maker to fill.
+        const bool leaf = op == CHECK_OP_VALUE;
+        graph->leaf_slots[node] = leaf ? graph->leaf_count : BUSTER_CHECK_NONE;
+        if (leaf)
+        {
+            graph->leaves[graph->leaf_count] = (CheckValue){ 0 };
+            graph->leaf_count += 1;
+        }
         graph->types[node] = 0;
         graph->members[node] = 0;
         graph->contexts[node] = 0;
@@ -684,7 +707,7 @@ static bool check_graph_pure(const CheckGraph* graph, uint32_t node, const uint8
     bool result = false;
     if (op == CHECK_OP_VALUE)
     {
-        result = graph->leaves != 0 && graph->leaves[node].overload_head == 0 && check_graph_builtin(graph->leaves[node].type);
+        result = graph->leaves != 0 && check_graph_leaf_of(graph, node)->overload_head == 0 && check_graph_builtin(check_graph_leaf_of(graph, node)->type);
     }
     else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
     {
@@ -725,6 +748,7 @@ struct CheckGraphValidation
     uint32_t vectors;
     uint32_t x86;
     uint32_t overloads;
+    uint32_t leaves;
     // The blocks check_graph_validate_vector decided itself, without the exact path (0 on that path).
     uint32_t vector_blocks;
 };
@@ -813,10 +837,12 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
     {
         result = result && (i < arity ? operands[i] < node : operands[i] == BUSTER_CHECK_NONE);
     }
-    result = result && (op != CHECK_OP_VALUE || graph->leaves != 0);
+    // A VALUE node's leaf is the next one, and every other node has none.
+    const uint32_t slot = graph->leaf_slots != 0 ? graph->leaf_slots[node] : BUSTER_CHECK_NONE;
+    result = result && (op == CHECK_OP_VALUE ? graph->leaves != 0 && slot == state->leaves && slot < graph->leaf_count : slot == BUSTER_CHECK_NONE);
     if (result && op == CHECK_OP_VALUE)
     {
-        result = graph->leaves[node].overload_head <= graph->overload_candidate_count;
+        result = graph->leaves[slot].overload_head <= graph->overload_candidate_count;
     }
     result = result && (op != CHECK_OP_STATEMENT_VALUE || graph->members == 0 || (graph->members[node] & ~BUSTER_CHECK_SIDE_EFFECT) == 0);
     result = result && ((op != CHECK_OP_VLA_BOUND && op != CHECK_OP_VLA_EXTENT) || (graph->members != NULL && graph->members[node] != 0));
@@ -883,6 +909,7 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
         state->maximum_effects += op == CHECK_OP_BUILTIN_OVERFLOW;
         state->arguments += varargs ? 0 : count;
         state->varargs += varargs;
+        state->leaves += op == CHECK_OP_VALUE;
         state->builtins[0] += op == CHECK_OP_BUILTIN_MISC;
         state->builtins[1] += op == CHECK_OP_BUILTIN_FLOAT;
         state->builtins[2] += op == CHECK_OP_BUILTIN_QUERY;
@@ -897,7 +924,8 @@ static bool check_graph_validate_node(const CheckGraph* graph, uint32_t node, ui
 static bool check_graph_validate_consumed(const CheckGraph* graph, const CheckGraphValidation* state)
 {
     return state->arguments == graph->argument_count && state->varargs == graph->varargs_count && state->builtin_calls == graph->builtin_count &&
-           state->vectors == graph->vector_member_count && state->x86 == graph->x86_count && state->overloads == graph->overload_count;
+           state->vectors == graph->vector_member_count && state->x86 == graph->x86_count && state->overloads == graph->overload_count &&
+           state->leaves == graph->leaf_count;
 }
 
 // The scalar twin of check_graph_validate_vector: every node in order, up to the first invalid one, which `failed` names.
@@ -956,18 +984,26 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
     const __m512i none = _mm512_set1_epi32((int)BUSTER_CHECK_NONE);
     const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
     const __m512i ops = _mm512_loadu_si512(graph->ops + node);
-    // A leaf's overload head, and whether a region may reorder it: first, while little else is live, since each leaf is two
-    // cache lines of its record and these are most of the block's time.
+    // A leaf's slot, the next one's, its overload head, and whether a region may reorder it: first, while little else is
+    // live, since each leaf is two cache lines of its record and these are most of the block's time.
     const __mmask16 leaves = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VALUE));
-    const bool readable = graph->leaves != 0;
+    const bool readable = graph->leaves != 0 && graph->leaf_slots != 0;
     bool heads = true;
     uint32_t reorderable_leaves = 0;
+    uint32_t expected = state->leaves;
     for (uint32_t lanes = readable ? leaves : 0; lanes != 0; lanes &= lanes - 1)
     {
         const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
-        const CheckValue* leaf = graph->leaves + node + lane;
-        heads &= leaf->overload_head <= graph->overload_candidate_count;
-        reorderable_leaves |= (uint32_t)(leaf->overload_head == 0 && check_graph_builtin(leaf->type)) << lane;
+        const uint32_t slot = graph->leaf_slots[node + lane];
+        const bool next = slot == expected && slot < graph->leaf_count;
+        heads &= next;
+        expected += 1;
+        if (next)
+        {
+            const CheckValue* leaf = graph->leaves + slot;
+            heads &= leaf->overload_head <= graph->overload_candidate_count;
+            reorderable_leaves |= (uint32_t)(leaf->overload_head == 0 && check_graph_builtin(leaf->type)) << lane;
+        }
     }
     const __m512i requested = _mm512_loadu_si512(graph->types + node);
     const __m512i offsets = _mm512_loadu_si512(graph->argument_offsets + node);
@@ -994,6 +1030,10 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
         valid &= _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(graph->source_positions + node), none);
     }
     valid &= readable ? (__mmask16)0xffff : (__mmask16)~leaves;
+    if (graph->leaf_slots != 0)
+    {
+        valid &= leaves | _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(graph->leaf_slots + node), none);
+    }
     valid &= (__mmask16)~_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_STATEMENT_VALUE)) | _mm512_testn_epi32_mask(members, _mm512_set1_epi32((int)~BUSTER_CHECK_SIDE_EFFECT));
     const __mmask16 bounds = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VLA_BOUND)) | _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VLA_EXTENT));
     valid &= (__mmask16)~bounds | _mm512_test_epi32_mask(members, members);
@@ -1065,6 +1105,7 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
         const uint32_t widest = _mm512_reduce_max_epu32(counts);
         state->maximum_arguments = widest > state->maximum_arguments ? widest : state->maximum_arguments;
         state->arguments += (uint32_t)_mm512_reduce_add_epi32(counts);
+        state->leaves += (uint32_t)__builtin_popcount(leaves);
         state->maximum_effects += (uint32_t)__builtin_popcount(_mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)));
         const CheckOp counted[6] =
         {
@@ -1176,7 +1217,7 @@ static void check_graph_action(const CheckGraph* graph, const CheckStream* strea
     }
     if (action->op == CHECK_OP_VALUE)
     {
-        action->operands[0] = graph->leaves[node];
+        action->operands[0] = *check_graph_leaf_of(graph, node);
     }
     if (check_graph_has_arguments(action->op) && graph->argument_counts != 0)
     {
@@ -1199,6 +1240,7 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
     stream->diagnostics[node] = result->diagnostic;
     stream->diagnostic_operands[node] = result->diagnostic_operand;
     stream->warnings[node] = result->warnings;
+    stream->member_offsets[node] = result->member_offset;
 }
 
 // check_graph_run's marks for the vector scheduler, in its `pure` column: a node a region may reorder (check_graph_pure),
@@ -1210,7 +1252,7 @@ static void check_graph_store(CheckStream* stream, uint32_t node, const CheckAct
 // sqlite3.c's body nodes.
 static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 {
-    return graph->ops[node] == CHECK_OP_VALUE && graph->leaves[node].overload_head == 0;
+    return graph->ops[node] == CHECK_OP_VALUE && check_graph_leaf_of(graph, node)->overload_head == 0;
 }
 
 // Such a leaf's record without its action: what check_graph_scalar_node gives it, which its own leaf decides alone, since a
@@ -1220,12 +1262,13 @@ static bool check_graph_is_leaf(const CheckGraph* graph, uint32_t node)
 // separate pass of leaves would write a second time (on sqlite3.c, a sixth of the graph's time).
 static void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
 {
-    const CheckValue* leaf = graph->leaves + node;
+    const CheckValue* leaf = check_graph_leaf_of(graph, node);
     const bool valid = type_is_valid(types, leaf->type);
     stream->values[node] = valid ? *leaf : (CheckValue){ 0 };
     stream->conversions[node] = (CheckNodeConversions){ .operands = { { .type = leaf->type } } };
     stream->diagnostics[node] = valid ? CHECK_DIAG_NONE : CHECK_DIAG_INVALID_TYPE;
     stream->warnings[node] = 0;
+    stream->member_offsets[node] = 0;
     stream->statistics.vector_nodes += 1;
 }
 
@@ -1883,6 +1926,7 @@ static void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, C
     CheckAction action;
     CheckActionResult result;
     check_graph_action(graph, stream, node, arguments, &action);
+    action.scalar = scalar;
     // Without overload candidates every value's overload head is zero (check_graph_validate checks the leaves', and the
     // actions only preserve their operands'): no call is contextual, and no operand takes an overload (#530).
     const bool overloads = graph->overload_candidate_count != 0;
@@ -2395,6 +2439,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
         stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+        stream->member_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count);
         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
@@ -2411,7 +2456,8 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
         stream->overloads = graph->overload_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadEffect, graph->overload_count) : 0;
         const bool overload_capacity = check_graph_overload_capacity(graph, scratch, &stream->overload_address_capacity, &stream->statistics.scratch_bytes);
         stream->overload_addresses = stream->overload_address_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckOverloadAddressEffect, stream->overload_address_capacity) : 0;
-        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->warnings != 0 &&
+        result = stream->values != 0 && stream->conversions != 0 && stream->diagnostics != 0 && stream->diagnostic_operands != 0 && stream->member_offsets != 0 &&
+                 stream->warnings != 0 &&
                  stream->warning_ignored != 0 && stream->reports != 0 &&
                  (maximum_arguments == 0 || arguments != 0) && (graph->argument_count == 0 || stream->argument_conversions != 0) &&
                  (maximum_effects == 0 || stream->effects != 0) && (graph->varargs_count == 0 || stream->varargs != 0) &&

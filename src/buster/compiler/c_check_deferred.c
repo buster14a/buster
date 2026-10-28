@@ -55,6 +55,7 @@ struct CheckDeferredCut
     uint32_t strings;
     uint32_t regions;
     uint32_t vlas;
+    uint32_t parameter_vla_begin;
     uint32_t asms;
     uint32_t varargs;
     uint32_t constants;
@@ -243,6 +244,7 @@ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
             .strings = reader->output->string_count,
             .regions = reader->output->region_count,
             .vlas = reader->output->vla_count,
+            .parameter_vla_begin = reader->parameter_vla_begin,
             .asms = reader->output->asm_count,
             .varargs = reader->vararg_count,
             .constants = reader->cached_constant_count,
@@ -296,6 +298,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     reader->scratch = &lane->scratch;
     reader->deferred = 0;
     reader->lane = true;
+    // Token columns are shared over disjoint bodies; interval summaries have shared ancestors and must be private.
+    reader->warning_index_ready = false;
+    reader->warning_index = valid ? check_deferred_copy(&lane->output, 0, 0, (uint64_t)reader->warning_index_base * 2, sizeof(uint16_t)) : 0;
+    valid &= reader->warning_index != 0;
     input->deferred_tokens = 0;
     Arena* arena = &lane->output;
     // The top level's events, the lane's own after them.
@@ -526,6 +532,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->function_result = 0;
     reader->function_end = 0;
     reader->function_body = BUSTER_CHECK_NONE;
+    reader->parameter_vla_begin = cut->parameter_vla_begin;
+    reader->parameter_vla_end = cut->vlas;
     reader->specifier_owner = BUSTER_CHECK_NONE;
     reader->specifier_query_depth = 0;
     reader->specifier_pending = false;
@@ -788,6 +796,25 @@ static TypeId check_deferred_type(const TypeReplayPart* part, TypeId type)
 static uint32_t check_deferred_id1(const uint32_t* top, uint32_t top_count, uint32_t base, uint32_t id)
 {
     return id != 0 ? check_deferred_id(top, top_count, base, id - 1) + 1 : 0;
+}
+
+// check_deferred_type and check_deferred_id1 of a token's entry, in place, where it has one: the reader keeps these
+// columns in pages of their own, which take memory only where the walk wrote them (#572), and writing their zeros back
+// would make every page of zeros real.
+static void check_deferred_map_type(TypeId* column, uint32_t token, const TypeReplayPart* part)
+{
+    if (column[token] != 0)
+    {
+        column[token] = type_replay_type(part, column[token]);
+    }
+}
+
+static void check_deferred_map_id1(uint32_t* column, uint32_t token, const uint32_t* top, uint32_t top_count, uint32_t base)
+{
+    if (column[token] != 0)
+    {
+        column[token] = check_deferred_id(top, top_count, base, column[token] - 1) + 1;
+    }
 }
 
 // Merges every body's result into the top level's reader, in source order: whether everything fit and was replayed.
@@ -1109,10 +1136,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         input->declared_types[token] = check_deferred_type(part, input->declared_types[token]);
         reader->query_types[token] = check_deferred_type(part, reader->query_types[token]);
         reader->return_types[token] = check_deferred_type(part, reader->return_types[token]);
-        reader->incomplete_array_types[token] = check_deferred_type(part, reader->incomplete_array_types[token]);
-        reader->selection_types[token] = check_deferred_type(part, reader->selection_types[token]);
-        reader->tag_types[token] = check_deferred_type(part, reader->tag_types[token]);
-        reader->declaration_bases[token] = check_deferred_type(part, reader->declaration_bases[token]);
+        check_deferred_map_type(reader->incomplete_array_types, token, part);
+        check_deferred_map_type(reader->selection_types, token, part);
+        check_deferred_map_type(reader->tag_types, token, part);
+        check_deferred_map_type(reader->declaration_bases, token, part);
         const uint32_t string_base = inside ? string_bases[b] : 0;
         const uint32_t region_base = inside ? region_bases[b] : 0;
         const uint32_t vla_base = inside ? vla_bases[b] : 0;
@@ -1122,12 +1149,12 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         reader->string_ids[token] = reader->string_ids[token] != BUSTER_CHECK_NONE ? check_deferred_id(string_map, top_strings, string_base, reader->string_ids[token]) :
                                     BUSTER_CHECK_NONE;
         input->expression_regions[token] = check_deferred_id1(region_map, top_regions, region_base, input->expression_regions[token]);
-        reader->vla_bounds[token] = check_deferred_id1(vla_map, top_vlas, vla_base, reader->vla_bounds[token]);
-        reader->vla_ends[token] = check_deferred_id1(vla_map, top_vlas, vla_base, reader->vla_ends[token]);
+        check_deferred_map_id1(reader->vla_bounds, token, vla_map, top_vlas, vla_base);
+        check_deferred_map_id1(reader->vla_ends, token, vla_map, top_vlas, vla_base);
         input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
-        reader->vararg_calls[token] = check_deferred_id1(vararg_map, top_varargs, vararg_base, reader->vararg_calls[token]);
-        reader->vararg_types[token] = check_deferred_id1(vararg_map, top_varargs, vararg_base, reader->vararg_types[token]);
-        reader->constant_present[token] = check_deferred_id1(constant_map, top_constants, constant_base, reader->constant_present[token]);
+        check_deferred_map_id1(reader->vararg_calls, token, vararg_map, top_varargs, vararg_base);
+        check_deferred_map_id1(reader->vararg_types, token, vararg_map, top_varargs, vararg_base);
+        check_deferred_map_id1(reader->constant_present, token, constant_map, top_constants, constant_base);
         CheckInputSpecifierJob* job = reader->specifier_finishes[token];
         if (job != 0)
         {
@@ -1400,6 +1427,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
         .parameters = types->parameters.capacity,
         .tags = types->tags.capacity - 1,
         .members = types->members.capacity - 1,
+        .lookups = types->lookup.capacity - 1,
     };
     valid = valid && type_initialize(&deferred->top, &deferred->top_arena, &deferred->top_index_arena, capacity) &&
             type_changes_initialize(&deferred->top_changes, &deferred->top_arena, types->types.capacity + types->tags.capacity * 4, types->parameters.capacity,
@@ -1408,7 +1436,7 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->reason = !valid ? "the deferred reader's own memory" : 0;
     // check_deferred_bodies ends the top level's span, which starts here.
     deferred->top_ns = timing ? check_deferred_now() : 0;
-    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred);
+    bool checked = valid && check_input_run(input, parser, pp, &deferred->top, arena, scratch, true, count, mask, binding_mode, deferred, true);
     deferred->top.changes = 0;
     deferred->unsupported |= !valid;
     deferred->reason = deferred->unsupported && deferred->reason == 0 ? "the top level's walk stopped" : deferred->reason;

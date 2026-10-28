@@ -180,16 +180,80 @@ Nonzero levels and unsupported wide/complex cases remain explicit metadata,
 not fabricated frame addresses or successful generated code.
 
 `c_builtin_misc_lower.c` consumes the already evaluated locals. It expands
-`memcpy`, `memmove`, `memset`, `memcmp` and `strlen` as existing typed byte
-loops, with absolute enclosing-stream branch targets and live-stack
-preservation. Zero-length operations perform no memory accesses. `memmove`
-selects a backward loop for overlapping higher destinations; `memcmp` compares
-unsigned bytes and returns their signed difference. Hints and baseline x86
+`memcpy` through baseline SSE 16-byte `COPY` operations, `memmove` through
+8-byte loads/stores, `memset` through repeated 8-byte integer patterns and `memcmp` through equal 8-byte
+words. Exact byte tails handle the remainder; a differing comparison word
+falls into the unsigned-byte comparison at that word's first byte. A higher
+overlapping move copies backward, loading each whole chunk before storing it.
+All branches have absolute enclosing-stream targets and preserve live values.
+Zero-length operations perform no memory accesses. `memcmp` returns the first
+unsigned-byte difference, independently of the host's integer byte order.
+
+The source producer retains a checked constant size that fits a `uint32_t` in
+`CBuiltinMiscLowerCall.constant_size`, guarded by `constant_size_known`, while
+still evaluating every argument once. Known copies and fills up to 32 bytes
+expand directly. Moves up to 16 bytes load one or two pieces before either
+store, so close overlap is safe in either direction. Comparisons of zero or
+one byte have direct results. Larger constants use the bounded runtime loops;
+no recipe grows with an unbounded source length. Unknown lengths have direct
+zero-, one- and eight-byte paths before loop setup and overlap classification.
+A move's word is loaded before it is stored even on that fast path; it does
+not rely on `COPY`, whose shared-IR contract requires equal or disjoint ranges.
+Known larger sizes omit these small-size tests. The recipe caller supplies
+locals with the usual pointer, size and value classes; size metadata is its
+proof about the converted size local, not a request to skip source effects.
+Only ordinary, fault-free integer rvalues without evaluation or floating
+environment effects supply that proof. A size evaluated under `FENV_ACCESS`
+keeps its runtime rounding behavior even if the checker retains a folded value.
+Queries also keep their separate runtime plan: a query's source proof is not
+used as the memory operation's runtime size.
+
+`strlen` probes its first eight bytes in order with one conditional branch per
+byte, stopping at the first zero. If all eight are nonzero, it starts at the
+next aligned word (rechecking at most seven bytes) and uses the integer
+zero-byte predicate `(x - 0x0101010101010101) & ~x & 0x8080808080808080`.
+Three binary splits locate the first marked byte of the terminating word;
+no target bit-count instruction or byte loop is required. It never reads before
+the string or crosses an unreadable page: x86
+page boundaries are multiples of eight. As with an ordinary library word
+scan, the terminating word may include readable bytes after the terminator;
+this is for ordinary nonvolatile strings, not byte-granular volatile access.
+
+These recipes require no external runtime symbols, optional target feature or
+host AVX-512 output permission. They also apply to explicit `__builtin_` calls
+in freestanding and no-builtin modes; the existing policy for recognizing
+ordinary function names is unchanged. The compiler's masked vector publication
+and scalar publication produce the same typed columns. Hints and baseline x86
 return-address extraction use the documented identity/no-op behavior.
 Dynamic stack allocation and genuine frame addresses remain explicit refusals
 in this adapter. Terminal helpers require a separate terminal source-graph
-path. Byte loops are the scalar memory fallback allowed by the issue; this
-adapter makes no memory-throughput claim.
+path. The native recipe tests retain independent libc comparisons, exact
+guarded tails, every small size across the expansion cutoffs, close overlap in
+both directions, high-bit bytes, and operations through 1 MiB. The checker
+tests also compile and execute source fixtures with retained size proofs and
+argument side effects against Clang.
+
+The [#599 qualification](https://github.com/buster14a/buster-performance/tree/afaf2b45b826e4a20b3bb5970ccb071e2ec5adeb/docs/measurements/memory-builtins-599-2026-10-27)
+compares main `92c025e7` with implementation `f499888c` on the locked 9700X,
+Clang 23.1.1, CPU 2. Dynamic disjoint/equal cases have these medians:
+
+| Operation | 4 KiB before / after, ns | 1 MiB speedup |
+| --- | ---: | ---: |
+| memcpy | 1016.4 / 70.1 | 17.1x |
+| memmove | 1016.6 / 148.5 | 7.4x |
+| memset | 760.4 / 115.4 | 8.0x |
+| memcmp, equal | 1494.8 / 203.7 | 8.0x |
+| strlen | 773.2 / 193.8 | 4.1x |
+
+The eight-byte dynamic copy is 1.62 ns versus 3.06 ns before; known 32-byte
+copies are 1.44 versus 8.23 ns. Empty dynamic copy/compare add about 0.18 ns
+of fixed overhead. The 41-wrapper object grows from 4486 to 6467 bytes of
+text. Compiling the wrappers adds 0.85% instructions; whole SQLite compilation
+is effectively unchanged (146.953 / 146.971 ms, overlapping ranges), with
+about 3 MiB more peak RSS. The record retains libc/Clang references, all
+alignments, overlap and mismatch shapes, code size, compiler cost, identities,
+guarded tests and measurement limits. These are emitted-wrapper measurements;
+they establish neither application-wide gains nor libc parity.
 
 ## Constant and object-bound queries
 

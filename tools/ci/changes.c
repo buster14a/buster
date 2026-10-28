@@ -283,12 +283,12 @@ struct ChangesModule
 
 // Each module's conditioned benchmark samples (`--only`, `--after-scalar`, repeated processes) and the sources they
 // measure under src/buster/compiler/, as ERE alternatives of the file's name without `.c`. Tests (*_test.c) don't
-// change what the samples measure, and don't count: c_check[a-z_]* matched every checker test, so that a pull request
-// that only added fixtures paid the checker's 3 minutes of samples.
+// change what the samples measure, and don't count: c_check[a-z0-9_]* matches every checker test, so that a pull
+// request that only added fixtures paid the checker's 3 minutes of samples.
 static const ChangesModule changes_modules[] = {
     {
         .name = "zen5",
-        .sources = "x86_zen5[a-z_]*",
+        .sources = "x86_zen5[a-z0-9_]*",
     },
     {
         .name = "ssa",
@@ -296,11 +296,11 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "parser_bindings",
-        .sources = "c_parser|c_parser_binding_trace|c_parser_bindings[a-z_]*|c_bindings[a-z_]*",
+        .sources = "c_parser|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
     },
     {
         .name = "environments",
-        .sources = "c_environment[a-z_]*",
+        .sources = "c_environment[a-z0-9_]*",
     },
     {
         .name = "ir",
@@ -312,36 +312,60 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "ir_optimize",
-        .sources = "ir|ir_validate|ir_optimize[a-z_]*",
+        .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*",
     },
     {
         .name = "checker",
-        .sources = "c_check[a-z_]*",
+        .sources = "c_check[a-z0-9_]*",
     },
-    // #336's binding handoff: the reader's retained answers (c_check_binding.c), the events' producers in the reader
+    // #336's binding handoff, the default's samples (direct, alone and after scalar work, by itself and through the
+    // pipeline): the reader's retained answers (c_check_binding.c), the events' producers in the reader
     // (check_input_bind and check_input_resolve in c_check_input.c, the enumerators' and the constant readers':
     // docs/c-check-bindings.md's table), the stack and batch resolvers and the parser's replay that it was chosen
     // over. Its repeated processes took 170 s of every pull request that changed any of the checker's sources, which
     // the plain run measures in every mode.
     {
         .name = "checker_bindings",
-        .sources = "c_check_binding[a-z_]*|c_check_input|c_check_enum_input|c_check_constant|c_bindings[a-z_]*|"
-                   "c_parser_binding_trace|c_parser_bindings[a-z_]*",
+        .sources = "c_check_binding[a-z0-9_]*|c_check_input|c_check_enum_input|c_check_constant|c_bindings[a-z0-9_]*|"
+                   "c_parser_binding_trace|c_parser_bindings[a-z0-9_]*",
     },
+    // The rest of #336's samples, the comparison it chose the default by: every mode on each input, and the old
+    // default (parser-batch) alone and after scalar work. The modes differ only in the handoffs, which only these
+    // sources change: the reader's retained answers and the samples' harness (c_check_binding*.c), the resolvers and
+    // the parser's replay. In a day, 15 of the 23 pull requests' runs that paid all of #336's samples, 142 s, changed
+    // none of these, only the events' producers, whose change the default's samples measure in about 32.
+    {
+        .name = "checker_binding_modes",
+        .sources = "c_check_binding[a-z_]*|c_bindings[a-z_]*|c_parser_binding_trace|c_parser_bindings[a-z_]*",
+    },
+    // #395's -g, each path alone and after scalar work, where the rows' producers or their passes change: what the
+    // source rows add to the emission (benchmark-check-debug's emit pass), and the unit built from the rows it makes
+    // (the build pass: their lines, the rows kept and the sections). The emission and the lowering copy the entries'
+    // tokens out, and Tier 0 writes each entry's first record, so a change to them changes the build pass's input.
     {
         .name = "check_debug",
-        .sources = "c_check_debug[a-z_]*|c_check_program_emit|c_check_program_lower|debug|tier0",
+        .sources = "c_check_debug[a-z0-9_]*|c_check_program_emit|c_check_program_lower|debug|tier0",
+    },
+    // Every pass in the same states (the synthetic raw rows, their lines and the rows kept, besides the two above),
+    // where the rows' own passes change: c_check_debug.c's code and debug.c's. Every pass's samples took 22 s, most of
+    // it 200 ms of scalar work before each of 21 samples of each pass, where the emit and build passes' take about 10;
+    // in a day, 30 of the 39 pull requests' runs that paid them changed neither file, only the emission, the lowering
+    // or Tier 0.
+    {
+        .name = "check_debug_rows",
+        .sources = "c_check_debug[a-z_]*|debug",
     },
     {
         .name = "files",
-        .sources = "c_files[a-z_]*",
+        .sources = "c_files[a-z0-9_]*",
     },
     // #518's attribution of sqlite3.c's compile: the driver's stage clock, the places that mark its stages (the driver
     // and the emission) and measure-compile, which time the whole compiler, the same for every pull request but one
     // that changes how it is timed. The daily run measures main.
     {
         .name = "compile_time",
-        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|compile_measure",
+        .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
+                   "compile_measure",
     },
 };
 
@@ -361,11 +385,19 @@ struct ChangesBenchmark
 // The plain benchmarks, by the name their commands take after benchmark- or measure-, in strcmp's order (the
 // self-test checks it): each runs where `contains(env.MEASURE, ',NAME,')`, on a pull request that changes what it
 // measures or its own step, and on every push.
+//
+// The `sources` of main.c's units' benchmarks were checked against the units' LLVM IR on 2026-10-28 (#679): from each
+// benchmark's command, every function and variable that a function's body or a variable's initializer names, in its
+// unit and through the homes' entry points into theirs, reaches functions only in files its list names. Twelve lists
+// had missed some: `[a-z_]*` matched no digit (c_check_x86_input.c, unwind_tier0.c), and the emission reaches the
+// inline assembler, binding's room and the unwinder, checking the type table's transparent queries, the preprocessor
+// its history and the builtin catalog, the streamed output branch sizing, and foreign debug sections zlib. The lists
+// still name files their benchmarks don't reach (most of them tests); those only cost a run.
 static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
-        .sources = "assembler[a-z_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
-                   "object_writer|x86_64_encoder|x86_match|x86_target[a-z_]*",
+        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
+                   "object_writer|x86_64_encoder|x86_match|x86_target[a-z0-9_]*",
     },
     {
         .name = "backend",
@@ -373,10 +405,11 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "backend-source",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
-                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
-                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|lane|"
-                   "x86_64_encoder|x86_semantics|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "branch_sizing|unwind[a-z0-9_]*|debug|link|lane|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
+                   "x86_match|assembler[a-z0-9_]*|object_writer|bind|import|runtime",
     },
     {
         .name = "bind",
@@ -392,17 +425,19 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "check-debug",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|"
-                   "c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|branch_sizing|"
-                   "calling_convention|debug|foreign_test|lane|link|object_writer|tier0|x86_64_encoder|x86_semantics|"
-                   "x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|branch_sizing|calling_convention|debug|foreign_test|lane|link|object_writer|"
+                   "object_writer_test|tier0|unwind[a-z0-9_]*|x86_64_encoder|x86_semantics|x86_target[a-z0-9_]*|"
+                   "x86_match|assembler[a-z0-9_]*|bind|import|runtime",
     },
     {
         .name = "check-lanes",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
-                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
-                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|"
-                   "object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
+                   "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
     {
         .name = "checker",
@@ -410,21 +445,24 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "checker-bindings",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|"
-                   "c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|"
-                   "bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|"
-                   "c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|"
-                   "bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|c_lowering|"
-                   "c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|preprocessor_fuzz[a-z_]*|"
-                   "bind|dynamic|executable|import|lane|link|object_writer|runtime|snapshot|x86_64_encoder|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "dataflow",
@@ -432,11 +470,11 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "debug",
-        .sources = "debug[a-z_]*|lane",
+        .sources = "debug[a-z0-9_]*|lane",
     },
     {
         .name = "environments",
-        .sources = "c_bindings[a-z_]*|c_environment[a-z_]*|c_types[a-z_]*|lane",
+        .sources = "c_bindings[a-z0-9_]*|c_environment[a-z0-9_]*|c_types[a-z0-9_]*|lane",
     },
     {
         .name = "executable",
@@ -452,13 +490,14 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "foreign-strings",
-        .sources = "foreign[a-z_]*|bind[a-z_]*|dynamic[a-z_]*|executable[a-z_]*|import[a-z_]*|link[a-z_]*|"
-                   "object_writer[a-z_]*|runtime|c_lexer[a-z_]*|lane|x86_64_encoder[a-z_]*",
+        .sources = "foreign[a-z0-9_]*|bind[a-z0-9_]*|dynamic[a-z0-9_]*|executable[a-z0-9_]*|import[a-z0-9_]*|"
+                   "link[a-z0-9_]*|object_writer[a-z0-9_]*|runtime|c_lexer[a-z0-9_]*|lane|x86_64_encoder[a-z0-9_]*|"
+                   "inflate",
     },
     {
         .name = "gnu",
-        .sources = "c_bindings|c_gnu[a-z_]*|c_intern|c_lexer[a-z_]*|c_parser|c_parser_binding_trace|c_predefines|"
-                   "c_preprocessor|c_refine|lane|x86_target",
+        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser|c_parser_binding_trace|"
+                   "c_predefines|c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "import",
@@ -470,8 +509,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "ir-lowering",
-        .sources = "ir|ir_validate|ir_benchmark|ir_lower[a-z_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z_]*|c_types|"
-                   "calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics",
+        .sources = "ir|ir_validate|ir_benchmark|ir_lower[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|tier0[a-z0-9_]*|"
+                   "c_types|calling_convention|link|object_writer|lane|x86_64_encoder|x86_semantics",
     },
     {
         .name = "ir-optimize",
@@ -479,7 +518,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "ir-optimize-passes",
-        .sources = "ir|ir_validate|ir_optimize[a-z_]*|ssa|ssa_ir|dataflow|dominators|lane",
+        .sources = "ir|ir_validate|ir_optimize[a-z0-9_]*|ssa|ssa_ir|dataflow|dominators|lane",
     },
     {
         .name = "lanes",
@@ -495,14 +534,15 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "lowering",
-        .sources = "c_lowering[a-z_]*|lane",
+        .sources = "c_lowering[a-z0-9_]*|lane",
     },
     {
         .name = "lowering-source",
-        .sources = "c_check[a-z_]*|c_builtin[a-z_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z_]*|"
-                   "c_lowering[a-z_]*|c_parser[a-z_]*|c_predefines[a-z_]*|c_preprocessor[a-z_]*|c_refine|c_types|"
-                   "preprocessor_fuzz[a-z_]*|tier0[a-z_]*|calling_convention|branch_sizing|unwind[a-z_]*|debug|link|"
-                   "object_writer|import|lane|x86_64_encoder|x86_semantics|x86_target",
+        .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
+                   "c_lowering[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|"
+                   "c_types|c_types_transparent|preprocessor_fuzz[a-z0-9_]*|tier0[a-z0-9_]*|calling_convention|"
+                   "branch_sizing|unwind[a-z0-9_]*|debug|link|object_writer|import|lane|x86_64_encoder|x86_semantics|"
+                   "x86_target[a-z0-9_]*|x86_match|assembler[a-z0-9_]*|bind|runtime",
     },
     {
         .name = "object-writer",
@@ -514,8 +554,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "parser-bindings",
-        .sources = "c_bindings[a-z_]*|c_gnu|c_intern|c_lexer[a-z_]*|c_parser[a-z_]*|c_predefines|c_preprocessor|"
-                   "c_refine|lane|x86_target",
+        .sources = "c_bindings[a-z0-9_]*|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines|"
+                   "c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "preprocessor",
@@ -523,8 +563,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "preprocessor-fuzz",
-        .sources = "preprocessor_fuzz[a-z_]*|c_preprocessor[a-z_]*|c_predefines[a-z_]*|c_builtin_catalog|c_intern|"
-                   "c_lexer|c_refine|lane|x86_target",
+        .sources = "preprocessor_fuzz[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_predefines[a-z0-9_]*|c_builtin_catalog|"
+                   "c_intern|c_lexer|c_refine|lane|x86_target",
     },
     {
         .name = "refinement",
@@ -540,8 +580,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "streaming",
-        .sources = "streaming[a-z_]*|unwind[a-z_]*|debug|executable|link[a-z_]*|object_writer[a-z_]*|c_types|"
-                   "calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics",
+        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
+                   "c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
         .name = "types",
@@ -549,8 +589,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "unwind",
-        .sources = "unwind[a-z_]*|debug[a-z_]*|c_types|calling_convention|lane|tier0|tier0_generate|x86_64_encoder|"
-                   "x86_semantics",
+        .sources = "unwind[a-z0-9_]*|debug[a-z0-9_]*|c_types|calling_convention|lane|tier0|tier0_generate|"
+                   "x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
         .name = "x86-disassembler",
@@ -566,7 +606,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "x86-zen5",
-        .sources = "x86_64_encoder|x86_zen5[a-z_]*",
+        .sources = "x86_64_encoder|x86_zen5[a-z0-9_]*",
     },
 };
 
@@ -1448,34 +1488,52 @@ static const ChangesFixture changes_fixtures[] = {
     },
     {
         .name = "a checker test alone starts no conditioned samples, but the plain runs that check the twins",
-        .files = "src/buster/compiler/c_checker_test.c src/buster/compiler/c_check_binding_test.c",
+        .files = "src/buster/compiler/c_checker_test.c src/buster/compiler/c_check_binding_test.c "
+                 "src/buster/compiler/c_check_debug_test.c",
         .outputs_true = "code",
-        .outputs_false = "checker checker_bindings check_debug",
+        .outputs_false = "checker checker_bindings checker_binding_modes check_debug check_debug_rows",
         .measured = "checker-source checker-bindings",
     },
     {
-        .name = "the reader produces the binding events",
+        .name = "the reader produces the binding events: the default handoff's samples, not the modes' comparison",
         .files = "src/buster/compiler/c_check_input.c",
         .outputs_true = "checker checker_bindings",
-        .outputs_false = "parser_bindings check_debug",
+        .outputs_false = "checker_binding_modes parser_bindings check_debug",
         .measured = "checker-bindings checker-deferred lowering-source",
         .unmeasured = "lexer parser",
+    },
+    {
+        .name = "the constant readers produce binding events too",
+        .files = "src/buster/compiler/c_check_constant.c src/buster/compiler/c_check_enum_input.c",
+        .outputs_true = "checker_bindings",
+        .outputs_false = "checker_binding_modes",
     },
     {
         .name = "another checker source runs the checker's samples, not the handoff's",
         .files = "src/buster/compiler/c_check_vla_input.c",
         .outputs_true = "checker",
-        .outputs_false = "checker_bindings",
+        .outputs_false = "checker_bindings checker_binding_modes",
     },
     {
         .name = "the binding handoff itself",
         .files = "src/buster/compiler/c_check_binding.c",
-        .outputs_true = "checker checker_bindings",
+        .outputs_true = "checker checker_bindings checker_binding_modes",
+    },
+    {
+        .name = "the handoff samples' harness",
+        .files = "src/buster/compiler/c_check_binding_benchmark.c",
+        .outputs_true = "checker_bindings checker_binding_modes",
+        .measured = "checker-bindings",
+    },
+    {
+        .name = "the resolvers",
+        .files = "src/buster/compiler/c_bindings.c",
+        .outputs_true = "checker_bindings checker_binding_modes parser_bindings",
     },
     {
         .name = "the parser's replay",
         .files = "src/buster/compiler/c_parser_bindings.c",
-        .outputs_true = "checker_bindings parser_bindings",
+        .outputs_true = "checker_bindings checker_binding_modes parser_bindings",
         .outputs_false = "checker",
         .measured = "parser-bindings",
     },
@@ -1547,11 +1605,24 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "files",
     },
     {
-        .name = "the debug rows",
+        .name = "Tier 0 writes the entries' first records: the emit and build passes' -g samples, not every pass's",
         .files = "src/buster/compiler/tier0.c",
         .outputs_true = "check_debug",
-        .outputs_false = "checker",
+        .outputs_false = "check_debug_rows checker",
         .measured = "backend backend-source check-debug",
+    },
+    {
+        .name = "the -g rows' own passes",
+        .files = "src/buster/compiler/c_check_debug.c",
+        .outputs_true = "check_debug check_debug_rows checker",
+        .measured = "check-debug",
+    },
+    {
+        .name = "debug.c's unit",
+        .files = "src/buster/compiler/debug.c",
+        .outputs_true = "check_debug check_debug_rows",
+        .outputs_false = "checker",
+        .measured = "debug",
     },
     {
         .name = "the backend's shared measurement measures both of its benchmarks",
@@ -1574,11 +1645,69 @@ static const ChangesFixture changes_fixtures[] = {
         .name = "the emission's stage marks",
         .files = "src/buster/compiler/c_check_program_emit.c",
         .outputs_true = "code compile_time check_debug",
+        .outputs_false = "check_debug_rows",
+    },
+    {
+        .name = "the expression templates' lowering time",
+        .files = "src/buster/compiler/c_check_program_batch.c",
+        .outputs_true = "code compile_time",
+    },
+    {
+        .name = "the scalar lowering twin's time",
+        .files = "src/buster/compiler/c_check_program_lower.c",
+        .outputs_true = "code compile_time",
     },
     {
         .name = "the compiler's code outside the attribution's sources",
         .files = "src/buster/compiler/tier0.c src/buster/compiler/c_checker_driver_test.c",
         .outputs_false = "compile_time",
+    },
+    {
+        .name = "a checker source with a digit in its name",
+        .files = "src/buster/compiler/c_check_x86_input.c",
+        .outputs_true = "checker",
+        .measured = "checker-source checker-bindings checker-deferred backend-source check-lanes lowering-source "
+                    "check-debug",
+    },
+    {
+        .name = "Tier 0's unwind tables, which the emission and the streamed output write",
+        .files = "src/buster/compiler/unwind_tier0.c",
+        .measured = "streaming unwind backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the streamed output sizes its branches",
+        .files = "src/buster/compiler/branch_sizing.c",
+        .measured = "streaming unwind",
+    },
+    {
+        .name = "the emission's inline assembly",
+        .files = "src/buster/compiler/assembler_words.c",
+        .measured = "backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the emission's link room",
+        .files = "src/buster/compiler/bind.c",
+        .measured = "backend-source check-lanes lowering-source check-debug",
+    },
+    {
+        .name = "the type table's transparent queries, which checking makes",
+        .files = "src/buster/compiler/c_types_transparent.c",
+        .measured = "checker-source checker-bindings checker-deferred backend-source",
+    },
+    {
+        .name = "the preprocessor's history",
+        .files = "src/buster/compiler/c_preprocessor_history.c",
+        .measured = "gnu parser-bindings",
+    },
+    {
+        .name = "the preprocessor's builtin queries",
+        .files = "src/buster/compiler/c_builtin_catalog.c",
+        .measured = "gnu parser-bindings",
+    },
+    {
+        .name = "zlib, which foreign debug sections are read through",
+        .files = "src/buster/compiler/inflate.c",
+        .measured = "foreign-strings",
     },
 };
 

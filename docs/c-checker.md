@@ -282,6 +282,37 @@ expression is refused with its bound, as a statement expression that holds a
 declaration is ("Variable-length arrays" below). A definition in a `typeof` is
 still refused, there as anywhere.
 
+Type-name prototypes check duplicate parameter names with a separate digital
+search tree per prototype (`check_constant_parameter_unique`, #604). A root
+and two child indices per existing parameter record consume interned 32-bit
+names directly, low bit first. Each unequal record fixes another bit, bounding
+an insertion by 32 unequal comparisons, independent of the parameter count.
+Zero names are skipped. Nested and sibling prototypes have independent roots;
+the tree is private to one `check_constant_type` scratch lifetime. It adds no
+allocation or identifier-table initialization. Parameter records grow from
+12 to 20 bytes; the scratch reservation grows by eight bytes per token of the
+bounded type slice. Reordering the part record keeps it at 40 bytes.
+
+The check stays after parameter type adjustment and before reading the next
+parameter, preserving the existing failure order and binding activation.
+The source-order insertions and their dependent bit decisions use scalar
+loads; the full scalar/vector source readers exercise the same membership
+rule. The affected path is declaration-time evaluation, for example
+`enum { N=sizeof(int (*)(int p0,int p1)) };`; a body-level `return sizeof(...)`
+uses the ordinary declarator reader and is a separate, already-linear control.
+
+On the locked 9700X against main `92c025e7`, a 4,096-name prototype takes
+11.27–11.41 ms as a whole `-fsyntax-only` process before this change and
+2.01–2.09 ms afterward (5.46–5.61 times faster); following 100 ms of scalar
+work it improves 5.15–5.33 times. Instructions fall 77.94%. SQLite's timing
+stays within the identical copies' variation; a possible few-percent cost on
+many small prototypes is unresolved. The 4,096-unnamed-parameter control
+uses about 2 MiB more peak RSS, while the named control stays near 31 MiB.
+[The pinned qualification and measurements](https://github.com/buster14a/buster-performance/tree/3e6cd7e2a88ae93b11797050f9fb8806be18ecc9/docs/measurements/prototype-parameter-names-604-2026-10-27)
+include all named/unnamed sizes, source/binary identities, memory costs,
+the passing target suites and the excluded setup run. These are measurements
+of this reader change and its recorded controls, not whole-compiler acceptance.
+
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
 the destination function-pointer type. Initializers, casts, assignments,
@@ -326,6 +357,25 @@ pointer qualification, function calls and their parameter conversions.
 Anonymous member lookup and aggregate
 modifiability use bounded iterative walks, including inherited qualification
 on anonymous members.
+
+Before record layout, `check_input_tag_definition` packs that record's direct
+members for `check_input_record_names` (`c_check_record_input.c`). Direct names
+have already passed the reader's generation-stamped duplicate check. While
+packing, the reader records whether an unnamed non-bit-field member exists and
+skips namespace allocation/validation entirely when none does. An anonymous
+nonrecord still enters the defensive helper and fails as before. Named fields
+introduce only their own name, even when their type contains another record's
+definition. The temporary hash table starts from the direct member count and
+grows geometrically at half occupancy as anonymous fields expose more names.
+Its clearing and rebuilding therefore follow the visited namespace, rather
+than the entire nested token span (#614). The explicit expansion stack starts
+with one local frame and grows only with anonymous depth; the token span still
+bounds that depth. Both scratch structures belong to this validation call and
+restore its arena mark on success, duplicate or allocation failure. Duplicate
+diagnostics retain the later containing direct member; layout receives the
+same packed members. `test-checker` exercises colliding identifier IDs, repeated
+table/stack growth, every scratch byte limit, named versus anonymous nesting,
+and Clang-checked source layouts and first-error lines on both parser paths.
 
 `CheckStream` holds expression results. `CheckProgram` adds checked control
 bracketing, body references and shared object/function identities without
@@ -406,7 +456,7 @@ their arrays need no padding and are accessed only within their counts.
 | `ops` | `count` `CheckOp` entries; one operation per stable node ID. |
 | `operand0`, `operand1`, `operand2` | `count` 32-bit entries each. Used operands are earlier node IDs; absent operands are `BUSTER_CHECK_NONE`. Arity is checked. |
 | `tokens` | Optional `count` 32-bit source-token identities. If absent, diagnostics use node IDs. |
-| `leaves` | `count` `CheckValue` records when value leaves are present. Only `VALUE` reads its leaf record. |
+| `leaves`, `leaf_slots` | `leaf_count` `CheckValue` records, one per `VALUE` node in node order, and `count` 32-bit slots: a `VALUE` node's is its record's index, the next after the previous `VALUE` node's, and every other node's is `BUSTER_CHECK_NONE` (`check_graph_leaf_of`). Only `VALUE` reads a record, so other nodes take none of its 96 bytes (#572). |
 | `types`, `members` | Optional `count` columns containing a requested destination/query `TypeId` or member identifier. A missing column supplies zero. |
 | `contexts` | Optional `count` bytes. The documented bits request an ICE, a true static assertion, or a static initializer. Unknown bits are invalid. |
 | `argument_offsets`, `argument_counts` | Optional `count` 32-bit columns. A call owns a bounded slice of `argument_nodes`; its callee is `operand0`. |
@@ -431,6 +481,24 @@ order, ownership, slice coverage and branch targets before interpreting a
 region. Body extraction includes these dependencies and remaps every retained
 node reference while preserving branch targets within each compacted slice.
 
+Overload declaration lookup uses transient signature buckets keyed separately
+by name and lexical scope, and by name and translation-unit linkage. Each
+fingerprint preserves canonical parameter identity, including nominal tags and
+nested function ABIs, while ignoring alignment sugar and the outer function's
+return type and ABI. Append-only type-DAG fingerprints are computed once per
+type. Eight contiguous bucket keys are compared together, with an exact scalar
+twin; collisions still undergo the original signature and compatibility checks.
+
+Validated redeclarations carry accumulated attributes, definition state and
+canonical object identity. Identical type representatives can then be replaced
+in the transient index. Ordinary declarations recorded before a name becomes
+overloaded must first have their complete history checked. Merely compatible
+return types cannot end that history walk: compatibility of old-style function
+pointers is not transitive. The immutable source candidate chains and captured
+call heads remain intact, so declarations in later or sibling scopes cannot
+change an earlier call. Declaration-only scaling is measured separately from
+call-site overload resolution (#612).
+
 ### Typed output
 
 `CheckStream.count` matches the input graph's count. Operators, source tokens
@@ -445,6 +513,11 @@ columns without renumbering or expanding the graph:
   arithmetic, assignment, explicit-cast or null-pointer conversion flags.
 - `argument_conversions` contains one record for each call-argument slot,
   including prototype conversions and default argument promotions.
+- `member_offsets` stores a `MEMBER` or `ARROW` node's member's offset in bits
+  from its record's start, through anonymous members, as the action's lookup
+  found it (`docs/c-types.md`, "Member lookup"), and 0 for every other node:
+  the lowering takes its member accesses' places from it rather than looking
+  the members up again (#591).
 - `diagnostics` stores the node's constraint diagnostic. `reports` is the
   compact diagnostic list, sorted stably by source token; `report_count` is its
   logical length and never exceeds the node count.
@@ -512,7 +585,8 @@ time (`check_graph_validate_vector`): the operators' classes come from one
 from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
 or a sideband entry goes to `check_graph_validate_node`, the scalar
 validator's step. Most of that validation's time is the leaves' records it
-reads: two cache lines of each 96-byte record. `test-checker` compares the two
+reads: two cache lines of each 96-byte record, which since #572 lie one after
+another, as only `VALUE` nodes have one. `test-checker` compares the two
 validators on random graphs whole, with each rule broken, and with their
 columns ending at `PROT_NONE` pages.
 
@@ -610,6 +684,28 @@ ABS64 fixups with signed byte addends; absolute pointer values remain bytes.
 External targets may remain unresolved. A referenced internal function needs
 its real code atom: standalone data inspection reports that limitation, while
 combined object/data output uses the program's actual symbol space.
+All-zero writes and large clear ranges remain symbolic. For ordinary nonzero
+objects, a bounded proof inspects at most eight final writes for a nonzero
+integer representation untouched by later writes. When the retained byte suffix
+already fits, validation and serialization then run together in source order,
+without a scalar cache or replay. Capacity failures still take the validating
+symbolic path, so an earlier invalid write retains diagnostic precedence.
+Other aggregates validate and encode their scalar writes once before replay. When
+overwrites can remove earlier nonzero bytes, a backwards last-writer walk over
+sorted bit-range boundaries determines the final state; each interval is visited
+once, with scratch proportional to checked writes rather than declared storage.
+Only a surviving nonzero byte or relocation requires an object-sized payload,
+built directly in the unpublished retained suffix. Encoded scalar slots use the widest actual scalar representation in
+that object rather than an unconditional 32-byte slot; CLEAR/BYTES-only objects
+allocate none; mixed plans may retain stride-sized positions for other part kinds.
+Replay releases its cache before the next object is planned,
+retaining only payload and fixups. Zero plans release their unused per-write
+caches as well. Const zero objects keep RODATA and are filled directly during publication;
+negative floating zero is classified by its encoded bytes. The byte-range scan
+has bounded AVX-512 loads and an exact scalar twin, including partial-byte tails;
+both stop after the first nonzero block/byte. Overlap boundaries reuse the existing
+stable scalar/vector radix kernel, sorting both 32-bit halves and skipping
+constant digits on the vector path, with guarded independent ordering tests.
 Initializer plans retain the exact selected overload candidate and object.
 The standalone source bridge refuses a referenced overloadable symbol until
 its ABI symbol name is available, before publishing any Link state. An unused
@@ -623,6 +719,28 @@ data references. The direct initializer API retains its strict rejection
 contract. Diagnostic-only scans borrow complete checked roots, restore both
 arenas and never publish an initializer or a supposedly clean stream.
 
+String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
+index retained in the output arena. Every adjacent literal part names the same
+record. An array-valued expression also resolves its ordinary literal through
+its object identity (`token + 1`), preserving parenthesized string copies;
+predefined function-name arrays remain excluded from literal initialization.
+The planner checks the indexed record's bounds and identity instead of scanning
+all literals for every initializer, including nonstring elements of a record.
+Deferred bodies remap this existing column together with their merged literal
+pool, and corpus comparisons include the retained indices.
+
+Static-assert messages contribute no expression value. The reader's existing
+constant-context pass marks each message span once, after identifying its
+assertion's top-level comma. String operands in the condition remain checked.
+This removes a parser-ancestor walk per string, whose repeated traversal of a
+long initializer's separator chain was quadratic (#593). Both changes consume
+existing reader facts; they add no search pass or per-initializer allocation.
+The parser rejects nonstring message operands before this span is ignored;
+regressions also check a C23 assertion with no message. The retained scaling
+campaign measures the default production path. Scalar/vector semantic checks
+establish equality, while the scalar reference's separate value-chain walks
+remain outside this string-specific scaling claim.
+
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be
 distinct. The lower-level emitter accepts an existing Link and object-to-symbol
@@ -631,6 +749,73 @@ leave its existing Link, bytes and scratch unchanged. The source bridge rolls
 back all its output on failure and validates the completed Link on success.
 Tests pass these atoms through the production ELF writer and independently
 compare bytes, symbol targets and relocation addends with Clang's object files.
+
+Static bit-field writes (`check_data_bit_field_value`, #601) merge only the
+partial boundary bytes and replace each interior byte once. They consume the
+validated integer's low bits, including signed and 128-bit values; an unaligned
+128-bit field can occupy 17 destination bytes. Clears mask the boundaries and
+zero the interior with `memset`, including ranges wider than a scalar. Neither
+helper reads or writes beyond the checked extent, requires padding, or changes
+the source order of overlapping designated writes and union replacements.
+`c_check_data_bit_field_test.c` checks every scalar width and byte offset against
+an independent bitwise reference at guarded allocation edges, larger clears,
+ordered overlapping plans and adjacent relocations. Source fixtures also pass
+packed 128-bit fields and replacements through the ELF writer and Clang.
+
+The locked [9700X comparison for #601](https://github.com/buster14a/buster-performance/tree/960c8cd2fd82c707f89296ef386352e7b28edee5/docs/measurements/static-bitfields-601-2026-10-27)
+compares `92c025e7` with `268c6a85`, Clang 23.1.1, `-O3 -march=native`,
+without debug information, on CPU 2 with one lane. Each whole-process case has
+24 samples per variant, warmed case-specific output files, two fresh tmpfs
+executable copies and a second baseline as its A/A control. Eleven paired
+stage-clock samples measure publication independently of parsing and checking.
+
+For 65,536 records with two 31-bit fields, whole compilation takes
+47.473 → 42.322 ms (10.85% less time), with 13.38% fewer user instructions;
+publication takes 8.535 → 3.423 ms (59.90% less time). For 16,384 packed
+128-bit records, whole time falls 13.37% and publication time 72.19%.
+Peak RSS is essentially unchanged. SQLite and the configured Lua sources'
+whole-time changes lie within their A/A copy ranges; this is no claim of an
+ordinary-corpus, cold-cache or multicore speedup. The record retains all
+identities, commands, raw reports, guarded tests and disassembly, and separates
+an excluded pilot whose shared output file biased some whole-process timings.
+Materialized payloads are constructed directly in an unpublished suffix of
+`bytes`, with no second payload copy when atoms are published. A zero-fill
+candidate releases its suffix; a failed batch restores the original length
+before returning. When the byte arena cannot fit a candidate, temporary scratch
+storage permits its zero-fill classification and exact capacity demand to
+complete; a nonzero payload in that storage can never be published. Scratch
+otherwise holds metadata proportional to objects and initializer references,
+not a second image of every payload. Live input prefixes in either arena remain
+valid throughout planning. Literal pools, non-TLS readonly objects and objects
+with live relocations already determine their section without scanning bytes.
+Other materialized objects use an early-exit 64-byte zero test with bounded
+masked tails. Avoiding materialization of explicit-zero aggregates is separate
+work in [#596](https://github.com/buster14a/buster/issues/596).
+
+For [#600](https://github.com/buster14a/buster/issues/600), the locked 9700X
+comparison of `92c025e7` and `4e21ef63` measured complete single-lane `-c`
+processes, with fixed output files, two executable copies and both build
+orders (36 processes per build/input). The
+[qualification record](https://github.com/buster14a/buster-performance/tree/b9552b4f387d9673dd9e6e55dd4d04d16e51a491/docs/measurements/static-data-600-2026-10-27)
+retains all sizes, counters, arena probes, assembly and correctness evidence.
+
+| 64 MiB object | Before, ms | After, ms | Change |
+| --- | ---: | ---: | ---: |
+| writable array | 27.412 | 22.894 | -16.48% |
+| readonly array | 27.426 | 22.858 | -16.66% |
+| array with one relocation | 27.354 | 22.912 | -16.24% |
+
+A 64 MiB array's emitter scratch peak fell from 64 MiB + 48 bytes to 48
+bytes; readonly/literal/relocation-bearing objects scanned no payload bytes
+for classification. Whole `-c` peak RSS stayed about 149 MiB for the arrays:
+the ELF writer later constructs its complete output image in scratch while
+retained bytes remain live. SQLite's 147.103 to 146.697 ms was within the
+observed spread. The 1 MiB writable median rose by 0.054 ms (+2.46%) with
+overlapping ranges; the explicit-zero control retained its materialization
+and used about 2 MiB more peak RSS. Neither a general small-input speedup nor
+an improvement to #596 is claimed. All nineteen source cases matched the
+baseline's entire object and Clang's data oracle, and the checker, driver,
+Link, object-writer and call-graph qualification groups passed.
 
 ## Backend handoff
 
@@ -665,17 +850,76 @@ What the lowering covers past scalars (#145's programs):
   register as a struct of it would, or from its 8-byte stack slot, which
   Tier 0's prologue copies into the object (an aligned typedef passes as its
   base, so the slot is aligned to 8 alone).
-- **Copies.** Struct and union assignment and initialization are `COPY`s of
-  at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard, and neither
-  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
-  value is used keeps its destination's address in a temporary too, pushed
-  again after the last `COPY`: whatever reads it takes its class from the entry
-  before it, which a `COPY`, of class `VOID`, can't give (#440).
+- **Copies.** Struct and union assignment and initialization up to 256 bytes
+  use one bounded `COPY`. Larger nonvolatile copies use one `memmove` runtime call (#597),
+  through the same symbol publication, ABI assignment and live-value preservation
+  as other runtime calls. The pointers and `size_t` have unsigned long's U64
+  INTEGER ABI on the generated SysV x86-64 target; no new type is created after
+  shared type classification. The call returns the destination when the
+  assignment's value is used, and its return is discarded otherwise. `memmove`
+  permits self-assignment. The number of typed entries and machine records is
+  bounded independently of the object size, so syntax-sized lowering capacities
+  cover this producer's actual demand. Small kept assignments retain the
+  destination in a temporary (#440), because `COPY` itself has class `VOID`.
+  Zero-size copies still evaluate their operands without touching memory.
+  Volatile copies retain the existing inline pieces, including self-assignment's
+  accesses; a library routine may skip copying when its pointers are equal.
+  The producer follows the copied value through comma, conditional, selected
+  and statement expressions, whose lvalue conversions can erase a source's
+  volatile qualifier. Its bounded private worklist borrows unused task storage.
+  A shared type-facts bit also retains volatile subobjects through by-value
+  records, arrays and aligned/atomic wrappers, stopping at pointer pointees.
+  Its memoized nonrecursive preparation visits each type and member edge once;
+  a bounded scalar/vector member scan skips that preparation when no member
+  is volatile. Initializer copies retain the declared destination's qualifiers
+  even when a plan's part type is unqualified. Shape and native regressions
+  cover destination-only volatility, nested volatile arrays, self-copy,
+  initialization/return and nonvolatile pointers to volatile storage.
+  The [9700X comparison](https://github.com/buster14a/buster-performance/blob/3d131b17c8b08bc2688da9c929e26ffea01055d2/docs/measurements/aggregate-copies-597-2026-10-27/README.md)
+  at compiler `03d79f50` records an 8192-byte discarded assignment shrinking
+  from 223 typed entries, 1152 machine records and 6197 text bytes to 6, 11
+  and 43, with hot-buffer runtime 52.659 to 23.647 ns per call. Copies through
+  262144 bytes compile where the baseline exhausts code capacity from 16384;
+  all 18 tested objects through 256 bytes remain byte-identical. Five release
+  test groups pass. There is no demonstrated compile-time gain; 257-byte calls
+  cost more than the old expansion, and the single-placement SQLite control's
+  median increases 0.79% with overlapping ranges. The report preserves these
+  limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
   bytes or value is stored, an aggregate's copied.
+  Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
+  plans use a readonly byte image and one call to the target C library's
+  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  storage is cleared separately. Images with internal holes larger than their
+  payload keep the existing writes, avoiding large readonly zero gaps for sparse
+  initializers. This preserves checked string truncation,
+  embedded NULs, wide characters, designated overrides and local mutability.
+  Pool preparation reads the same immutable by-value volatile-containment facts
+  as aggregate-copy lowering. The unit prepares those facts once before pool
+  planning; each initializer uses one bounded lookup, without a type-sized
+  visited table or graph walk. The many-record regression retains complete
+  prefixes using only 256 bytes of plan scratch despite hundreds of unused
+  types in the unit.
+  A mixed runtime plan retains its ordered parts, pooling an individual string
+  part above the same threshold. Small payloads, volatile parts, bit-fields and
+  values needing address relocations retain their existing lowering. Pools are
+  immutable before function lanes start, have deterministic local symbols, and
+  require no generated ISA beyond the ordinary C runtime call ABI.
+  The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/a1cfed5a9927bcbf4cca3130943efdf3fcd1af7f/docs/measurements/local-initializers-598-2026-10-27)
+  compares `92c025e7` with `b5b679ad`: signed `int[40000]` compiles in
+  18.676 → 15.428 ms without stage clocks (−17.4%), emits 680,026 → 96 bytes
+  of text plus 160,000 bytes of readonly data, and takes 11,929 → 1,275 ns per
+  warm repeated call. Strings above the threshold stay at 100 text bytes,
+  14 typed entries and 24 machine records through 32,769 total bytes.
+  Small objects are byte-identical and their timing differences are below 1%;
+  tiny-input compiler peak RSS rises about 2 MiB, and the frozen SQLite
+  whole-object control is 0.88% slower (same-binary A/A 0.20%). Large baseline
+  string compiles that exhaust code capacity remain failure observations,
+  with no baseline runtime speedup claimed for them. The record includes raw
+  samples, identities, native/Clang scalar/vector checks and source-corpus
+  receipts, including the successful pinned c-testsuite rerun.
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes
@@ -823,6 +1067,28 @@ What the lowering covers past scalars (#145's programs):
   the same way, and so do initializer parts with a bit width. A field whose bits
   are spread over more than 8 bytes (a packed one) is refused.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
+  The source reader's declaration handoff retains the half-open append range
+  of VLA records introduced by its specifiers and declarator. Only that range
+  is associated and given the declaration's scope; reusing a typedef creates
+  no new bound or capture. A suspended `typeof` specifier saves the range's
+  beginning across its source walk. A definition retains its header's range
+  until parameter activation, and deferred-body cuts save it for each lane,
+  whose private record table also contains other headers. The original
+  declaration-token/body filters still exclude nested prototypes. These ranges
+  use scalar indices, require no allocation or padded access, and are empty
+  for declarations without new bounds. One-bound declarations visit one record
+  each instead of all earlier records (#611); the small, ordered span updates
+  retain the existing scalar record layout and stable bound identities.
+  Empty ranges still validate variably modified declarations and retain their
+  jump-scope metadata. In eleven paired fresh-process runs on the locked
+  9700X (CPU 2, one lane), 32,000 one-bound typedef declarations compile in
+  34.744 ms median instead of 249.305 ms, with 507,587,203 user instructions
+  instead of 6,650,980,156. From 16k to 32k, head instructions grow 1.940 times.
+  The SQLite control adds 0.0112% instructions and shows mixed, small timing
+  changes within process/copy variability. The
+  [frozen measurements and target checks](https://github.com/buster14a/buster-performance/blob/b5a850b6171da718b16feb4db341109476e3db19/docs/measurements/vla-record-spans-611-2026-10-27/README.md)
+  record exact sources and limits, five byte-identical baseline/head objects
+  and their stage receipts ([performance PR #27](https://github.com/buster14a/buster-performance/pull/27)).
   The control stream puts a `STACK_SAVE` before each block's first array, an
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
@@ -1098,6 +1364,24 @@ The test command fails if the oracle cannot run. It covers:
   last linked program's takes that program's run: the same files would link
   into the same executable (#465). A program that fails is linked and run, and
   its directory kept with `driver.c` and `oracle.c`.
+- The passes after checking that visit a unit's few records rather than every
+  token (#592), on every program fixture by both paths
+  (`check_test_program_sparse`): `check_data_prepare` against the dense pass it
+  replaced, kept as the test's oracle, record for record, with each object's
+  last declaration (`check_data_latest`) and the static declarations' keys;
+  `check_program_token_body` against the token-sized column of every body's
+  tokens; and the objects `check_program_object_access` finds the unit defines
+  against a walk of every token. `check_init_declarations` runs at every count
+  to 200 and larger ones, ending at `PROT_NONE` pages, beside #442's kernels.
+- The diagnostics' report (`check_driver_reports`, #592) against the walk of
+  every token it replaced, kept as the test's oracle
+  (`check_test_driver_reports` in `c_checker_driver_test.c`): units with
+  warnings of each kind, an error and a fatal error, reported as checked and
+  with their sparse records rewritten at random (constants' and nodes'
+  warnings, floating-point pragmas and packed members' addresses in token order
+  and out of it, the original pragmas apart, reports, the driver's own
+  diagnostics and excess elements, quiet and not). The text, the counts and the
+  fatal flag must be the oracle's by both paths.
 
 The fixtures that ask clang for acceptance and first errors go to it many at a
 time (`parse_test_clang`), split in order among up to eight processes that run
@@ -1150,7 +1434,7 @@ conversions are distinguished from source conversions: `__builtin_assume_aligned
 retains its warning while the ordinary pointer parameters of `__builtin_memcpy`
 can cancel it. The existing diagnostic pragma history controls suppression and
 promotion, and `-w` silences the diagnostic. Source records remain ordered and
-the driver consumes them sparsely without widening its dense warning columns.
+the driver merges them with its sparse warning and report keys.
 
 The rules were checked against LLVM's `SemaChecking.cpp` and `SemaExpr.cpp` at
 `llvmorg-23.1.3`, then probed with external Clang 23.1.4. No LLVM implementation
@@ -1252,6 +1536,21 @@ counts that size its tables, the walk in source order
 (`check_input_expressions`), and the passes after them. #529 cut the work
 they do per token where little of it was per declaration or expression:
 
+- **Attribute arguments (#605).** `check_input_attribute_validate` counts the
+  arguments in one forward delimiter walk, then fills a compact table of the
+  separating commas as it checks their shapes in a second forward walk.
+  Both skip complete parenthesis, bracket and brace groups through the
+  parser's matching-parent links. A validated list of A arguments retains
+  exactly A - 1 `uint32_t` token indices when A > 1, owned by the output
+  arena and shared immutably by attribute copies and merges. Empty and
+  single-argument attributes allocate no boundary table. The existing outer
+  bounds plus those indices give `check_input_attribute_argument` each
+  half-open argument range in constant time, without reading source tokens.
+  Shape validation, the declaration reader, and the constant reader's
+  preparation and evaluation reuse those ranges; numeric operands still
+  evaluate once, in source order. Malformed delimiters fail before a table
+  is published, and allocation failure reports the attribute's original
+  range as a resource error. No token-sized sparse column is added.
 - **Value chains.** The graph's walk gives each token the chain of its
   values, its children's chains joined, and counted the chain by walking each
   child's again. An initializer's separators are each a child of the next, so
@@ -1285,6 +1584,46 @@ they do per token where little of it was per declaration or expression:
   distinct identifier, refuses a name that doesn't start with `__` before it
   scans its catalog, whose names all do (`test-preprocessor` checks it).
 
+Both ordinary and declaration-time `_Generic` readers use the same association
+index (`c_check_generic.c`). Pointers, arrays and atomic wrappers ending at a
+nominal struct or union use that tag as a necessary compatibility key. Other
+types share an ambiguous key: enums and integers, function prototypes,
+transparent-union parameters and the two vector kinds still receive exact
+source-position-aware compatibility checks. Qualifiers and alignment never
+replace those checks. The control's key also filters provably incompatible
+control matches.
+
+The producer appends associations in source order into scratch-owned key and
+type columns. Each hash probe compares sixteen owned keys at once; the scalar
+twin computes the same candidate and empty masks. Equal-key candidates stay in
+insertion order through collisions and wraparound, so the first failing
+association and expression/warning handling keep their existing order. Up to
+eight associations use local storage; larger lists reserve a bounded,
+at-most-half-full table from the token span. Allocation and sizing failures
+propagate as resource failures, and each reader restores its scratch mark.
+The index records exact duplicate and control compatibility-query counts.
+
+For A distinct nominal tags, including pointers to forward-declared tags,
+duplicate validation makes zero compatibility queries; a control with one of
+those keys needs one exact query. Hash probing and input reading remain. This
+is a bounded improvement for the nominal families in #602; a large family
+sharing an ambiguous key can still require quadratic compatibility work.
+`test-checker` compares the index with independent pairwise semantic queries,
+checks source-time transparent unions, guarded groups, collisions, exhaustion
+and the query-count bound, and checks both source readers against Clang.
+
+On the locked 9700X (CPU 2, one lane, six repeated fresh-process samples),
+10,000 pointer associations went from 738.960 to 12.474 ms in an ordinary
+expression and from 785.990 to 58.097 ms in a declaration-time constant.
+Duplicate compatibility queries fell from 49,995,000 to zero in both readers,
+and control queries from 10,000 to one. The complete constant-expression
+compile still grows faster than linearly; this removes its quadratic
+association-compatibility work, without claiming every other operation is
+linear. SQLite's control instructions were effectively unchanged. The
+[source pins, full scaling/RSS/instruction table, exact-query logs and validation](https://github.com/buster14a/buster-performance/blob/b6424ad152a7cdc49ee9d3ca89e66ac850c90dbb/docs/measurements/generic-association-index-602-2026-10-27/README.md)
+retain both record and pointer families, scalar/vector/native equivalence and
+the experiment's limits.
+
 `test-checker` checks every scan, count and syntax bit, by both paths,
 against its own reading of columns of every length to 200 that end at a
 `PROT_NONE` page (`c_check_input_scan_test.c`).
@@ -1305,10 +1644,69 @@ both paths. The scratch the reader writes grew by 3.5 MB (`value_counts` and
 record](https://github.com/buster14a/buster-performance/tree/6929480812d31868d77a515f88ddca3bad408429/docs/measurements/check-input-529-2026-10-27)
 has the scripts, the raw outputs and the trees' manifests.
 
-What is left of the reader's per-token work is in its two walks, each of
-which still reads about ten sparse columns at every token, and in
-`check_input_run`'s fill of 22 columns with `NONE` (#528). Building the
-expression graph data-parallel is the next step for the walks.
+### The walks' visits
+
+The two walks still made their tests at every token: the walk in source
+order, some fifteen columns' at each, though it acts at about a quarter of
+`sqlite3.c`'s tokens, and the expressions' walk its chain of tests, though at
+about a quarter it only writes the token's first value. Each now visits the
+tokens it may act at, and tests there only what may make it act. On SQLite
+3.53.4's `sqlite3.c` (716,380 tokens), the walk in source order visits
+263,473 of them and the expressions' walk 525,518
+(`benchmark-checker-bindings` prints both):
+
+- **The walk in source order** visits the tokens marked in a byte column,
+  `CheckInputReader.visits`, the next marked one found 64 bytes at a time
+  (`check_input_resolve_next`). Two kinds of writes mark them, each with a
+  reason (`BUSTER_CHECK_RESOLVE_*`):
+  - `check_input_count_tokens`' pass marks the tokens whose syntax the walk
+    tests: their roles and kinds, and their successors', looked up 64 at a
+    time in tables of the walk's tests (`check_input_role_tests`,
+    `check_input_kind_tests`, with `vpermi2b`), and the syntax bits;
+  - each write ahead of the walk to a column it tests marks its token
+    (`check_input_visit`): an activation, a scope's end, an initializer's
+    finish, a declarator's or an initializer's start, or a type query's, a
+    designator's or a builtin's operand.
+
+  A visit tests only the columns its marks give reasons for, each read when
+  the walk tests it, after its earlier steps at the token may have marked it.
+- **The expressions' walk** takes each token's classes from a pass before it
+  (`check_input_expression_classes`): whether the walk acts at the token (it
+  has children, its role or kind is one the walk's tests take, by the same
+  tables, or one of seven sparse columns has an entry for it, 16 tokens' at a
+  time), and whether a sparse column does. It skips the tokens it doesn't act
+  at, whose first values, `NONE`, the pass writes, and tests the sparse
+  columns only of the tokens that have an entry.
+- **Deferred bodies** (#113) need no marks of their own: each starts at an
+  `OPEN_BODY`, which the walk tests, and the walk jumps over the body from
+  there. Lanes share the column, each writing only its own body's tokens.
+- **The twins.** The scalar path, `--scalar`, still visits every token and
+  makes every test. At each token it also checks what the vector path would
+  have done: each test that could act there, without the mark or the class
+  that would make the vector path make it, counts in `CheckInput.visit_misses`,
+  which `test-checker`'s fixtures and `test-checker-corpus` require to be 0. A
+  mutant without the activations' mark failed 3,243 of `test-checker`'s checks.
+  `test-checker` also requires the vector path's walks to visit fewer tokens
+  than the scalar path's (`resolve_visits`, `expression_visits`), which a mark
+  on every token, passing every comparison, would not. The scans' test checks
+  the marks and the classes by both paths against its own reading, with every
+  column ending at a `PROT_NONE` page.
+
+On the locked 9700X, CPU 2, main `92c025e7` against `60732582`, the completed
+final comparison gives `check-input` 63.682 → 58.927 ms, the direct reader
+53.912 → 49.375 ms, and whole `-c` perf task clock 146.340 → 141.725 ms.
+User cycles fall 3.77% and instructions 5.21%; all observations, unchanged
+scalar/one/eight-lane objects and the 16 target checker-suite results are
+in the [record](https://github.com/buster14a/buster-performance/tree/703e034725e79fed5574e42b0be96b3af4cae9bf/docs/measurements/check-input-529-walks-2026-10-27).
+This is the sparse-walk snapshot, before the later combined storage/traversal
+integration, not a new measurement of that combination.
+
+What is left of the reader's per-token work is the walks' work where they
+act, the expression-comma propagation, graph construction and the remaining
+output fills. Since #572 the graph stores `CheckValue` only for VALUE leaves;
+since #186 the parser and reader share one retained traversal. The sparse
+walk consumes that reader-owned postorder, and the continuation's dynamic
+visit mark is retained even when zero-valued sparse stores are skipped.
 
 ## Benchmark and validation limits
 
@@ -1460,3 +1858,74 @@ fixtures. Existing synthetic checker rates exclude source adaptation and are
 not end-to-end evidence. [#133](https://github.com/buster14a/buster/issues/133) owns supported-source/corpus completion and the
 whole source/check/data costs, allocations, memory and occupancy; [#145](https://github.com/buster14a/buster/issues/145)/[#138](https://github.com/buster14a/buster/issues/138)
 own the eventual complete compiler/program-quality evidence.
+
+## Nested selections and warning ranges (#603)
+
+`check_input_range_root` consumes the parser's postorder/subtree sizes and the
+reader's existing inverse postorder and subtree ends. A complete expression
+occupies one contiguous run in both orders. The first token's own subtree
+begins that run; its postorder position minus its subtree size, plus the
+expression length, locates the root in constant work. The root's size and last
+token validate the requested slice. Both source selections and declaration-time
+constant evaluation use this lookup, with no additional syntax-tree column.
+Raw attribute expressions retain their separate explicit-stack representation.
+
+`c_check_warning_input.c` applies clearing and suppression immediately in their
+original order. Its interval index has a two-byte summary per node and one leaf
+per 64 tokens, rounded to a power of two: less than one eighth of a byte per
+token for large inputs. The low byte summarizes clearable warnings; the high
+byte summarizes missing suppression bits. Completed intervals skip repeated
+updates, while a later warning write reopens its leaf's ancestor path. Range
+queries cost logarithmic index work plus the blocks that still need changes;
+repeated nested ranges no longer rescan their full token spans. Short ranges
+before index initialization use direct updates. The index borrows reader scratch
+and its first long range initializes conservative summaries, without reading
+the whole unit's warning columns.
+
+Scalar and masked AVX-512 block updates preserve independently evaluated bound
+contexts, both warning columns and the graph's suppression facts. Loads and
+stores stay within the requested range and logical token count. Boundary blocks
+retain conservative summaries for their untouched bytes. Deferred workers own
+separate indexes, so neither interval ancestors nor adjacent bodies' bytes are
+shared mutable summaries; joining workers invalidates the parent reader's old
+summaries. Replacing constant contexts also invalidates the index. Diagnostics
+retain their existing source-order consumer.
+
+`test-checker` checks every slice of two independent parser trees against a
+parent-scan root oracle, and ordered warning mutations against an immediate
+byte-update oracle with protected tails at every length through 257. Source
+fixtures cover nested selected/discarded arms, vector results, lvalues, bound
+warnings and rejected discarded expressions. `test-checker-deferred` covers
+warning-bearing selections in several bodies. The scaling campaign's original
+C generator and work-count instrumentation live in buster-performance under
+`docs/measurements/nested-selections-603-2026-10-27`.
+
+The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/6ab3a0e96500957ce30a05f974806eb153f482ac/docs/measurements/nested-selections-603-2026-10-27)
+compares main `92c025e7` with the implementation at `1014c296`. At depth
+2048, the eight default-driver cases improve from 8.42–30.57 ms to
+2.04–3.91 ms (4.1–8.4 times faster). Runtime discarded generics' root and
+warning scans fall from 23,065,600 and 46,123,008 token visits to 8,192 bounded
+root queries, 154,432 warning-byte visits and 107,908 index-node visits.
+All five depths and both schedules are retained. Scalar and AVX-512 paths
+pass the independent byte oracle; the available whole driver and the reader's
+initialization/traversal/selection path are measured together with their own
+costs, rather than claiming an isolated block-update rate.
+
+With the shared traversal from #640, complete-root queries consume
+`CheckInputReader.subtree_sizes` by postorder position. The reader borrows the
+parser's optional size column when available; tree-only, prefix and repair
+inputs derive one reader-owned column alongside their existing traversal.
+This actual consumer requires four retained bytes per token plus a sentinel.
+The first-child start column is temporary and released immediately after
+derivation. The default vector path publishes sizes in the same traversal
+pass; scalar/prefix/repair views derive them from their already retained
+postorder, positions, subtree ends and first children. The parent-scan root
+oracle explicitly requests the parser's optional size column. Warning tests
+also cover independent-to-ordinary context transitions and late writes after
+worker-column replacement against the immediate-byte oracle.
+
+Frozen SQLite has a small measured cost in this paired build: syntax checking
++0.16% and object compilation +0.36%, with about 0.1 MiB more peak RSS and
+byte-identical objects. The record separates the deep Clang enum oracle's
+limit, focused sanitizer evidence, full checker/driver/deferred suites and
+whole-process measurements. It makes no whole-compiler sanitizer/corpus claim.

@@ -663,14 +663,37 @@ static bool pp_test_read_output(FILE* stream, char** text, size_t* length)
     return result;
 }
 
+// This process's environment without CPATH and C_INCLUDE_PATH, which clang reads and the preprocessor doesn't: a
+// calloc'd array of its strings, or null.
+static char** pp_test_clang_environment(void)
+{
+    uint32_t variables = 0;
+    while (environ[variables] != 0)
+    {
+        variables += 1;
+    }
+    char** result = calloc((size_t)variables + 1, sizeof(char*));
+    uint32_t kept = 0;
+    for (uint32_t i = 0; result != 0 && i < variables; i += 1)
+    {
+        if (strncmp(environ[i], "CPATH=", 6) != 0 && strncmp(environ[i], "C_INCLUDE_PATH=", 15) != 0)
+        {
+            result[kept] = environ[i];
+            kept += 1;
+        }
+    }
+    return result;
+}
+
+// `executable ARGUMENTS -E [-dM -x c] PATH`, through the oracle cache (oracle_cache.c, #542): its output and
+// diagnostics in memory, bounded, and whether clang accepted the input, rejected it, or couldn't run reliably.
 static PPClangOutput pp_test_clang_process(const char* executable, char** arguments, int argument_count, const char* path, bool macros)
 {
     PPClangOutput result = { 0 };
-    FILE* output = tmpfile();
-    FILE* diagnostics = tmpfile();
     char** argv = calloc((size_t)argument_count + 9, sizeof(char*));
-    bool ready = output != 0 && diagnostics != 0 && argv != 0;
-    pid_t child = -1;
+    char** environment = pp_test_clang_environment();
+    bool ready = argv != 0 && environment != 0;
+    int status = 0;
     if (ready)
     {
         int n = 0;
@@ -687,53 +710,34 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
             argv[n++] = "c";
         }
         argv[n++] = (char*)path;
-        child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            if (dup2(fileno(output), STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            execvp(executable, argv);
-            perror(executable);
-            _exit(127);
-        }
-        int status = 0;
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        size_t diagnostic_length = 0;
-        ready = waited == child && child > 0 && pp_test_read_output(output, &result.text, &result.length) &&
-                pp_test_read_output(diagnostics, &result.diagnostics, &diagnostic_length);
-        // Exit 1 alone does not establish an input rejection: a driver can also report a failed frontend or I/O.
-        const char* message = result.diagnostics != 0 ? result.diagnostics : "";
-        const bool rejected = strstr(message, "error:") != 0 && strstr(message, "clang: error:") == 0 &&
-                              strstr(message, "unable to execute command") == 0 && strstr(message, "PLEASE submit a bug report") == 0 &&
-                              strstr(message, "LLVM ERROR") == 0 && strstr(message, "No space left on device") == 0 &&
-                              strstr(message, "Input/output error") == 0 && strstr(message, "Cannot allocate memory") == 0;
-        if (ready && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || (WEXITSTATUS(status) == 1 && rejected)))
-        {
-            result.status = WEXITSTATUS(status) == 0 ? PP_CLANG_ACCEPTED : PP_CLANG_REJECTED;
-        }
-        else
-        {
-            fprintf(stderr, "%s: Clang oracle could not run reliably (wait status %d)\n", path, status);
-        }
+        argv[n] = 0;
+        OracleRun run = {
+            .purpose = "preprocessor: clang -E",
+            .arguments = argv,
+            .environment = environment,
+            .dependencies = true,
+        };
+        ready = oracle_run(&run) && run.output_length < BUSTER_PP_TEST_MAX_OUTPUT && run.errors_length < BUSTER_PP_TEST_MAX_OUTPUT;
+        status = run.status;
+        result.text = run.output;
+        result.length = run.output_length;
+        result.diagnostics = run.errors;
     }
-    if (output != 0)
+    // Exit 1 alone does not establish an input rejection: a driver can also report a failed frontend or I/O.
+    const char* message = result.diagnostics != 0 ? result.diagnostics : "";
+    const bool rejected = strstr(message, "error:") != 0 && strstr(message, "clang: error:") == 0 && strstr(message, "unable to execute command") == 0 &&
+                          strstr(message, "PLEASE submit a bug report") == 0 && strstr(message, "LLVM ERROR") == 0 && strstr(message, "No space left on device") == 0 &&
+                          strstr(message, "Input/output error") == 0 && strstr(message, "Cannot allocate memory") == 0;
+    if (ready && WIFEXITED(status) && (WEXITSTATUS(status) == 0 || (WEXITSTATUS(status) == 1 && rejected)))
     {
-        fclose(output);
+        result.status = WEXITSTATUS(status) == 0 ? PP_CLANG_ACCEPTED : PP_CLANG_REJECTED;
     }
-    if (diagnostics != 0)
+    else
     {
-        fclose(diagnostics);
+        fprintf(stderr, "%s: Clang oracle could not run reliably (wait status %d)\n", path, status);
     }
     free(argv);
+    free(environment);
     return result;
 }
 
@@ -1275,7 +1279,7 @@ static const PPTestCase pp_test_cases[] = {
     { "an expansion of a template with ## past 16 tokens",
       "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
       0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
-    // Arguments whose names of macros are all direct objects (pp_direct_argument), expanded in place before the template
+    // Arguments whose names of macros are all direct objects (pp_argument_in_place), expanded in place before the template
     // or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
     // ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
     { "arguments of direct objects, expanded in place",
@@ -1295,6 +1299,45 @@ static const PPTestCase pp_test_cases[] = {
     { "arguments of direct objects used twice",
       "#define D(a, b) a b a b\n#define X x\n#define P(a) [a]\n#define W(a, b) D(a, b) P(a)\nD(X, z) D(z, X) W(X, X) W( X ,z)\n",
       0, "c17", "x z x z z x z x x x x x [x] x z x z [x]\n", false },
+    // Invocations in arguments expanded in place (pp_nested_invocation): pastes, a simple template, #, no parameters, a
+    // variadic argument left out and given, beside other invocations and direct objects; and the ones left to the main
+    // loop, a paste that makes a macro's name and an invocation whose argument names a direct object.
+    { "invocations in arguments, expanded in place",
+      "#define F(a) (a + 1)\n#define C(x, y) x ## y\n#define G(x) [x]\n#define S(x) #x\n#define Z() zz\n#define V(x, ...) x __VA_ARGS__\n#define X 2\n#define foo 7\nF(C(a, b)) F(G(1)) F(S(a  b)) F(Z()) F(V(1)) F(V(1, 2, 3)) F(C(a, b) G(c) X) F(X C(p, q)) F(C(fo, o)) F(G(X))\n",
+      0, "c17", "(ab + 1) ([1] + 1) (\"a b\" + 1) (zz + 1) (1 + 1) (1 2, 3 + 1) (ab [c] 2 + 1) (2 pq + 1) (7 + 1) ([2] + 1)\n", false },
+    // An invocation that makes nothing, between other tokens, alone, first and last (the space it leaves pending), and
+    // invocations next to each other and to a token.
+    { "empty and adjacent invocations in arguments",
+      "#define F(a) <a>\n#define P(x, y) x ## y\n#define G(x) [x]\nF(x P(, ) y) F(P(, )) F(P(, ) y) F(x P(, )) F(G(1)G(2)) F( G(1) G(2) ) F(G(1)z)\n",
+      0, "c17", "<x y> <> <y> <x> <[1][2]> <[1] [2]> <[1]z>\n", false },
+    // The invoked macro's name in its own expansion, and a disabled macro's in an invocation's argument: painted, so
+    // that neither expands before the '(' after it once the outer expansion is rescanned.
+    { "invocations in arguments beside painted names",
+      "#define F(a) a (2)\n#define S(x) x S\n#define G(x) [x]\n#define H(x) F(G(H x))\n#define K(x) F(G(x) K)\nF(S(1)) H(3) K(4)\n",
+      0, "c17", "1 S (2) [H 3] (2) [4] K (2)\n", false },
+    // Invocations in arguments that start and end lines, from a file's text and from an expansion, with clang's line
+    // markers.
+    { "invocations in arguments on new lines",
+      "#define F(a) <a>\n#define C(x, y) x ## y\n#define W(a) F(a) [F(a)]\nF(\nC(a, b)) F(C(a,\nb)\n) W(\nC(c, d)) F(\n  C(e, f) g)\nW(x\n  C(g, h)\n  z)\n",
+      0, "c17", "<ab> <ab> <cd> [<cd>] <ef g>\n<x gh z> [<x gh z>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<ab> <ab> <cd> [<cd>] <ef g>\n\n\n\n\n\n<x gh z> [<x gh z>]\n" },
+    // Eight invocations in one invocation's arguments, the most pp_finish_simple plans (BUSTER_PP_NESTED_PLANS), and nine.
+    { "invocations in arguments past the plans kept",
+      "#define F(a, b) {a | b}\n#define G(x) [x]\nF(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8)) F(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8) G(9))\n",
+      0, "c17", "{[1] [2] [3] [4] | [5] [6] [7] [8]} {[1] [2] [3] [4] | [5] [6] [7] [8] [9]}\n", false },
+    // The outer body requires rescan rather than painting its arguments on direct output. An inner self name must
+    // already be painted when the later invocation supplies its parentheses.
+    { "invocations in arguments retain paint through outer rescan",
+      "#define F(x) T(x)\n#define T(x) x (2)\n#define S(x) x S\nF(S(1))\n",
+      0, "c17", "1 S (2)\n", false },
+    // An empty invocation leaves name-space pending. A plain run consumes it before another invocation, then a later
+    // stringification observes the space between 'a' and 'b', even though no source space follows the empty call.
+    { "invocations in arguments pass pending space to an intervening run",
+      "#define F(x) S(x)\n#define S(x) #x\n#define E(x,y) x ## y\n#define G(x) [x]\nF(a E(,)b G(1))\n",
+      0, "c17", "\"a b [1]\"\n", false },
+    // A plain argument does not authorize in-place expansion when the nested body's name itself still expands.
+    { "invocations in arguments leave expanding body names to rescan",
+      "#define F(x) [x]\n#define G(x) X x\n#define X 9\nF(G(2))\n",
+      0, "c17", "[9 2]\n", false },
     // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
     // name takes the main loop's path).
     { "poisoned names a template pastes",
@@ -4643,7 +4686,7 @@ static bool pp_test_raw_recovery_failures(void)
     return result;
 }
 
-// #595's review: an argument expanded in place (pp_expand_direct_argument) that runs out of room, as the history records
+// #595's review: an argument expanded in place (pp_expand_argument_in_place) that runs out of room, as the history records
 // it, ends the run before anything is substituted from it. X's body is 1,100 tokens, past the 1,024 origins a stack
 // starts with, so expanding F(X)'s argument grows pp->arguments' origins first. The faults: that growth failing, and
 // pp->arguments cut below the expansion; each must give one fatal error and no output token. The control, with nothing
@@ -5686,6 +5729,277 @@ static __attribute__((format(printf, 4, 5))) bool pp_test_append(char* buffer, s
     return result;
 }
 
+// #615: sparse/high ids, absent names, repeated insertions and growth failures must keep the first ordinal. The
+// scalar and vector small-list paths are checked against the insertion order, including the transition to hashing.
+static bool pp_test_parameter_index(void)
+{
+    const long page_size = sysconf(_SC_PAGESIZE);
+    uint8_t* guarded = page_size > 0 ? mmap(0, (size_t)page_size * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+    bool result = guarded != MAP_FAILED && mprotect(guarded + page_size, (size_t)page_size, PROT_NONE) == 0;
+    for (uint32_t count = 0; result && count <= BUSTER_PP_SMALL_PARAMETERS; count += 1)
+    {
+        IdentId* names = (IdentId*)(guarded + page_size) - count;
+        for (uint32_t p = 0; p < count; p += 1)
+        {
+            names[p] = (p + 1) * 8192;
+        }
+        for (uint32_t mode = 0; result && mode < 2; mode += 1)
+        {
+            for (uint32_t p = 0; result && p <= count; p += 1)
+            {
+                const uint32_t wanted = p < count ? p : BUSTER_PP_NONE;
+                result = pp_parameter_index_small(names, count, (p + 1) * 8192, mode == 0) == wanted &&
+                         pp_parameter_index_small(names, count, (p + 1) * 8192 + 1, mode == 0) == BUSTER_PP_NONE &&
+                         pp_parameter_index_small(names, count, 0, mode == 0) == BUSTER_PP_NONE;
+            }
+            if (result && count > 1)
+            {
+                names[count - 1] = names[0];
+                result = pp_parameter_index_small(names, count, names[0], mode == 0) == 0;
+                names[count - 1] = count * 8192;
+            }
+        }
+    }
+    if (guarded != MAP_FAILED)
+    {
+        munmap(guarded, (size_t)page_size * 2);
+    }
+    Scratch descriptor = scratch_begin(0);
+    const uint64_t descriptor_capacity = descriptor.arena->capacity;
+    descriptor.arena->capacity = descriptor.arena->length;
+    PPParameterIndex* allocated = pp_parameter_index_allocate(true);
+    result = result && allocated == 0 && descriptor.arena->length == descriptor.length;
+    descriptor.arena->capacity = descriptor_capacity;
+    scratch_end(descriptor);
+    if (result)
+    {
+        Scratch outer = scratch_begin(0);
+        allocated = pp_parameter_index_allocate(true);
+        result = allocated != 0;
+        for (uint32_t p = 0; result && p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
+        {
+            uint32_t previous;
+            result = pp_parameter_insert(allocated, p, p, &previous);
+        }
+        const uint64_t capacity = outer.arena->capacity;
+        outer.arena->capacity = outer.arena->length;
+        uint32_t previous;
+        result = result && !pp_parameter_insert(allocated, BUSTER_PP_SMALL_PARAMETERS, BUSTER_PP_SMALL_PARAMETERS, &previous);
+        outer.arena->capacity = capacity;
+        if (allocated != 0)
+        {
+            pp_parameter_index_end(allocated);
+        }
+        result = result && outer.arena->length == outer.length;
+        scratch_end(outer);
+    }
+    if (result)
+    {
+        Scratch outer = scratch_begin(0);
+        IdentId names[BUSTER_PP_SMALL_PARAMETERS + 1];
+        for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(names); p += 1)
+        {
+            names[p] = p;
+        }
+        const uint64_t capacity = outer.arena->capacity;
+        outer.arena->capacity = outer.arena->length + sizeof(PPParameterIndex) + _Alignof(PPParameterIndex);
+        allocated = pp_parameter_index_build(names, BUSTER_ARRAY_LENGTH(names), true);
+        result = allocated == 0 && outer.arena->length == outer.length;
+        outer.arena->capacity = capacity;
+        scratch_end(outer);
+    }
+    for (uint32_t mode = 0; mode < 2; mode += 1)
+    {
+        PPParameterIndex index = { .vectorized = mode == 0 };
+        for (uint32_t p = 0; result && p < BUSTER_PP_MAX_PARAMETERS; p += 1)
+        {
+            const IdentId id = p * 8192;
+            uint32_t previous;
+            result = pp_parameter_insert(&index, id, p, &previous) && previous == BUSTER_PP_NONE;
+            for (uint32_t q = 0; result && q <= p; q += 1)
+            {
+                result = pp_parameter_index(&index, q * 8192) == q && pp_parameter_index(&index, q * 8192 + 1) == BUSTER_PP_NONE;
+            }
+            result = result && pp_parameter_insert(&index, id, p + 1, &previous) && previous == p && index.count == p + 1;
+        }
+        pp_parameter_index_end(&index);
+    }
+    for (uint32_t count = BUSTER_PP_SMALL_PARAMETERS; result && count <= 2 * BUSTER_PP_SMALL_PARAMETERS; count *= 2)
+    {
+        PPParameterIndex index = { .vectorized = true };
+        uint32_t previous;
+        for (uint32_t p = 0; result && p < count; p += 1)
+        {
+            result = pp_parameter_insert(&index, p, p, &previous);
+        }
+        Scratch scratch = scratch_begin(0);
+        const uint64_t capacity = scratch.arena->capacity;
+        scratch.arena->capacity = scratch.arena->length;
+        result = result && !pp_parameter_insert(&index, count, count, &previous) && index.count == count;
+        scratch.arena->capacity = capacity;
+        for (uint32_t p = 0; result && p < count; p += 1)
+        {
+            result = pp_parameter_index(&index, p) == p;
+        }
+        scratch_end(scratch);
+        pp_parameter_index_end(&index);
+    }
+    printf("macro parameter index: %s (guarded small views, sparse ids, first ordinals, misses and failed growth)\n", result ? "pass" : "FAIL");
+    return result;
+}
+
+// Large definitions, unused and invoked twice, with replacement identifiers in reverse order. These exercise every
+// stored ordinal rather than just the first/last, plus the small/vector/hash boundaries and the legal maximum.
+static bool pp_test_many_parameters(const char* directory, bool with_clang)
+{
+    static const uint32_t counts[] = { 0, 1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1000, 2000, 4000, BUSTER_PP_MAX_PARAMETERS };
+    bool result = pp_test_parameter_index();
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint32_t count = counts[c];
+        char* source = 0;
+        char* expected = 0;
+        size_t source_length = 0;
+        size_t expected_length = 0;
+        FILE* input = open_memstream(&source, &source_length);
+        FILE* output = open_memstream(&expected, &expected_length);
+        result = input != 0 && output != 0;
+        for (uint32_t unused = 0; result && unused < 2; unused += 1)
+        {
+            fprintf(input, "#define %s(", unused ? "UNUSED" : "F");
+            for (uint32_t p = 0; p < count; p += 1)
+            {
+                fprintf(input, "%sp%u", p != 0 ? "," : "", p);
+            }
+            fprintf(input, ") other");
+            for (uint32_t p = count; p != 0; p -= 1)
+            {
+                fprintf(input, " p%u", p - 1);
+            }
+            fprintf(input, "\n");
+        }
+        for (uint32_t use = 0; result && use < 2; use += 1)
+        {
+            fprintf(input, "F(");
+            fprintf(output, "other");
+            for (uint32_t p = 0; p < count; p += 1)
+            {
+                fprintf(input, "%s%u", p != 0 ? "," : "", p);
+                fprintf(output, " %u", count - p - 1);
+            }
+            fprintf(input, ")\n");
+            fprintf(output, "\n");
+        }
+        if (input != 0)
+        {
+            result = fclose(input) == 0 && result;
+        }
+        if (output != 0)
+        {
+            result = fclose(output) == 0 && result;
+        }
+        const PPTestCase test = {
+            .name = "many macro parameters: reversed replacement and unused definition",
+            .source = source,
+            .standard = "c23",
+            .expected = expected,
+        };
+        result = result && pp_test_case(&test, directory, with_clang);
+        if (!result)
+        {
+            printf("many macro parameters: count %u failed\n", count);
+        }
+        free(source);
+        free(expected);
+    }
+    static const PPTestCase operators[] = {
+        {
+            .name = "indexed parameters: #, ##, variadics and __VA_OPT__",
+            .source = "#define F(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,...) #q a##q __VA_OPT__(#a q __VA_ARGS__) other\n"
+                      "F(x,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,y)\n"
+                      "F(x,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,y,z)\n"
+                      "#undef F\n#define F(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q...) #q a##p q\n"
+                      "F(x,1,2,3,4,5,6,7,8,9,10,11,12,13,14,y,z)\n"
+                      "#undef F\n#define F(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,__VA_ARGS__,...) #__VA_ARGS__ __VA_ARGS__\n"
+                      "F(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,first,last)\n",
+            .standard = "gnu23",
+            .expected = "\"y\" xy other \"y\" xy \"x\" y z other \"z\" xy z \"first\" first",
+        },
+        {
+            .name = "indexed parameters: every # in an unused definition",
+            .source = "#define F(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q) #a #b #c #d #e #f #g #h #i #j #k #l #m #n #o #p #q\nOK\n",
+            .standard = "c23",
+            .expected = "OK",
+        },
+    };
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(operators); c += 1)
+    {
+        result = pp_test_case(&operators[c], directory, with_clang);
+    }
+    // A duplicate before another syntax error, that error before the duplicate, and a valid over-limit list. Inspect
+    // the diagnostic itself: merely checking failure would miss a changed diagnostic order or a wrapped count.
+    static const uint32_t invalid_counts[] = { 16, 17, 33, 4097, 65536 };
+    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(invalid_counts); c += 1)
+    {
+        const uint32_t count = invalid_counts[c];
+        for (uint32_t variant = 0; result && variant < 3; variant += 1)
+        {
+            char* source = 0;
+            size_t length = 0;
+            FILE* input = open_memstream(&source, &length);
+            uint64_t column = 0;
+            result = input != 0;
+            if (result)
+            {
+                fprintf(input, "#define F(");
+                for (uint32_t p = 0; p < count; p += 1)
+                {
+                    fprintf(input, "%sp%u", p != 0 ? "," : "", p);
+                }
+                column = (uint64_t)ftell(input) + (variant < 2 ? 2 : 4);
+                column = variant == 2 && count > BUSTER_PP_MAX_PARAMETERS ? 9 : column;
+                fprintf(input, "%s\n", variant == 0 ? ",p0,1) #bad" : variant == 1 ? ",1,p0) #bad" : ") #bad");
+                result = fclose(input) == 0;
+            }
+            for (uint32_t mode = 0; result && mode < 2; mode += 1)
+            {
+                char* diagnostics = 0;
+                size_t diagnostic_length = 0;
+                FILE* stream = open_memstream(&diagnostics, &diagnostic_length);
+                static Preprocessor pp;
+                static InternTable table;
+                const PPOptions options = { .scalar = mode != 0, .diagnostics = stream, .language = { .standard = 2023 } };
+                const bool ready = stream != 0 && intern_initialize(&table) && pp_initialize(&pp, &options, &table);
+                const bool ran = ready && pp_run_source(&pp, "parameters.c", (const uint8_t*)source, length);
+                result = ready && !ran && pp.errors == 1 && !pp.fatal;
+                if (ready)
+                {
+                    pp_release(&pp);
+                }
+                intern_release(&table);
+                if (stream != 0)
+                {
+                    result = fclose(stream) == 0 && result;
+                }
+                const char* wanted = variant == 0 ? "duplicate macro parameter name 'p0'" : variant == 1 ? "invalid token in macro parameter list"
+                                    : count > BUSTER_PP_MAX_PARAMETERS ? "too many macro parameters" : "'#' is not followed by a macro parameter";
+                char place[128];
+                snprintf(place, sizeof(place), "parameters.c:1:%lu: error: ", (unsigned long)column);
+                result = result && diagnostics != 0 && strstr(diagnostics, wanted) != 0 && strstr(diagnostics, place) != 0;
+                if (!result)
+                {
+                    printf("macro parameter diagnostics: count %u variant %u mode %u: wanted %s, got %s\n", count, variant, mode, wanted,
+                           diagnostics != 0 ? diagnostics : "(none)");
+                }
+                free(diagnostics);
+            }
+            free(source);
+        }
+    }
+    printf("many macro parameters: %s (boundaries, maximum, operators and diagnostic order)%s\n", result ? "pass" : "FAIL", with_clang ? " (Clang oracle)" : "");
+    return result;
+}
+
 // Appends `#include <NAME.h>` for each of `count` names.
 static bool pp_test_append_includes(char* buffer, size_t capacity, size_t* length, const char* const* names, uint32_t count)
 {
@@ -6144,7 +6458,7 @@ static bool pp_test_clang_command(const char* directory)
     bool markers;
     char ours[PATH_MAX];
     char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-command-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-command", directory);
     bool linked = false;
     int clang_count = 0;
     bool result = pp_test_write_file(path, source) && pp_parse_options(count + 1, passed, &options, &arena, &input, &written_to, &markers);
@@ -6542,7 +6856,7 @@ static uint32_t pp_test_files(int passed_count, char** passed, int file_count, c
     char** with_input = calloc((size_t)passed_count + 2, sizeof(char*));
     char ours[PATH_MAX];
     char links[4200];
-    snprintf(links, sizeof(links), "%s/clang-search-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-search", directory);
     bool linked = false;
     int clang_count = 0;
     bool ready = with_input != 0 && file_count != 0;
@@ -6647,7 +6961,7 @@ static bool pp_test_headers(const char* directory)
     char empty[4096];
     char links[4096];
     snprintf(empty, sizeof(empty), "%s/headers-empty.c", directory);
-    snprintf(links, sizeof(links), "%s/clang-headers-XXXXXX", directory);
+    snprintf(links, sizeof(links), "%s/clang-headers", directory);
     result = result && pp_test_write_file(empty, "");
     const bool linked = result && pp_clang_fallback_links(ours, links);
     if (result && !linked)
@@ -7054,6 +7368,7 @@ static bool predefines_test_refused(void);
 #include "c_preprocessor_batch_test.c"
 #include "c_preprocessor_semantic_test.c"
 #include "c_preprocessor_windows_test.c"
+#include "c_preprocessor_arguments_test.c"
 
 // A semantic consumer diagnoses an original pragma operand after preprocessing has discarded its temporary
 // buffers. Test that boundary directly, including argument prescan and distinct presumed definition/use files.
@@ -7299,6 +7614,8 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     const char* temporary = getenv("TMPDIR");
     snprintf(directory, sizeof(directory), "%s/buster-pp-test-XXXXXX", temporary != 0 ? temporary : "/tmp");
     const bool created = valid && !print_case && fuzz.jobs != 0 && fuzz.jobs <= BUSTER_PP_FUZZ_MAX_JOBS && passed != 0 && clang_passed != 0 && files != 0 && mkdtemp(directory) != 0;
+    // The oracle cache, set up before the parts fork, so that their counts reach its report.
+    OracleCache* oracle = oracle_cache();
     bool passed_all = created;
     if (passed_all && generate_targets)
     {
@@ -7334,6 +7651,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= test_process_test() == 0;
         passed_all &= pp_test_system_case_levels(directory);
         passed_all &= pp_test_macro_batches(directory, with_clang);
+        passed_all &= pp_test_many_parameters(directory, with_clang);
         passed_all &= pp_test_semantic_pragmas(directory, with_clang);
         passed_all &= pp_test_timestamps(directory, with_clang);
         passed_all &= pp_test_implemented_features(directory);
@@ -7361,6 +7679,9 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all &= pp_test_named_ucn_boundaries(directory);
         passed_all &= pp_test_prelude_failures();
         passed_all &= pp_test_direct_argument_failures();
+        passed_all &= pp_test_nested_arguments();
+        passed_all &= pp_test_argument_links();
+        passed_all &= pp_test_argument_slice_semantics(directory, with_clang);
         passed_all &= pp_test_option_refusals(directory, with_clang);
         if (with_clang)
         {
@@ -7393,6 +7714,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
                (unsigned long long)pp_test_system_made);
         passed_all = failures == 0;
     }
+    oracle_cache_report(oracle, "test-preprocessor");
     if (valid && print_case)
     {
         passed_all = pp_fuzz_print_case(&fuzz, printed_case);

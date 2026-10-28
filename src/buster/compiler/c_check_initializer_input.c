@@ -33,12 +33,36 @@ static bool check_init_object_candidate(const CheckInput* input, const TypeTable
            (type_qualifiers(type) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST;
 }
 
-static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput* input, const TypeTable* types, uint32_t cutoff, Arena* scratch)
+// The declarations among tokens 0 to `end` - 1 that have an initializer (initializer_begins isn't BUSTER_CHECK_NONE), in
+// token order into `declarations`, which has room for `end`: how many. Few of a unit's tokens declare with an initializer
+// (#592), so the vector path tests 16 tokens at a time; the scalar path takes every token.
+static uint32_t check_init_declarations(const CheckInput* input, uint32_t end, uint32_t* declarations, bool scalar)
+{
+    uint32_t count = 0;
+    for (uint32_t first = 0; first < end; first += 16)
+    {
+        const uint32_t lanes = scalar ? (uint32_t)check_input_scan_all(first, end) & 0xffff :
+                                        check_input_scan_below(input->initializer_begins, first, end, BUSTER_CHECK_NONE);
+        for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            declarations[count] = token;
+            count += input->initializer_begins[token] != BUSTER_CHECK_NONE;
+        }
+    }
+    return count;
+}
+
+// The table of constant objects' bytes, with room for the candidates among `declarations` (check_init_declarations')
+// whose initializers end by `cutoff`: an object can only be a candidate where its declaration has an initializer.
+static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput* input, const TypeTable* types, const uint32_t* declarations,
+                                    uint32_t declaration_count, uint32_t cutoff, Arena* scratch)
 {
     *objects = (CheckInitObjects){ 0 };
     uint32_t count = 0;
-    for (uint32_t token = 0; token < cutoff; token += 1)
+    for (uint32_t d = 0; d < declaration_count; d += 1)
     {
+        const uint32_t token = declarations[d];
         count += check_init_object_candidate(input, types, token) && input->initializer_ends[token] <= cutoff;
     }
     uint64_t capacity = count != 0 ? 1 : 0;
@@ -129,7 +153,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
             // earlier retained bytes; an ordinary nonconstant result does not reject the automatic object.
             const uint64_t output_mark = output->length;
             CheckInitializer constant = { 0 };
-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                        input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
                                        true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
@@ -180,16 +204,25 @@ static bool check_init_warning_collector(CheckInitWarningCollector* collector, C
     return valid;
 }
 
-static void check_init_warning_order(CheckInitWarningCollector* collector, uint32_t first)
+// The warnings' tokens the collector added to its sink from `first` on, in token order: the tokens it saw, 64 at a time
+// (the scalar path takes every token), where it added any.
+static void check_init_warning_order(CheckInitWarningCollector* collector, uint32_t first, bool scalar)
 {
-    if (collector->sink != NULL)
+    if (collector->sink != NULL && collector->sink->count != first)
     {
         uint32_t at = first;
-        for (uint32_t token = 0; token < collector->token_count; token += 1)
+        for (uint32_t token = 0; token < collector->token_count; token += 64)
         {
-            if (collector->seen[token] == 1)
+            const uint64_t lanes = scalar ? check_input_scan_all(token, collector->token_count) :
+                                            check_input_scan_equal(collector->seen, token, collector->token_count, 1);
+            for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
             {
-                collector->sink->tokens[at++] = token;
+                const uint32_t warned = token + (uint32_t)__builtin_ctzll(selected);
+                if (collector->seen[warned] == 1)
+                {
+                    collector->sink->tokens[at] = warned;
+                    at += 1;
+                }
             }
         }
     }
@@ -289,6 +322,15 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         }
         complete[node] = checked;
     }
+    // The declarations with initializers before the cutoff: those of any other token begin at BUSTER_CHECK_NONE, which
+    // makes them ineligible below.
+    uint32_t* declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)cutoff + 1) : 0;
+    const uint32_t declaration_count = declarations != 0 ? check_init_declarations(input, cutoff, declarations, parser->options.scalar) : 0;
+    if (valid && declarations == 0)
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, warnings, parser->tokens.count, scratch))
     {
@@ -296,13 +338,14 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         result->status = CHECK_INIT_RESOURCE;
     }
     CheckInitObjects objects = { 0 };
-    if (valid && !check_init_objects_open(&objects, input, types, cutoff, scratch))
+    if (valid && !check_init_objects_open(&objects, input, types, declarations, declaration_count, cutoff, scratch))
     {
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
-    for (uint32_t declaration = 0; valid && declaration < cutoff; declaration += 1)
+    for (uint32_t d = 0; valid && d < declaration_count; d += 1)
     {
+        const uint32_t declaration = declarations[d];
         const uint32_t begin = input->initializer_begins[declaration];
         const uint32_t end = input->initializer_ends[declaration];
         bool eligible = begin < end && end <= cutoff && type_is_valid(types, input->declared_types[declaration]);
@@ -314,7 +357,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
         if (eligible)
         {
             CheckInitializer plan = { 0 };
-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
+            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, input->static_objects[declaration] != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
             const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
@@ -339,7 +382,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     }
     if (valid)
     {
-        check_init_warning_order(&collector, warning_start);
+        check_init_warning_order(&collector, warning_start, parser->options.scalar);
     }
     if (output != 0)
     {
@@ -384,23 +427,25 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         valid = false;
         result->status = input->resource || stream->status == CHECK_STATUS_RESOURCE ? CHECK_INIT_RESOURCE : CHECK_INIT_CHECK_FAILED;
     }
-    uint32_t count = 0;
-    for (uint32_t token = 0; valid && token < tokens; token += 1)
+    // The declarations with initializers, which the checks, the objects' table and the plans visit rather than every token
+    // (#592).
+    uint32_t* declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : 0;
+    const uint32_t count = declarations != 0 ? check_init_declarations(input, tokens, declarations, parser->options.scalar) : 0;
+    if (valid && declarations == 0)
     {
-        if (input->initializer_begins[token] != BUSTER_CHECK_NONE)
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
+    for (uint32_t d = 0; valid && d < count; d += 1)
+    {
+        const uint32_t token = declarations[d];
+        const uint32_t begin = input->initializer_begins[token];
+        const uint32_t end = input->initializer_ends[token];
+        valid = begin < end && end <= tokens && type_is_valid(types, input->declared_types[token]);
+        if (!valid)
         {
-            const uint32_t begin = input->initializer_begins[token];
-            const uint32_t end = input->initializer_ends[token];
-            valid = begin < end && end <= tokens && type_is_valid(types, input->declared_types[token]);
-            if (valid)
-            {
-                count += 1;
-            }
-            else
-            {
-                result->status = CHECK_INIT_INVALID;
-                result->token = token;
-            }
+            result->status = CHECK_INIT_INVALID;
+            result->token = token;
         }
     }
     if (valid)
@@ -424,42 +469,39 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         result->status = CHECK_INIT_RESOURCE;
     }
     CheckInitObjects objects = { 0 };
-    if (valid && !check_init_objects_open(&objects, input, types, tokens, scratch))
+    if (valid && !check_init_objects_open(&objects, input, types, declarations, count, tokens, scratch))
     {
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
-    uint32_t at = 0;
-    for (uint32_t token = 0; valid && token < tokens; token += 1)
+    for (uint32_t at = 0; valid && at < count; at += 1)
     {
-        if (input->initializer_begins[token] != BUSTER_CHECK_NONE)
+        const uint32_t token = declarations[at];
+        CheckInitializer* plan = result->plans + at;
+        valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
+                                      input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                      input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+        if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {
-            CheckInitializer* plan = result->plans + at;
-            valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
-                                          input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
-                                          input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
-            if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
-            {
-                valid = false;
-                plan->status = CHECK_INIT_RESOURCE;
-                plan->failed_token = input->initializer_begins[token];
-            }
-            if (valid)
-            {
-                result->declaration_tokens[at] = token;
-                result->declaration_plans[token] = at + 1;
-                at += 1;
-            }
-            else
-            {
-                result->status = plan->status;
-                result->token = plan->failed_token;
-            }
+            valid = false;
+            plan->status = CHECK_INIT_RESOURCE;
+            plan->failed_token = input->initializer_begins[token];
+        }
+        if (valid)
+        {
+            result->declaration_tokens[at] = token;
+            result->declaration_plans[token] = at + 1;
+        }
+        else
+        {
+            result->status = plan->status;
+            result->token = plan->failed_token;
+
         }
     }
     if (valid)
     {
-        check_init_warning_order(&collector, 0);
+        check_init_warning_order(&collector, 0, parser->options.scalar);
         result->count = count;
         result->token_count = tokens;
         result->warning_count = warnings.count;

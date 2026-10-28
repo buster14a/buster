@@ -173,7 +173,7 @@ static __attribute__((noinline)) void check_test_builtin_vector_graph(CheckTest*
             }
         }
         CheckGraph small = graph;
-        small.count = nodes[0] + 1;
+        check_test_graph_cut(&small, nodes[0] + 1);
         small.argument_count = 1;
         check_test_special_graph_bounds(test, table, &small);
     }

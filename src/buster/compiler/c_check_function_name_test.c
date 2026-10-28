@@ -174,7 +174,7 @@ static void check_test_function_name_fixture(CheckTest* test, const CheckFunctio
             {
                 const uint32_t name = parser.tokens.names[token];
                 const uint32_t kind = name == C_NAME_FUNC ? 0 : name == C_NAME_FUNCTION ? 1 : 2;
-                const CheckValue value = input.graph.leaves[i];
+                const CheckValue value = *check_graph_leaf_of(&input.graph, i);
                 check_test_expect(test, value.category == CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS &&
                                   (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && (objects[kind] == 0 || objects[kind] == value.object),
                                   "predefined array leaves have stable static object identity");

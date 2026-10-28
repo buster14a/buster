@@ -144,7 +144,7 @@
 //     on the stacks).
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
-//     same or apart. A front end copies more through memcpy, as clang -O0 does past this many bytes.
+//     same or apart. A front end copies more through a runtime call (the C producer uses memmove for self-assignment).
 //   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16 (of the frame's alignment
 //     in a realigned frame, which so stays aligned), on the stack, and pushes their address (`class` U64, a multiple of
 //     16; `value` 0): a variable-length array's storage. The bytes stay until a STACK_RESTORE releases them or the
@@ -320,7 +320,8 @@ struct Tier0Operation
 // displacement fits a disp32. An object's alignment, and a call's outgoing area's (AbiCall.stack_alignment_log2), is at
 // most 2^30: past 16 bytes, the function's frame is realigned to the most any of them needs (Tier0Frame.alignment_log2).
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
-#define BUSTER_TIER0_MAX_LOCALS (1u << 16)
+// Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
+#define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
 #define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
@@ -570,8 +571,11 @@ static __attribute__((unused)) Tier0Code tier0_compile(const Tier0Function* func
 // The same, an entry at a time: the twin and oracle, with identical results.
 static __attribute__((unused)) Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output);
 // Whether the function keeps the typed stream's rules (the kinds, classes and values, operands and depths, targets and
-// the stacks at them, locals and calls), for the tests and for debugging.
+// the stacks at them, locals and calls): the lowering's check of every function it lowers, and the tests'. The vector
+// path, which leaves to the scalar validator whatever it doesn't take, so that a refusal is always the scalar's.
 static __attribute__((unused)) Tier0Check tier0_validate(const Tier0Function* function);
+// The same an entry at a time: the twin, with identical results.
+static __attribute__((unused)) Tier0Check tier0_validate_scalar(const Tier0Function* function);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Registers
@@ -8490,9 +8494,135 @@ static void tier0_validate_vector(const Tier0Function* function, Tier0Validator*
     }
 }
 
-// tier0_validate's body, for a caller that inlines it whatever the function's other callers make clang decide
-// (check_program_lower_body's two copies, #426).
-static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(const Tier0Function* function)
+// tier0_validate_scalar's checks of the tables beside the stream, which the vector path (tier0_validate_accepts) shares:
+// the locals and the objects, the vectors' constants and the operations' rows, long double's constants and result, the
+// objects' bytes, the parameters' locations and the calls' arguments. Each refusal is at node 0.
+static void tier0_validate_tables(const Tier0Function* function, Tier0Validator* validator)
+{
+    if (function->local_sizes != 0 && function->local_alignments == 0)
+    {
+        tier0_reject(validator, 0, "the objects' sizes without their alignments");
+    }
+    uint64_t object_bytes = 0;
+    for (uint32_t l = 0; l < function->local_count && validator->check.error == TIER0_OK; l += 1)
+    {
+        if (tier0_is_object(function, l))
+        {
+            if (function->local_classes[l] != BUSTER_TYPED_CLASS_VOID || (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 ||
+                function->local_alignments[l] > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
+            {
+                tier0_reject(validator, 0, "an object that isn't an address-taken local of class VOID, or aligned past 2^30");
+            }
+            // Its size rounded up to 16 and, aligned past 16, the most its place may move by for its alignment.
+            const uint64_t alignment = UINT64_C(1) << (function->local_alignments[l] & 63);
+            object_bytes += (((uint64_t)function->local_sizes[l] + 15) & ~15ull) + (alignment > 16 ? alignment - 16 : 0);
+        }
+        else if (function->local_classes[l] == BUSTER_TYPED_CLASS_VOID || function->local_classes[l] >= BUSTER_TYPED_CLASSES)
+        {
+            tier0_reject(validator, 0, "a local without a class");
+        }
+        else if (tier0_class_memory(function->local_classes[l]))
+        {
+            tier0_reject(validator, 0, "a long double or 128-bit integer local that isn't an object");
+        }
+        else if (tier0_class_vector(function->local_classes[l]))
+        {
+            tier0_reject(validator, 0, "a vector local that isn't an object");
+        }
+    }
+    // The vectors' constants, 16, 32 or 64 bytes each, and the machine operations' rows (tier0_operation_valid).
+    if ((function->vector_constant_count != 0 && (function->vector_constants == 0 || function->vector_constant_bytes == 0)) ||
+        (function->operation_count != 0 && function->operations == 0))
+    {
+        tier0_reject(validator, 0, "the vectors' constants' or the operations' count without their columns");
+    }
+    for (uint32_t k = 0; k < function->vector_constant_count && validator->check.error == TIER0_OK; k += 1)
+    {
+        if (!tier0_vector_bytes_valid(function->vector_constant_bytes[k]))
+        {
+            tier0_reject(validator, 0, "a vector constant of other than 16, 32 or 64 bytes");
+        }
+    }
+    for (uint32_t k = 0; k < function->operation_count && validator->check.error == TIER0_OK; k += 1)
+    {
+        if (!tier0_operation_valid(&function->operations[k]))
+        {
+            tier0_reject(validator, 0, "an operation's row Tier 0 doesn't place: its counts, classes, forms, roles or memory operands");
+        }
+    }
+    if (function->x87_constant_count != 0 && function->x87_constants == 0)
+    {
+        tier0_reject(validator, 0, "long double's constants' count without the constants");
+    }
+    // A long double result in st0, which the epilogue loads from slot 0; a complex one (st0 and st1) isn't Tier 0's.
+    if (function->result_size == 0 && tier0_x87_parts(function->result) != 0 && (tier0_x87_parts(function->result) != 1 || !tier0_x87_result_valid(function->result, 0)))
+    {
+        tier0_reject(validator, 0, "a function's x87 result that isn't one long double in st0");
+    }
+    // Long double's values have their slots only in a function that says it has them (Tier0Function.x87): its result,
+    // from slot 0, and below each entry of class F80.
+    if (tier0_x87_returns(function) && !function->x87)
+    {
+        tier0_reject(validator, 0, "a long double result in a function without x87");
+    }
+    if (object_bytes > BUSTER_TIER0_MAX_OBJECT_BYTES)
+    {
+        tier0_reject(validator, 0, "objects past BUSTER_TIER0_MAX_OBJECT_BYTES");
+    }
+    for (uint32_t p = 0; p < function->parameter_count; p += 1)
+    {
+        // A value in a register of its kind (an object's location, and the registers, tier0_parameters_valid checks).
+        const AbiLocation location = function->parameters[p];
+        const bool floating = tier0_class_floating(function->local_classes[p]);
+        const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
+        if (!tier0_is_object(function, p) && location.kind != BUSTER_ABI_LOCATION_STACK && (location.kind != BUSTER_ABI_LOCATION_REGISTERS || floating != vector))
+        {
+            tier0_reject(validator, 0, "a parameter's location doesn't fit its class");
+        }
+    }
+    for (uint32_t c = 0; c < function->call_count; c += 1)
+    {
+        if ((uint64_t)function->call_first[c] + function->call_argument_counts[c] > function->argument_count ||
+            function->call_argument_counts[c] > BUSTER_TIER0_MAX_CALL_ARGUMENTS)
+        {
+            tier0_reject(validator, 0, "a call's arguments past the argument columns");
+        }
+        for (uint32_t a = 0; a < function->call_argument_counts[c] && validator->check.error == TIER0_OK; a += 1)
+        {
+            // A value in a register of its kind; an aggregate's address U64 (its location tier0_aggregates_valid checks).
+            const uint32_t argument = function->call_first[c] + a;
+            const uint32_t class = function->argument_classes[argument];
+            const AbiLocation location = function->argument_locations[argument];
+            const bool aggregate = function->argument_sizes != 0 && function->argument_sizes[argument] != 0;
+            const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
+            // A long double on the stack alone, in 16 bytes at a multiple of 16 inside its call's area.
+            const bool x87 = tier0_class_x87(class) &&
+                             (aggregate || location.kind != BUSTER_ABI_LOCATION_STACK || location.stack_offset % 16 != 0 ||
+                              (uint64_t)location.stack_offset + 16 > function->calls[c].stack_bytes);
+            if (x87 || (aggregate ? class != BUSTER_TYPED_CLASS_U64 : location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier0_class_floating(class) != vector))
+            {
+                tier0_reject(validator, 0, "a call's argument whose class doesn't fit its location, or an aggregate's that isn't U64");
+            }
+            // A 128-bit integer argument is an object's address, as a struct of two INTEGER eightbytes is, and so is a
+            // vector's, whose bytes one vector register holds whole. A class past the classes is none: a vector's
+            // stack byte (BUSTER_TIER0_STACK_VECTOR) would match one at the CALL, which compares its arguments' bytes
+            // with these (#556's review).
+            if (tier0_class_int128(class) || tier0_class_vector(class))
+            {
+                tier0_reject(validator, 0, "a call's 128-bit integer or vector argument as a value, which an object passes");
+            }
+            if (class == BUSTER_TYPED_CLASS_VOID || class >= BUSTER_TYPED_CLASSES)
+            {
+                tier0_reject(validator, 0, "a call's argument without a class");
+            }
+        }
+    }
+}
+
+// The stream's rules an entry at a time: the twin and oracle of the vector path (tier0_validate_accepts), which gives
+// tier0_validate's verdict and rule wherever the vector path doesn't take a stream. Out of line: it runs for --scalar and
+// for the streams the vector path leaves to it, not for every function the lowering validates.
+static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -8555,124 +8685,7 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
                 tier0_arrive(&validator, hashes, seen, target, 0);
             }
         }
-        if (function->local_sizes != 0 && function->local_alignments == 0)
-        {
-            tier0_reject(&validator, 0, "the objects' sizes without their alignments");
-        }
-        uint64_t object_bytes = 0;
-        for (uint32_t l = 0; l < function->local_count && validator.check.error == TIER0_OK; l += 1)
-        {
-            if (tier0_is_object(function, l))
-            {
-                if (function->local_classes[l] != BUSTER_TYPED_CLASS_VOID || (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 ||
-                    function->local_alignments[l] > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
-                {
-                    tier0_reject(&validator, 0, "an object that isn't an address-taken local of class VOID, or aligned past 2^30");
-                }
-                // Its size rounded up to 16 and, aligned past 16, the most its place may move by for its alignment.
-                const uint64_t alignment = UINT64_C(1) << (function->local_alignments[l] & 63);
-                object_bytes += (((uint64_t)function->local_sizes[l] + 15) & ~15ull) + (alignment > 16 ? alignment - 16 : 0);
-            }
-            else if (function->local_classes[l] == BUSTER_TYPED_CLASS_VOID || function->local_classes[l] >= BUSTER_TYPED_CLASSES)
-            {
-                tier0_reject(&validator, 0, "a local without a class");
-            }
-            else if (tier0_class_memory(function->local_classes[l]))
-            {
-                tier0_reject(&validator, 0, "a long double or 128-bit integer local that isn't an object");
-            }
-            else if (tier0_class_vector(function->local_classes[l]))
-            {
-                tier0_reject(&validator, 0, "a vector local that isn't an object");
-            }
-        }
-        // The vectors' constants, 16, 32 or 64 bytes each, and the machine operations' rows (tier0_operation_valid).
-        if ((function->vector_constant_count != 0 && (function->vector_constants == 0 || function->vector_constant_bytes == 0)) ||
-            (function->operation_count != 0 && function->operations == 0))
-        {
-            tier0_reject(&validator, 0, "the vectors' constants' or the operations' count without their columns");
-        }
-        for (uint32_t k = 0; k < function->vector_constant_count && validator.check.error == TIER0_OK; k += 1)
-        {
-            if (!tier0_vector_bytes_valid(function->vector_constant_bytes[k]))
-            {
-                tier0_reject(&validator, 0, "a vector constant of other than 16, 32 or 64 bytes");
-            }
-        }
-        for (uint32_t k = 0; k < function->operation_count && validator.check.error == TIER0_OK; k += 1)
-        {
-            if (!tier0_operation_valid(&function->operations[k]))
-            {
-                tier0_reject(&validator, 0, "an operation's row Tier 0 doesn't place: its counts, classes, forms, roles or memory operands");
-            }
-        }
-        if (function->x87_constant_count != 0 && function->x87_constants == 0)
-        {
-            tier0_reject(&validator, 0, "long double's constants' count without the constants");
-        }
-        // A long double result in st0, which the epilogue loads from slot 0; a complex one (st0 and st1) isn't Tier 0's.
-        if (function->result_size == 0 && tier0_x87_parts(function->result) != 0 && (tier0_x87_parts(function->result) != 1 || !tier0_x87_result_valid(function->result, 0)))
-        {
-            tier0_reject(&validator, 0, "a function's x87 result that isn't one long double in st0");
-        }
-        // Long double's values have their slots only in a function that says it has them (Tier0Function.x87): its result,
-        // from slot 0, and below each entry of class F80.
-        if (tier0_x87_returns(function) && !function->x87)
-        {
-            tier0_reject(&validator, 0, "a long double result in a function without x87");
-        }
-        if (object_bytes > BUSTER_TIER0_MAX_OBJECT_BYTES)
-        {
-            tier0_reject(&validator, 0, "objects past BUSTER_TIER0_MAX_OBJECT_BYTES");
-        }
-        for (uint32_t p = 0; p < function->parameter_count; p += 1)
-        {
-            // A value in a register of its kind (an object's location, and the registers, tier0_parameters_valid checks).
-            const AbiLocation location = function->parameters[p];
-            const bool floating = tier0_class_floating(function->local_classes[p]);
-            const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
-            if (!tier0_is_object(function, p) && location.kind != BUSTER_ABI_LOCATION_STACK && (location.kind != BUSTER_ABI_LOCATION_REGISTERS || floating != vector))
-            {
-                tier0_reject(&validator, 0, "a parameter's location doesn't fit its class");
-            }
-        }
-        for (uint32_t c = 0; c < function->call_count; c += 1)
-        {
-            if ((uint64_t)function->call_first[c] + function->call_argument_counts[c] > function->argument_count ||
-                function->call_argument_counts[c] > BUSTER_TIER0_MAX_CALL_ARGUMENTS)
-            {
-                tier0_reject(&validator, 0, "a call's arguments past the argument columns");
-            }
-            for (uint32_t a = 0; a < function->call_argument_counts[c] && validator.check.error == TIER0_OK; a += 1)
-            {
-                // A value in a register of its kind; an aggregate's address U64 (its location tier0_aggregates_valid checks).
-                const uint32_t argument = function->call_first[c] + a;
-                const uint32_t class = function->argument_classes[argument];
-                const AbiLocation location = function->argument_locations[argument];
-                const bool aggregate = function->argument_sizes != 0 && function->argument_sizes[argument] != 0;
-                const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
-                // A long double on the stack alone, in 16 bytes at a multiple of 16 inside its call's area.
-                const bool x87 = tier0_class_x87(class) &&
-                                 (aggregate || location.kind != BUSTER_ABI_LOCATION_STACK || location.stack_offset % 16 != 0 ||
-                                  (uint64_t)location.stack_offset + 16 > function->calls[c].stack_bytes);
-                if (x87 || (aggregate ? class != BUSTER_TYPED_CLASS_U64 : location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier0_class_floating(class) != vector))
-                {
-                    tier0_reject(&validator, 0, "a call's argument whose class doesn't fit its location, or an aggregate's that isn't U64");
-                }
-                // A 128-bit integer argument is an object's address, as a struct of two INTEGER eightbytes is, and so is a
-                // vector's, whose bytes one vector register holds whole. A class past the classes is none: a vector's
-                // stack byte (BUSTER_TIER0_STACK_VECTOR) would match one at the CALL, which compares its arguments' bytes
-                // with these (#556's review).
-                if (tier0_class_int128(class) || tier0_class_vector(class))
-                {
-                    tier0_reject(&validator, 0, "a call's 128-bit integer or vector argument as a value, which an object passes");
-                }
-                if (class == BUSTER_TYPED_CLASS_VOID || class >= BUSTER_TYPED_CLASSES)
-                {
-                    tier0_reject(&validator, 0, "a call's argument without a class");
-                }
-            }
-        }
+        tier0_validate_tables(function, &validator);
         uint32_t return_class = BUSTER_TIER0_ANY_DEPTH;
         // A function returning an aggregate leaves rax an address at every RETURN: in registers, its bytes', which the
         // epilogue loads the result from; through a hidden pointer, the pointer, which the caller may read the result
@@ -9051,10 +9064,6 @@ static inline __attribute__((always_inline)) Tier0Check tier0_validate_inline(co
     return validator.check;
 }
 
-static Tier0Check tier0_validate(const Tier0Function* function)
-{
-    return tier0_validate_inline(function);
-}
 
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -10355,4 +10364,1104 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
     return code;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Validation's vector path (#569)
+//
+// tier0_validate_scalar's rules 64 entries at a time in byte lanes, as Tier 0's passes read the stream: the depth before
+// each entry is the prefix sum of the entries' effects (what each pushes less what it pops, by table, a call's from its
+// operands), and the stack holds the values those entries pushed. An operand's class is its producer's, the entry that
+// pushed it: the nearest one before the operand's reader whose floor (its depth after its own pops) is at or below the
+// operand's place, found by a nearest-smaller-value search over the block's floors (tier0_scan_previous), or for a value
+// from an earlier block the carried stack's, which holds each place's class and producer. The rules are then compares
+// of those classes and the entries' own against masks of classes by kind, the values against bounds by kind, and the
+// locals' and calls' rules against tables of the function's.
+//
+// That stack is tier0_validate_scalar's wherever control arrives at a target with the stack the prefix sums give the
+// target, which the vector path checks: a forward arrival's depth, the producer of the value just below what it may
+// differ in (so that every value below it is the same one) and the class of the value a JUMP_VALUE brings, against every
+// other arrival's and the target's own; a backward arrival only with nothing on the stack; and code that no path reaches
+// before a target (after a jump or a return) at depth 0, where the scalar validator starts again. Under those checks the
+// two stacks are the same at every entry, so that the vector path takes a stream only where the scalar validator takes
+// it (tier0_validate_test.c checks that on every stream the tests make, and on every short one), and leaves every other
+// one to it, which gives the verdict and the rule: a stream that breaks a rule, and one the vector path doesn't decide: a
+// function with vectors, a block whose pops come to more than BUSTER_TIER0_SCAN_POPS, a depth past BUSTER_TIER0_SCAN_DEPTH
+// at a block's start, or an arrival the rules above don't take (a backward one with values on the stack, or a target
+// whose arrivals bring values from different producers, which the scalar validator compares by their classes).
+
+// The vector path's limits, past which it leaves a function to the scalar validator: the values a block's entries pop,
+// so that its depths relative to its start stay in a byte (from -BUSTER_TIER0_SCAN_POPS to 64), and the depth at a
+// block's start, so that the carried stack's classes are a register's 64 bytes, a place each (a block reads them there,
+// and stores into memory would stall the next block's reads of them), and every depth is below 129.
+#define BUSTER_TIER0_SCAN_POPS 100
+#define BUSTER_TIER0_SCAN_DEPTH 64
+// The carried stack's producers, which the arrivals' checks read a place at a time: 64 below place 0 (no value:
+// BUSTER_TIER0_SCAN_NONE), the places, and room past them for a block's values stored whole.
+#define BUSTER_TIER0_SCAN_STACK (64 + 2 * BUSTER_TIER0_SCAN_DEPTH)
+#define BUSTER_TIER0_SCAN_NONE 0xffffffffu
+// A target that no forward arrival has reached yet (tier0_validate_accepts' `expected`).
+#define BUSTER_TIER0_SCAN_UNREACHED 0xff
+
+// Per kind, what an entry pops (bits 0 and 1: a call's are its operands', and a RETURN of nothing pops nothing), whether
+// it pushes a value of its class (a call only with a class), and whether its value must be nonzero (PTR_ADD's size).
+#define BUSTER_TIER0_SCAN_PUSH 0x04
+#define BUSTER_TIER0_SCAN_NONZERO 0x08
+static const uint8_t tier0_scan_shapes[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = {
+    [BUSTER_TYPED_CONST] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_LOCAL] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_LOCAL_ADDRESS] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_GLOBAL] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_GLOBAL_ADDRESS] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_DUP] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_NEG] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_NOT] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_CONVERT] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_LOAD] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_ADD] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SUB] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_MUL] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_DIV] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_MOD] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_AND] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_OR] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_XOR] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SHL] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SHR] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_PTR_ADD] = 2 | BUSTER_TIER0_SCAN_PUSH | BUSTER_TIER0_SCAN_NONZERO,
+    [BUSTER_TYPED_EQ] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_NE] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_LT] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_LE] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_GT] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_GE] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_STORE] = 2 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SET] = 2,
+    [BUSTER_TYPED_STORE_LOCAL] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SET_LOCAL] = 1,
+    [BUSTER_TYPED_STORE_GLOBAL] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_SET_GLOBAL] = 1,
+    [BUSTER_TYPED_CALL] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_DISCARD] = 1,
+    [BUSTER_TYPED_BRANCH_FALSE] = 1,
+    [BUSTER_TYPED_BRANCH_TRUE] = 1,
+    [BUSTER_TYPED_JUMP] = 0,
+    [BUSTER_TYPED_JUMP_VALUE] = 1,
+    [BUSTER_TYPED_RETURN] = 1,
+    [BUSTER_TYPED_COPY] = 2,
+    [BUSTER_TYPED_ALLOCA] = 1 | BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_SCAN_PUSH,
+    [BUSTER_TYPED_STACK_RESTORE] = 1,
+    [BUSTER_TYPED_JUMP_INDIRECT] = 1,
+};
+
+// Per kind, the bounds of its value (tier0_validate_accepts' table of them, the function's): none; a local, a call, a
+// target (an entry or the end), a symbol (nonzero, of 32 bits, inside the access column when there is one); a copy's
+// bytes; zero; and, for a long double's constant (a CONST of F80, by its class), an index into x87_constants.
+#define BUSTER_TIER0_BOUND_NONE 0
+#define BUSTER_TIER0_BOUND_LOCAL 1
+#define BUSTER_TIER0_BOUND_CALL 2
+#define BUSTER_TIER0_BOUND_TARGET 3
+#define BUSTER_TIER0_BOUND_SYMBOL 4
+#define BUSTER_TIER0_BOUND_COPY 5
+#define BUSTER_TIER0_BOUND_ZERO 6
+#define BUSTER_TIER0_BOUND_X87 7
+static const uint8_t tier0_scan_bounds[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = {
+    [BUSTER_TYPED_LOCAL] = BUSTER_TIER0_BOUND_LOCAL,
+    [BUSTER_TYPED_LOCAL_ADDRESS] = BUSTER_TIER0_BOUND_LOCAL,
+    [BUSTER_TYPED_GLOBAL] = BUSTER_TIER0_BOUND_SYMBOL,
+    [BUSTER_TYPED_GLOBAL_ADDRESS] = BUSTER_TIER0_BOUND_SYMBOL,
+    [BUSTER_TYPED_STORE_LOCAL] = BUSTER_TIER0_BOUND_LOCAL,
+    [BUSTER_TYPED_SET_LOCAL] = BUSTER_TIER0_BOUND_LOCAL,
+    [BUSTER_TYPED_STORE_GLOBAL] = BUSTER_TIER0_BOUND_SYMBOL,
+    [BUSTER_TYPED_SET_GLOBAL] = BUSTER_TIER0_BOUND_SYMBOL,
+    [BUSTER_TYPED_CALL] = BUSTER_TIER0_BOUND_CALL,
+    [BUSTER_TYPED_BRANCH_FALSE] = BUSTER_TIER0_BOUND_TARGET,
+    [BUSTER_TYPED_BRANCH_TRUE] = BUSTER_TIER0_BOUND_TARGET,
+    [BUSTER_TYPED_JUMP] = BUSTER_TIER0_BOUND_TARGET,
+    [BUSTER_TYPED_JUMP_VALUE] = BUSTER_TIER0_BOUND_TARGET,
+    [BUSTER_TYPED_COPY] = BUSTER_TIER0_BOUND_COPY,
+    [BUSTER_TYPED_ALLOCA] = BUSTER_TIER0_BOUND_ZERO,
+    [BUSTER_TYPED_STACK_SAVE] = BUSTER_TIER0_BOUND_ZERO,
+    [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_BOUND_ZERO,
+    [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_BOUND_ZERO,
+};
+
+// Per kind, its operands' rules: it reads the class of its top operand (TOP: one it pops, or DUP's) and of the one below
+// (SECOND), each in its kind's mask of classes (tier0_scan_top, tier0_scan_second), or the entry's own (TOP_SELF,
+// SECOND_SELF), or the top's (COMPARE, the second's), or in CONVERT's mask by the entry's class (CONVERT, the top's); the
+// top's class is the entry before's (LAST, tier0_last_mismatch's rule; not for a RETURN of nothing); and nothing is left
+// under its operands (FLOOR).
+#define BUSTER_TIER0_RULE_TOP 0x01
+#define BUSTER_TIER0_RULE_SECOND 0x02
+#define BUSTER_TIER0_RULE_LAST 0x04
+#define BUSTER_TIER0_RULE_TOP_SELF 0x08
+#define BUSTER_TIER0_RULE_SECOND_SELF 0x10
+#define BUSTER_TIER0_RULE_COMPARE 0x20
+#define BUSTER_TIER0_RULE_CONVERT 0x40
+#define BUSTER_TIER0_RULE_FLOOR 0x80
+#define BUSTER_TIER0_RULE_UNARY (BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_TOP_SELF)
+#define BUSTER_TIER0_RULE_BINARY (BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_SECOND_SELF)
+static const uint8_t tier0_scan_rules[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = {
+    [BUSTER_TYPED_DUP] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_NEG] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_NOT] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_CONVERT] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_CONVERT,
+    [BUSTER_TYPED_LOAD] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST,
+    [BUSTER_TYPED_ADD] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_SUB] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_MUL] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_DIV] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_MOD] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_AND] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_OR] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_XOR] = BUSTER_TIER0_RULE_BINARY | BUSTER_TIER0_RULE_TOP_SELF,
+    [BUSTER_TYPED_SHL] = BUSTER_TIER0_RULE_BINARY,
+    [BUSTER_TYPED_SHR] = BUSTER_TIER0_RULE_BINARY,
+    [BUSTER_TYPED_PTR_ADD] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST,
+    [BUSTER_TYPED_EQ] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_NE] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_LT] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_LE] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_GT] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_GE] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_COMPARE,
+    [BUSTER_TYPED_STORE] = BUSTER_TIER0_RULE_UNARY | BUSTER_TIER0_RULE_SECOND,
+    [BUSTER_TYPED_SET] = BUSTER_TIER0_RULE_UNARY | BUSTER_TIER0_RULE_SECOND,
+    [BUSTER_TYPED_STORE_LOCAL] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_SET_LOCAL] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_STORE_GLOBAL] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_SET_GLOBAL] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_DISCARD] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_BRANCH_FALSE] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_BRANCH_TRUE] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_JUMP_VALUE] = BUSTER_TIER0_RULE_UNARY,
+    [BUSTER_TYPED_RETURN] = BUSTER_TIER0_RULE_UNARY | BUSTER_TIER0_RULE_FLOOR,
+    [BUSTER_TYPED_COPY] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_SECOND | BUSTER_TIER0_RULE_LAST,
+    [BUSTER_TYPED_ALLOCA] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST,
+    [BUSTER_TYPED_STACK_RESTORE] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST,
+    [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_RULE_TOP | BUSTER_TIER0_RULE_LAST | BUSTER_TIER0_RULE_FLOOR,
+};
+
+// Per kind, what else it takes part in: arrivals at its value (CONTROL), an end to the code falling through after it
+// (TRANSFER), a local's classes by the function's table of them (LOCAL; ADDRESS for LOCAL_ADDRESS, whose local's address
+// is taken), the access column (GLOBAL), a call's own rules (CALL), and one class for every RETURN (RETURN).
+#define BUSTER_TIER0_SIDE_CONTROL 0x01
+#define BUSTER_TIER0_SIDE_TRANSFER 0x02
+#define BUSTER_TIER0_SIDE_LOCAL 0x04
+#define BUSTER_TIER0_SIDE_ADDRESS 0x08
+#define BUSTER_TIER0_SIDE_GLOBAL 0x10
+#define BUSTER_TIER0_SIDE_CALL 0x20
+#define BUSTER_TIER0_SIDE_RETURN 0x40
+static const uint8_t tier0_scan_sides[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = {
+    [BUSTER_TYPED_LOCAL] = BUSTER_TIER0_SIDE_LOCAL,
+    [BUSTER_TYPED_LOCAL_ADDRESS] = BUSTER_TIER0_SIDE_ADDRESS,
+    [BUSTER_TYPED_GLOBAL] = BUSTER_TIER0_SIDE_GLOBAL,
+    [BUSTER_TYPED_GLOBAL_ADDRESS] = BUSTER_TIER0_SIDE_GLOBAL,
+    [BUSTER_TYPED_STORE_LOCAL] = BUSTER_TIER0_SIDE_LOCAL,
+    [BUSTER_TYPED_SET_LOCAL] = BUSTER_TIER0_SIDE_LOCAL,
+    [BUSTER_TYPED_STORE_GLOBAL] = BUSTER_TIER0_SIDE_GLOBAL,
+    [BUSTER_TYPED_SET_GLOBAL] = BUSTER_TIER0_SIDE_GLOBAL,
+    [BUSTER_TYPED_CALL] = BUSTER_TIER0_SIDE_CALL,
+    [BUSTER_TYPED_BRANCH_FALSE] = BUSTER_TIER0_SIDE_CONTROL,
+    [BUSTER_TYPED_BRANCH_TRUE] = BUSTER_TIER0_SIDE_CONTROL,
+    [BUSTER_TYPED_JUMP] = BUSTER_TIER0_SIDE_CONTROL | BUSTER_TIER0_SIDE_TRANSFER,
+    [BUSTER_TYPED_JUMP_VALUE] = BUSTER_TIER0_SIDE_CONTROL | BUSTER_TIER0_SIDE_TRANSFER,
+    [BUSTER_TYPED_RETURN] = BUSTER_TIER0_SIDE_TRANSFER | BUSTER_TIER0_SIDE_RETURN,
+    [BUSTER_TYPED_JUMP_INDIRECT] = BUSTER_TIER0_SIDE_TRANSFER,
+};
+
+// Masks of classes, a bit per class: every class but the vectors' (which the vector path leaves to the scalar validator),
+// every one with a value, those without the memory classes, the integers, the widths arithmetic takes (4 bytes and more),
+// those division takes (no 128-bit integers), remainder's and the bitwise operations' (integers, and the 128-bit ones
+// but for remainder), NOT's, PTR_ADD's index's, and single classes.
+#define BUSTER_TIER0_CLASSES_ALL 0x3fff
+#define BUSTER_TIER0_CLASSES_VALUES 0x3ffe
+#define BUSTER_TIER0_CLASSES_SCALARS 0x07fe
+#define BUSTER_TIER0_CLASSES_INTEGERS 0x01fe
+#define BUSTER_TIER0_CLASSES_ARITHMETIC 0x3fe0
+#define BUSTER_TIER0_CLASSES_DIVISION 0x0fe0
+#define BUSTER_TIER0_CLASSES_REMAINDER 0x01e0
+#define BUSTER_TIER0_CLASSES_BITWISE 0x31e0
+#define BUSTER_TIER0_CLASSES_NOT 0x31fe
+#define BUSTER_TIER0_CLASSES_WIDE_INTEGERS 0x0180
+#define BUSTER_TIER0_CLASSES_NO_INT128 0x0ffe
+#define BUSTER_TIER0_CLASS(class) (1u << (class))
+_Static_assert(BUSTER_TYPED_CLASS_VECTOR == 14 && BUSTER_TYPED_CLASS_F80 == 11 && BUSTER_TYPED_CLASS_I128 == 12 && BUSTER_TYPED_CLASS_U128 == 13,
+               "the vector path's masks of classes");
+
+// The tables of 16-bit masks of classes below, each as two tables of bytes for vpermb (its masks' low bytes, and their
+// high bytes), from one list of entries.
+#define BUSTER_TIER0_LOW_BYTE(index, mask) [index] = (uint8_t)((mask) & 0xff),
+#define BUSTER_TIER0_HIGH_BYTE(index, mask) [index] = (uint8_t)((mask) >> 8),
+
+// Per kind, the classes an entry may have (the function's tables restrict CALL's and RETURN's further, and a function
+// without labels takes no JUMP_INDIRECT); an unknown kind's, NONE's and X86's none.
+#define BUSTER_TIER0_SCAN_OWN(entry)                                                                                   \
+    entry(BUSTER_TYPED_CONST, BUSTER_TIER0_CLASSES_VALUES)                                                             \
+    entry(BUSTER_TYPED_LOCAL, BUSTER_TIER0_CLASSES_VALUES)                                                             \
+    entry(BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
+    entry(BUSTER_TYPED_GLOBAL, BUSTER_TIER0_CLASSES_SCALARS)                                                           \
+    entry(BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                     \
+    entry(BUSTER_TYPED_DUP, BUSTER_TIER0_CLASSES_VALUES)                                                               \
+    entry(BUSTER_TYPED_NEG, BUSTER_TIER0_CLASSES_VALUES)                                                               \
+    entry(BUSTER_TYPED_NOT, BUSTER_TIER0_CLASSES_NOT)                                                                  \
+    entry(BUSTER_TYPED_CONVERT, BUSTER_TIER0_CLASSES_VALUES)                                                           \
+    entry(BUSTER_TYPED_LOAD, BUSTER_TIER0_CLASSES_VALUES)                                                              \
+    entry(BUSTER_TYPED_ADD, BUSTER_TIER0_CLASSES_ARITHMETIC)                                                           \
+    entry(BUSTER_TYPED_SUB, BUSTER_TIER0_CLASSES_ARITHMETIC)                                                           \
+    entry(BUSTER_TYPED_MUL, BUSTER_TIER0_CLASSES_ARITHMETIC)                                                           \
+    entry(BUSTER_TYPED_DIV, BUSTER_TIER0_CLASSES_DIVISION)                                                             \
+    entry(BUSTER_TYPED_MOD, BUSTER_TIER0_CLASSES_REMAINDER)                                                            \
+    entry(BUSTER_TYPED_AND, BUSTER_TIER0_CLASSES_BITWISE)                                                              \
+    entry(BUSTER_TYPED_OR, BUSTER_TIER0_CLASSES_BITWISE)                                                               \
+    entry(BUSTER_TYPED_XOR, BUSTER_TIER0_CLASSES_BITWISE)                                                              \
+    entry(BUSTER_TYPED_SHL, BUSTER_TIER0_CLASSES_BITWISE)                                                              \
+    entry(BUSTER_TYPED_SHR, BUSTER_TIER0_CLASSES_BITWISE)                                                              \
+    entry(BUSTER_TYPED_PTR_ADD, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                            \
+    entry(BUSTER_TYPED_EQ, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_NE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_LT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_LE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_GT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_GE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I32))                                                 \
+    entry(BUSTER_TYPED_STORE, BUSTER_TIER0_CLASSES_VALUES)                                                             \
+    entry(BUSTER_TYPED_SET, BUSTER_TIER0_CLASSES_VALUES)                                                               \
+    entry(BUSTER_TYPED_STORE_LOCAL, BUSTER_TIER0_CLASSES_VALUES)                                                       \
+    entry(BUSTER_TYPED_SET_LOCAL, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_STORE_GLOBAL, BUSTER_TIER0_CLASSES_SCALARS)                                                     \
+    entry(BUSTER_TYPED_SET_GLOBAL, BUSTER_TIER0_CLASSES_SCALARS)                                                       \
+    entry(BUSTER_TYPED_CALL, BUSTER_TIER0_CLASSES_ALL)                                                                 \
+    entry(BUSTER_TYPED_DISCARD, BUSTER_TIER0_CLASSES_VALUES)                                                           \
+    entry(BUSTER_TYPED_BRANCH_FALSE, BUSTER_TIER0_CLASSES_INTEGERS)                                                    \
+    entry(BUSTER_TYPED_BRANCH_TRUE, BUSTER_TIER0_CLASSES_INTEGERS)                                                     \
+    entry(BUSTER_TYPED_JUMP, BUSTER_TIER0_CLASSES_ALL)                                                                 \
+    entry(BUSTER_TYPED_JUMP_VALUE, BUSTER_TIER0_CLASSES_VALUES)                                                        \
+    entry(BUSTER_TYPED_RETURN, BUSTER_TIER0_CLASSES_ALL)                                                               \
+    entry(BUSTER_TYPED_COPY, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_VOID))                                              \
+    entry(BUSTER_TYPED_ALLOCA, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                             \
+    entry(BUSTER_TYPED_STACK_SAVE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                         \
+    entry(BUSTER_TYPED_STACK_RESTORE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
+    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
+static const uint8_t tier0_scan_own_low[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_LOW_BYTE) };
+static const uint8_t tier0_scan_own_high[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_OWN(BUSTER_TIER0_HIGH_BYTE) };
+
+// Per kind, the classes its top operand may have, besides TOP_SELF's, COMPARE's and CONVERT's.
+#define BUSTER_TIER0_SCAN_TOP(entry)                                                                                   \
+    entry(BUSTER_TYPED_LOAD, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                               \
+    entry(BUSTER_TYPED_SHL, BUSTER_TIER0_CLASSES_INTEGERS)                                                             \
+    entry(BUSTER_TYPED_SHR, BUSTER_TIER0_CLASSES_INTEGERS)                                                             \
+    entry(BUSTER_TYPED_PTR_ADD, BUSTER_TIER0_CLASSES_WIDE_INTEGERS)                                                    \
+    entry(BUSTER_TYPED_EQ, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_NE, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_LT, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_LE, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_GT, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_GE, BUSTER_TIER0_CLASSES_VALUES)                                                                \
+    entry(BUSTER_TYPED_COPY, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                               \
+    entry(BUSTER_TYPED_ALLOCA, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                             \
+    entry(BUSTER_TYPED_STACK_RESTORE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                      \
+    entry(BUSTER_TYPED_JUMP_INDIRECT, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
+static const uint8_t tier0_scan_top_low[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_TOP(BUSTER_TIER0_LOW_BYTE) };
+static const uint8_t tier0_scan_top_high[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_TOP(BUSTER_TIER0_HIGH_BYTE) };
+
+// Per kind, the classes the operand below its top may have, besides SECOND_SELF's and COMPARE's: an address.
+#define BUSTER_TIER0_SCAN_SECOND(entry)                                                                                \
+    entry(BUSTER_TYPED_PTR_ADD, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                            \
+    entry(BUSTER_TYPED_STORE, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                              \
+    entry(BUSTER_TYPED_SET, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))                                                \
+    entry(BUSTER_TYPED_COPY, BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64))
+static const uint8_t tier0_scan_second_low[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_SECOND(BUSTER_TIER0_LOW_BYTE) };
+static const uint8_t tier0_scan_second_high[BUSTER_TYPED_KIND_LIMIT] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_SECOND(BUSTER_TIER0_HIGH_BYTE) };
+
+// Per class (the first 16 bytes of 64, for vpermb), the classes CONVERT to it may take: a 128-bit integer only the
+// integers, a floating class no 128-bit integer, an integer every class with a value.
+#define BUSTER_TIER0_SCAN_CONVERT(entry)                                                                               \
+    entry(BUSTER_TYPED_CLASS_I8, BUSTER_TIER0_CLASSES_VALUES)                                                          \
+    entry(BUSTER_TYPED_CLASS_U8, BUSTER_TIER0_CLASSES_VALUES)                                                          \
+    entry(BUSTER_TYPED_CLASS_I16, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_U16, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_I32, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_U32, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_I64, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_U64, BUSTER_TIER0_CLASSES_VALUES)                                                         \
+    entry(BUSTER_TYPED_CLASS_F32, BUSTER_TIER0_CLASSES_NO_INT128)                                                      \
+    entry(BUSTER_TYPED_CLASS_F64, BUSTER_TIER0_CLASSES_NO_INT128)                                                      \
+    entry(BUSTER_TYPED_CLASS_F80, BUSTER_TIER0_CLASSES_NO_INT128)                                                      \
+    entry(BUSTER_TYPED_CLASS_I128, BUSTER_TIER0_CLASSES_NOT)                                                           \
+    entry(BUSTER_TYPED_CLASS_U128, BUSTER_TIER0_CLASSES_NOT)
+static const uint8_t tier0_scan_convert_low[64] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_CONVERT(BUSTER_TIER0_LOW_BYTE) };
+static const uint8_t tier0_scan_convert_high[64] __attribute__((aligned(64))) = { BUSTER_TIER0_SCAN_CONVERT(BUSTER_TIER0_HIGH_BYTE) };
+
+// The lanes' own indices, 0 to 63.
+static const uint8_t tier0_scan_lane_indices[64] __attribute__((aligned(64))) = {
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+};
+
+// Whether each lane's class (below 16) is in its 16-bit mask of classes, whose low and high bytes are `low` and `high`.
+static __mmask64 tier0_scan_member(__m512i low, __m512i high, __m512i classes)
+{
+    const __m512i bits = _mm512_set4_epi32((int)0x80402010, 0x08040201, (int)0x80402010, 0x08040201);
+    const __m512i row = _mm512_mask_blend_epi8(_mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(8)), low, high);
+    return _mm512_test_epi8_mask(row, _mm512_shuffle_epi8(bits, classes));
+}
+
+// For each lane, the nearest lane before it in the block whose floor is at or below `place` (relative to the block's
+// start: where the lane's operand is): that lane, or a byte with bit 7 set where there is none (the operand comes from an
+// earlier block). `windows[s]` holds each lane's lowest floor over its last 2^s lanes as a key (the floor with its sign
+// bit flipped, so that keys order as unsigned bytes, and 0xff before the block): the parser's doubling search
+// (parse_previous_smaller8), with masks.
+static __m512i tier0_scan_previous(const __m512i* windows, __m512i place)
+{
+    const __m512i threshold = _mm512_xor_si512(_mm512_add_epi8(place, _mm512_set1_epi8(1)), _mm512_set1_epi8((char)0x80));
+    __m512i lane = _mm512_sub_epi8(_mm512_load_si512(tier0_scan_lane_indices), _mm512_set1_epi8(1));
+    for (int32_t s = 5; s >= 0; s -= 1)
+    {
+        const __mmask64 none = _mm512_cmpge_epu8_mask(_mm512_permutexvar_epi8(lane, windows[s]), threshold);
+        lane = _mm512_mask_sub_epi8(lane, none, lane, _mm512_set1_epi8((char)(1 << s)));
+    }
+    return lane;
+}
+
+// A byte vector's lanes shifted ahead by `ahead` (lane j holds lane j + ahead), `fill`'s past the last.
+static __m512i tier0_shift_ahead(__m512i current, __m512i fill, uint32_t ahead)
+{
+    const __m512i index = _mm512_add_epi8(_mm512_load_si512(tier0_scan_lane_indices), _mm512_set1_epi8((char)ahead));
+    return _mm512_permutex2var_epi8(current, index, fill);
+}
+
+// Each lane's lowest floor among the lanes after it in `kept` (127 where there are none): a lane that pushes keeps its
+// value on the stack past them where its own floor is lower.
+static __m512i tier0_scan_later_floors(__m512i floors, __mmask64 kept)
+{
+    const __m512i high = _mm512_set1_epi8(127);
+    __m512i lowest = _mm512_mask_mov_epi8(high, kept, floors);
+    for (uint32_t step = 1; step < 64; step *= 2)
+    {
+        lowest = _mm512_min_epi8(lowest, tier0_shift_ahead(lowest, high, step));
+    }
+    return tier0_shift_ahead(lowest, high, 1);
+}
+
+// Quarter q of a byte vector, lanes 16q to 16q + 15.
+static __m128i tier0_scan_quarter(__m512i bytes, uint32_t q)
+{
+    return q == 0 ? _mm512_extracti32x4_epi32(bytes, 0) : q == 1 ? _mm512_extracti32x4_epi32(bytes, 1) : q == 2 ? _mm512_extracti32x4_epi32(bytes, 2)
+                                                                                                         : _mm512_extracti32x4_epi32(bytes, 3);
+}
+
+// The low bytes of four quarters of dwords, as one byte vector.
+static __m512i tier0_scan_bytes(const __m512i* words)
+{
+    const __m256i low = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm512_cvtepi32_epi8(words[0])), _mm512_cvtepi32_epi8(words[1]), 1);
+    const __m256i high = _mm256_inserti128_si256(_mm256_castsi128_si256(_mm512_cvtepi32_epi8(words[2])), _mm512_cvtepi32_epi8(words[3]), 1);
+    return _mm512_inserti64x4(_mm512_castsi256_si512(low), high, 1);
+}
+
+// The words of `table` at the lanes' indices (the values' low dwords, by quarter) in `lanes`, zero elsewhere, by
+// quarter: the lookup of a table too large for vpermi2b, of more than 128 locals or calls.
+static void tier0_scan_gather(const uint32_t* table, const __m512i* indices, __mmask64 lanes, __m512i* words)
+{
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        words[q] = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), (__mmask16)(lanes >> (16 * q)), indices[q], (const void*)table, 4);
+    }
+}
+
+// The producer of the value `slot` places below the top before a lane at `depth` (1 for the top): the block's lane the
+// search found (`found`, below 64, from the block's `first` entry), or the carried stack's, BUSTER_TIER0_SCAN_NONE below
+// the stack's bottom.
+static uint32_t tier0_scan_producer(uint32_t first, uint32_t found, uint32_t depth, uint32_t slot, const uint32_t* producers)
+{
+    return found < 64 ? first + found : producers[64 + (int64_t)depth - slot];
+}
+
+// The classes LOCAL, STORE_LOCAL and SET_LOCAL may have on local `local` (tier0_validate_scalar's rule: its own class, or
+// for an object every class of its size or less; none for an address-only one), and bit 15 where LOCAL_ADDRESS may take
+// its address.
+static uint32_t tier0_scan_local(const Tier0Function* function, uint32_t local)
+{
+    const uint32_t flags = function->local_flags[local];
+    uint32_t classes = 0;
+    if (tier0_is_object(function, local))
+    {
+        // By the classes' bytes: 16 for all, then 8 (no memory class), 4 (I8 to U32 and F32), 2 and 1.
+        const uint32_t size = function->local_sizes[local];
+        classes = size >= 16 ? 0x3ffe : size >= 8 ? 0x07fe : size >= 4 ? 0x027e : size >= 2 ? 0x001e : 0x0006;
+    }
+    else
+    {
+        classes = function->local_classes[local] < BUSTER_TYPED_CLASS_VECTOR ? BUSTER_TIER0_CLASS(function->local_classes[local]) : 0;
+    }
+    classes = (flags & BUSTER_TYPED_LOCAL_ADDRESS_ONLY) == 0 ? classes & BUSTER_TIER0_CLASSES_VALUES : 0;
+    return classes | ((flags & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0 ? 0x8000u : 0);
+}
+
+// tier0_scan_local's classes of the 64 locals from `first` (below the count), as their low bytes and their high bytes by
+// lane (zero past the locals): for vpermi2b, in registers, where a vector load of bytes just stored one at a time would
+// stall. It reads no quarter of 16 past the locals: a masked load of memory past an arena's touched pages takes a slow
+// path, though it reads none of it.
+static void tier0_scan_locals(const Tier0Function* function, uint32_t first, __m512i* low, __m512i* high)
+{
+    const uint32_t count = function->local_count;
+    const __m512i classes = tier0_bytes_at(function->local_classes, first, count);
+    const __m512i flags = tier0_bytes_at(function->local_flags, first, count);
+    // An object's size, by its classes' bytes (none, 1, 2, 4, 8 and 16 or more), from the optional sizes' column.
+    __m512i sizes[4] = { _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512() };
+    for (uint32_t q = 0; q < 4 && first + 16 * q < count; q += 1)
+    {
+        const __mmask16 quarter = (__mmask16)(tier0_lanes(first, count) >> (16 * q));
+        const uintptr_t at = (uintptr_t)function->local_sizes + ((uintptr_t)first + 16 * q) * sizeof(uint32_t);
+        const __m512i size = function->local_sizes != 0 ? _mm512_maskz_loadu_epi32(quarter, (const void*)at) : _mm512_setzero_si512();
+        __m512i step = _mm512_setzero_si512();
+        static const uint32_t thresholds[5] = { 1, 2, 4, 8, 16 };
+        for (uint32_t t = 0; t < 5; t += 1)
+        {
+            step = _mm512_mask_add_epi32(step, _mm512_cmpge_epu32_mask(size, _mm512_set1_epi32((int)thresholds[t])), step, _mm512_set1_epi32(1));
+        }
+        sizes[q] = step;
+    }
+    const __m512i size = tier0_scan_bytes(sizes);
+    // By size: 16 bytes or more, every class; 8, all but the memory classes; 4, I8 to U32 and F32; 2 and 1.
+    const __m512i object_low = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0, 0x0000fefe7e1e0600ll);
+    const __m512i object_high = _mm512_set_epi64(0, 0, 0, 0, 0, 0, 0, 0x00003f0702000000ll);
+    const __m512i bits = _mm512_set4_epi32((int)0x80402010, 0x08040201, (int)0x80402010, 0x08040201);
+    const __m512i bit = _mm512_shuffle_epi8(bits, classes);
+    const __mmask64 objects = _mm512_test_epi8_mask(size, size);
+    const __mmask64 high_classes = _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(8));
+    __m512i classes_low = _mm512_mask_blend_epi8(objects, _mm512_maskz_mov_epi8(~high_classes, bit), _mm512_permutexvar_epi8(size, object_low));
+    __m512i classes_high = _mm512_mask_blend_epi8(objects, _mm512_maskz_mov_epi8(high_classes, bit), _mm512_permutexvar_epi8(size, object_high));
+    // None for an address-only local, every one with a value (no VOID, no vector), and LOCAL_ADDRESS's bit where its
+    // address is taken.
+    const __mmask64 usable = _mm512_testn_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_ONLY));
+    classes_low = _mm512_and_si512(_mm512_maskz_mov_epi8(usable, classes_low), _mm512_set1_epi8((char)(BUSTER_TIER0_CLASSES_VALUES & 0xff)));
+    classes_high = _mm512_and_si512(_mm512_maskz_mov_epi8(usable, classes_high), _mm512_set1_epi8((char)(BUSTER_TIER0_CLASSES_VALUES >> 8)));
+    const __mmask64 taken = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+    *low = classes_low;
+    *high = _mm512_or_si512(classes_high, _mm512_maskz_mov_epi8(taken, _mm512_set1_epi8((char)0x80)));
+}
+
+// The operands (each argument, and an indirect call's callee) of the 64 calls from `first` (below the count), by lane
+// (zero past the calls), in a register; it reads no quarter of 16 past the calls (tier0_scan_locals).
+static __m512i tier0_scan_operands(const Tier0Function* function, uint32_t first)
+{
+    const uint32_t count = function->call_count;
+    __m512i operands[4] = { _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512() };
+    for (uint32_t q = 0; q < 4 && first + 16 * q < count; q += 1)
+    {
+        const __mmask16 quarter = (__mmask16)(tier0_lanes(first, count) >> (16 * q));
+        const uintptr_t arguments = (uintptr_t)function->call_argument_counts + ((uintptr_t)first + 16 * q) * sizeof(uint32_t);
+        const uintptr_t targets = (uintptr_t)function->call_targets + ((uintptr_t)first + 16 * q) * sizeof(SymbolId);
+        const __m512i target = _mm512_maskz_loadu_epi32(quarter, (const void*)targets);
+        const __m512i argument = _mm512_maskz_loadu_epi32(quarter, (const void*)arguments);
+        operands[q] = _mm512_mask_add_epi32(argument, quarter & _mm512_testn_epi32_mask(target, target), argument, _mm512_set1_epi32(1));
+    }
+    _Static_assert(sizeof(SymbolId) == 4, "a call's target is a dword");
+    return tier0_scan_bytes(operands);
+}
+
+// The classes a CALL of call `call` may have (tier0_validate_scalar's rules): VOID alone where an object takes its
+// result, no 128-bit integer (an object takes one), and with a result in x87 registers F80 where it is a long double's
+// value in st0, and VOID where an object takes it.
+static uint32_t tier0_scan_call(const Tier0Function* function, uint32_t call)
+{
+    const bool object = function->call_result_objects != 0 && function->call_result_objects[call] != 0;
+    const AbiReturn returned = function->calls[call].result;
+    uint32_t classes = BUSTER_TIER0_CLASSES_ALL &
+                       ~(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80));
+    if (object)
+    {
+        classes = BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_VOID);
+    }
+    else if (tier0_x87_parts(returned) != 0)
+    {
+        classes = tier0_x87_parts(returned) == 1 && tier0_x87_result_valid(returned, 0) ? BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80) : 0;
+    }
+    return classes;
+}
+
+// The classes call `call`'s operands must have on the stack, from the first pushed (an indirect call's callee, U64, then
+// its arguments), by lane, and their count, into `count`.
+static __m512i tier0_scan_call_operands(const Tier0Function* function, uint32_t call, uint32_t* count)
+{
+    const uint32_t arguments = function->call_argument_counts[call];
+    const bool indirect = function->call_targets[call] == 0;
+    const uintptr_t classes = (uintptr_t)function->argument_classes + function->call_first[call];
+    const __m512i given = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, arguments), (const void*)classes);
+    *count = arguments + (indirect ? 1 : 0);
+    return _mm512_mask_blend_epi8(indirect ? ~(__mmask64)0 : 0, given, tier0_shift_back(given, _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64), 1));
+}
+
+// The locals' rules of tier0_frame_input_valid and tier0_validate_tables for a function without an incoming variadic
+// area, 64 at a time: flags of the roles alone, an address-only local a va_list U64 past the parameters with its address
+// taken; an object an address-taken VOID one aligned to 2^30 at most, the objects' bytes (each one's rounded up to 16
+// and, aligned past 16, its alignment less 16) within BUSTER_TIER0_MAX_OBJECT_BYTES; any other one of a value's class
+// but a memory class's or a vector's.
+static bool tier0_scan_locals_valid(const Tier0Function* function)
+{
+    const uint32_t count = function->local_count;
+    bool valid = !(function->local_sizes != 0 && function->local_alignments == 0);
+    __m512i object_bytes = _mm512_setzero_si512();
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i classes = tier0_bytes_at(function->local_classes, first, count);
+        const __m512i flags = tier0_bytes_at(function->local_flags, first, count);
+        const __mmask64 parameters = tier0_lanes(first, function->parameter_count);
+        const __mmask64 roles = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_ONLY));
+        const __mmask64 taken = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        __mmask64 refused = _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)~(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN | BUSTER_TYPED_LOCAL_ADDRESS_ONLY)));
+        refused |= roles & (_mm512_cmpneq_epi8_mask(_mm512_and_si512(flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_ONLY)), _mm512_set1_epi8(BUSTER_TYPED_LOCAL_VA_LIST)) |
+                            _mm512_cmpneq_epi8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64)) | ~taken | parameters);
+        // The objects, and their bytes, in 64-bit lanes.
+        __mmask64 objects = 0;
+        const __m512i alignments = function->local_alignments != 0 ? tier0_bytes_at(function->local_alignments, first, count) : _mm512_setzero_si512();
+        for (uint32_t e = 0; function->local_sizes != 0 && e < 8 && first + 8 * e < count; e += 1)
+        {
+            const __mmask8 eighth = (__mmask8)(lanes >> (8 * e));
+            const uintptr_t at = (uintptr_t)function->local_sizes + ((uintptr_t)first + 8 * e) * sizeof(uint32_t);
+            const __m512i size = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(eighth, (const void*)at));
+            const __m512i log2 = _mm512_cvtepu8_epi64(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_add_epi8(_mm512_load_si512(tier0_scan_lane_indices), _mm512_set1_epi8((char)(8 * e))), alignments)));
+            const __mmask8 present = _mm512_test_epi64_mask(size, size);
+            const __m512i rounded = _mm512_and_si512(_mm512_add_epi64(size, _mm512_set1_epi64(15)), _mm512_set1_epi64(~15ll));
+            const __m512i slack = _mm512_maskz_sub_epi64(_mm512_cmpgt_epu64_mask(log2, _mm512_set1_epi64(BUSTER_TIER0_FRAME_ALIGNMENT_LOG2)),
+                                                         _mm512_sllv_epi64(_mm512_set1_epi64(1), log2), _mm512_set1_epi64(16));
+            object_bytes = _mm512_add_epi64(object_bytes, _mm512_maskz_add_epi64(present, rounded, slack));
+            objects |= (__mmask64)present << (8 * e);
+        }
+        refused |= objects & (_mm512_cmpneq_epi8_mask(classes, _mm512_setzero_si512()) | ~taken |
+                              _mm512_cmpgt_epu8_mask(alignments, _mm512_set1_epi8(BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)));
+        refused |= ~objects & (_mm512_cmpeq_epi8_mask(classes, _mm512_setzero_si512()) | _mm512_cmpgt_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F64)));
+        valid = (refused & lanes) == 0;
+    }
+    return valid && (uint64_t)_mm512_reduce_add_epi64(object_bytes) <= BUSTER_TIER0_MAX_OBJECT_BYTES;
+}
+
+// The calls' rules of tier0_calls_valid and tier0_validate_tables for a function without aggregates' metadata, each
+// call's arguments eight at a time: the arguments in range, at most BUSTER_TIER0_MAX_CALL_ARGUMENTS, the area's alignment
+// 2^30 at most, and no result through a hidden pointer (no object to take it); each argument of a value's class (not VOID,
+// not a 128-bit integer's or a vector's) ignored, in an argument register of its kind that no other argument of the call
+// takes, or in an 8-byte slot inside the call's area, a long double's a 16-byte one at a multiple of 16.
+static bool tier0_scan_calls_valid(const Tier0Function* function)
+{
+    bool valid = true;
+    for (uint32_t c = 0; valid && c < function->call_count; c += 1)
+    {
+        const uint32_t first = function->call_first[c];
+        const uint32_t count = function->call_argument_counts[c];
+        const AbiCall* call = &function->calls[c];
+        const __m512i stack_bytes = _mm512_set1_epi64((int64_t)call->stack_bytes);
+        valid = (uint64_t)first + count <= function->argument_count && count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS &&
+                call->stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 && call->result.kind != BUSTER_ABI_RESULT_MEMORY;
+        uint64_t either = 0;
+        uint64_t sum = 0;
+        for (uint32_t a = 0; valid && a < count; a += 8)
+        {
+            const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, count - a);
+            const uintptr_t at = (uintptr_t)function->argument_locations + ((uintptr_t)first + a) * sizeof(AbiLocation);
+            const uintptr_t classes_at = (uintptr_t)function->argument_classes + first + a;
+            const __m512i locations = _mm512_maskz_loadu_epi64(lanes, (const void*)at);
+            const __m512i classes = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8((__mmask16)lanes, (const void*)classes_at));
+            _Static_assert(sizeof(AbiLocation) == 8 && offsetof(AbiLocation, registers) == 4 && offsetof(AbiLocation, kind) == 6, "a location's fields in its qword");
+            const __m512i offset = _mm512_and_si512(locations, _mm512_set1_epi64(0xffffffffll));
+            const __m512i reg = _mm512_and_si512(_mm512_srli_epi64(locations, 32), _mm512_set1_epi64(0xff));
+            const __m512i kind = _mm512_and_si512(_mm512_srli_epi64(locations, 48), _mm512_set1_epi64(0xff));
+            const __mmask8 registers = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_REGISTERS));
+            const __mmask8 stack = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_STACK));
+            // A register's bit (tier0_register_bit): a vector one's from BUSTER_TIER0_XMM(0), of the argument registers.
+            const __mmask8 vector = _mm512_test_epi64_mask(reg, _mm512_set1_epi64(BUSTER_ABI_REGISTER_VECTOR));
+            const __m512i number = _mm512_mask_add_epi64(reg, vector, _mm512_and_si512(reg, _mm512_set1_epi64(0x1f)), _mm512_set1_epi64(BUSTER_TIER0_XMM(0)));
+            const __m512i bit = _mm512_and_si512(_mm512_sllv_epi64(_mm512_set1_epi64(1), number), _mm512_set1_epi64(BUSTER_TIER0_ARGUMENT_REGISTERS));
+            const __mmask8 argument_register = _mm512_cmplt_epu64_mask(_mm512_andnot_si512(_mm512_set1_epi64(BUSTER_ABI_REGISTER_VECTOR), reg), _mm512_set1_epi64(16)) &
+                                               _mm512_test_epi64_mask(bit, bit);
+            const __mmask8 slot = _mm512_testn_epi64_mask(offset, _mm512_set1_epi64(BUSTER_ABI_SLOT_BYTES - 1)) &
+                                  _mm512_cmple_epu64_mask(_mm512_add_epi64(offset, _mm512_set1_epi64(BUSTER_ABI_SLOT_BYTES)), stack_bytes);
+            const __mmask8 placed = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_IGNORE)) | (registers & argument_register) | (stack & slot);
+            const __mmask8 floating = _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F32)) |
+                                      _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F64));
+            const __mmask8 x87 = _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F80));
+            const __mmask8 x87_placed = stack & _mm512_testn_epi64_mask(offset, _mm512_set1_epi64(15)) &
+                                        _mm512_cmple_epu64_mask(_mm512_add_epi64(offset, _mm512_set1_epi64(16)), stack_bytes);
+            __mmask8 refused = ~placed | (registers & (floating ^ vector)) | (x87 & ~x87_placed);
+            refused |= _mm512_cmpeq_epi64_mask(classes, _mm512_setzero_si512()) | _mm512_cmpgt_epu64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F80));
+            const __m512i taken = _mm512_maskz_mov_epi64(registers & lanes, bit);
+            either |= (uint64_t)_mm512_reduce_or_epi64(taken);
+            sum += (uint64_t)_mm512_reduce_add_epi64(taken);
+            valid = (refused & lanes) == 0;
+        }
+        // No register two arguments take: their bits' sum is their union.
+        valid = valid && either == sum;
+    }
+    return valid;
+}
+
+// tier0_validate_scalar's checks of the frame and the tables (tier0_frame_input_valid, tier0_calls_valid,
+// tier0_parameters_valid and tier0_validate_tables): for a function without the optional parts that only those take
+// (aggregates' metadata, an incoming variadic area, vectors' constants and operations), the locals 64 at a time and each
+// call's arguments eight at a time, and the scalar helpers' for the parameters and the rest; the scalar helpers' alone
+// for a function with them.
+static bool tier0_scan_tables(const Tier0Function* function)
+{
+    const bool plain = function->argument_sizes == 0 && function->call_result_objects == 0 && function->incoming_variadic == 0 && function->result_size == 0 &&
+                       function->result.kind != BUSTER_ABI_RESULT_MEMORY && function->vector_constant_count == 0 && function->operation_count == 0;
+    bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
+    if (valid && !plain)
+    {
+        valid = tier0_frame_input_valid(function) && tier0_calls_valid(function) && tier0_parameters_valid(function);
+        Tier0Validator tables;
+        memset(&tables, 0, sizeof(tables));
+        if (valid)
+        {
+            tier0_validate_tables(function, &tables);
+        }
+        valid = valid && tables.check.error == TIER0_OK;
+    }
+    else if (valid)
+    {
+        valid = tier0_scan_locals_valid(function) && tier0_scan_calls_valid(function) && tier0_parameters_valid(function);
+        // Each parameter that isn't an object in a register of its kind or on the stack (tier0_parameters_valid checks the
+        // registers and the slots).
+        for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
+        {
+            const AbiLocation location = function->parameters[p];
+            const bool floating = tier0_class_floating(function->local_classes[p]);
+            const bool vector = (location.registers[0] & BUSTER_ABI_REGISTER_VECTOR) != 0;
+            valid = tier0_is_object(function, p) || location.kind == BUSTER_ABI_LOCATION_STACK || (location.kind == BUSTER_ABI_LOCATION_REGISTERS && floating == vector);
+        }
+        // Long double's constants, and its result: one long double in st0, in a function with x87.
+        const uint32_t parts = tier0_x87_parts(function->result);
+        valid = valid && (function->x87_constant_count == 0 || function->x87_constants != 0) && (parts == 0 || (parts == 1 && tier0_x87_result_valid(function->result, 0))) &&
+                !(tier0_x87_returns(function) && !function->x87);
+    }
+    return valid;
+}
+
+// The vector path: whether it takes the function's stream, which is then one tier0_validate_scalar takes too. False
+// leaves the function to the scalar validator, for the verdict and the rule.
+static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function* function)
+{
+    const uint32_t count = function->count;
+    const uint32_t local_count = function->local_count;
+    const uint32_t call_count = function->call_count;
+    // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
+    bool valid = !function->vectors && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) && tier0_scan_tables(function);
+    Scratch scratch = scratch_begin(0);
+    // Per entry, the depth before it (and room for a block's store past the last); per entry and the end, the depth the
+    // forward arrivals there bring (UNREACHED before the first) and what else they bring: the producer just below what
+    // they may differ in, whether they bring a value (a JUMP_VALUE's) and its class; and past 128 locals or calls, their
+    // words for the gathers (tier0_scan_local's, and a call's operands).
+    uint8_t* depths = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64) : 0;
+    uint8_t* expected = depths != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 65) : 0;
+    uint64_t* arrivals = expected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count + 1) : 0;
+    // Per entry and the end, a bit where an arrival there brings nothing but depth 0, the most of them (statements').
+    uint64_t* emptied_targets = arrivals != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count / 64 + 1) : 0;
+    const bool few_locals = local_count <= 128;
+    const bool few_calls = call_count <= 128;
+    uint32_t* local_words = arrivals != 0 && !few_locals ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, local_count) : 0;
+    uint32_t* call_words = arrivals != 0 && !few_calls ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, call_count) : 0;
+    valid = valid && emptied_targets != 0 && (few_locals || local_words != 0) && (few_calls || call_words != 0);
+    // The locals' classes and the calls' operands for vpermi2b where there are 128 or fewer (each table's two halves),
+    // and their words for the gathers otherwise.
+    __m512i local_low[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
+    __m512i local_high[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
+    __m512i call_operands[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
+    for (uint32_t h = 0; valid && h < 2 && few_locals && 64 * h < local_count; h += 1)
+    {
+        tier0_scan_locals(function, 64 * h, &local_low[h], &local_high[h]);
+    }
+    for (uint32_t h = 0; valid && h < 2 && few_calls && 64 * h < call_count; h += 1)
+    {
+        call_operands[h] = tier0_scan_operands(function, 64 * h);
+    }
+    for (uint32_t l = 0; valid && !few_locals && l < local_count; l += 1)
+    {
+        local_words[l] = tier0_scan_local(function, l);
+    }
+    for (uint32_t c = 0; valid && !few_calls && c < call_count; c += 1)
+    {
+        // At most 65 operands: tier0_validate_tables refuses more than 64 arguments.
+        call_words[c] = function->call_argument_counts[c] + (function->call_targets[c] == 0 ? 1 : 0);
+    }
+    // The values' bounds, by BUSTER_TIER0_BOUND_* (an empty range where there is nothing to name: [1, 0]), built in
+    // registers: a vector load of words just stored one at a time would stall.
+    _Static_assert(BUSTER_TIER0_BOUND_NONE == 0 && BUSTER_TIER0_BOUND_LOCAL == 1 && BUSTER_TIER0_BOUND_CALL == 2 && BUSTER_TIER0_BOUND_TARGET == 3 &&
+                       BUSTER_TIER0_BOUND_SYMBOL == 4 && BUSTER_TIER0_BOUND_COPY == 5 && BUSTER_TIER0_BOUND_ZERO == 6 && BUSTER_TIER0_BOUND_X87 == 7,
+                   "the bounds' order in their vectors");
+    const uint32_t x87_count = function->x87_constant_count;
+    const uint32_t symbol_limit = function->symbol_access == 0 ? UINT32_MAX : function->symbol_count == 0 ? 0 : function->symbol_count - 1;
+    const __m512i minimum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, x87_count == 0 ? 1 : 0, 0, 1, 1, 0, call_count == 0 ? 1 : 0, local_count == 0 ? 1 : 0, 0);
+    const __m512i maximum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, (int)(x87_count == 0 ? 0 : x87_count - 1), 0, BUSTER_TIER0_MAX_COPY_BYTES, (int)symbol_limit,
+                                             (int)count, (int)(call_count == 0 ? 0 : call_count - 1), (int)(local_count == 0 ? 0 : local_count - 1), (int)UINT32_MAX);
+    // Every kind's classes with the function's: long double's and the 128-bit integers' only where it has them; RETURN's
+    // the address of an aggregate's bytes (U64) where the function returns one, no 128-bit integer, and F80 exactly where
+    // it returns a long double's value in st0; JUMP_INDIRECT's none without labels.
+    const uint32_t allowed = BUSTER_TIER0_CLASSES_ALL & ~(function->x87 ? 0 : BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80)) &
+                             ~(function->int128 ? 0 : BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U128));
+    const bool aggregate = function->result_size != 0 || function->result.kind == BUSTER_ABI_RESULT_MEMORY;
+    uint32_t returned = (aggregate ? BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64) : BUSTER_TIER0_CLASSES_ALL) &
+                        ~(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U128));
+    returned &= tier0_x87_returns(function) ? BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80) : ~BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80);
+    returned &= allowed;
+    const uint32_t indirect = function->label_count != 0 ? BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U64) : 0;
+    __m512i own_low = _mm512_and_si512(_mm512_load_si512(tier0_scan_own_low), _mm512_set1_epi8((char)(allowed & 0xff)));
+    __m512i own_high = _mm512_and_si512(_mm512_load_si512(tier0_scan_own_high), _mm512_set1_epi8((char)(allowed >> 8)));
+    own_low = _mm512_mask_mov_epi8(own_low, (__mmask64)1 << BUSTER_TYPED_RETURN, _mm512_set1_epi8((char)(returned & 0xff)));
+    own_high = _mm512_mask_mov_epi8(own_high, (__mmask64)1 << BUSTER_TYPED_RETURN, _mm512_set1_epi8((char)(returned >> 8)));
+    own_low = _mm512_mask_mov_epi8(own_low, (__mmask64)1 << BUSTER_TYPED_JUMP_INDIRECT, _mm512_set1_epi8((char)(indirect & 0xff)));
+    own_high = _mm512_mask_mov_epi8(own_high, (__mmask64)1 << BUSTER_TYPED_JUMP_INDIRECT, _mm512_set1_epi8((char)(indirect >> 8)));
+    if (valid)
+    {
+        memset(expected, BUSTER_TIER0_SCAN_UNREACHED, (uint64_t)count + 65);
+        memset(arrivals, 0, ((uint64_t)count + 1) * sizeof(uint64_t));
+        memset(emptied_targets, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
+    }
+    // The labels JUMP_INDIRECT may go to: arrivals with nothing on the stack, before the first entry.
+    for (uint32_t k = 0; valid && k < function->label_count; k += 1)
+    {
+        const uint32_t target = function->label_entries[k];
+        valid = target <= count;
+        if (valid)
+        {
+            expected[target] = 0;
+            arrivals[target] = BUSTER_TIER0_SCAN_NONE;
+        }
+    }
+    // The carried stack: each place's class, by lane from place 0, and its producer, from place 0 at index 64.
+    __m512i carried = _mm512_setzero_si512();
+    uint32_t stack_producers[BUSTER_TIER0_SCAN_STACK] __attribute__((aligned(64)));
+    for (uint32_t p = 0; p < 64; p += 1)
+    {
+        stack_producers[p] = BUSTER_TIER0_SCAN_NONE;
+    }
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi8(1);
+    const __m512i lane_indices = _mm512_load_si512(tier0_scan_lane_indices);
+    const __m512i even = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
+    const __m512i odd = _mm512_add_epi32(even, _mm512_set1_epi32(1));
+    uint32_t base = 0;
+    uint32_t previous_kind = BUSTER_TYPED_NONE;
+    uint32_t previous_class = BUSTER_TYPED_CLASS_VOID;
+    uint32_t return_class = BUSTER_TIER0_SCAN_UNREACHED;
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const uint32_t live = count - first < 64 ? count - first : 64;
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const __m512i classes = tier0_bytes_at(function->classes, first, count);
+        const __m512i previous_kinds = tier0_shift_back(kinds, _mm512_set1_epi8((char)previous_kind), 1);
+        const __m512i previous_classes = tier0_shift_back(classes, _mm512_set1_epi8((char)previous_class), 1);
+        // An unknown kind or class, an X86 entry and a vector's class: the scalar validator's.
+        __mmask64 refused = lanes & (_mm512_cmpeq_epi8_mask(kinds, zero) | _mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_X86)) |
+                                     _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)));
+        const __m512i shapes = tier0_lookup(tier0_scan_shapes, kinds);
+        const __m512i rules = tier0_lookup(tier0_scan_rules, kinds);
+        const __m512i sides = tier0_lookup(tier0_scan_sides, kinds);
+        const __mmask64 x87_constants = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) &
+                                        _mm512_cmpeq_epi8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F80));
+        const __m512i bounds = _mm512_mask_mov_epi8(tier0_lookup(tier0_scan_bounds, kinds), x87_constants, _mm512_set1_epi8(BUSTER_TIER0_BOUND_X87));
+        // The values, by their low and high dwords in quarters of 16 lanes, against their kinds' bounds; their low bytes
+        // index the locals' and the calls' tables. No load of eight past the entries (tier0_scan_locals).
+        __m512i low_words[4];
+        __mmask64 bounded = 0;
+        __mmask64 nonzero = 0;
+        for (uint32_t q = 0; q < 4; q += 1)
+        {
+            const uintptr_t at = (uintptr_t)function->values + ((uintptr_t)first + 16 * q) * sizeof(uint64_t);
+            const __m512i a = first + 16 * q < count ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> (16 * q)), (const void*)at) : zero;
+            const __m512i b = first + 16 * q + 8 < count ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> (16 * q + 8)), (const void*)(at + 64)) : zero;
+            low_words[q] = _mm512_permutex2var_epi32(a, even, b);
+            const __m512i high_words = _mm512_permutex2var_epi32(a, odd, b);
+            const __m512i bound = _mm512_cvtepu8_epi32(tier0_scan_quarter(bounds, q));
+            const __mmask16 inside = _mm512_cmpge_epu32_mask(low_words[q], _mm512_permutexvar_epi32(bound, minimum)) &
+                                     _mm512_cmple_epu32_mask(low_words[q], _mm512_permutexvar_epi32(bound, maximum)) &
+                                     (_mm512_cmpeq_epi32_mask(high_words, zero) | _mm512_cmpeq_epi32_mask(bound, zero));
+            const __m512i any = _mm512_or_si512(low_words[q], high_words);
+            bounded |= (__mmask64)inside << (16 * q);
+            nonzero |= (__mmask64)_mm512_test_epi32_mask(any, any) << (16 * q);
+        }
+        refused |= lanes & (~bounded | (_mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_NONZERO)) & ~nonzero));
+        const __m512i indices = tier0_scan_bytes(low_words);
+        // What each entry pops: its kind's, a call's operands, nothing for a RETURN of nothing; and what it pushes: a value
+        // of its class, for a call only where it has one.
+        const __mmask64 calls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CALL));
+        const __mmask64 returns = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_RETURN));
+        const __mmask64 empty_returns = returns & _mm512_cmpeq_epi8_mask(classes, zero);
+        __m512i operands = zero;
+        if (few_calls)
+        {
+            operands = _mm512_permutex2var_epi8(call_operands[0], indices, call_operands[1]);
+        }
+        else if (calls != 0)
+        {
+            __m512i words[4];
+            tier0_scan_gather(call_words, low_words, calls & bounded, words);
+            operands = tier0_scan_bytes(words);
+        }
+        // One comparison register holds at most 64 operands. An indirect call with 64 arguments has 65; its
+        // complete operand check belongs to the scalar validator rather than dropping the last argument.
+        refused |= calls & _mm512_cmpgt_epu8_mask(operands, _mm512_set1_epi8(64));
+        __m512i pops = _mm512_and_si512(shapes, _mm512_set1_epi8(3));
+        pops = _mm512_mask_mov_epi8(pops, calls, operands);
+        pops = _mm512_mask_mov_epi8(pops, empty_returns, zero);
+        const __mmask64 pushes = lanes & _mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_PUSH)) & ~(calls & _mm512_cmpeq_epi8_mask(classes, zero));
+        valid = valid && (uint64_t)_mm512_reduce_add_epi64(_mm512_sad_epu8(pops, zero)) <= BUSTER_TIER0_SCAN_POPS;
+        // The depths before and after each entry, relative to the block's start: prefix sums of the effects in six shifted
+        // adds, and its floor, the depth after its pops.
+        const __m512i effects = _mm512_sub_epi8(_mm512_maskz_mov_epi8(pushes, one), pops);
+        __m512i after = effects;
+        for (uint32_t step = 1; step < 64; step *= 2)
+        {
+            after = _mm512_add_epi8(after, tier0_shift_back(after, zero, step));
+        }
+        const __m512i before = _mm512_sub_epi8(after, effects);
+        const __m512i floors = _mm512_sub_epi8(before, pops);
+        // An operand the stack doesn't have: the lowest place an entry reads (its floor, or DUP's top) below the stack's
+        // bottom.
+        const __mmask64 tops = lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP)) & ~empty_returns;
+        const __m512i lowest = _mm512_sub_epi8(before, _mm512_max_epu8(pops, _mm512_maskz_mov_epi8(tops, one)));
+        refused |= lanes & _mm512_cmplt_epi8_mask(lowest, _mm512_set1_epi8((char)-(int32_t)base));
+        // Each operand's producer: for the top (place before - 1) and the one below it (before - 2), the nearest lane whose
+        // floor is at or below the place, or the carried stack's below the block's start; and its class.
+        __m512i windows[6];
+        windows[0] = _mm512_xor_si512(floors, _mm512_set1_epi8((char)0x80));
+        for (uint32_t s = 1; s < 6; s += 1)
+        {
+            windows[s] = _mm512_min_epu8(windows[s - 1], tier0_shift_back(windows[s - 1], _mm512_set1_epi8((char)0xff), 1u << (s - 1)));
+        }
+        const __m512i first_producers = tier0_scan_previous(windows, _mm512_sub_epi8(before, one));
+        const __m512i second_producers = tier0_scan_previous(windows, _mm512_sub_epi8(before, _mm512_set1_epi8(2)));
+        const __m512i top = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(first_producers), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 1))), carried),
+                                                   _mm512_permutexvar_epi8(first_producers, classes));
+        const __m512i second = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(second_producers), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 2))), carried),
+                                                      _mm512_permutexvar_epi8(second_producers, classes));
+        // The rules: each entry's class; its top's, by its kind's mask, its own, or CONVERT's mask by its class; the one
+        // below, by its kind's mask, its own or the top's; the top the entry before (tier0_last_mismatch's); and nothing
+        // under a RETURN's or a JUMP_INDIRECT's operand.
+        refused |= lanes & ~tier0_scan_member(_mm512_permutexvar_epi8(kinds, own_low), _mm512_permutexvar_epi8(kinds, own_high), classes);
+        __mmask64 top_fits = tier0_scan_member(tier0_lookup(tier0_scan_top_low, kinds), tier0_lookup(tier0_scan_top_high, kinds), top);
+        top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP_SELF)) & _mm512_cmpeq_epi8_mask(top, classes);
+        top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_CONVERT)) &
+                    tier0_scan_member(tier0_lookup(tier0_scan_convert_low, classes), tier0_lookup(tier0_scan_convert_high, classes), top);
+        refused |= tops & ~top_fits;
+        __mmask64 second_fits = tier0_scan_member(tier0_lookup(tier0_scan_second_low, kinds), tier0_lookup(tier0_scan_second_high, kinds), second);
+        second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND_SELF)) & _mm512_cmpeq_epi8_mask(second, classes);
+        second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_COMPARE)) & _mm512_cmpeq_epi8_mask(second, top);
+        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND)) & ~second_fits;
+        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_LAST)) & ~empty_returns & _mm512_cmpneq_epi8_mask(top, previous_classes);
+        const __mmask64 emptied = _mm512_cmpeq_epi8_mask(floors, _mm512_set1_epi8((char)-(int32_t)base));
+        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8((char)BUSTER_TIER0_RULE_FLOOR)) & ~emptied;
+        // A local's classes by the function's table (the bit LOCAL_ADDRESS tests, 15, where its address is taken).
+        const __mmask64 locals = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_LOCAL | BUSTER_TIER0_SIDE_ADDRESS));
+        __m512i local_classes_low = zero;
+        __m512i local_classes_high = zero;
+        if (few_locals)
+        {
+            local_classes_low = _mm512_permutex2var_epi8(local_low[0], indices, local_low[1]);
+            local_classes_high = _mm512_permutex2var_epi8(local_high[0], indices, local_high[1]);
+        }
+        else if (locals != 0)
+        {
+            __m512i words[4];
+            tier0_scan_gather(local_words, low_words, locals & bounded, words);
+            local_classes_low = tier0_scan_bytes(words);
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                words[q] = _mm512_srli_epi32(words[q], 8);
+            }
+            local_classes_high = tier0_scan_bytes(words);
+        }
+        const __m512i local_bit = _mm512_mask_mov_epi8(classes, _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_ADDRESS)), _mm512_set1_epi8(15));
+        refused |= locals & ~tier0_scan_member(local_classes_low, local_classes_high, local_bit);
+        // One class for every RETURN: the first one's.
+        uint8_t class_lanes[64] __attribute__((aligned(64)));
+        _mm512_store_si512(class_lanes, classes);
+        const uint32_t first_return = returns != 0 ? class_lanes[__builtin_ctzll(returns)] : return_class;
+        return_class = return_class == BUSTER_TIER0_SCAN_UNREACHED ? first_return : return_class;
+        refused |= returns & _mm512_cmpneq_epi8_mask(classes, _mm512_set1_epi8((char)return_class));
+        // The lane-at-a-time checks below index the producer stack and shift by classes. Only a block whose
+        // kinds, classes, bounds and depths already passed may execute them; malformed byte depths can wrap.
+        valid = valid && refused == 0;
+        // The lanes' depths, producers and classes for the arrivals' and the calls' checks, which take them a lane at a
+        // time; and each lane's lowest place the lanes before it in the block reached (the place 0 where none did).
+        uint8_t depth_lanes[64] __attribute__((aligned(64)));
+        uint8_t kind_lanes[64] __attribute__((aligned(64)));
+        uint8_t first_lanes[64] __attribute__((aligned(64)));
+        uint8_t second_lanes[64] __attribute__((aligned(64)));
+        uint8_t top_lanes[64] __attribute__((aligned(64)));
+        uint8_t second_class_lanes[64] __attribute__((aligned(64)));
+        uint8_t reached_lanes[64] __attribute__((aligned(64)));
+        const __m512i depth = _mm512_add_epi8(before, _mm512_set1_epi8((char)base));
+        __m512i reached = _mm512_mask_mov_epi8(_mm512_set1_epi8(127), lanes, floors);
+        for (uint32_t step = 1; step < 64; step *= 2)
+        {
+            reached = _mm512_min_epi8(reached, tier0_shift_back(reached, _mm512_set1_epi8(127), step));
+        }
+        _mm512_storeu_si512(depths + first, depth);
+        _mm512_store_si512(depth_lanes, depth);
+        _mm512_store_si512(kind_lanes, kinds);
+        _mm512_store_si512(first_lanes, first_producers);
+        _mm512_store_si512(second_lanes, second_producers);
+        _mm512_store_si512(top_lanes, top);
+        _mm512_store_si512(second_class_lanes, second);
+        _mm512_store_si512(reached_lanes, tier0_shift_back(reached, zero, 1));
+        // The targets the block holds, as forward arrivals from earlier blocks left them: read before this block's own
+        // arrivals, which store no target of the block's (a vector load of bytes just stored a byte at a time stalls).
+        const __m512i expectations = _mm512_loadu_si512(expected + first);
+        // Each arrival's depth (a branch's and a JUMP_VALUE's after its pop, a JUMP_VALUE's with its value) and those that
+        // bring nothing to compare but depth 0, a statement's: a bit for the target (checked where the target's block
+        // is, `emptied_targets`), and backward, its depth 0 now.
+        const __mmask64 controls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CONTROL)) & bounded;
+        const __mmask64 jumps = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP));
+        const __mmask64 brought_values = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP_VALUE));
+        const __m512i arrivals_depth = _mm512_add_epi8(_mm512_sub_epi8(depth, _mm512_maskz_mov_epi8(~jumps, one)), _mm512_maskz_mov_epi8(brought_values, one));
+        const __mmask64 empty = controls & _mm512_cmpeq_epi8_mask(arrivals_depth, zero);
+        bool failed = false;
+        for (uint64_t pending = empty; valid && pending != 0; pending &= pending - 1)
+        {
+            const uint32_t entry = first + (uint32_t)__builtin_ctzll(pending);
+            const uint32_t target = (uint32_t)function->values[entry];
+            emptied_targets[target >> 6] |= 1ull << (target & 63);
+            failed |= (target <= entry) & (depths[target] != 0);
+        }
+        // The others: forward, the depth, the producer just below what they may differ in (of the top for a JUMP, which
+        // pops nothing, and of the one below for a branch's and a JUMP_VALUE's) and the class of the value a JUMP_VALUE
+        // brings, against the target's own where the block holds it (`near`), and otherwise against the first forward
+        // arrival's, which the target's block checks; backward, the scalar validator's.
+        __mmask64 near = 0;
+        for (uint64_t pending = controls & ~empty; valid && pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            const uint32_t entry = first + lane;
+            const uint32_t target = (uint32_t)function->values[entry];
+            const uint32_t popped = kind_lanes[lane] != BUSTER_TYPED_JUMP ? 1 : 0;
+            const uint32_t brings = kind_lanes[lane] == BUSTER_TYPED_JUMP_VALUE ? 1 : 0;
+            const uint32_t arrival = depth_lanes[lane] - popped + brings;
+            const uint32_t below = tier0_scan_producer(first, (popped != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + popped, stack_producers);
+            const uint32_t value_class = brings != 0 ? class_lanes[lane] : 0;
+            const bool forward = target > entry;
+            const bool inside = forward && target < first + live;
+            const uint32_t at = (target - first) & 63;
+            const uint32_t at_below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[at], depth_lanes[at], 1 + brings, stack_producers);
+            failed |= inside && (depth_lanes[at] != arrival || at_below != below || (brings != 0 && top_lanes[at] != value_class));
+            near |= (__mmask64)(inside ? 1 : 0) << at;
+            const uint64_t brought = below | (uint64_t)brings << 32 | (uint64_t)value_class << 40;
+            const bool far = forward && !inside;
+            const uint32_t old = expected[target];
+            const uint64_t old_brought = arrivals[target];
+            const bool fresh = old == BUSTER_TIER0_SCAN_UNREACHED;
+            failed |= (far && !fresh && (old != arrival || old_brought != brought)) || !forward;
+            expected[target] = (uint8_t)(far && fresh ? arrival : old);
+            arrivals[target] = far && fresh ? brought : old_brought;
+        }
+        // The targets' depths: 0 where an arrival brings nothing else; from earlier blocks' other arrivals, theirs, and
+        // the same producer below what they bring and the same value a JUMP_VALUE brings; and code no path reaches before
+        // a target, after a jump or a return, at depth 0, where tier0_validate_scalar starts again.
+        refused |= lanes & emptied_targets[first >> 6] & _mm512_test_epi8_mask(depth, depth);
+        const __mmask64 reached_before = lanes & _mm512_cmpneq_epi8_mask(expectations, _mm512_set1_epi8((char)BUSTER_TIER0_SCAN_UNREACHED));
+        refused |= reached_before & _mm512_cmpneq_epi8_mask(expectations, depth);
+        refused |= lanes & _mm512_test_epi8_mask(tier0_lookup(tier0_scan_sides, previous_kinds), _mm512_set1_epi8(BUSTER_TIER0_SIDE_TRANSFER)) & ~(reached_before | near) &
+                   _mm512_test_epi8_mask(depth, depth);
+        valid = valid && refused == 0 && !failed;
+        for (uint64_t pending = reached_before & _mm512_test_epi8_mask(expectations, expectations); valid && pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            const uint64_t brought = arrivals[first + lane];
+            const uint32_t brings = (uint32_t)(brought >> 32) & 1;
+            const uint32_t below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + brings, stack_producers);
+            failed |= below != (uint32_t)brought || (brings != 0 && top_lanes[lane] != (uint8_t)(brought >> 40));
+        }
+        // Each call: its class by its own rules, and its operands' (an indirect call's callee, U64, then its arguments, the
+        // first pushed first) on the stack: for two or fewer, the top's and the one below's; for more, from the carried
+        // stack below the lowest place the lanes before it reached and above it the values those lanes left, in order.
+        const __mmask64 few_operands = calls & bounded & _mm512_cmple_epu8_mask(operands, _mm512_set1_epi8(2));
+        for (uint64_t pending = few_operands; valid && pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            const uint32_t call = (uint32_t)function->values[first + lane];
+            uint32_t count_operands = 0;
+            const __m512i wanted = tier0_scan_call_operands(function, call, &count_operands);
+            const __m512i stack = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)second_class_lanes[lane]), (__mmask64)1 << ((count_operands - 1) & 63),
+                                                       _mm512_set1_epi8((char)top_lanes[lane]));
+            failed |= ((tier0_scan_call(function, call) >> class_lanes[lane]) & 1) == 0 || _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
+        }
+        for (uint64_t pending = calls & bounded & ~few_operands; valid && pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+            const uint32_t call = (uint32_t)function->values[first + lane];
+            uint32_t count_operands = 0;
+            const __m512i wanted = tier0_scan_call_operands(function, call, &count_operands);
+            const int32_t at = (int32_t)depth_lanes[lane];
+            // Below the stack's bottom (an operand it doesn't have), the call is refused already: its places from 0.
+            const int32_t bottom = at >= (int32_t)count_operands ? at - (int32_t)count_operands : 0;
+            const int32_t lowest_place = (int32_t)base + (int8_t)reached_lanes[lane];
+            const int32_t below = (lowest_place < at ? lowest_place : at) - bottom;
+            const uint32_t kept = below > 0 ? (uint32_t)below : 0;
+            const __m512i held_below = _mm512_maskz_permutexvar_epi8(_bzhi_u64(~0ull, kept), _mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)bottom)), carried);
+            const __mmask64 earlier = _bzhi_u64(~0ull, lane);
+            const __m512i held = _mm512_maskz_compress_epi8(pushes & earlier & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, earlier)), classes);
+            const __m512i inside = _mm512_permutexvar_epi8(_mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)(bottom - lowest_place))), held);
+            const __m512i stack = _mm512_mask_blend_epi8(_bzhi_u64(~0ull, kept), inside, held_below);
+            failed |= ((tier0_scan_call(function, call) >> class_lanes[lane]) & 1) == 0 || _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
+        }
+        // A global entry's symbol's access, where the function has the column.
+        if (function->symbol_access != 0)
+        {
+            for (uint64_t pending = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_GLOBAL)) & bounded; pending != 0; pending &= pending - 1)
+            {
+                failed |= function->symbol_access[(uint32_t)function->values[first + (uint32_t)__builtin_ctzll(pending)]] >= BUSTER_TIER0_ACCESSES;
+            }
+        }
+        valid = valid && refused == 0 && !failed;
+        if (valid)
+        {
+            // The values the block leaves on the stack, onto the carried stack: each lane's that pushes and whose floor is
+            // below every later lane's, in order from the lowest place the block reached.
+            uint8_t lowest_lanes[64] __attribute__((aligned(64)));
+            _mm512_store_si512(lowest_lanes, reached);
+            const uint32_t place = base + (uint32_t)(int32_t)(int8_t)lowest_lanes[live - 1];
+            const __mmask64 left = pushes & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, lanes));
+            const __m512i left_classes = _mm512_maskz_compress_epi8(left, classes);
+            carried = _mm512_mask_blend_epi8(~_bzhi_u64(~0ull, place), carried, _mm512_permutexvar_epi8(_mm512_sub_epi8(lane_indices, _mm512_set1_epi8((char)place)), left_classes));
+            uint32_t offset = 64 + place;
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                const __mmask16 quarter = (__mmask16)(left >> (16 * q));
+                const __m512i producers = _mm512_add_epi32(_mm512_set1_epi32((int)(first + 16 * q)), _mm512_cvtepu8_epi32(tier0_scan_quarter(lane_indices, 0)));
+                _mm512_storeu_si512(stack_producers + offset, _mm512_maskz_compress_epi32(quarter, producers));
+                offset += (uint32_t)__builtin_popcount(quarter);
+            }
+            base = (uint32_t)((int32_t)base + (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(after, 3), 15));
+            valid = base <= BUSTER_TIER0_SCAN_DEPTH;
+            previous_kind = kind_lanes[live - 1];
+            previous_class = class_lanes[live - 1];
+        }
+    }
+    // The end, where no value is left and a function returning an aggregate never arrives (its RETURNs leave the address
+    // the epilogue reads).
+    if (valid)
+    {
+        const bool falls = count == 0 || (tier0_scan_sides[function->kinds[count - 1]] & BUSTER_TIER0_SIDE_TRANSFER) == 0;
+        const bool jumped = expected[count] != BUSTER_TIER0_SCAN_UNREACHED || ((emptied_targets[count >> 6] >> (count & 63)) & 1) != 0;
+        valid = base == 0 && (expected[count] == BUSTER_TIER0_SCAN_UNREACHED || expected[count] == 0) && !(aggregate && (falls || jumped));
+    }
+    scratch_end(scratch);
+    return valid;
+}
+
+#define BUSTER_TIER0_VALIDATE_SMALL_COUNT 16
+
+static Tier0Check tier0_validate(const Tier0Function* function)
+{
+    Tier0Check check;
+    memset(&check, 0, sizeof(check));
+    // Locked 9700X size controls favor scalar validation through 16 entries. Keep empty streams on their cheap
+    // vector setup path and do not infer a small total workload from entry count when metadata tables are large.
+    const bool small = function->count != 0 && function->count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
+                       function->local_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT && function->call_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
+                       function->argument_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT;
+    if (small || !tier0_validate_accepts(function))
+    {
+        check = tier0_validate_scalar(function);
+    }
+    return check;
 }

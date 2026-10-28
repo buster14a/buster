@@ -11,23 +11,22 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
     BindTestLink* test = &program.test;
     Scratch scratch = scratch_begin(0);
     ExecutableDynamic dynamic = { 0 };
-    bool built = program.bound && dynamic_inputs(&dynamic, runtime, &test->bind, scratch.arena);
+    bool built = program.bound && dynamic_inputs(&dynamic, runtime, &test->bind, scratch.arena) && dynamic.library_count == 2;
     ExecutableLibrary libraries[260] = { 0 };
     if (built)
     {
-        // The runtime's libgcc_s.so.1, libc.so.6 and loader (dynamic_inputs): the first selected by no version, since
-        // the program needs none of its names.
+        // The runtime's libc.so.6 and loader, without the unused libgcc_s catalog. Put both above index 255 and leave
+        // index 257 empty to keep testing sparse library indices as well.
         libraries[1] = (ExecutableLibrary){ .name = BUSTER_S8("libm.so.6"), .required = true };
-        libraries[257] = dynamic.libraries[0];
-        libraries[258] = dynamic.libraries[1];
-        libraries[259] = dynamic.libraries[2];
+        libraries[258] = dynamic.libraries[0];
+        libraries[259] = dynamic.libraries[1];
         libraries[259].required = true;
         ExecutableVersion* versions = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ExecutableVersion, dynamic.version_count);
         built = versions != 0;
         for (uint32_t v = 0; built && v < dynamic.version_count; v += 1)
         {
             versions[v] = dynamic.versions[v];
-            versions[v].library += 257;
+            versions[v].library += 258;
         }
         dynamic.versions = versions;
         dynamic.libraries = libraries;

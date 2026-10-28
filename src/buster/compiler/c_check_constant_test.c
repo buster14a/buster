@@ -3,11 +3,146 @@
 // Original declaration-time expression fixtures, checked by both parser/checker paths and installed Clang.
 // The FILE-sized arithmetic is authored from the target sizes; no system header or external fixture is copied.
 
+static void check_test_constant_parameter_names(CheckTest* test)
+{
+    enum { COUNT = 1024 };
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    const uint64_t bytes = COUNT * sizeof(CheckConstantParameter);
+    const uint64_t readable = (bytes + page - 1) / page * page;
+    uint8_t* mapping = mmap(0, readable + page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = mapping != MAP_FAILED && mprotect(mapping + readable, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "prototype name tree guarded records");
+    if (ready)
+    {
+        CheckConstantParameter* parameters = (CheckConstantParameter*)(mapping + readable - bytes);
+        CheckConstantPart functions[2] = { 0 };
+        uint8_t owners[COUNT];
+        for (uint32_t i = 0; i < COUNT - 2; i += 1)
+        {
+            // The first 33 names force every bit decision, including bit 31; later names mix duplicates,
+            // unnamed parameters and two interleaved prototype scopes. The independent oracle scans only here.
+            const uint32_t name = i < 32 ? ~(UINT32_C(1) << i) : i == 32 ? UINT32_MAX : (i * 73) % 193;
+            owners[i] = i < 33 ? 0 : i & 1;
+            parameters[i] = (CheckConstantParameter){ .name = name };
+            bool expected = true;
+            for (uint32_t previous = 0; previous < i; previous += 1)
+            {
+                expected &= name == 0 || owners[previous] != owners[i] || parameters[previous].name != name;
+            }
+            const bool unique = check_constant_parameter_unique(&functions[owners[i]], parameters, i);
+            check_test_expect(test, unique == expected, "prototype name tree differs from independent membership");
+        }
+        parameters[COUNT - 1] = (CheckConstantParameter){ .name = UINT32_MAX };
+        check_test_expect(test, !check_constant_parameter_unique(&functions[0], parameters, COUNT - 1), "prototype name tree full-depth duplicate");
+        CheckConstantPart empty = { 0 };
+        parameters[COUNT - 1] = (CheckConstantParameter){ 0 };
+        check_test_expect(test, check_constant_parameter_unique(&empty, parameters, COUNT - 1) && empty.parameter_names == 0,
+                          "unnamed parameter leaves prototype tree empty");
+    }
+    if (mapping != MAP_FAILED)
+    {
+        munmap(mapping, readable + page);
+    }
+}
+
+static __attribute__((noinline)) void check_test_constant_parameter_sources(CheckTest* test, const char* clang)
+{
+    const uint32_t counts[] = {
+        0,
+        1,
+        15,
+        16,
+        17,
+        31,
+        32,
+        33,
+        256,
+        4096,
+    };
+    char directory[] = "/tmp/buster-checker-parameters-XXXXXX";
+    const bool created = mkdtemp(directory) != 0;
+    check_test_expect(test, created, "prototype scaling fixtures' directory");
+    for (uint32_t c = 0; created && c < BUSTER_ARRAY_LENGTH(counts); c += 1)
+    {
+        const uint32_t count = counts[c];
+        for (uint32_t form = 0; form < (count >= 256 ? 4u : 2u); form += 1)
+        {
+            Arena text = arena_reserve((uint64_t)count * 32 + 256);
+            const uint64_t capacity = (uint64_t)count * 32 + 256;
+            char* source = arena_push(&text, capacity, 1);
+            uint64_t length = 0;
+            if (source != 0)
+            {
+                length = (uint64_t)snprintf(source, capacity, "enum { A=sizeof(int (*)(");
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const uint32_t name = form == 2 && i == 1 ? 0 : form == 3 && i + 1 == count ? 0 : i;
+                    length += form == 1 ? (uint64_t)snprintf(source + length, capacity - length, "%sint", i == 0 ? "" : ",") :
+                                          (uint64_t)snprintf(source + length, capacity - length, "%sint p%u", i == 0 ? "" : ",", name);
+                }
+                length += (uint64_t)snprintf(source + length, capacity - length, "%s)) }; _Static_assert(A==8,\"prototype pointer\");\n", count == 0 ? "void" : "");
+            }
+            char path[160];
+            snprintf(path, sizeof(path), "%s/%u-%u.c", directory, count, form);
+            char* paths[] = { path };
+            const char* arguments[] = { "-std=gnu17" };
+            ParseTestClang outcome = { 0 };
+            const bool ready = source != 0 && length < capacity && parse_test_write(path, source, length) &&
+                               parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &outcome);
+            check_test_expect(test, ready && outcome.rejected == (form >= 2), "prototype scaling fixture Clang expectation");
+            if (ready)
+            {
+                const CheckSourceFixture fixture = {
+                    .name = "generated prototype parameter names",
+                    .source = source,
+                    .rejected = form >= 2,
+                };
+                check_test_source(test, &fixture, path, &outcome);
+            }
+            unlink(path);
+            arena_release(&text);
+        }
+    }
+    if (created)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_constant_sources(CheckTest* test, const char* clang)
 {
+    check_test_constant_parameter_names(test);
+    check_test_constant_parameter_sources(test, clang);
     // Clang 23 tests only the low 64 bits of this GNU condition; GCC and the full-width C integer truth rule
     // select 7. Keep the original counterexample as a direct checker regression and an explicit oracle probe.
     const char* wide_truth_source = "enum { N=__builtin_choose_expr(((__int128)1<<100),7,0) }; _Static_assert(N==7, \"full-width truth\");\n";
+    char nested_selections[4][8192];
+    for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(nested_selections); shape += 1)
+    {
+        // Clang's ICE validation stalls on deep choose-expression enums; runtime syntax is a bounded oracle.
+        uint32_t used = (uint32_t)snprintf(nested_selections[shape], sizeof(nested_selections[shape]), shape < 2 ? "int f(void){return " : "enum { N=");
+        const char* opening = shape == 0 ? "__builtin_choose_expr(1," : shape == 1 ? "__builtin_choose_expr(0," :
+                              shape == 2 ? "_Generic(0,int:" : "_Generic(0,default:";
+        const char* closing = shape < 2 ? ",0)" : shape == 2 ? ",default:0)" : ",int:0)";
+        for (uint32_t depth = 0; depth < 128; depth += 1)
+        {
+            used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "%s", opening);
+        }
+        used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "7");
+        for (uint32_t depth = 0; depth < 128; depth += 1)
+        {
+            used += (uint32_t)snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, "%s", closing);
+        }
+        if (shape < 2)
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used, ";}\n");
+        }
+        else
+        {
+            snprintf(nested_selections[shape] + used, sizeof(nested_selections[shape]) - used,
+                     " }; _Static_assert(N==%u, \"nested selection\");\n", shape % 2 == 0 ? 7u : 0u);
+        }
+    }
     char nested_source[4096];
     uint32_t length = (uint32_t)snprintf(nested_source, sizeof(nested_source), "enum { N=");
     for (uint32_t i = 0; i < 96; i += 1)
@@ -48,6 +183,23 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     snprintf(raw_shuffle + length, sizeof(raw_shuffle) - length, ")))]]; _Static_assert(_Alignof(T)==2048, \"raw long shuffle operand slice\");\n");
     const CheckSourceFixture fixtures[] =
     {
+        { .name = "deep selected choose expressions", .source = nested_selections[0] },
+        { .name = "deep unselected choose expressions", .source = nested_selections[1] },
+        { .name = "deep selected generic expressions", .source = nested_selections[2] },
+        { .name = "deep unselected generic expressions", .source = nested_selections[3] },
+        {
+            .name = "nested selections retain prefix, infix and comma roots",
+            .source = "enum { A=__builtin_choose_expr(1,-(2+3),0), B=_Generic(0,int:2*3+1,default:0), C=__builtin_choose_expr(0,0,_Generic(0,int:(2,7),default:0)) }; _Static_assert(A==-5 && B==7 && C==7,\"selection roots\");\n",
+        },
+        {
+            .name = "nested selections retain vector values and lvalues",
+            .source = "typedef int V __attribute__((vector_size(16))); V a,b; V f(void){return _Generic(0,int:__builtin_choose_expr(1,a,b),default:b);} int g(void){_Generic(0,int:__builtin_choose_expr(0,b,a),default:b)[0]=9; return a[0];}\n",
+        },
+        {
+            .name = "unselected nested operands remain type checked in source order",
+            .source = "int f(void){return __builtin_choose_expr(1,7,_Generic(0,int:missing,default:0));}\n",
+            .rejected = true,
+        },
         { .name = "bitcast declaration integer representation", .source = "enum { N=__builtin_bit_cast(int,0xffffffffu), P=__builtin_bit_cast(unsigned, -1) }; _Static_assert(N==-1 && P==0xffffffffu,\"integer representation\");\n" },
         { .name = "bitcast raw attribute is not an integer constant expression", .source = "typedef int T [[gnu::aligned(__builtin_bit_cast(unsigned,16))]];\n", .rejected = true },
         { .name = "bitcast half operand is not promoted", .source = "__fp16 x; enum { N=sizeof(__builtin_bit_cast(unsigned short,x)), M=sizeof(__builtin_bit_cast(__fp16,(unsigned short)0x3c00)) }; _Static_assert(N==2 && M==2,\"half representation\");\n" },
@@ -365,6 +517,55 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .rejected = true,
         },
         {
+            .name = "type name duplicate separated by unnamed parameters",
+            .source = "enum { A=sizeof(int (*)(int x,int,int,int x)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "type name nested prototypes reuse outer names",
+            .source = "enum { A=sizeof(int (*)(int x,int (*cb)(int x,int y),int y)) }; _Static_assert(A==8,\"nested scopes\");\n",
+        },
+        {
+            .name = "type name sibling prototypes reuse names",
+            .source = "enum { A=sizeof(int (*)(int (*a)(int x,int y),int (*b)(int x,int y))) }; _Static_assert(A==8,\"sibling scopes\");\n",
+        },
+        {
+            .name = "type name outer duplicate survives nested prototype",
+            .source = "enum { A=sizeof(int (*)(int x,int (*cb)(int x),int x)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "type name nested prototype duplicate",
+            .source = "enum { A=sizeof(int (*)(int x,int (*cb)(int y,int y),int z)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "separate type names reuse prototype names",
+            .source = "enum { A=sizeof(int (*)(int x,int y))+sizeof(int (*)(int x,int y)) }; _Static_assert(A==16,\"separate prototypes\");\n",
+        },
+        {
+            .name = "nested type name parameter does not hide outer typedef",
+            .source = "typedef int T; enum { A=sizeof(int (*)(int (*cb)(int T),T x)) }; _Static_assert(A==8,\"typedef restored\");\n",
+        },
+        {
+            .name = "type name unnamed parameters do not collide",
+            .source = "enum { A=sizeof(int (*)(int,int,int,int)) }; _Static_assert(A==8,\"unnamed parameters\");\n",
+        },
+        {
+            .name = "type name duplicate precedes later invalid declaration",
+            .source = "enum { A=sizeof(int (*)(int x,int x)) };\nint f(void){return missing;}\n",
+            .rejected = true,
+        },
+        {
+            .name = "type name invalid parameter precedes later duplicate",
+            .source = "enum { A=sizeof(int (*)(void bad,\nint x,int x)) };\n",
+            .rejected = true,
+        },
+        {
+            .name = "body expression named callback type",
+            .source = "unsigned long f(void){return sizeof(int (*)(int p0,int p1,int p2,int p3));}\n",
+        },
+        {
             .name = "declaration member offset",
             .source = "struct S { char c; int a[3]; }; enum { A=__builtin_offsetof(struct S,a[2]) }; _Static_assert(A==12, \"offset\");\n",
         },
@@ -418,6 +619,43 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
         {
             .name = "declaration generic selection",
             .source = "enum { N=_Generic(1,int:7,default:1/0) }; _Static_assert(N==7, \"generic\");\n",
+        },
+        {
+            .name = "generic aligned nominal duplicate",
+            .source = "struct S{int x;}; typedef struct S T __attribute__((aligned(16))); int f(struct S x){return _Generic(x,struct S:1,T:2);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic enum underlying duplicate",
+            .source = "enum E{E0}; enum{N=_Generic(0,enum E:1,unsigned int:2,default:0)};\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic compatible record array pointers",
+            .source = "struct S{int x;}; int f(void){return _Generic(0,struct S(*)[]:1,struct S(*)[3]:2,default:0);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic compatible function pointers",
+            .source = "enum{N=_Generic(0,int(*)():1,int(*)(double):2,default:0)};\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic nominal qualifiers retain exact checks",
+            .source = "struct S; typedef struct S *P; enum{N=_Generic((P)0,const struct S*:1,P:7)}; _Static_assert(N==7,\"selected\"); int f(P x){return _Generic(x,const struct S*:1,P:7);}\n",
+        },
+        {
+            .name = "generic distinct pointer shapes share a nominal key",
+            .source = "struct S{int x;}; int f(struct S*x){return _Generic(x,struct S*:7,struct S**:2,struct S(*)[3]:3);}\n",
+        },
+        {
+            .name = "generic transparent function parameter duplicate",
+            .source = "struct S; union U{struct S*p;void*q;} __attribute__((transparent_union)); int f(void){return _Generic(0,int(*)(union U):1,int(*)(struct S*):2,default:0);}\n",
+            .rejected = true,
+        },
+        {
+            .name = "generic later transparent attribute is inactive",
+            .source = "struct S; union U{struct S*p;void*q;}; enum{N=_Generic(0,int(*)(union U):1,int(*)(struct S*):2,default:7)}; typedef union U TU __attribute__((transparent_union)); _Static_assert(N==7,\"source time\");\n",
         },
         {
             .name = "declaration nested generic selection",

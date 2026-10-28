@@ -227,6 +227,15 @@ typedef enum TypeFunctionABI
 // TypeMember.bit_width of a member that isn't a bit-field.
 #define BUSTER_TYPE_NOT_BIT_FIELD UINT32_MAX
 
+// The member lookup (TypeLookup): a record of at most BUSTER_TYPE_LOOKUP_SCAN members, none of them an anonymous struct or
+// union, is scanned with one compare; any other has an index of buckets of BUSTER_TYPE_LOOKUP_SLOTS names, or, where its
+// index doesn't fit, TypeTags.lookup BUSTER_TYPE_LOOKUP_WALK. type_lookup_member's answer BUSTER_TYPE_MEMBER_UNKNOWN, which
+// no member's index is, says that a walk ran out of scratch memory.
+#define BUSTER_TYPE_LOOKUP_SCAN 16
+#define BUSTER_TYPE_LOOKUP_SLOTS 8
+#define BUSTER_TYPE_LOOKUP_WALK UINT32_MAX
+#define BUSTER_TYPE_MEMBER_UNKNOWN UINT32_MAX
+
 // The limits: clang's array limit (2^61 bytes), _BitInt's widths, and alignments up to 2^32 bytes.
 #define BUSTER_TYPE_MAX_OBJECT_BYTES ((1ull << 61) - 1)
 #define BUSTER_TYPE_MAX_BIT_INT_WIDTH 8388608u
@@ -324,7 +333,8 @@ struct TypeParameters
 // Per tag (struct, union or enum), by tag index. A tag is one per declaration: never hash-consed. completion is the
 // order in which tags were completed, from 1 (0 while incomplete), which #113's deferred bodies compare. packed,
 // pack_log2 and alignment_log2 are the layout's inputs (an enum's alignment too); the last two hold log2 + 1, 0 for
-// none. Record 0 is unused.
+// none. lookup is how a struct's or union's members are found by name (TypeLookup): 0 for a scan of its members,
+// BUSTER_TYPE_LOOKUP_WALK for a walk, and otherwise its index's first bucket, of 2^lookup_log2. Record 0 is unused.
 typedef struct TypeTags TypeTags;
 struct TypeTags
 {
@@ -336,6 +346,8 @@ struct TypeTags
     uint8_t* packed;
     uint8_t* pack_log2;
     uint8_t* alignment_log2;
+    uint32_t* lookup;
+    uint8_t* lookup_log2;
     uint32_t count;
     uint32_t capacity;
     // How many tags have been completed.
@@ -355,6 +367,29 @@ struct TypeMembers
     uint8_t* alignment_log2;
     uint8_t* flags;
     uint64_t* offset;
+    uint32_t count;
+    uint32_t capacity;
+};
+
+// The member lookup's index (#591): what a name finds in a struct or union, without a pass over its members. Each record
+// that isn't scanned (BUSTER_TYPE_LOOKUP_SCAN) has a hash table of every name its lookup finds, through its anonymous
+// members too, each with the first of its own members in declaration order that finds it: the named member, or the
+// anonymous member that holds the name, whose record's lookup goes on from there. type_record_define builds it, half
+// full at most, its anonymous members' names from their records' lookups, so a lookup takes a probe per anonymous member
+// it goes through, and never visits a record twice, however often records hold one another. A bucket is a cache line:
+// BUSTER_TYPE_LOOKUP_SLOTS names (0 in an empty slot), compared at once, and their members; a probe goes from the name's
+// bucket on until it finds the name or an empty slot. Bucket 0 is unused, so that TypeTags.lookup 0 is a scan.
+typedef struct TypeLookupBucket TypeLookupBucket;
+struct TypeLookupBucket
+{
+    uint32_t names[BUSTER_TYPE_LOOKUP_SLOTS];
+    uint32_t members[BUSTER_TYPE_LOOKUP_SLOTS];
+};
+
+typedef struct TypeLookup TypeLookup;
+struct TypeLookup
+{
+    TypeLookupBucket* buckets;
     uint32_t count;
     uint32_t capacity;
 };
@@ -390,6 +425,7 @@ struct TypeTable
     TypeParameters parameters;
     TypeTags tags;
     TypeMembers members;
+    TypeLookup lookup;
     TypeIndex index;
     // Why the last request that failed did, for its diagnostic.
     TypeError last_error;
@@ -403,8 +439,9 @@ struct TypeTable
     bool char_unsigned;
 };
 
-// How many records of each table there is room for: types besides the builtin ones, and tags and members besides
-// record 0.
+// How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
+// and the member lookup's buckets besides bucket 0 (TypeLookup), where 0 asks for one a member: more than a unit's records
+// take unless their anonymous members nest deeply, past which their lookups walk.
 typedef struct TypeCapacity TypeCapacity;
 struct TypeCapacity
 {
@@ -412,6 +449,7 @@ struct TypeCapacity
     uint32_t parameters;
     uint32_t tags;
     uint32_t members;
+    uint32_t lookups;
 };
 
 // A member as type_record_define takes it.
@@ -652,6 +690,15 @@ static __attribute__((unused)) TypeId type_enum_underlying(bool packed, uint32_t
 // A member of a struct or union by name, looking into anonymous members as C does, and its offset in bits from the
 // record's start. Returns the member's index in TypeMembers, or 0 if there is none.
 static __attribute__((unused)) uint32_t type_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset);
+// The same with the qualifiers the member's access inherits: the record's and those of the anonymous members' types on
+// the way. The member is the first with the name in declaration order, depth first through anonymous members, as clang's
+// lookup finds it; BUSTER_TYPE_MEMBER_UNKNOWN if the scratch memory couldn't hold a walk. type_lookup_member takes each
+// record's lookup (TypeLookup: its index or its scan, compared in vectors, and the walk only where its index didn't
+// fit); type_lookup_member_scalar is its exact twin, which compares one name at a time; type_lookup_walk walks the
+// members, without the index, depth first.
+static __attribute__((unused)) uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers);
+static __attribute__((unused)) uint32_t type_lookup_member_scalar(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers);
+static __attribute__((unused)) uint32_t type_lookup_walk(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers);
 // x86-64's __builtin_va_list: struct __va_list_tag { unsigned gp_offset, fp_offset; void* overflow_arg_area,
 // *reg_save_area; }[1], with the names' ids given in that order (the tag's first).
 static __attribute__((unused)) TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names);
@@ -719,6 +766,7 @@ struct TypeViewMark
     uint32_t parameters;
     uint32_t tags;
     uint32_t members;
+    uint32_t lookups;
     uint32_t completions;
     uint32_t buckets;
 };
@@ -925,8 +973,8 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 #define BUSTER_TYPE_COLUMN_ALIGNMENT 64
 #define BUSTER_TYPE_RECORD_BYTES (4 * sizeof(uint8_t) + sizeof(TypeId) + sizeof(uint32_t) + 3 * sizeof(uint64_t))
 #define BUSTER_TYPE_RECORD_COLUMNS 9
-#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 4 * sizeof(uint32_t) + 3 * sizeof(uint8_t))
-#define BUSTER_TYPE_TAG_COLUMNS 8
+#define BUSTER_TYPE_TAG_BYTES (sizeof(TypeId) + 5 * sizeof(uint32_t) + 4 * sizeof(uint8_t))
+#define BUSTER_TYPE_TAG_COLUMNS 10
 #define BUSTER_TYPE_MEMBER_BYTES (sizeof(uint32_t) + sizeof(TypeId) + sizeof(uint32_t) + 2 * sizeof(uint8_t) + sizeof(uint64_t))
 #define BUSTER_TYPE_MEMBER_COLUMNS 6
 // The index: four slots per 64-byte bucket, at most three quarters full, from 64 buckets (4 KB).
@@ -936,6 +984,13 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
 // The types past a copy's own that its index has room for before it grows (type_copy).
 #define BUSTER_TYPE_COPY_INDEX_SLACK 4096
 _Static_assert(sizeof(TypeSlot) * BUSTER_TYPE_BUCKET_SLOTS == BUSTER_TYPE_BUCKET_BYTES, "a bucket is a cache line");
+_Static_assert(sizeof(TypeLookupBucket) == BUSTER_TYPE_COLUMN_ALIGNMENT, "a lookup bucket is a cache line");
+
+// The member lookup's buckets a capacity has room for besides bucket 0 (TypeCapacity.lookups, one a member for 0).
+static uint64_t type_lookup_capacity(TypeCapacity capacity)
+{
+    return capacity.lookups != 0 ? capacity.lookups : capacity.members;
+}
 
 static uint64_t type_capacity_bytes(TypeCapacity capacity)
 {
@@ -944,6 +999,7 @@ static uint64_t type_capacity_bytes(TypeCapacity capacity)
     result += ((uint64_t)capacity.parameters + 1) * sizeof(TypeId) + padding;
     result += ((uint64_t)capacity.tags + 1) * BUSTER_TYPE_TAG_BYTES + BUSTER_TYPE_TAG_COLUMNS * padding;
     result += ((uint64_t)capacity.members + 1) * BUSTER_TYPE_MEMBER_BYTES + BUSTER_TYPE_MEMBER_COLUMNS * padding;
+    result += (type_lookup_capacity(capacity) + 1) * sizeof(TypeLookupBucket) + padding;
     return result;
 }
 
@@ -1014,8 +1070,10 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
     TypeTable result = {
         .last_error = TYPE_ERROR_NONE,
     };
+    // A lookup's first bucket is below BUSTER_TYPE_LOOKUP_WALK.
+    const uint64_t lookups = type_lookup_capacity(capacity) + 1;
     bool fits = capacity.types <= BUSTER_TYPE_MAX_INDEX + 1 - BUSTER_TYPE_BUILTIN_COUNT && capacity.parameters < UINT32_MAX && capacity.tags < UINT32_MAX &&
-                capacity.members < UINT32_MAX;
+                capacity.members < UINT32_MAX && lookups < BUSTER_TYPE_LOOKUP_WALK;
     if (fits)
     {
         const uint64_t types = (uint64_t)capacity.types + BUSTER_TYPE_BUILTIN_COUNT;
@@ -1038,12 +1096,15 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
         result.tags.packed = type_push_column(arena, tags, sizeof(*result.tags.packed), 1, &fits);
         result.tags.pack_log2 = type_push_column(arena, tags, sizeof(*result.tags.pack_log2), 1, &fits);
         result.tags.alignment_log2 = type_push_column(arena, tags, sizeof(*result.tags.alignment_log2), 1, &fits);
+        result.tags.lookup = type_push_column(arena, tags, sizeof(*result.tags.lookup), 1, &fits);
+        result.tags.lookup_log2 = type_push_column(arena, tags, sizeof(*result.tags.lookup_log2), 1, &fits);
         result.members.name = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.name), 1, &fits);
         result.members.type = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.type), 1, &fits);
         result.members.bit_width = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.bit_width), 1, &fits);
         result.members.alignment_log2 = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.alignment_log2), 1, &fits);
         result.members.flags = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.flags), 1, &fits);
         result.members.offset = type_push_column(arena, (uint64_t)capacity.members + 1, sizeof(*result.members.offset), 1, &fits);
+        result.lookup.buckets = type_push_column(arena, lookups, sizeof(*result.lookup.buckets), 1, &fits);
         result.index.slots = type_push_column(index_arena, BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot),
                                               BUSTER_TYPE_INITIAL_BUCKETS * BUSTER_TYPE_BUCKET_SLOTS, &fits);
         if (fits)
@@ -1055,6 +1116,8 @@ static bool type_initialize(TypeTable* table, Arena* arena, Arena* index_arena, 
             result.tags.capacity = (uint32_t)tags;
             result.members.count = 1;
             result.members.capacity = capacity.members + 1;
+            result.lookup.count = 1;
+            result.lookup.capacity = (uint32_t)lookups;
             result.index.arena = index_arena;
             result.index.bucket_count = BUSTER_TYPE_INITIAL_BUCKETS;
             type_set_builtins(&result.types);
@@ -2485,6 +2548,8 @@ static TypeId type_tag(TypeTable* table, uint8_t kind, uint32_t name)
         tags->packed[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
+        tags->lookup[tag] = 0;
+        tags->lookup_log2[tag] = 0;
         tags->count += 1;
         const TypeChange change = {
             .operation = BUSTER_TYPE_CHANGE_TAG,
@@ -2562,6 +2627,226 @@ static TypeError type_check_member(const TypeTable* table, const TypeMember* mem
     return result;
 }
 
+// The member lookup (TypeLookup, #591): each record's index, built when its members are written; the kernels that scan
+// a record and probe an index, compared in vectors, and their twins, one name at a time; and the lookup that takes them,
+// with the walk over the members for a record whose index didn't fit.
+
+// The tag of the struct or union that member `member` is an anonymous member of, or 0 if it isn't one.
+static uint32_t type_lookup_anonymous(const TypeTable* table, uint32_t member)
+{
+    const TypeId inner = type_strip_aligned(table, table->members.type[member]);
+    const uint8_t kind = type_kind(table, inner);
+    const bool anonymous = table->members.name[member] == 0 && (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 &&
+                           (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
+    return anonymous ? table->types.index[type_index(inner)] : 0;
+}
+
+// A name's first bucket among an index's 2^log2: the top bits of its Fibonacci hash, which spread an identifier table's
+// consecutive ids; 0 for one bucket.
+static uint32_t type_lookup_bucket(uint32_t name, uint32_t log2)
+{
+    const uint64_t hash = (uint64_t)name * UINT64_C(11400714819323198485);
+    return (uint32_t)((hash >> 32) >> (32 - log2));
+}
+
+// The member of a scanned record (at most BUSTER_TYPE_LOOKUP_SCAN members, none an anonymous struct or union) that `name`,
+// not 0, names, or 0: all its names compared at once, the lanes past its members masked off, so that the load reads
+// nothing past them. The first in declaration order, should two share the name.
+static uint32_t type_lookup_scan(const uint32_t* names, uint32_t begin, uint32_t count, uint32_t name)
+{
+    const __mmask16 lanes = (__mmask16)((1u << count) - 1);
+    const __m512i members = _mm512_maskz_loadu_epi32(lanes, names + begin);
+    const __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, members, _mm512_set1_epi32((int)name));
+    return found != 0 ? begin + (uint32_t)__builtin_ctz(found) : 0;
+}
+
+// type_lookup_scan's twin: one name at a time.
+static uint32_t type_lookup_scan_scalar(const uint32_t* names, uint32_t begin, uint32_t count, uint32_t name)
+{
+    uint32_t result = 0;
+    for (uint32_t member = begin; result == 0 && member < begin + count; member += 1)
+    {
+        result = names[member] == name ? member : 0;
+    }
+    return result;
+}
+
+// type_lookup_probe's twin: one slot at a time, until the name or an empty slot. A bucket's names fill its slots in
+// order (type_lookup_insert), so the first empty slot follows every name it holds, as a whole bucket's compare finds.
+static uint32_t type_lookup_probe_scalar(const TypeLookupBucket* buckets, uint32_t first, uint32_t log2, uint32_t name)
+{
+    const uint32_t mask = (1u << log2) - 1;
+    uint32_t bucket = type_lookup_bucket(name, log2);
+    uint32_t result = 0;
+    bool searching = true;
+    for (uint32_t probes = 0; searching && probes <= mask; probes += 1)
+    {
+        const TypeLookupBucket* at = buckets + first + bucket;
+        for (uint32_t slot = 0; searching && slot < BUSTER_TYPE_LOOKUP_SLOTS; slot += 1)
+        {
+            result = at->names[slot] == name ? at->members[slot] : 0;
+            searching = at->names[slot] != name && at->names[slot] != 0;
+        }
+        bucket = (bucket + 1) & mask;
+    }
+    return result;
+}
+
+// The member that an index (its first bucket, and 2^log2 of them) gives `name`, not 0, or 0: from the name's bucket on,
+// each bucket's names compared at once, until one has the name or an empty slot. An index is at most half full, so a
+// probe takes one bucket, or a few: never more than the index has.
+static uint32_t type_lookup_probe(const TypeLookupBucket* buckets, uint32_t first, uint32_t log2, uint32_t name)
+{
+    const uint32_t mask = (1u << log2) - 1;
+    const __m256i target = _mm256_set1_epi32((int)name);
+    uint32_t bucket = type_lookup_bucket(name, log2);
+    uint32_t result = 0;
+    bool searching = true;
+    for (uint32_t probes = 0; searching && probes <= mask; probes += 1)
+    {
+        const TypeLookupBucket* at = buckets + first + bucket;
+        const __m256i names = _mm256_load_si256((const __m256i*)at->names);
+        const __mmask8 found = _mm256_cmpeq_epi32_mask(names, target);
+        result = found != 0 ? at->members[__builtin_ctz(found)] : 0;
+        searching = found == 0 && _mm256_testn_epi32_mask(names, names) == 0;
+        bucket = (bucket + 1) & mask;
+    }
+    return result;
+}
+
+// Gives `name` the member `member` in an index, unless an earlier member has it already: the index keeps the first
+// member in declaration order that finds each name.
+static void type_lookup_insert(TypeLookupBucket* buckets, uint32_t first, uint32_t log2, uint32_t name, uint32_t member)
+{
+    const uint32_t mask = (1u << log2) - 1;
+    uint32_t bucket = type_lookup_bucket(name, log2);
+    bool searching = true;
+    for (uint32_t probes = 0; searching && probes <= mask; probes += 1)
+    {
+        TypeLookupBucket* at = buckets + first + bucket;
+        uint32_t slot = 0;
+        while (slot < BUSTER_TYPE_LOOKUP_SLOTS && at->names[slot] != 0 && at->names[slot] != name)
+        {
+            slot += 1;
+        }
+        if (slot < BUSTER_TYPE_LOOKUP_SLOTS && at->names[slot] == 0)
+        {
+            at->names[slot] = name;
+            at->members[slot] = member;
+        }
+        searching = slot == BUSTER_TYPE_LOOKUP_SLOTS;
+        bucket = (bucket + 1) & mask;
+    }
+}
+
+// The names a record's lookup finds, an upper bound for its index's: its named members' if it is scanned, and its index's
+// otherwise (a walking record's aren't counted).
+static uint64_t type_lookup_names(const TypeTable* table, uint32_t tag)
+{
+    const uint32_t lookup = table->tags.lookup[tag];
+    uint64_t result = 0;
+    if (lookup == 0)
+    {
+        const uint32_t begin = table->tags.member_begin[tag];
+        for (uint32_t member = begin; member < begin + table->tags.member_count[tag]; member += 1)
+        {
+            result += table->members.name[member] != 0;
+        }
+    }
+    else if (lookup != BUSTER_TYPE_LOOKUP_WALK)
+    {
+        const TypeLookupBucket* buckets = table->lookup.buckets + lookup;
+        const uint64_t slots = (uint64_t)BUSTER_TYPE_LOOKUP_SLOTS << table->tags.lookup_log2[tag];
+        for (uint64_t slot = 0; slot < slots; slot += 1)
+        {
+            result += buckets[slot / BUSTER_TYPE_LOOKUP_SLOTS].names[slot % BUSTER_TYPE_LOOKUP_SLOTS] != 0;
+        }
+    }
+    return result;
+}
+
+// A record's lookup, once its members are written. One of at most BUSTER_TYPE_LOOKUP_SCAN members, none of them an
+// anonymous struct or union whose record finds a name, is scanned. Any other gets an index of at least twice as many
+// slots as the names its members find, filled in declaration order, each anonymous member's record's names from that
+// record's lookup; or, where the buckets left can't hold the index or an anonymous member's record walks, a walk. A record
+// is built once, when it is defined, so this stays scalar: the lookups that take its index are what every access runs.
+static void type_lookup_build(TypeTable* table, uint32_t tag)
+{
+    const TypeMembers* members = &table->members;
+    const uint32_t begin = table->tags.member_begin[tag];
+    const uint32_t count = table->tags.member_count[tag];
+    uint64_t names = 0;
+    bool anonymous = false;
+    bool walk = false;
+    for (uint32_t member = begin; member < begin + count; member += 1)
+    {
+        const uint32_t inner = type_lookup_anonymous(table, member);
+        names += members->name[member] != 0 ? 1 : inner != 0 ? type_lookup_names(table, inner) : 0;
+        anonymous |= inner != 0;
+        walk |= inner != 0 && table->tags.lookup[inner] == BUSTER_TYPE_LOOKUP_WALK;
+    }
+    uint32_t lookup = 0;
+    uint32_t log2 = 0;
+    if (walk)
+    {
+        lookup = BUSTER_TYPE_LOOKUP_WALK;
+    }
+    else if (count > BUSTER_TYPE_LOOKUP_SCAN || (anonymous && names != 0))
+    {
+        while (log2 < 31 && ((uint64_t)BUSTER_TYPE_LOOKUP_SLOTS << log2) < names * 2)
+        {
+            log2 += 1;
+        }
+        const uint64_t buckets = UINT64_C(1) << log2;
+        TypeLookup* index = &table->lookup;
+        if (((uint64_t)BUSTER_TYPE_LOOKUP_SLOTS << log2) >= names * 2 && buckets <= index->capacity - index->count)
+        {
+            lookup = index->count;
+            index->count += (uint32_t)buckets;
+            memset(index->buckets + lookup, 0, buckets * sizeof(TypeLookupBucket));
+            for (uint32_t member = begin; member < begin + count; member += 1)
+            {
+                const uint32_t inner = type_lookup_anonymous(table, member);
+                const uint32_t inner_lookup = inner != 0 ? table->tags.lookup[inner] : 0;
+                if (members->name[member] != 0)
+                {
+                    type_lookup_insert(index->buckets, lookup, log2, members->name[member], member);
+                }
+                else if (inner != 0 && inner_lookup == 0)
+                {
+                    const uint32_t inner_begin = table->tags.member_begin[inner];
+                    for (uint32_t at = inner_begin; at < inner_begin + table->tags.member_count[inner]; at += 1)
+                    {
+                        if (members->name[at] != 0)
+                        {
+                            type_lookup_insert(index->buckets, lookup, log2, members->name[at], member);
+                        }
+                    }
+                }
+                else if (inner != 0)
+                {
+                    const uint64_t slots = (uint64_t)BUSTER_TYPE_LOOKUP_SLOTS << table->tags.lookup_log2[inner];
+                    for (uint64_t slot = 0; slot < slots; slot += 1)
+                    {
+                        const uint32_t name = index->buckets[inner_lookup + slot / BUSTER_TYPE_LOOKUP_SLOTS].names[slot % BUSTER_TYPE_LOOKUP_SLOTS];
+                        if (name != 0)
+                        {
+                            type_lookup_insert(index->buckets, lookup, log2, name, member);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            lookup = BUSTER_TYPE_LOOKUP_WALK;
+            log2 = 0;
+        }
+    }
+    table->tags.lookup[tag] = lookup;
+    table->tags.lookup_log2[tag] = (uint8_t)log2;
+}
+
 static bool type_record_define(TypeTable* table, TypeId record, const TypeMember* members, uint32_t count, TypeRecordAttributes attributes)
 {
     TypeError error = TYPE_ERROR_NONE;
@@ -2610,6 +2895,7 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
         table->tags.packed[tag] = attributes.packed ? 1 : 0;
         table->tags.pack_log2[tag] = attributes.pack_log2;
         table->tags.alignment_log2[tag] = attributes.alignment_log2;
+        type_lookup_build(table, tag);
         table->types.flags[type_index(record)] |= flags;
         const TypeChange change = {
             .operation = BUSTER_TYPE_CHANGE_DEFINE,
@@ -2747,87 +3033,155 @@ static bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId unde
     return error == TYPE_ERROR_NONE;
 }
 
-// Depth first, in declaration order, with an explicit stack of the anonymous members still to search, as clang's lookup
-// through anonymous structs and unions finds the first member with the name.
-static uint32_t type_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset)
+// The lookup: through each record's own lookup, a scan or a probe of its index, which gives the member that finds the
+// name, and into that member's record when it is an anonymous member, until a named member has the name. Each step goes
+// into a record that was complete before the record that holds it was defined, so there are never more steps than
+// tags. A record whose index didn't fit is walked, from there on. `scalar`, a constant in each of its two callers, picks
+// the kernels' twins.
+static inline __attribute__((always_inline)) uint32_t type_lookup_member_with(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset,
+                                                                               uint32_t* qualifiers, bool scalar)
 {
-    Scratch scratch = scratch_begin(0);
-    typedef struct TypeMemberSearch TypeMemberSearch;
-    struct TypeMemberSearch
+    TypeId current = type_strip_aligned(table, record);
+    const uint8_t kind = type_kind(table, current);
+    uint32_t inherited = type_qualifiers(current);
+    uint64_t at = 0;
+    uint32_t result = 0;
+    bool searching = name != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
+    for (uint32_t steps = 0; searching && steps < table->tags.count; steps += 1)
+    {
+        const uint32_t tag = table->types.index[type_index(current)];
+        const uint32_t lookup = table->tags.lookup[tag];
+        if (lookup == BUSTER_TYPE_LOOKUP_WALK)
+        {
+            uint64_t rest = 0;
+            uint32_t more = 0;
+            result = type_lookup_walk(table, current, name, &rest, &more);
+            at += rest;
+            inherited |= more;
+            searching = false;
+        }
+        else
+        {
+            const uint32_t begin = table->tags.member_begin[tag];
+            const uint32_t count = table->tags.member_count[tag];
+            const uint32_t log2 = table->tags.lookup_log2[tag];
+            const uint32_t member = lookup == 0 ? (scalar ? type_lookup_scan_scalar(table->members.name, begin, count, name) : type_lookup_scan(table->members.name, begin, count, name)) :
+                                    scalar ? type_lookup_probe_scalar(table->lookup.buckets, lookup, log2, name) : type_lookup_probe(table->lookup.buckets, lookup, log2, name);
+            // Member 0, which no lookup finds, is zero in every column, so that its name is never the one sought.
+            at += table->members.offset[member];
+            result = table->members.name[member] == name ? member : 0;
+            searching = member != 0 && result == 0;
+            current = type_strip_aligned(table, table->members.type[member]);
+            inherited |= searching ? type_qualifiers(current) : 0;
+        }
+    }
+    const bool found = result != 0 && result != BUSTER_TYPE_MEMBER_UNKNOWN;
+    *offset = found ? at : 0;
+    *qualifiers = found ? inherited : 0;
+    return result;
+}
+
+static uint32_t type_lookup_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
+{
+    return type_lookup_member_with(table, record, name, offset, qualifiers, false);
+}
+
+static uint32_t type_lookup_member_scalar(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
+{
+    return type_lookup_member_with(table, record, name, offset, qualifiers, true);
+}
+
+// The walk: depth first, in declaration order, with an explicit stack of the anonymous members still to search, as clang's
+// lookup through anonymous structs and unions finds the first member with the name: for a record whose index didn't fit,
+// and as the tests' oracle. It enters each record once, however many anonymous members hold it: a record entered before
+// and searched to its end has no member with the name. The records entered are a sparse set over type indices, which
+// nothing clears: `entered` lists them, and `places` gives each its place in the list, where an index that isn't entered
+// has whatever value, never pointing at it.
+static uint32_t type_lookup_walk(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset, uint32_t* qualifiers)
+{
+    typedef struct TypeMemberFrame TypeMemberFrame;
+    struct TypeMemberFrame
     {
         uint32_t next;
         uint32_t end;
+        uint32_t qualifiers;
         uint64_t offset;
     };
-    uint32_t result = 0;
-    uint64_t capacity = 0;
-    uint64_t depth = 0;
-    TypeMemberSearch* stack = 0;
-    const TypeId stripped = type_strip_aligned(table, record);
-    const uint8_t kind = type_kind(table, stripped);
-    if (name != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (table->types.flags[type_index(stripped)] & BUSTER_TYPE_FLAG_DEFINED) != 0)
+    Scratch scratch = scratch_begin(0);
+    const TypeId root = type_strip_aligned(table, record);
+    const uint8_t kind = type_kind(table, root);
+    const bool searching = name != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION);
+    // A frame for each record entered, at most one a tag.
+    const uint32_t room = table->tags.count;
+    TypeMemberFrame* stack = searching ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeMemberFrame, room) : 0;
+    uint32_t* entered = stack != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, room) : 0;
+    uint32_t* places = entered != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, table->types.count) : 0;
+    uint32_t result = searching && places == 0 ? BUSTER_TYPE_MEMBER_UNKNOWN : 0;
+    uint32_t depth = 0;
+    uint32_t count = 0;
+    uint64_t found_offset = 0;
+    uint32_t found_qualifiers = 0;
+    if (searching && result == 0)
     {
-        const uint32_t tag = table->types.index[type_index(stripped)];
-        capacity = 16;
-        stack = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeMemberSearch, capacity);
-        if (stack != 0)
-        {
-            stack[0] = (TypeMemberSearch){
-                .next = table->tags.member_begin[tag],
-                .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-                .offset = 0,
-            };
-            depth = 1;
-        }
+        const uint32_t index = type_index(root);
+        const uint32_t tag = table->types.index[index];
+        places[index] = count;
+        entered[count++] = index;
+        stack[depth++] = (TypeMemberFrame){
+            .next = table->tags.member_begin[tag],
+            .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
+            .qualifiers = type_qualifiers(root),
+            .offset = 0,
+        };
     }
     while (result == 0 && depth != 0)
     {
-        TypeMemberSearch* top = &stack[depth - 1];
+        TypeMemberFrame* top = &stack[depth - 1];
         if (top->next == top->end)
         {
             depth -= 1;
         }
         else
         {
-            const uint32_t member = top->next;
+            const uint32_t member = top->next++;
             const uint64_t member_offset = top->offset + table->members.offset[member];
-            top->next += 1;
             if (table->members.name[member] == name)
             {
                 result = member;
-                *offset = member_offset;
+                found_offset = member_offset;
+                found_qualifiers = top->qualifiers;
             }
-            else if (table->members.name[member] == 0 && (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
+            else if (type_lookup_anonymous(table, member) != 0)
             {
                 const TypeId inner = type_strip_aligned(table, table->members.type[member]);
-                const uint8_t inner_kind = type_kind(table, inner);
-                if (inner_kind == BUSTER_TYPE_KIND_STRUCT || inner_kind == BUSTER_TYPE_KIND_UNION)
+                const uint32_t index = type_index(inner);
+                const bool seen = places[index] < count && entered[places[index]] == index;
+                if (!seen)
                 {
-                    if (depth == capacity)
-                    {
-                        // The stack is the scratch arena's last push, so it grows in place.
-                        capacity = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeMemberSearch, capacity) != 0 ? capacity * 2 : 0;
-                    }
-                    if (depth < capacity)
-                    {
-                        const uint32_t tag = table->types.index[type_index(inner)];
-                        stack[depth] = (TypeMemberSearch){
-                            .next = table->tags.member_begin[tag],
-                            .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
-                            .offset = member_offset,
-                        };
-                        depth += 1;
-                    }
-                    else
-                    {
-                        depth = 0;
-                    }
+                    const uint32_t tag = table->types.index[index];
+                    places[index] = count;
+                    entered[count++] = index;
+                    stack[depth++] = (TypeMemberFrame){
+                        .next = table->tags.member_begin[tag],
+                        .end = table->tags.member_begin[tag] + table->tags.member_count[tag],
+                        .qualifiers = top->qualifiers | type_qualifiers(inner),
+                        .offset = member_offset,
+                    };
                 }
             }
         }
     }
     scratch_end(scratch);
+    *offset = found_offset;
+    *qualifiers = found_qualifiers;
     return result;
+}
+
+static uint32_t type_find_member(const TypeTable* table, TypeId record, uint32_t name, uint64_t* offset)
+{
+    uint32_t qualifiers = 0;
+    const uint32_t result = type_lookup_member(table, record, name, offset, &qualifiers);
+    return result != BUSTER_TYPE_MEMBER_UNKNOWN ? result : 0;
 }
 
 static TypeId type_builtin_va_list(TypeTable* table, const uint32_t* names)
@@ -5493,11 +5847,13 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
     const uint64_t parameters = (uint64_t)source->parameters.count + extra.parameters;
     const uint64_t tags = (uint64_t)source->tags.count - 1 + extra.tags;
     const uint64_t members = (uint64_t)source->members.count - 1 + extra.members;
+    const uint64_t lookups = (uint64_t)source->lookup.count - 1 + type_lookup_capacity(extra);
     const TypeCapacity capacity = {
         .types = types < UINT32_MAX ? (uint32_t)types : UINT32_MAX,
         .parameters = parameters < UINT32_MAX ? (uint32_t)parameters : UINT32_MAX,
         .tags = tags < UINT32_MAX ? (uint32_t)tags : UINT32_MAX,
         .members = members < UINT32_MAX ? (uint32_t)members : UINT32_MAX,
+        .lookups = lookups < UINT32_MAX ? (uint32_t)lookups : UINT32_MAX,
     };
     bool valid = source->hidden_end == 0 && type_initialize(table, arena, index_arena, capacity);
     if (valid)
@@ -5524,6 +5880,8 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->tags.packed, source->tags.packed, tag_count * sizeof(*table->tags.packed));
         memcpy(table->tags.pack_log2, source->tags.pack_log2, tag_count * sizeof(*table->tags.pack_log2));
         memcpy(table->tags.alignment_log2, source->tags.alignment_log2, tag_count * sizeof(*table->tags.alignment_log2));
+        memcpy(table->tags.lookup, source->tags.lookup, tag_count * sizeof(*table->tags.lookup));
+        memcpy(table->tags.lookup_log2, source->tags.lookup_log2, tag_count * sizeof(*table->tags.lookup_log2));
         table->tags.count = source->tags.count;
         table->tags.completions = source->tags.completions;
         const uint64_t member_count = source->members.count;
@@ -5534,6 +5892,8 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         memcpy(table->members.flags, source->members.flags, member_count * sizeof(*table->members.flags));
         memcpy(table->members.offset, source->members.offset, member_count * sizeof(*table->members.offset));
         table->members.count = source->members.count;
+        memcpy(table->lookup.buckets, source->lookup.buckets, (uint64_t)source->lookup.count * sizeof(*table->lookup.buckets));
+        table->lookup.count = source->lookup.count;
         table->last_error = source->last_error;
         table->char_unsigned = source->char_unsigned;
         // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
@@ -5565,6 +5925,7 @@ static TypeViewMark type_view_mark(const TypeTable* table)
         .parameters = table->parameters.count,
         .tags = table->tags.count,
         .members = table->members.count,
+        .lookups = table->lookup.count,
         .completions = table->tags.completions,
         .buckets = table->index.bucket_count,
     };
@@ -5573,7 +5934,8 @@ static TypeViewMark type_view_mark(const TypeTable* table)
 static bool type_view_reset(TypeTable* table, TypeViewMark mark)
 {
     bool valid = mark.types >= BUSTER_TYPE_BUILTIN_COUNT && mark.types <= table->types.count && mark.parameters <= table->parameters.count &&
-                 mark.tags >= 1 && mark.tags <= table->tags.count && mark.members >= 1 && mark.members <= table->members.count;
+                 mark.tags >= 1 && mark.tags <= table->tags.count && mark.members >= 1 && mark.members <= table->members.count &&
+                 mark.lookups >= 1 && mark.lookups <= table->lookup.count;
     if (valid && table->index.bucket_count == mark.buckets)
     {
         // The types made since come out latest first: a later type's probe may pass an earlier one's slot, but no
@@ -5611,6 +5973,7 @@ static bool type_view_reset(TypeTable* table, TypeViewMark mark)
         table->parameters.count = mark.parameters;
         table->tags.count = mark.tags;
         table->members.count = mark.members;
+        table->lookup.count = mark.lookups;
         table->tags.completions = mark.completions;
         table->hidden_begin = 0;
         table->hidden_end = 0;
@@ -5641,6 +6004,8 @@ static void type_tag_withdraw(TypeTable* table, uint32_t tag, bool transparency_
         tags->packed[tag] = 0;
         tags->pack_log2[tag] = 0;
         tags->alignment_log2[tag] = 0;
+        tags->lookup[tag] = 0;
+        tags->lookup_log2[tag] = 0;
     }
 }
 
@@ -5660,6 +6025,8 @@ static void type_tag_restore(TypeTable* table, const TypeTable* source, uint32_t
     tags->packed[tag] = source->tags.packed[tag];
     tags->pack_log2[tag] = source->tags.pack_log2[tag];
     tags->alignment_log2[tag] = source->tags.alignment_log2[tag];
+    tags->lookup[tag] = source->tags.lookup[tag];
+    tags->lookup_log2[tag] = source->tags.lookup_log2[tag];
 }
 
 static TypeId type_replay_type(const TypeReplayPart* part, TypeId type)

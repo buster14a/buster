@@ -87,15 +87,17 @@ static __attribute__((unused)) void dynamic_static_pie_inputs(ExecutableDynamic*
 
 // Fills `dynamic` for a link that `bind` bound against `runtime`, its versions pushed from `arena`: the libraries the
 // link names with -l (Bind.libraries), in their order, each needed when a strong reference binds to it; then
-// libgcc_s.so.1's, libc.so.6's and the loader's, as GCC's driver puts them on the line. False if the arena has no room
-// for them.
+// libgcc_s.so.1's when Bind.gcc_s_needed, libc.so.6's and the loader's, as GCC's driver puts them on the line. The
+// producer's as-needed decision excludes the unused GCC library and its versions before reserving or copying them.
+// False if the arena has no room for them.
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynamic* dynamic, const Runtime* runtime, const Bind* bind, Arena* arena)
 {
     const RuntimeLibraries* named = bind->libraries;
     const uint32_t named_count = named != 0 ? named->count : 0;
     const ImportLibrary* const libraries[] = { &runtime->gcc_s, &runtime->libc, &runtime->loader };
-    const uint32_t library_count = named_count + BUSTER_ARRAY_LENGTH(libraries);
-    uint64_t version_room = (uint64_t)runtime->gcc_s.version_count + runtime->libc.version_count + runtime->loader.version_count + 1;
+    const uint32_t first = bind->gcc_s_needed ? 0 : 1;
+    const uint32_t library_count = named_count + BUSTER_ARRAY_LENGTH(libraries) - first;
+    uint64_t version_room = (uint64_t)runtime->libc.version_count + runtime->loader.version_count + (bind->gcc_s_needed ? runtime->gcc_s.version_count : 0) + 1;
     for (uint32_t l = 0; l < named_count; l += 1)
     {
         version_room += named->libraries[l].version_count;
@@ -106,7 +108,7 @@ BUSTER_LINKER_ENTRY __attribute__((unused)) bool dynamic_inputs(ExecutableDynami
     uint16_t relr_version = 0;
     for (uint32_t l = 0; versions != 0 && needed != 0 && l < library_count; l += 1)
     {
-        const ImportLibrary* library = l < named_count ? &named->libraries[l] : libraries[l - named_count];
+        const ImportLibrary* library = l < named_count ? &named->libraries[l] : libraries[l - named_count + first];
         const bool libc = library == &runtime->libc;
         needed[l] = (ExecutableLibrary){
             .name = l < named_count ? runtime_libraries_name(named, l) : library->soname,

@@ -447,7 +447,7 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
             check_graph_run(&unit->types, &unit->input.graph, &unit->output, &unit->scratch, &check_options, &unit->stream) && unit->stream.report_count == 0 &&
             check_asms_run(&unit->asms, &unit->input, &unit->stream, &unit->types, &unit->output, &unit->scratch) &&
             check_initializers_run(&unit->initializers, &unit->input, &unit->stream, parser, &unit->types, &unit->output, &unit->scratch) &&
-            check_data_prepare(&unit->data, &unit->input, &unit->stream, &unit->initializers, &unit->types, &unit->output, &unit->scratch);
+            check_data_prepare(&unit->data, &unit->input, &unit->stream, &unit->initializers, &unit->types, scalar, &unit->output, &unit->scratch);
     const CheckProgramOptions program_options = {
         .initializers = &unit->initializers,
         .asms = &unit->asms,

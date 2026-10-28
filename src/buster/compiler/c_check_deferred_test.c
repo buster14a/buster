@@ -38,6 +38,11 @@ struct CheckDeferredFixture
 
 static const CheckDeferredFixture check_deferred_fixtures[] =
 {
+    { "nested-selection-warnings",
+      "#define C(X) __builtin_choose_expr(1,0,(X))\n"
+      "#define N C(C(C(C(C(C(C(C(C(C(C(C((2147483647+1)))))))))))))\n"
+      "int f(void){enum {A=N}; return A;} int g(void){enum {B=N}; return B;}\n"
+      "int h(void){return _Generic(N,int:0,default:1);}\n", true },
     { "naked-valid-bodies", "__attribute__((naked)) void f(int n) { ; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
     { "naked-invalid-statement", "__attribute__((naked)) void f(void) { int x=1; __asm__(\"ret\"); }\nint g(int n) { return n; }\n", true },
     { "naked-parameter-reference", "__attribute__((naked)) void f(int n) { __asm__(\"\" : : \"r\"(n)); }\nint g(int n) { return n; }\n", true },
@@ -94,8 +99,24 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
+    {
+        "string-initializer-indices",
+        "const char* before[]={\"first\",\"second\"};\n"
+        "const char* f(int i){static const char* t[]={\"body\" \" one\",\"body two\",__func__};"
+        "_Static_assert(sizeof \"condition\"==10,\"message\" \" tail\");return t[i];}\n"
+        "char between[][4]={\"ab\",(\"cd\")};\n"
+        "const char* g(int i){struct Row{char text[4];const char* p;};"
+        "static struct Row t[]={{\"xy\",\"body three\"},{\"za\",\"body four\"}};return t[i].p;}\n"
+        "const char* after[]={\"last\",\"final\"};\n",
+        true,
+    },
     { "statement-expressions", "int f(int a) { int r = ({ int t = a + 1; t * 2; }); return r + ({ a; }); }\nint g(int b) { return ({ int u = b; u; }); }\n", true },
     { "variable-length-arrays", "int f(int n, int a[n]) { int b[n]; b[0] = a[0]; return (int)sizeof b + b[0]; }\nint g(int m) { int c[m][2]; return (int)sizeof c; }\n", true },
+    { "vla-header-spans",
+      "void proto(int n, int a[n]);\n"
+      "int f(int n, int a[n][n+1], int (*callback)(int m, int b[m]), int z[n+2]) { typedef int A[n]; A a0; { A a1; int b[n+2]; } return sizeof a0; }\n"
+      "int g(int m, int (*p)[m+2]) { __typeof__(int[m+3]) a, b; return sizeof a + sizeof b + sizeof *p; }\n"
+      "int h(int k, int a[k]) { typedef int A[k+1]; A b; return sizeof b; }\n", true },
     { "varargs",
       "int sum(int count, ...) { __builtin_va_list list; __builtin_va_start(list, count); int total = 0;\n"
       "  for (int i = 0; i < count; i += 1) total += __builtin_va_arg(list, int); __builtin_va_end(list); return total; }\n"
