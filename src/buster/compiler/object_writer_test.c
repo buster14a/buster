@@ -35,12 +35,11 @@
 //   - Files: object_write_file into a new file, over a larger and a smaller one in place (the same inode, truncated),
 //     over one with another hard link (which keeps the old bytes), also with a name of NAME_MAX bytes, into /dev/null,
 //     into a pipe, and into a missing directory (an error).
-//   - With --cross-check, which needs readelf, llvm-readobj, as, ld.bfd, ld.lld, mold and wild on PATH, and a cc that
-//     takes -fuse-ld=wild:
+//   - With --cross-check, which needs readelf, llvm-readobj, as, ld.bfd, ld.lld, mold, wild, cc and clang on PATH:
 //       - readelf -W and llvm-readobj list every object's EI_OSABI, sections, symbols and relocations (the link made
 //         by hand's too), which must be what object_view_open read, field by field;
 //       - GNU ld, lld, mold and wild link each program's objects into an executable that writes LinkProgram.output and
-//         exits with status 0: a static program with -static -e _start, and one that calls libc through cc, as a PIE,
+//         exits with status 0: a static program with -static -e _start, and one that calls libc through cc (clang for wild), as a PIE,
 //         with -no-pie and with -static. wild links only the programs without SIZE32 and SIZE64, which wild 0.10
 //         doesn't link, and among them one past SHN_LORESERVE sections. The same linkers link, the same three ways,
 //         a program whose main calls a local IFUNC directly and through a pointer (object_test_ifunc_link), which
@@ -2528,7 +2527,7 @@ static ObjectTestExpected object_test_program_expected(const LinkProgram* progra
 
 // Writes a program's objects to `directory`, lists each with readelf and llvm-readobj, and links them with each linker
 // that `linkers` names (a bit per linker of object_test_linkers) into a program that must do what `expected` says. With
-// `harness`, the program is a shared library (LinkProgramOptions.shared): linked by cc -shared, and run by the harness,
+// `harness`, the program is a shared library (LinkProgramOptions.shared): linked by the driver's -shared, and run by the harness,
 // which loads it and calls its entry (object_test_harness).
 static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* link, uint32_t unit_count, ObjectTestExpected expected, bool libc, const char* harness,
                                             ObjectOptions options, const char* directory, const char* name, uint32_t linkers, bool keep, Arena* arena)
@@ -2539,7 +2538,14 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
         "mold",
         "wild",
     };
-    // A program that calls libc links through cc, with each linker, three ways.
+    // A program that calls libc links through a compiler driver, with each linker, three ways. GCC 15 doesn't
+    // accept -fuse-ld=wild, so the Wild links use Clang rather than depending on which compiler cc names.
+    static const char* const object_test_drivers[] = {
+        "cc",
+        "cc",
+        "cc",
+        "clang",
+    };
     static const char* const object_test_fuse_ld[] = {
         "-fuse-ld=bfd",
         "-fuse-ld=lld",
@@ -2599,7 +2605,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             uint32_t argument = 0;
             if (libc)
             {
-                arguments[argument++] = "cc";
+                arguments[argument++] = (char*)object_test_drivers[l];
                 arguments[argument++] = (char*)object_test_fuse_ld[l];
                 arguments[argument++] = harness != 0 ? "-shared" : (char*)object_test_libc_ways[way];
             }
@@ -2618,8 +2624,15 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
             }
             arguments[argument] = 0;
             char linked_by[64];
-            snprintf(linked_by, sizeof(linked_by), "%s%s%s", object_test_linkers[l], libc ? " through cc " : "",
-                     harness != 0 ? "-shared" : libc ? object_test_libc_ways[way] : "");
+            if (libc)
+            {
+                snprintf(linked_by, sizeof(linked_by), "%s through %s %s", object_test_linkers[l], object_test_drivers[l],
+                         harness != 0 ? "-shared" : object_test_libc_ways[way]);
+            }
+            else
+            {
+                snprintf(linked_by, sizeof(linked_by), "%s", object_test_linkers[l]);
+            }
             unlink(program_path);
             const int link_status = object_test_run(arguments, output_path, error_path);
             const uint64_t before = arena->length;
