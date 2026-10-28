@@ -623,20 +623,78 @@ static bool pp_test_diagnostic_collection(void)
             if (ready)
             {
                 pp.diagnostic_source = true;
-                pp_diagnose_output(&pp, PP_SEVERITY_ERROR, 0, "earlier");
+                char message[] = "first owned note";
+                PPOutputDiagnosticNote notes[] = { { 0, message }, { 1, "second owned note" } };
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_ERROR, 0, 0, notes, BUSTER_ARRAY_LENGTH(notes), "earlier");
+                message[0] = '!';
+                notes[1].token = 0;
                 pp_diagnostic_publish(&pp);
                 pp_diagnostic_summary(&pp);
             }
             char* text = NULL;
             size_t length = 0;
             ready = ready && pp_test_read_output(diagnostics, &text, &length);
-            const char* expected = options.quiet ? "" : "ordered.c:1:1: error: earlier\nfatal error: too many errors emitted, stopping now [-ferror-limit=]\n2 errors generated.\n";
+            const char* expected = options.quiet ? "" : "ordered.c:1:1: error: earlier\nordered.c:1:1: note: first owned note\nordered.c:1:5: note: second owned note\nfatal error: too many errors emitted, stopping now [-ferror-limit=]\n2 errors generated.\n";
             const bool exact = ready && text != NULL && strcmp(text, expected) == 0 && pp.errors == 2 && pp.warnings == 0 && pp.fatal &&
                                pp.diagnostic_first == NULL && pp.diagnostic_last == NULL;
             failures += !exact;
             if (!exact)
             {
                 printf("diagnostic collection scalar=%u mode=%u: %s\n", scalar, mode, text != NULL ? text : "unavailable");
+            }
+            free(text);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            if (diagnostics != NULL)
+            {
+                fclose(diagnostics);
+            }
+        }
+        for (uint32_t mode = 0; mode < 4; mode += 1)
+        {
+            FILE* diagnostics = tmpfile();
+            const PPOptions options = {
+                .language = { .standard = 2017, .gnu = true },
+                .scalar = scalar != 0,
+                .error_limit = 1,
+                .diagnostics = diagnostics,
+                .no_standard_includes = true,
+                .collect_diagnostics = (mode & 1) != 0,
+                .suppress_warnings = (mode & 2) != 0,
+            };
+            InternTable identifiers = { 0 };
+            Preprocessor pp = { 0 };
+            const char source[] = "int value;\n";
+            bool ready = diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                         pp_run_source(&pp, "notes.c", (const uint8_t*)source, sizeof(source) - 1);
+            if (ready)
+            {
+                const PPOutputDiagnosticNote notes[] = { { 1, "attached" }, { 0, "also attached" } };
+                pp.diagnostic_source = true;
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_WARNING, 0, 0, notes, BUSTER_ARRAY_LENGTH(notes), "warning group");
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_ERROR, 0, 0, notes, BUSTER_ARRAY_LENGTH(notes), "error group");
+                pp_diagnose_output_notes_at(&pp, PP_SEVERITY_ERROR, 1, 1, notes, BUSTER_ARRAY_LENGTH(notes), "limited group");
+                pp_diagnostic_publish(&pp);
+                pp_diagnostic_summary(&pp);
+            }
+            char* text = NULL;
+            size_t length = 0;
+            ready = ready && pp_test_read_output(diagnostics, &text, &length);
+            const char* prefix = options.suppress_warnings ? "" :
+                "notes.c:1:1: warning: warning group\nnotes.c:1:5: note: attached\nnotes.c:1:1: note: also attached\n";
+            const char* body = "notes.c:1:1: error: error group\nnotes.c:1:5: note: attached\nnotes.c:1:1: note: also attached\n"
+                               "fatal error: too many errors emitted, stopping now [-ferror-limit=]\n";
+            const char* summary = options.suppress_warnings ? "2 errors generated.\n" : "1 warning and 2 errors generated.\n";
+            const uint64_t prefix_length = strlen(prefix);
+            const uint64_t body_length = strlen(body);
+            const bool exact = ready && text != NULL && length == prefix_length + body_length + strlen(summary) &&
+                               memcmp(text, prefix, prefix_length) == 0 && memcmp(text + prefix_length, body, body_length) == 0 &&
+                               strcmp(text + prefix_length + body_length, summary) == 0 && pp.errors == 2 &&
+                               pp.warnings == (options.suppress_warnings ? 0u : 1u) && pp.fatal;
+            failures += !exact;
+            if (!exact)
+            {
+                printf("diagnostic attached groups scalar=%u mode=%u: %s\n", scalar, mode, text != NULL ? text : "unavailable");
             }
             free(text);
             pp_release(&pp);
@@ -746,7 +804,7 @@ static bool pp_test_diagnostic_collection(void)
             }
         }
     }
-    printf("diagnostic collection: %u of 16 fail (ordering, quiet counts, allocation refusal and rejected replay)\n", failures);
+    printf("diagnostic collection: %u of 24 fail (ordering, attached groups, quiet counts, allocation refusal and rejected replay)\n", failures);
     return failures == 0;
 }
 

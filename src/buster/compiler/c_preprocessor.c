@@ -1247,6 +1247,14 @@ struct PPNested
 };
 
 typedef struct PPDiagnosticRecord PPDiagnosticRecord;
+typedef struct PPDiagnosticSourceNote PPDiagnosticSourceNote;
+struct PPDiagnosticSourceNote
+{
+    uint32_t location;
+    uint32_t origin;
+    const char* message;
+};
+
 struct PPDiagnosticRecord
 {
     PPDiagnosticRecord* next;
@@ -1258,6 +1266,8 @@ struct PPDiagnosticRecord
     IdentId note_macro;
     const char* message;
     const char* note_message;
+    PPDiagnosticSourceNote* source_notes;
+    uint32_t source_note_count;
     uint8_t severity;
 };
 
@@ -1549,7 +1559,16 @@ typedef enum PPSeverity
     PP_SEVERITY_WARNING,
     PP_SEVERITY_ERROR,
     PP_SEVERITY_FATAL,
+    // Rendered only inside an accepted diagnostic group; never passed through the counting gate.
+    PP_SEVERITY_NOTE,
 } PPSeverity;
+
+typedef struct PPOutputDiagnosticNote PPOutputDiagnosticNote;
+struct PPOutputDiagnosticNote
+{
+    uint32_t token;
+    const char* message;
+};
 
 typedef struct PPDiagnosticNote PPDiagnosticNote;
 struct PPDiagnosticNote
@@ -1565,7 +1584,7 @@ static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** na
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
-static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const char* format, va_list arguments);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_publish(Preprocessor* pp);
 
 // Both source and output-token diagnostics pass this gate before rendering their complete group, including notes.
@@ -1624,7 +1643,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         const uint32_t position = pp->diagnostic_position != BUSTER_PP_NONE ? pp->diagnostic_position : pp->output.count;
         if (pp->options.collect_diagnostics)
         {
-            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            pp_collect_diagnostic(pp, severity, (uint64_t)position * 2, location, location != 0 ? pp->diagnostic_origin : 0, NULL, NULL, 0, format, arguments);
         }
         else
         {
