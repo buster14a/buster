@@ -7,8 +7,8 @@
 # input-x86-sha256=821ca469485d5079920df9d695781a8bdad6576739be0d3ad8fb52c6bca91b03
 # input-x86_64-sha256=bc85a6cefc1bb94b25f73a2158cbe3ddc1c3d3ce82c9d170e5ca2becd8818628
 # input-version-sha256=2cf74bd66f8958e1936307158bec163fac911e30f4534bab376dd2dff067d5fd
-# input-names-sha256=553724b3d9830b644788469f3d94ed5695b046027c308b247aef17fc85096eaf
-# rows=1534
+# input-names-sha256=61a222b8ae3cbec9afaf0fbc59b44ba5528e990aeff67e7650e362268b4c7a21
+# rows=1535
 name	type_encoding	attributes	features	header_token	language_token	shard	source_line	source_ordinal	custom_typechecking	constant_evaluable	record_kind	semantic_constraints
 __builtin_add_overflow	b.	ntE		NO_HEADER	ALL_LANGUAGES	generic	4013	126	1	1	table-record	unmodeled
 __builtin_assume	vb	nE		NO_HEADER	ALL_LANGUAGES	generic	4048	161	0	1	table-record	unmodeled
@@ -1014,6 +1014,7 @@ __builtin_ia32_tzcnt_u64	UOiUOi	ncE		NO_HEADER	ALL_LANGUAGES	x86_64	618	116	0	1	
 __builtin_ia32_ucmpb128_mask	UsV16cV16cIiUs	ncEV:128:	avx512vl,avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6086	1273	0	1	table-record	unmodeled
 __builtin_ia32_ucmpb256_mask	UiV32cV32cIiUi	ncEV:256:	avx512vl,avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6087	1274	0	1	table-record	unmodeled
 __builtin_ia32_ucmpb512_mask	UOiV64cV64cIiUOi	ncEV:512:	avx512bw	NO_HEADER	ALL_LANGUAGES	x86	6088	1275	0	1	table-record	unmodeled
+__builtin_ia32_ucmpd128_mask	UcV4iV4iIiUc	ncEV:128:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	6089	1276	0	1	table-record	unmodeled
 __builtin_ia32_ucmpd256_mask	UcV8iV8iIiUc	ncEV:256:	avx512vl	NO_HEADER	ALL_LANGUAGES	x86	6090	1277	0	1	table-record	unmodeled
 __builtin_ia32_ucmpd512_mask	UsV16iV16iIiUs	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6091	1278	0	1	table-record	unmodeled
 __builtin_ia32_ucmpq512_mask	UcV8OiV8OiIiUc	ncEV:512:	avx512f	NO_HEADER	ALL_LANGUAGES	x86	6094	1281	0	1	table-record	unmodeled

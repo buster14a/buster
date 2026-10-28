@@ -112,6 +112,35 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h+(a*3)[n&3];}",
         },
         {
+            "atomic-vector-transport",
+            "typedef int A4 __attribute__((vector_size(16)));"
+            "_Atomic(A4) external_atomic4(_Atomic(A4));int external_apply_atomic4(_Atomic(A4)(*)(_Atomic(A4)),int);"
+            "static _Atomic(A4) local_atomic4(_Atomic(A4) x){A4 v=x;return v+1;}"
+            "typedef int A8 __attribute__((vector_size(32)));"
+            "_Atomic(A8) external_atomic8(_Atomic(A8));int external_apply_atomic8(_Atomic(A8)(*)(_Atomic(A8)),int);"
+            "static _Atomic(A8) local_atomic8(_Atomic(A8) x){A8 v=x;return v+1;}"
+            "typedef int A16 __attribute__((vector_size(64)));"
+            "_Atomic(A16) external_atomic16(_Atomic(A16));int external_apply_atomic16(_Atomic(A16)(*)(_Atomic(A16)),int);"
+            "static _Atomic(A16) local_atomic16(_Atomic(A16) x){A16 v=x;return v+1;}"
+            "int tested(int n){unsigned h=2166136261u;"
+            "A4 a4={0};for(int i=0;i<4;i++)a4[i]=n+i;_Atomic(A4) s4=a4;A4 r4=s4;FOLD(r4);"
+            "s4=a4+1;A4 e4=a4+1;int ok4=__c11_atomic_compare_exchange_strong(&s4,&e4,a4+2,5,0);FOLD(ok4);"
+            "ok4=__c11_atomic_compare_exchange_strong(&s4,&e4,a4+3,5,0);FOLD(ok4);FOLD(e4);"
+            "r4=__c11_atomic_exchange(&s4,a4+4,5);FOLD(r4);__c11_atomic_store(&s4,a4+5,5);r4=__c11_atomic_load(&s4,5);FOLD(r4);"
+            "_Atomic(A4) z4=external_atomic4(a4);r4=z4;FOLD(r4);int q4=external_apply_atomic4(local_atomic4,n);FOLD(q4);"
+            "A8 a8={0};for(int i=0;i<8;i++)a8[i]=n+i;_Atomic(A8) s8=a8;A8 r8=s8;FOLD(r8);"
+            "s8=a8+1;A8 e8=a8+1;int ok8=__c11_atomic_compare_exchange_strong(&s8,&e8,a8+2,5,0);FOLD(ok8);"
+            "ok8=__c11_atomic_compare_exchange_strong(&s8,&e8,a8+3,5,0);FOLD(ok8);FOLD(e8);"
+            "r8=__c11_atomic_exchange(&s8,a8+4,5);FOLD(r8);__c11_atomic_store(&s8,a8+5,5);r8=__c11_atomic_load(&s8,5);FOLD(r8);"
+            "_Atomic(A8) z8=external_atomic8(a8);r8=z8;FOLD(r8);int q8=external_apply_atomic8(local_atomic8,n);FOLD(q8);"
+            "A16 a16={0};for(int i=0;i<16;i++)a16[i]=n+i;_Atomic(A16) s16=a16;A16 r16=s16;FOLD(r16);"
+            "s16=a16+1;A16 e16=a16+1;int ok16=__c11_atomic_compare_exchange_strong(&s16,&e16,a16+2,5,0);FOLD(ok16);"
+            "ok16=__c11_atomic_compare_exchange_strong(&s16,&e16,a16+3,5,0);FOLD(ok16);FOLD(e16);"
+            "r16=__c11_atomic_exchange(&s16,a16+4,5);FOLD(r16);__c11_atomic_store(&s16,a16+5,5);r16=__c11_atomic_load(&s16,5);FOLD(r16);"
+            "_Atomic(A16) z16=external_atomic16(a16);r16=z16;FOLD(r16);int q16=external_apply_atomic16(local_atomic16,n);FOLD(q16);"
+            "return (int)h;}",
+        },
+        {
             "volatile-vector-values",
             "int tested(int n){unsigned h=2166136261u;volatile v4si a={n,2,3,4};v4si b=a;a=b+1;"
             "int x=((v4si)a)[n&3];v4si c=(0,a);int y=c[(n+1)&3];FOLD(b);FOLD(x);FOLD(y);return (int)h;}",
@@ -218,6 +247,12 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             0,
         },
         {
+            "atomic-vector-update",
+            "typedef int V __attribute__((vector_size(16)));V tested(_Atomic(V)*p,V v){return *p+=v;}",
+            "updates of atomic vector values",
+            0,
+        },
+        {
             "vector-logical-not",
             "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2};return (!a)[0];}",
             "vector logical operators and conditions",
@@ -257,6 +292,50 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
                                        "vector-without-avx512", true, false, 0, 2, "vector types without AVX-512F and AVX-512VL");
 }
 
+// Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
+static void check_test_program_atomic_vector_constraints(CheckTest* test, const char* clang)
+{
+    static const CheckSourceFixture fixtures[] = {
+        {
+            "atomic vector initializers keep the declared destination",
+            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
+            "int f(void){_Atomic(V) a=(V){1,2,3,4};V b=a;_Atomic(V) c=make(b);V d=c;return b[0]+d[0];}",
+            false,
+            false,
+        },
+        {
+            "atomic vector rvalues do not initialize plain vectors",
+            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
+            "V f(void){V x=make((V){1,2,3,4});return x;}",
+            true,
+            false,
+        },
+    };
+    char directory[] = "/tmp/buster-atomic-vector-XXXXXX";
+    const bool created = mkdtemp(directory) != NULL;
+    check_test_expect(test, created, "atomic vector constraint directory");
+    const char* arguments[] = { "-std=gnu17" };
+    for (uint32_t i = 0; created && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char path[128];
+        snprintf(path, sizeof(path), "%s/%u.c", directory, i);
+        char* paths[] = { path };
+        ParseTestClang oracle = { 0 };
+        const bool ready = parse_test_write(path, fixtures[i].source, strlen(fixtures[i].source)) &&
+                           parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), paths, 1, &oracle);
+        check_test_expect(test, ready, "atomic vector constraint oracle");
+        if (ready)
+        {
+            check_test_source(test, fixtures + i, path, &oracle);
+        }
+        unlink(path);
+    }
+    if (created)
+    {
+        rmdir(directory);
+    }
+}
+
 static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test, const char* clang)
 {
     X86Target target = { 0 };
@@ -271,5 +350,6 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
+        check_test_program_atomic_vector_constraints(test, clang);
     }
 }

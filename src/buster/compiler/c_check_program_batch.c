@@ -127,7 +127,8 @@ static inline __attribute__((always_inline)) bool check_lower_value_payload(cons
     // Not a _BitInt's, whose values check_lower_bit_int_node extends from its width: so no template takes an expression of
     // one, whose operands are of one or convert to one (check_lower_conversion_empty).
     bool valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
-                 (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_BIT_INT) << 8)) == 0 && value->overload_head == 0;
+                 (metadata & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC | BUSTER_CHECK_LOWER_TYPE_BIT_INT) << 8)) == 0 &&
+                 value->overload_head == 0;
     valid = valid && (initialized || op != CHECK_OP_VALUE || !known || !program->input->compound_objects[object - 1] || program->input->static_objects[object - 1]);
     *kind = 0;
     *bits = 0;
@@ -166,7 +167,7 @@ static bool check_lower_batch_target(const CheckLowerWriter* writer, TypeId targ
 {
     const uint32_t index = type_index(target);
     const uint32_t metadata = index < writer->type_count ? writer->type_templates[index] : UINT8_MAX;
-    const uint32_t forbidden = (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS |
+    const uint32_t forbidden = (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC |
                                 (pointer ? BUSTER_CHECK_LOWER_TYPE_POINTER : 0)) << 8;
     return target == 0 || ((uint8_t)metadata <= BUSTER_TYPED_CLASS_F64 && (metadata & forbidden) == 0);
 }
@@ -262,7 +263,7 @@ static inline __attribute__((always_inline)) bool check_lower_batch_expression(C
             uint64_t a_bits = 0;
             uint64_t b_bits = 0;
             valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
-                    (root_info & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS) << 8)) == 0 &&
+                    (root_info & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC) << 8)) == 0 &&
                     check_lower_value_payload(writer, a, a_info, false, &a_kind, &a_bits) &&
                     (!binary || check_lower_value_payload(writer, b, b_info, false, &b_kind, &b_bits));
             if (valid)

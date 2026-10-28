@@ -227,7 +227,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
             continue;
         }
         diagnostic.attribute = attribute->name_token;
-        for (uint32_t child = closing < reader->expression_limit ? reader->first_child[closing] : BUSTER_CHECK_NONE;
+        for (uint32_t child = closing < check_input_expression_limit(reader, closing) ? reader->first_child[closing] : BUSTER_CHECK_NONE;
              child != BUSTER_CHECK_NONE && diagnostic.position == BUSTER_CHECK_NONE; child = reader->next_child[child])
         {
             const uint32_t first = check_input_first_token(reader, child);
@@ -247,7 +247,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
         for (; statement < input->asm_count && input->asm_statements[statement].token < closing; statement += 1)
         {
             const CheckInputAsm* assembly = input->asm_statements + statement;
-            if (assembly->body == body && assembly->closing < reader->expression_limit && assembly->closing < diagnostic.position)
+            if (assembly->body == body && assembly->closing < check_input_expression_limit(reader, assembly->closing) && assembly->closing < diagnostic.position)
             {
                 for (uint32_t i = 0; i < assembly->output_count + assembly->input_count; i += 1)
                 {
@@ -270,7 +270,12 @@ static void check_input_naked_finish(CheckInputReader* reader)
         if (input->naked_diagnostic != NULL)
         {
             *input->naked_diagnostic = diagnostic;
+            const uint32_t before = input->report_count;
             check_input_report(reader, diagnostic.position, message);
+            if (input->report_count != before)
+            {
+                input->reports[before].completion = diagnostic.position;
+            }
         }
     }
 }

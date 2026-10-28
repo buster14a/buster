@@ -1389,8 +1389,13 @@ locations from `abi_assign`. clang's first five are directed
 R of runs of bit-fields wider than an eightbyte (an `i128`, packed, followed
 by a `char`, two bit-fields in one run, and a packed `_BitInt(128)` one),
 which the uncounted `nullptr_t` leaves one general register where clang counts
-two; the rest are random, with up to 21 named arguments and 6 unnamed, a fifth
-of the results `void`:
+two; in the compiled runs against clang, the first is `(nullptr_t, long × 5, U,
+long)` (`abi_test_world_directed_compiled`) for a union U of 16 bytes whose high
+eightbyte is padding, an `int` beside an empty struct aligned to 16, which clang
+passes as its low eightbyte alone, an `i64`, there with a general register left
+in its count and none in LLVM's: in one 8-byte stack slot, the last `long`'s
+after it. The rest are random, with up to 21 named arguments and 6 unnamed, a
+fifth of the results `void`:
 
 - **The C file** has the world's typedefs, written by `c_types_test.c`'s
   oracle, every signature's argument and result bytes (each value a valid
@@ -1480,8 +1485,9 @@ object or a call's outgoing area aligned past 16, and a value aligned past 8 is
 an object), with flexible array members, bit-fields, packing and member
 alignments;
 no `_BitInt` past 128 bits, vector of another size or of `bool`, complex
-`__int128` or complex `_BitInt`, or `_Atomic` type, and none of clang's directed records, whose bit-fields span
-more than 8 bytes. C23's enums of a fixed underlying type, structs
+`__int128` or complex `_BitInt`, or `_Atomic` type, and none of the record runs'
+directed records, whose bit-fields span more than 8 bytes, but a directed record
+of their own (above). C23's enums of a fixed underlying type, structs
 whose only named member is a flexible array member (a GNU extension) and
 bit-fields with attributes after their widths are among their types, as
 clang and GCC write them. Tier 0 holds a call's arguments on its stacks at once (15
@@ -1497,9 +1503,15 @@ arguments or as its result
 (`abi_test_tier0_memory`) passes at most 12 integer values (an aggregate is
 its address, and a `long double` or a 128-bit integer takes an integer depth)
 and 15 floating ones, an argument past them becoming one of the other stack's,
-and the others pass their 21 named and 6 unnamed arguments as drawn. Our side is C (`abi_test_write_ours`): per signature, a callee
-that stores each parameter's bytes, its unnamed ones read with `va_arg`, and
-returns the result's from the signature's data, and a caller that copies each
+and the others pass their 21 named and 6 unnamed arguments as drawn. A
+`_BitInt` of 65 to 127 bits is never the 12th: its value extends from its width
+as it loads (the convention leaves the bits past it unspecified), through
+128-bit shifts whose count takes the depth above it, one more than a
+128-bit integer's value takes. Our side is C (`abi_test_write_ours`): per signature, a callee
+that writes each parameter's bytes from the signature's data, the last first
+(a parameter kept in a slot shorter than its object would overwrite the
+parameters after it), then stores them, its unnamed ones read with `va_arg`,
+and returns the result's from the data, and a caller that copies each
 argument's bytes into a local of its type, calls the C callee with them and
 stores the result's bytes. This executable (or `--buster PATH`) compiles it
 with `--verify -std=gnu23 -w -c` and the run's `-march`, the vector paths'

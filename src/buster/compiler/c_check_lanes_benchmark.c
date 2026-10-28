@@ -54,9 +54,15 @@ static bool check_lanes_benchmark_emit(const CheckProgram* program, const CheckD
         CheckDataResult published = { 0 };
         ObjectUnits units = { 0 };
         ObjectSymbols symbols = { 0 };
+        ObjectAtomSection* sections = 0;
         valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count, &code.link, 0, bytes, scratch, &published) &&
+                check_program_sections(&code, program, bytes, output, &sections) &&
                 link_check(&code.link) == LINK_ERROR_NONE && object_prepare(&units, &code.link, 1, scratch) && object_map_symbols(&symbols, &code.link, scratch);
-        const Object built = valid ? object_build(&code.link, &units, &symbols, 0, (ObjectOptions){ 0 }, (String8){ .pointer = "lanes.c", .length = 7 }, scratch) :
+        const ObjectOptions options = {
+            .atom_sections = sections,
+            .atom_section_count = sections != 0 ? code.link.atoms.count : 0,
+        };
+        const Object built = valid ? object_build(&code.link, &units, &symbols, 0, options, (String8){ .pointer = "lanes.c", .length = 7 }, scratch) :
                                      (Object){ .error = OBJECT_ERROR_FULL };
         valid = built.error == OBJECT_ERROR_NONE;
         *object = valid ? link_hash(built.bytes, built.size) : 0;
