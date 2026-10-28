@@ -591,7 +591,8 @@ struct CheckInputReader
     uint32_t function_body;
     bool naked_functions;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
-    // the first setting's or section attribute's position on (section_record_from, BUSTER_CHECK_NONE before either).
+    // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
+    // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
     CheckInputSectionEvent* section_events;
     uint32_t section_event_count;
     uint32_t section_event_capacity;
@@ -3093,9 +3094,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     reader->output->initializer_ends[name] = valid ? reader->ends[right] + 1 : i + 1;
                     i = valid ? reader->ends[right] + 1 : i;
                 }
-                // A declarator without attributes before the first setting or section attribute is no section event: the
-                // walk tests that here, so that a unit without either pays two compares per declarator.
-                if (valid && !is_typedef && (attributes != NULL || i >= reader->section_record_from))
+                // A declarator that ends before the first setting or section attribute is no section event (a section
+                // attribute of its own comes before its end): the walk tests that here, so that a unit without either pays
+                // a compare per declarator.
+                if (valid && !is_typedef && i >= reader->section_record_from)
                 {
                     check_input_section_declaration(reader, name, i, attributes, function, function && kind == PARSE_KIND_L_BRACE,
                                                     !function && reader->static_objects[name], type);

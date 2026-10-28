@@ -337,7 +337,8 @@ static bool check_input_section_pragmas(CheckInputReader* reader, uint8_t* handl
             }
             valid = !reader->output->resource;
             reader->output->sections = valid ? sections : 0;
-            reader->section_record_from = valid && sections->setting_count != 0 ? settings[0].position : reader->section_record_from;
+            reader->section_record_from = valid && sections->setting_count != 0 && settings[0].position < reader->section_record_from ? settings[0].position :
+                                          reader->section_record_from;
         }
     }
     reader->output->resource |= !valid;
@@ -351,7 +352,9 @@ static bool check_input_section_pragmas(CheckInputReader* reader, uint8_t* handl
 
 // The walk's declarator `name`, ended at token `position` (after its initializer, if any): an event for the settings
 // and the conflicts when it has a section attribute of its own, or, from the first setting or such an attribute on, when
-// it defines a function or declares a variable with static storage. A lane leaves a unit with an event to source order.
+// it defines a function or declares a variable with static storage. The walk calls it from there on alone
+// (CheckInputReader.section_record_from, which the attribute reader lowers to each section attribute's token). A lane
+// leaves a unit with an event to source order.
 static void check_input_section_declaration(CheckInputReader* reader, uint32_t name, uint32_t position, const CheckInputAttributes* attributes,
                                             bool function, bool body, bool static_storage, TypeId type)
 {
@@ -399,7 +402,6 @@ static void check_input_section_declaration(CheckInputReader* reader, uint32_t n
             };
         }
     }
-    reader->section_record_from = attribute != NULL && position < reader->section_record_from ? position : reader->section_record_from;
 }
 
 // A section name's first use (check_input_section_conflicts): its flags, and the setting it was (`event`
