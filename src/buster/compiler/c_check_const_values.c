@@ -336,6 +336,176 @@ static bool check_const_eligible(const TypeTable* types, TypeId type)
     return result && finished;
 }
 
+// A read may normalize an atomic/aligned value, but no cast can erase volatile from its declaration path.
+static TypeId check_const_declared(const TypeTable* types, TypeId type)
+{
+    TypeId result = 0;
+    bool finished = false;
+    for (uint32_t visited = 0; !finished && types != NULL && visited < types->types.count; visited += 1)
+    {
+        if (!type_is_valid(types, type) || (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0)
+        {
+            finished = true;
+        }
+        else
+        {
+            const uint8_t kind = type_kind(types, type);
+            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC)
+            {
+                type = types->types.base != NULL ? types->types.base[type_index(type)] : 0;
+            }
+            else
+            {
+                result = type_unqualified(type);
+                finished = true;
+            }
+        }
+    }
+    return result;
+}
+
+// Return one physical ordinal, shared by access-path guards and the typed read witness. Missing metadata
+// selects the first initializable member; neither absent selections nor malformed selections admit all arms.
+static uint32_t check_const_union_member(const TypeTable* types, const CheckConstValues* owner, const CheckConstObject* receipt,
+                                         TypeId record_type, uint64_t bit_offset)
+{
+    const TypeId plain = check_const_plain(types, record_type);
+    uint32_t selected = 0;
+    const bool valid = receipt != NULL && owner != NULL && plain != 0 && type_kind(types, plain) == BUSTER_TYPE_KIND_UNION &&
+                       type_is_complete(types, plain) && receipt->byte_size <= UINT64_MAX / 8 && bit_offset <= receipt->byte_size * 8 &&
+                       type_size(types, plain) <= (receipt->byte_size * 8 - bit_offset) / 8 && receipt->union_first <= owner->union_count &&
+                       receipt->union_count <= owner->union_count - receipt->union_first && (receipt->union_count == 0 || owner->unions != NULL);
+    if (valid)
+    {
+        const uint32_t tag = types->types.index[type_index(plain)];
+        const bool tagged = tag < types->tags.count && types->tags.member_begin != NULL && types->tags.member_count != NULL;
+        const uint32_t first = tagged ? types->tags.member_begin[tag] : 0;
+        const uint32_t count = tagged ? types->tags.member_count[tag] : 0;
+        const bool bounded = first <= types->members.count && count <= types->members.count - first &&
+                             types->members.name != NULL && types->members.flags != NULL;
+        for (uint32_t i = 0; bounded && selected == 0 && i < count; i += 1)
+        {
+            if (types->members.name[first + i] != 0 || (types->members.flags[first + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
+            {
+                selected = i + 1;
+            }
+        }
+        for (uint32_t i = 0; bounded && i < receipt->union_count; i += 1)
+        {
+            const CheckConstUnion* alternative = owner->unions + receipt->union_first + i;
+            if (alternative->bit_offset == bit_offset && check_const_plain(types, alternative->type) == plain)
+            {
+                selected = alternative->member;
+            }
+        }
+        const bool initializable = bounded && selected != 0 && selected <= count &&
+            (types->members.name[first + selected - 1] != 0 || (types->members.flags[first + selected - 1] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0);
+        selected = initializable ? selected : 0;
+    }
+    return selected;
+}
+
+// Coverage proves a representation only after this path proves a declared readable subobject. Positive-width
+// struct members are disjoint, arrays contribute one computed element, and a union contributes only its active
+// physical member. The iterative path allocates nothing and cannot mistake padding or a cast's requested type
+// for a declaration. Instance storage does not supply a missing declared array bound for a constant read.
+static bool check_const_subobject(const TypeTable* types, const CheckConstValues* owner, const CheckConstObject* receipt,
+                                   uint64_t begin, uint64_t width, uint32_t bit_width, TypeId plain)
+{
+    TypeId current = receipt->type;
+    uint64_t offset = 0;
+    bool result = false;
+    bool finished = false;
+    for (uint32_t depth = 0; !finished && depth < types->types.count; depth += 1)
+    {
+        current = check_const_declared(types, current);
+        if (current == 0 || offset > begin)
+        {
+            finished = true;
+        }
+        else
+        {
+            const uint8_t kind = type_kind(types, current);
+            if (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            {
+                finished = true;
+            }
+            else if (kind == BUSTER_TYPE_KIND_ARRAY)
+            {
+                const TypeId element = types->types.base != NULL ? type_element(types, current) : 0;
+                const TypeId declared = check_const_declared(types, element);
+                const uint64_t size = declared != 0 ? type_size(types, element) : 0;
+                const uint64_t unit = size <= UINT64_MAX / 8 ? size * 8 : 0;
+                const uint64_t delta = begin - offset;
+                const uint64_t index = unit != 0 ? delta / unit : 0;
+                const uint64_t count = types->types.extent != NULL ? types->types.extent[type_index(current)] : 0;
+                finished = declared == 0 || unit == 0 || index >= count || width > unit - delta % unit;
+                if (!finished)
+                {
+                    offset = begin - delta % unit;
+                    current = element;
+                }
+            }
+            else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+            {
+                const uint32_t tag = types->types.index[type_index(current)];
+                const bool tagged = type_is_complete(types, current) && tag < types->tags.count &&
+                                    types->tags.member_begin != NULL && types->tags.member_count != NULL;
+                const uint32_t first = tagged ? types->tags.member_begin[tag] : 0;
+                const uint32_t count = tagged ? types->tags.member_count[tag] : 0;
+                const bool bounded = first <= types->members.count && count <= types->members.count - first &&
+                                     types->members.type != NULL && types->members.offset != NULL && types->members.name != NULL &&
+                                     types->members.flags != NULL && types->members.bit_width != NULL;
+                const uint32_t active = bounded && kind == BUSTER_TYPE_KIND_UNION ?
+                                        check_const_union_member(types, owner, receipt, current, offset) : 0;
+                TypeId selected = 0;
+                uint64_t selected_offset = 0;
+                for (uint32_t i = 0; bounded && !finished && selected == 0 && i < count; i += 1)
+                {
+                    const uint32_t member = first + i;
+                    const bool field = (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+                    const bool initializable = !field || types->members.name[member] != 0;
+                    const uint64_t relative = types->members.offset[member];
+                    if (initializable && (kind != BUSTER_TYPE_KIND_UNION || active == i + 1) && relative <= UINT64_MAX - offset)
+                    {
+                        const uint64_t start = offset + relative;
+                        const TypeId declared = check_const_declared(types, types->members.type[member]);
+                        const uint64_t size = declared != 0 ? type_size(types, types->members.type[member]) : 0;
+                        const uint64_t bits = field ? types->members.bit_width[member] : size <= UINT64_MAX / 8 ? size * 8 : 0;
+                        if (start <= begin && width <= bits && begin - start <= bits - width)
+                        {
+                            if (field)
+                            {
+                                result = declared == plain && begin == start && bit_width != 0 && width == bit_width &&
+                                         bit_width == types->members.bit_width[member];
+                                finished = true;
+                            }
+                            else
+                            {
+                                selected = types->members.type[member];
+                                selected_offset = start;
+                            }
+                        }
+                    }
+                }
+                if (!finished)
+                {
+                    finished = selected == 0;
+                    current = selected;
+                    offset = selected_offset;
+                }
+            }
+            else
+            {
+                const uint64_t size = type_size(types, current);
+                result = bit_width == 0 && current == plain && begin == offset && size <= UINT64_MAX / 8 && width == size * 8;
+                finished = true;
+            }
+        }
+    }
+    return result;
+}
+
 static bool check_const_zero(const TypeTable* types, TypeId type, CheckValue* value)
 {
     uint32_t width = 0;
@@ -384,6 +554,7 @@ static bool check_const_load(const TypeTable* types, const CheckConstValues* vie
     valid = valid && subbyte_bit_offset <= UINT64_MAX - begin;
     begin += valid ? subbyte_bit_offset : 0;
     valid = valid && begin <= receipt->byte_size * 8 && width <= receipt->byte_size * 8 - begin;
+    valid = valid && check_const_subobject(types, owner, receipt, begin, width, bit_width, plain);
     CheckValue value = { 0 };
     bool result = false;
     bool decided = false;
@@ -460,7 +631,8 @@ static bool check_const_load(const TypeTable* types, const CheckConstValues* vie
     {
         value.type = plain;
         value.category = CHECK_RVALUE;
-        const uint32_t pointer_flags = value.constant_kind == CHECK_CONSTANT_ADDRESS ? value.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS) : 0;
+        const uint32_t pointer_flags = value.constant_kind == CHECK_CONSTANT_ADDRESS ?
+                                       value.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_CAST) : 0;
         value.flags = (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) | pointer_flags |
                       BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_GNU_CONSTANT;
         value.bit_width = bit_width;
@@ -477,39 +649,7 @@ static bool check_const_union_allows(const TypeTable* types, const CheckConstVal
 {
     const CheckConstValues* owner = NULL;
     const CheckConstObject* receipt = check_const_find(view, object, source_position, &owner);
-    const TypeId plain = check_const_plain(types, record_type);
-    bool result = receipt == NULL;
-    if (receipt != NULL && owner != NULL && plain != 0 && type_kind(types, plain) == BUSTER_TYPE_KIND_UNION &&
-        type_is_complete(types, plain) && receipt->byte_size <= UINT64_MAX / 8 && bit_offset <= receipt->byte_size * 8 &&
-        type_size(types, plain) <= (receipt->byte_size * 8 - bit_offset) / 8 && receipt->union_first <= owner->union_count &&
-        receipt->union_count <= owner->union_count - receipt->union_first && (receipt->union_count == 0 || owner->unions != NULL))
-    {
-        const uint32_t tag = types->types.index[type_index(plain)];
-        const bool tagged = tag < types->tags.count && types->tags.member_begin != NULL && types->tags.member_count != NULL;
-        const uint32_t first = tagged ? types->tags.member_begin[tag] : 0;
-        const uint32_t count = tagged ? types->tags.member_count[tag] : 0;
-        const bool bounded = first <= types->members.count && count <= types->members.count - first &&
-                             types->members.name != NULL && types->members.flags != NULL;
-        uint32_t selected = 0;
-        for (uint32_t i = 0; bounded && selected == 0 && i < count; i += 1)
-        {
-            if (types->members.name[first + i] != 0 || (types->members.flags[first + i] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0)
-            {
-                selected = i + 1;
-            }
-        }
-        for (uint32_t i = 0; bounded && i < receipt->union_count; i += 1)
-        {
-            const CheckConstUnion* alternative = owner->unions + receipt->union_first + i;
-            if (alternative->bit_offset == bit_offset && check_const_plain(types, alternative->type) == plain)
-            {
-                selected = alternative->member;
-            }
-        }
-        const bool initializable = bounded && member_ordinal != 0 && member_ordinal <= count &&
-            (types->members.name[first + member_ordinal - 1] != 0 || (types->members.flags[first + member_ordinal - 1] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0);
-        result = initializable && selected == member_ordinal;
-    }
+    const bool result = receipt == NULL || (member_ordinal != 0 && member_ordinal == check_const_union_member(types, owner, receipt, record_type, bit_offset));
     return result;
 }
 
