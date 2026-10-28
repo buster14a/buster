@@ -151,6 +151,34 @@ jobs:
           bash tools/ci/fetch-corpus.sh "$corpus"
           printf 'BUSTER_CORPUS=%s\n' "$corpus" >> "$GITHUB_ENV"
 
+      - name: Report host CPU and selected compiler path
+        run: |
+          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+          printf 'Available CPUs: %s\n' "$(nproc)"
+          for arch in native "$BUSTER_HOST_ARCH"; do
+            printf '\nClang target for -march=%s:\n' "$arch"
+            clang -### -march="$arch" -c -x c /dev/null -o /dev/null 2>&1 |
+              sed -n 's/.*"-target-cpu" "\([^"]*\)".*/  CPU: \1/p'
+            clang -march="$arch" -dM -E -x c /dev/null |
+              grep -E '^#define (__AVX512(F|BW|VL|DQ|CD|VBMI|VBMI2|VPOPCNTDQ|BITALG|VNNI)__|__(GFNI|VAES|AES|BMI|BMI2|LZCNT|POPCNT|AVX2|SSSE3|SSE4_1|XSAVE)__) ' || true
+          done
+          defines=$(clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E \
+            -include src/buster/compiler/host_isa.h -x c /dev/null)
+          if grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
+            path=vector
+          else
+            path=scalar
+          fi
+          printf '\nSelected host path: %s (%s)\n' "$path" "$BUSTER_HOST_ARCH"
+          if [ "$BUSTER_HOST_ARCH" = x86-64 ]; then test "$path" = scalar; fi
+
+      - name: Check baseline fallback memory and arithmetic boundaries
+        run: |
+          clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-psabi \
+            -fsanitize=undefined -fno-sanitize-recover=all -Isrc/buster/compiler \
+            tests/host-fallback/edge_cases.c -o "$RUNNER_TEMP/host-fallback-edges"
+          "$RUNNER_TEMP/host-fallback-edges"
+
       - name: Build the external Clang pragma oracle and the compiler
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
@@ -314,6 +342,7 @@ jobs:
           == Test the parser's snippets against clang
           # The snippets, each also checked against clang, the generated inputs and the driver's checks.
           ./build/compiler test-parser --clang
+          ./build/compiler test-parser --clang tests/parser-handoff/pragma-heavy.c
           == Test Tier 0
           # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
           # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
@@ -1039,7 +1068,6 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
-          ./build/compiler test-parser --clang tests/parser-handoff/pragma-heavy.c
           taskset -c "$cpu" ./build/compiler benchmark-parser --passes 1 --only vector tests/parser-handoff/pragma-heavy.c
 
       - name: Benchmark selective lowering on synthetic graphs

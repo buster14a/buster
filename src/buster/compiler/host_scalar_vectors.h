@@ -560,7 +560,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_slli_epi16(__m256i a, int count)
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        uint64_t amount = (unsigned)count; r.u16[i] = amount >= 16 ? 0 : (uint16_t)(a_.u16[i] << amount);
+        uint64_t amount = (unsigned)count; r.u16[i] = amount >= 16 ? 0 : (uint16_t)((uint64_t)a_.u16[i] << amount);
     }
     return r.value;
 }
@@ -571,7 +571,7 @@ BUSTER_HOST_INLINE __m256i host_mm256_slli_epi32(__m256i a, int count)
     HostV256 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        uint64_t amount = (unsigned)count; r.u32[i] = amount >= 32 ? 0 : (uint32_t)(a_.u32[i] << amount);
+        uint64_t amount = (unsigned)count; r.u32[i] = amount >= 32 ? 0 : (uint32_t)((uint64_t)a_.u32[i] << amount);
     }
     return r.value;
 }
@@ -1477,7 +1477,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi32(__m512i index, const void*
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        memcpy(&r.u32[i], (const uint8_t*)memory + (int64_t)index_.i32[i] * scale, 4);
+        memcpy(&r.u32[i], (const void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), 4);
     }
     return r.value;
 }
@@ -1488,7 +1488,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_i32gather_epi64(__m256i index, const void*
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        memcpy(&r.u64[i], (const uint8_t*)memory + (int64_t)index_.i32[i] * scale, 8);
+        memcpy(&r.u64[i], (const void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), 8);
     }
     return r.value;
 }
@@ -1499,7 +1499,7 @@ BUSTER_HOST_INLINE void host_mm512_i32scatter_epi32(void* memory, __m512i index,
     HostV512 a_ __attribute__((unused)) = { .value = a };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        memcpy((uint8_t*)memory + (int64_t)index_.i32[i] * scale, &a_.u32[i], 4);
+        memcpy((void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), &a_.u32[i], 4);
     }
 }
 
@@ -1930,7 +1930,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi32(__m512i src, __mmask1
     r = src_;
     for (unsigned i = 0; i < 16; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u32[i], (const uint8_t*)memory + (int64_t)index_.i32[i] * scale, 4); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u32[i], (const void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), 4); }
     }
     return r.value;
 }
@@ -1943,7 +1943,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i32gather_epi64(__m512i src, __mmask8
     r = src_;
     for (unsigned i = 0; i < 8; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u64[i], (const uint8_t*)memory + (int64_t)index_.i32[i] * scale, 8); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u64[i], (const void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), 8); }
     }
     return r.value;
 }
@@ -1954,7 +1954,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i32scatter_epi32(void* memory, __mmask16
     HostV512 a_ __attribute__((unused)) = { .value = a };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy((uint8_t*)memory + (int64_t)index_.i32[i] * scale, &a_.u32[i], 4); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy((void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i32[i] * (unsigned)scale), &a_.u32[i], 4); }
     }
 }
 
@@ -1966,7 +1966,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_mask_i64gather_epi64(__m512i src, __mmask8
     r = src_;
     for (unsigned i = 0; i < 8; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u64[i], (const uint8_t*)memory + (int64_t)index_.i64[i] * scale, 8); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy(&r.u64[i], (const void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i64[i] * (unsigned)scale), 8); }
     }
     return r.value;
 }
@@ -1977,7 +1977,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi32(void* memory, __mmask8 
     HostV256 a_ __attribute__((unused)) = { .value = a };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy((uint8_t*)memory + (int64_t)index_.i64[i] * scale, &a_.u32[i], 4); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy((void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i64[i] * (unsigned)scale), &a_.u32[i], 4); }
     }
 }
 
@@ -1987,7 +1987,7 @@ BUSTER_HOST_INLINE void host_mm512_mask_i64scatter_epi64(void* memory, __mmask8 
     HostV512 a_ __attribute__((unused)) = { .value = a };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        if (((uint64_t)k >> i & 1) != 0) { memcpy((uint8_t*)memory + (int64_t)index_.i64[i] * scale, &a_.u64[i], 8); }
+        if (((uint64_t)k >> i & 1) != 0) { memcpy((void*)((uintptr_t)memory + (uint64_t)(int64_t)index_.i64[i] * (unsigned)scale), &a_.u64[i], 8); }
     }
 }
 
@@ -2437,7 +2437,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi64(__m512i a, __m512i count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        uint64_t amount = count_.u64[i]; r.u64[i] = amount >= 64 ? 0 : (uint64_t)(a_.u64[i] << amount);
+        uint64_t amount = count_.u64[i]; r.u64[i] = amount >= 64 ? 0 : (uint64_t)((uint64_t)a_.u64[i] << amount);
     }
     return r.value;
 }
@@ -3200,7 +3200,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sllv_epi32(__m512i a, __m512i count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        uint64_t amount = count_.u32[i]; r.u32[i] = amount >= 32 ? 0 : (uint32_t)(a_.u32[i] << amount);
+        uint64_t amount = count_.u32[i]; r.u32[i] = amount >= 32 ? 0 : (uint32_t)((uint64_t)a_.u32[i] << amount);
     }
     return r.value;
 }
@@ -3234,6 +3234,17 @@ BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi32(__mmask16 k, __m512i a, __
     for (unsigned i = 0; i < 16; i += 1)
     {
         if (((uint64_t)k >> i & 1) != 0) { r.u32[i] = result.u32[i]; }
+    }
+    return r.value;
+}
+
+BUSTER_HOST_INLINE __m512i host_mm512_maskz_sub_epi64(__mmask8 k, __m512i a, __m512i b)
+{
+    HostV512 result = { .value = host_mm512_sub_epi64(a, b) };
+    HostV512 r = { 0 };
+    for (unsigned i = 0; i < 8; i += 1)
+    {
+        if (((uint64_t)k >> i & 1) != 0) { r.u64[i] = result.u64[i]; }
     }
     return r.value;
 }
@@ -3766,7 +3777,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_sll_epi64(__m512i a, __m128i count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        uint64_t amount = count_.u64[0]; r.u64[i] = amount >= 64 ? 0 : (uint64_t)(a_.u64[i] << amount);
+        uint64_t amount = count_.u64[0]; r.u64[i] = amount >= 64 ? 0 : (uint64_t)((uint64_t)a_.u64[i] << amount);
     }
     return r.value;
 }
@@ -3777,7 +3788,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi16(__m512i a, int count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 32; i += 1)
     {
-        uint64_t amount = (unsigned)count; r.u16[i] = amount >= 16 ? 0 : (uint16_t)(a_.u16[i] << amount);
+        uint64_t amount = (unsigned)count; r.u16[i] = amount >= 16 ? 0 : (uint16_t)((uint64_t)a_.u16[i] << amount);
     }
     return r.value;
 }
@@ -3788,7 +3799,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi32(__m512i a, int count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 16; i += 1)
     {
-        uint64_t amount = (unsigned)count; r.u32[i] = amount >= 32 ? 0 : (uint32_t)(a_.u32[i] << amount);
+        uint64_t amount = (unsigned)count; r.u32[i] = amount >= 32 ? 0 : (uint32_t)((uint64_t)a_.u32[i] << amount);
     }
     return r.value;
 }
@@ -3799,7 +3810,7 @@ BUSTER_HOST_INLINE __m512i host_mm512_slli_epi64(__m512i a, int count)
     HostV512 r = { 0 };
     for (unsigned i = 0; i < 8; i += 1)
     {
-        uint64_t amount = (unsigned)count; r.u64[i] = amount >= 64 ? 0 : (uint64_t)(a_.u64[i] << amount);
+        uint64_t amount = (unsigned)count; r.u64[i] = amount >= 64 ? 0 : (uint64_t)((uint64_t)a_.u64[i] << amount);
     }
     return r.value;
 }
@@ -5374,6 +5385,9 @@ BUSTER_HOST_INLINE __mmask16 host_mm_test_epi8_mask(__m128i a, __m128i b)
 
 #undef _mm512_maskz_sub_epi32
 #define _mm512_maskz_sub_epi32 host_mm512_maskz_sub_epi32
+
+#undef _mm512_maskz_sub_epi64
+#define _mm512_maskz_sub_epi64 host_mm512_maskz_sub_epi64
 
 #undef _mm512_max_epu8
 #define _mm512_max_epu8 host_mm512_max_epu8

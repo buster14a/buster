@@ -7,6 +7,8 @@
 #ifndef BUSTER_C_CHECK_PROGRAM_ASM_TEST_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_ASM_TEST_INCLUDED
 
+#include <cpuid.h>
+
 static void check_test_program_asm(CheckTest* test, const char* clang)
 {
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
@@ -82,11 +84,23 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "char*p=0;__asm__(\"leaq 16(%1), %0\" : \"=r\"(p) : \"r\"(p));unsigned short v=(unsigned short)(n*257+3);unsigned char hi;"
         "__asm__(\"movb %h1, %0\" : \"=q\"(hi) : \"Q\"(v));return (int)counter+small+mid+(int)(long)p+hi;}",
         "asm-output-widths", clang);
-    // XCR0, and rsp's alignment at the template (16, as clang -O0's function bodies have it), and basic asm statements.
+    // rsp's alignment at the template (16, as clang -O0's function bodies have it), and basic asm statements.
     check_test_program_source(test,
-        "int tested(int n){unsigned lo,hi;__asm__ volatile(\"xgetbv\" : \"=a\"(lo),\"=d\"(hi) : \"c\"(0));long sp;"
-        "__asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));__asm__(\"nop\");__asm__ volatile(\"nop\\n\\tnop\");return (int)(lo&0xff)+(int)hi+(int)(sp&15)+n;}",
-        "asm-xgetbv-and-alignment", clang);
+        "int tested(int n){long sp;__asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));"
+        "__asm__(\"nop\");__asm__ volatile(\"nop\\n\\tnop\");return (int)(sp&15)+n;}",
+        "asm-alignment", clang);
+    // XGETBV is executable only with XSAVE and OSXSAVE, even on an x86-64 host.
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) && (ecx & (3u << 26)) == (3u << 26))
+    {
+        check_test_program_source(test,
+            "int tested(int n){unsigned lo,hi;__asm__ volatile(\"xgetbv\" : \"=a\"(lo),\"=d\"(hi) : \"c\"(0));"
+            "return (int)(lo&0xff)+(int)hi+n;}", "asm-xgetbv", clang);
+    }
+    else
+    {
+        printf("  asm-xgetbv: skipped execution (XSAVE or OSXSAVE unavailable)\n");
+    }
     // XMM operands of double and float.
     check_test_program_source(test,
         "int tested(int n){double d=n*0.5,e=n+0.25;__asm__(\"addpd %1, %0\" : \"+x\"(d) : \"x\"(e));float f=(float)n,g;"
