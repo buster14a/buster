@@ -144,7 +144,7 @@
 //     on the stacks).
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
-//     same or apart. A front end copies more through memcpy, as clang -O0 does past this many bytes.
+//     same or apart. A front end copies more through a runtime call (the C producer uses memmove for self-assignment).
 //   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16 (of the frame's alignment
 //     in a realigned frame, which so stays aligned), on the stack, and pushes their address (`class` U64, a multiple of
 //     16; `value` 0): a variable-length array's storage. The bytes stay until a STACK_RESTORE releases them or the

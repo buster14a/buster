@@ -704,13 +704,41 @@ What the lowering covers past scalars (#145's programs):
   register as a struct of it would, or from its 8-byte stack slot, which
   Tier 0's prologue copies into the object (an aligned typedef passes as its
   base, so the slot is aligned to 8 alone).
-- **Copies.** Struct and union assignment and initialization are `COPY`s of
-  at most 256 bytes each, the source's address kept in a temporary between
-  them; a statement's assignment leaves no address to discard, and neither
-  does a discarded comma's right operand (`k = 1, a = b;`). An assignment whose
-  value is used keeps its destination's address in a temporary too, pushed
-  again after the last `COPY`: whatever reads it takes its class from the entry
-  before it, which a `COPY`, of class `VOID`, can't give (#440).
+- **Copies.** Struct and union assignment and initialization up to 256 bytes
+  use one bounded `COPY`. Larger nonvolatile copies use one `memmove` runtime call (#597),
+  through the same symbol publication, ABI assignment and live-value preservation
+  as other runtime calls. The pointers and `size_t` have unsigned long's U64
+  INTEGER ABI on the generated SysV x86-64 target; no new type is created after
+  shared type classification. The call returns the destination when the
+  assignment's value is used, and its return is discarded otherwise. `memmove`
+  permits self-assignment. The number of typed entries and machine records is
+  bounded independently of the object size, so syntax-sized lowering capacities
+  cover this producer's actual demand. Small kept assignments retain the
+  destination in a temporary (#440), because `COPY` itself has class `VOID`.
+  Zero-size copies still evaluate their operands without touching memory.
+  Volatile copies retain the existing inline pieces, including self-assignment's
+  accesses; a library routine may skip copying when its pointers are equal.
+  The producer follows the copied value through comma, conditional, selected
+  and statement expressions, whose lvalue conversions can erase a source's
+  volatile qualifier. Its bounded private worklist borrows unused task storage.
+  A shared type-facts bit also retains volatile subobjects through by-value
+  records, arrays and aligned/atomic wrappers, stopping at pointer pointees.
+  Its memoized nonrecursive preparation visits each type and member edge once;
+  a bounded scalar/vector member scan skips that preparation when no member
+  is volatile. Initializer copies retain the declared destination's qualifiers
+  even when a plan's part type is unqualified. Shape and native regressions
+  cover destination-only volatility, nested volatile arrays, self-copy,
+  initialization/return and nonvolatile pointers to volatile storage.
+  The [9700X comparison](https://github.com/buster14a/buster-performance/blob/3d131b17c8b08bc2688da9c929e26ffea01055d2/docs/measurements/aggregate-copies-597-2026-10-27/README.md)
+  at compiler `03d79f50` records an 8192-byte discarded assignment shrinking
+  from 223 typed entries, 1152 machine records and 6197 text bytes to 6, 11
+  and 43, with hot-buffer runtime 52.659 to 23.647 ns per call. Copies through
+  262144 bytes compile where the baseline exhausts code capacity from 16384;
+  all 18 tested objects through 256 bytes remain byte-identical. Five release
+  test groups pass. There is no demonstrated compile-time gain; 257-byte calls
+  cost more than the old expansion, and the single-placement SQLite control's
+  median increases 0.79% with overlapping ranges. The report preserves these
+  limits and the full evidence.
 - **Initializers.** A local object's plan is applied in order: the object is
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
