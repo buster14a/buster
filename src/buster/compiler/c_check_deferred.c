@@ -24,10 +24,11 @@
 //     (type_replay), each body's events and entries put at its cut, where source order makes them, and every TypeId and
 //     every id into those tables that the walk wrote mapped to its place. check_input_run's later phases then run on the
 //     merged reader, as they do after a walk in source order.
-// A body that does what the merge doesn't take yet sends the unit to source order: a declaration with linkage (the
-// file-scope entity's, which later declarations see), a union made transparent, an intrinsic, a report, or a table
-// that runs out of room. check_input_deferred then checks the unit with check_input, from nothing, and says so
-// (CheckDeferred.unsupported). So does a unit with overloadable functions, whose sets later declarations join.
+// A body that does what the merge doesn't take yet sends the unit to source order: a declaration with linkage that
+// changes what later ones see (its entity's first, one that changes its type, one unlike the one it replaces), a
+// union of the top level's made transparent, a report, or a table that runs out of room. check_input_deferred then
+// checks the unit with check_input, from nothing, and says so (CheckDeferred.unsupported). So does a unit with
+// overloadable functions, whose sets later declarations join.
 //
 // The memory is the state's (CheckDeferredMemory), and outlives its readings: the top level's table and the lanes' are
 // the deferred reader's own. The first reading that needs an arena reserves it, a lane's on the calling thread before
@@ -70,11 +71,24 @@ struct CheckDeferredCut
     uint32_t asms;
     uint32_t varargs;
     uint32_t constants;
+    uint32_t intrinsic_declarations;
+    uint32_t intrinsic_calls;
+};
+
+// One of the top level's updates of a name's linked declaration (an id + 1) and type, at `position`
+// (check_deferred_linked).
+typedef struct CheckDeferredLinked CheckDeferredLinked;
+struct CheckDeferredLinked
+{
+    uint32_t name;
+    uint32_t position;
+    uint32_t declaration;
+    TypeId type;
 };
 
 // What a body's walk made, in its lane's ids: its type changes, its events' columns, its appended entries, the
-// completion positions of the tags it made, the top level's VLAs it changed (its parameters') and the predefined types
-// it made.
+// completion positions and transparency of the tags it made, the intrinsic declarations it made and its calls of
+// intrinsics, the top level's VLAs it changed (its parameters') and the predefined types it made.
 typedef struct CheckDeferredResult CheckDeferredResult;
 struct CheckDeferredResult
 {
@@ -82,6 +96,15 @@ struct CheckDeferredResult
     uint32_t types;
     uint32_t tags;
     uint32_t* tag_completions;
+    uint32_t* transparent;
+    // The top level's tags the body completed, its definition's parameter-list tags (#436), with their positions.
+    uint32_t* completed_tags;
+    uint32_t* completed_positions;
+    uint32_t completed_count;
+    CheckInputIntrinsicDeclaration* intrinsic_declarations;
+    uint32_t intrinsic_declaration_count;
+    CheckInputIntrinsicCall* intrinsic_calls;
+    uint32_t intrinsic_call_count;
     uint32_t event_count;
     uint32_t* key;
     uint32_t* declaration;
@@ -198,6 +221,15 @@ struct CheckDeferred
     CheckDeferredResult* results;
     uint32_t body_count;
     uint32_t body_capacity;
+    // The top level's updates of names' linked declarations and types (check_deferred_linked), in the walk's order and
+    // room for two a token; then by name (check_deferred_bodies), each name's from linked_offsets[name] to
+    // linked_offsets[name + 1] in position order, from which a lane takes the state at its body's opening
+    // (check_deferred_name_state).
+    CheckDeferredLinked* linked;
+    uint32_t linked_count;
+    uint32_t linked_capacity;
+    CheckDeferredLinked* linked_names;
+    uint32_t* linked_offsets;
     // The largest body's tokens (the first of them), the largest of the others' and the lane that read the largest; the
     // top level's tokens (the unit's outside its bodies), and the bodies' tokens beyond their critical path that paid for
     // a lane (check_deferred_bodies).
@@ -296,11 +328,31 @@ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
             .asms = reader->output->asm_count,
             .varargs = reader->vararg_count,
             .constants = reader->cached_constant_count,
+            .intrinsic_declarations = reader->output->intrinsic_declaration_count,
+            .intrinsic_calls = reader->output->intrinsic_call_count,
         };
         deferred->body_count += 1;
     }
     deferred->unsupported |= !room;
     deferred->reason = !room ? "more bodies than the mask has" : deferred->reason;
+}
+
+static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position)
+{
+    CheckDeferred* deferred = reader->deferred;
+    const bool room = deferred->linked_count < deferred->linked_capacity;
+    if (room)
+    {
+        deferred->linked[deferred->linked_count] = (CheckDeferredLinked){
+            .name = name,
+            .position = position,
+            .declaration = reader->linked_declarations[name],
+            .type = reader->linked_types[name],
+        };
+        deferred->linked_count += 1;
+    }
+    deferred->unsupported |= !room;
+    deferred->reason = !room ? "more linked declarations than the log has" : deferred->reason;
 }
 
 // Pushes `count` records of `size` bytes, copies `source`'s first `used` into them, and returns them (0 without room).
@@ -432,11 +484,16 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     valid = reader->enum_fixed != 0;
     if (valid && top->intrinsic_names != 0)
     {
-        // The intrinsics' cache, which the lane fills for the names it meets, and their tables, which a body that uses
-        // one leaves to source order.
+        // The intrinsics' cache, which each body sets for the names it spells as source order's is at its opening
+        // (check_deferred_name_state) and fills for those it decodes, and their tables, after the top level's of which
+        // each body appends its own declarations and calls.
+        // A body decodes each name once at most, a name the top level decoded after its opening among them: room for the
+        // top level's declarations and as many again as the top level has room for.
+        const uint64_t declarations = (uint64_t)top_input->intrinsic_declaration_count + top_input->intrinsic_declaration_capacity;
+        input->intrinsic_declaration_capacity = declarations < UINT32_MAX ? (uint32_t)declarations : UINT32_MAX;
         reader->intrinsic_names = check_deferred_copy(arena, top->intrinsic_names, top->pp->table->count, top->pp->table->count, sizeof(uint32_t));
         input->intrinsic_declarations = check_deferred_copy(arena, top_input->intrinsic_declarations, top_input->intrinsic_declaration_count,
-                                                            (uint64_t)top_input->intrinsic_declaration_capacity + 1, sizeof(CheckInputIntrinsicDeclaration));
+                                                            (uint64_t)input->intrinsic_declaration_capacity + 1, sizeof(CheckInputIntrinsicDeclaration));
         input->intrinsic_calls = check_deferred_copy(arena, top_input->intrinsic_calls, top_input->intrinsic_call_count,
                                                      (uint64_t)top_input->intrinsic_call_capacity + 1, sizeof(CheckInputIntrinsicCall));
         valid = reader->intrinsic_names != 0 && input->intrinsic_declarations != 0 && input->intrinsic_calls != 0;
@@ -505,6 +562,38 @@ static uint32_t check_deferred_visible(const CEnvironment* environment, uint32_t
     return result;
 }
 
+// Sets the lane's state of `name` that the top level's walk changes as it goes to source order's at the body's opening
+// (`cut`): its linked declaration and type, the last of the top level's updates before the opening
+// (check_deferred_linked), and its intrinsic's cache entry, which a declaration the top level made after the cut
+// leaves undecoded, as source order's is there. The walk reads them for the names it spells alone.
+static void check_deferred_name_state(const CheckDeferred* deferred, CheckDeferredLane* lane, uint32_t name, const CheckDeferredCut* cut)
+{
+    CheckInputReader* reader = &lane->reader;
+    uint32_t declaration = 0;
+    TypeId type = 0;
+    if (deferred->linked_offsets != 0)
+    {
+        const uint32_t begin = deferred->linked_offsets[name];
+        uint32_t slot = deferred->linked_offsets[name + 1];
+        while (slot > begin && deferred->linked_names[slot - 1].position > cut->opening)
+        {
+            slot -= 1;
+        }
+        declaration = slot > begin ? deferred->linked_names[slot - 1].declaration : 0;
+        type = slot > begin ? deferred->linked_names[slot - 1].type : 0;
+    }
+    reader->linked_declarations[name] = declaration;
+    reader->linked_types[name] = type;
+    if (reader->intrinsic_names != 0)
+    {
+        const CheckInputReader* top = deferred->top_reader;
+        const uint32_t cached = top->intrinsic_names[name];
+        const bool later = cached != 0 && (cached & UINT32_C(0x80000000)) == 0 && cached - 1 >= cut->intrinsic_declarations;
+        const BuiltinIntrinsicInfo* info = later ? top->output->intrinsic_declarations[cached - 1].info : 0;
+        reader->intrinsic_names[name] = later ? UINT32_C(0x80000000) | (uint32_t)(info - builtin_intrinsic_infos) : cached;
+    }
+}
+
 // Sets the lane's heads of every name the body (`body`) and its parameters spell to the file scope's at the body's
 // opening: the binding state source order's reader has there, for the names the body can look up. Each name once (by
 // the lane's stamps), its label head none and its ordinary and tag heads from the history, 16 keys at a time
@@ -532,6 +621,7 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
                 lane->points[count] = cut->opening;
                 lane->points[count + 1] = cut->opening;
                 bindings->heads[C_BINDING_LABEL * names + name] = 0;
+                check_deferred_name_state(deferred, lane, name, cut);
                 count += 2;
             }
             token = pass == 0 ? token + 1 : reader->parameter_next[token];
@@ -651,6 +741,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     input->region_count = top_input->region_count;
     input->vla_count = top_input->vla_count;
     input->asm_count = top_input->asm_count;
+    input->intrinsic_declaration_count = top_input->intrinsic_declaration_count;
+    input->intrinsic_call_count = top_input->intrinsic_call_count;
     for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
         const bool made = top->predefined_positions[i] <= cut->opening;
@@ -665,6 +757,7 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const TypeViewMark view = type_view_mark(types);
     types->hidden_begin = cut->types;
     types->hidden_end = deferred->top.types.count;
+    reader->lane_tags = view.tags;
     // The first withdrawal after the opening, by binary search: the list is in position order.
     uint32_t low = 0;
     uint32_t high = deferred->withdrawal_count;
@@ -696,19 +789,23 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     }
     const uint64_t walk_end = deferred->timing ? check_deferred_now() : 0;
     types->changes = 0;
-    // A completion of a tag the top level made (a definition's parameter-list tag, which its body declares again,
-    // #436): everything after the body sees the tag complete in source order, which the merge doesn't carry yet.
+    // The completions of tags the top level made: a definition's parameter-list tags, which its body declares again
+    // (#436) and nothing after the body can name, so that only the merged table and the tags' positions show them. A
+    // tag the top level completes itself, which a lane withdraws, isn't one.
+    uint32_t completed = 0;
     bool completes = false;
     for (uint32_t i = 0; i < changes->count; i += 1)
     {
         const TypeChange* change = changes->items + i;
-        completes |= (change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM) && change->tag < view.tags;
+        const bool top_tag = (change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM) && change->tag < view.tags;
+        completed += top_tag;
+        completes |= top_tag && (deferred->top.tags.completion[change->tag] != 0 || deferred->transparencies[change->tag] != BUSTER_CHECK_NONE);
     }
     result->unsupported = !valid || reader->lane_unsupported || input->report_count != 0 || input->resource || !reader->bindings.valid || changes->full ||
                           completes;
     result->reason = !valid || input->resource || changes->full ? "a body ran out of room" : reader->lane_unsupported ? reader->lane_reason :
                      input->report_count != 0 ? "a body reports an error" :
-                     !reader->bindings.valid ? "a body's bindings ran out of room" : completes ? "a body completes a tag the top level made" : 0;
+                     !reader->bindings.valid ? "a body's bindings ran out of room" : completes ? "a body completes a tag the top level completes" : 0;
     if (!result->unsupported)
     {
         Arena* arena = &lane->arenas->results;
@@ -726,6 +823,30 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
         result->types = types->types.count - view.types;
         result->tags = types->tags.count - view.tags;
         result->tag_completions = check_deferred_keep(arena, reader->tag_completions + view.tags, result->tags, sizeof(uint32_t), &kept);
+        result->transparent = reader->transparent_unions != 0 ? check_deferred_keep(arena, reader->transparent_unions + view.tags, result->tags, sizeof(uint32_t), &kept) : 0;
+        result->completed_count = completed;
+        result->completed_tags = kept && completed != 0 ? arena_push_array(arena, completed, sizeof(uint32_t), 4) : 0;
+        result->completed_positions = result->completed_tags != 0 ? arena_push_array(arena, completed, sizeof(uint32_t), 4) : 0;
+        kept = kept && (completed == 0 || result->completed_positions != 0);
+        completed = 0;
+        for (uint32_t i = 0; kept && i < changes->count; i += 1)
+        {
+            const TypeChange* change = changes->items + i;
+            if ((change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM) && change->tag < view.tags)
+            {
+                result->completed_tags[completed] = change->tag;
+                result->completed_positions[completed] = reader->tag_completions[change->tag];
+                completed += 1;
+            }
+        }
+        // A unit with intrinsics has the lane's tables (check_deferred_lane_prepare); one without has none.
+        const bool intrinsics = reader->intrinsic_names != 0;
+        result->intrinsic_declaration_count = input->intrinsic_declaration_count - top_input->intrinsic_declaration_count;
+        result->intrinsic_declarations = intrinsics ? check_deferred_keep(arena, input->intrinsic_declarations + top_input->intrinsic_declaration_count,
+                                                                          result->intrinsic_declaration_count, sizeof(CheckInputIntrinsicDeclaration), &kept) : 0;
+        result->intrinsic_call_count = input->intrinsic_call_count - top_input->intrinsic_call_count;
+        result->intrinsic_calls = intrinsics ? check_deferred_keep(arena, input->intrinsic_calls + top_input->intrinsic_call_count, result->intrinsic_call_count,
+                                                                   sizeof(CheckInputIntrinsicCall), &kept) : 0;
         result->event_count = events;
         result->key = check_deferred_keep(arena, reader->bindings.key + base, events, sizeof(uint32_t), &kept);
         result->declaration = check_deferred_keep(arena, reader->bindings.declaration + base, events, sizeof(uint32_t), &kept);
@@ -786,6 +907,24 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     const uint64_t undo_begin = deferred->timing ? check_deferred_now() : 0;
     check_deferred_heads_clear(lane);
     const bool reset = type_view_reset(types, view);
+    // The top level's tags the body changed, back to the top level's state (none it withdraws: a body doesn't change
+    // one where it is merged).
+    for (uint32_t i = 0; i < changes->count; i += 1)
+    {
+        const TypeChange* change = changes->items + i;
+        const bool completion = change->operation == BUSTER_TYPE_CHANGE_LAYOUT || change->operation == BUSTER_TYPE_CHANGE_ENUM ||
+                                change->operation == BUSTER_TYPE_CHANGE_TRANSPARENT;
+        if (completion && change->tag < view.tags)
+        {
+            type_tag_restore(types, &deferred->top, change->tag);
+            reader->tag_completions[change->tag] = top->tag_completions[change->tag];
+            reader->enum_fixed[change->tag] = top->enum_fixed[change->tag];
+            if (reader->transparent_unions != 0)
+            {
+                reader->transparent_unions[change->tag] = top->transparent_unions[change->tag];
+            }
+        }
+    }
     for (uint32_t i = 0; i < top_input->vla_count; i += 1)
     {
         input->vlas[i] = top_input->vlas[i];
@@ -927,6 +1066,36 @@ static void check_deferred_map_id1(uint32_t* column, uint32_t token, const uint3
     {
         column[token] = check_deferred_id(top, top_count, base, column[token] - 1) + 1;
     }
+}
+
+// Maps a decoded intrinsic's types through a part of the replay.
+static void check_deferred_intrinsic_types(BuiltinIntrinsicTypeResult* decoded, const TypeReplayPart* part)
+{
+    decoded->function_type = check_deferred_type(part, decoded->function_type);
+    decoded->result_type = check_deferred_type(part, decoded->result_type);
+    for (uint32_t p = 0; p < decoded->parameter_count && p < BUSTER_INTRINSIC_TYPE_MAX_PARAMETERS; p += 1)
+    {
+        decoded->parameters[p] = check_deferred_type(part, decoded->parameters[p]);
+    }
+}
+
+// Places an intrinsic declaration (`record`, in `part`'s ids) at the next of `declarations`, of room for `capacity`,
+// unless its catalogue entry has one (`places`: each entry's place + 1), and writes its place: whether it fit.
+static bool check_deferred_intrinsic_place(const CheckInputIntrinsicDeclaration* record, const TypeReplayPart* part, uint32_t* places,
+                                           CheckInputIntrinsicDeclaration* declarations, uint32_t capacity, uint32_t* total, uint32_t* place)
+{
+    const uint32_t entry = (uint32_t)(record->info - builtin_intrinsic_infos);
+    const bool fresh = places[entry] == 0;
+    const bool valid = !fresh || *total < capacity;
+    if (fresh && valid)
+    {
+        declarations[*total] = *record;
+        check_deferred_intrinsic_types(&declarations[*total].types, part);
+        *total += 1;
+        places[entry] = *total;
+    }
+    *place = valid ? places[entry] - 1 : 0;
+    return valid;
 }
 
 // Merges every body's result into the top level's reader, in source order: whether everything fit and was replayed.
@@ -1123,6 +1292,78 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             constants[constant_bases[b] + i].type = check_deferred_type(part, result->constants[i].type);
         }
     }
+    // The intrinsics, merged into new tables of the input's capacities: each declaration where source order's walk makes
+    // it, the top level's up to each body's cut and then the body's own, each in its walk's order, a catalogue entry's
+    // first kept and its others mapped to it, as source order makes a name's once (an entry has one name); and the calls
+    // at their cuts, each with its declaration's place.
+    const bool intrinsics = input->intrinsic_ids != 0;
+    const uint32_t top_declarations = input->intrinsic_declaration_count;
+    const uint32_t top_calls = input->intrinsic_call_count;
+    uint32_t* call_map = valid && intrinsics ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)top_calls + 1) : 0;
+    uint32_t* call_bases = call_map != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)bodies + 1) : 0;
+    uint32_t* declaration_bases = call_bases != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)bodies + 1) : 0;
+    valid = valid && (!intrinsics || declaration_bases != 0);
+    uint32_t body_declarations = 0;
+    for (uint32_t b = 0; valid && intrinsics && b < bodies; b += 1)
+    {
+        declaration_bases[b] = top_declarations + body_declarations;
+        body_declarations += deferred->results[b].intrinsic_declaration_count;
+    }
+    uint32_t* declaration_map = valid && intrinsics ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)top_declarations + body_declarations + 1) : 0;
+    uint32_t* entry_places = declaration_map != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)BUSTER_BUILTIN_INTRINSIC_COUNT + 1) : 0;
+    CheckInputIntrinsicDeclaration* intrinsic_declarations =
+        entry_places != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputIntrinsicDeclaration, (uint64_t)input->intrinsic_declaration_capacity + 1) : 0;
+    CheckInputIntrinsicCall* intrinsic_calls =
+        intrinsic_declarations != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputIntrinsicCall, (uint64_t)input->intrinsic_call_capacity + 1) : 0;
+    valid = valid && (!intrinsics || intrinsic_calls != 0);
+    uint32_t declaration_total = 0;
+    uint32_t call_total = 0;
+    if (valid && intrinsics)
+    {
+        // A catalogue entry's place + 1, 0 while it has none.
+        memset(entry_places, 0, ((uint64_t)BUSTER_BUILTIN_INTRINSIC_COUNT + 1) * sizeof(uint32_t));
+        const uint32_t capacity = input->intrinsic_declaration_capacity;
+        uint32_t t = 0;
+        for (uint32_t b = 0; valid && b <= bodies; b += 1)
+        {
+            // The top level's before the body's cut, then the body's.
+            const uint32_t until = b < bodies ? deferred->cuts[b].intrinsic_declarations : top_declarations;
+            for (; valid && t < until; t += 1)
+            {
+                valid = check_deferred_intrinsic_place(input->intrinsic_declarations + t, &parts[0], entry_places, intrinsic_declarations, capacity, &declaration_total,
+                                                       declaration_map + t);
+            }
+            const CheckDeferredResult* result = b < bodies ? deferred->results + b : 0;
+            for (uint32_t j = 0; valid && result != 0 && j < result->intrinsic_declaration_count; j += 1)
+            {
+                valid = check_deferred_intrinsic_place(result->intrinsic_declarations + j, &parts[1 + b], entry_places, intrinsic_declarations, capacity,
+                                                       &declaration_total, declaration_map + declaration_bases[b] + j);
+            }
+        }
+        for (uint32_t c = 0; c < bodies; c += 1)
+        {
+            counts[c] = deferred->results[c].intrinsic_call_count;
+        }
+        call_total = check_deferred_layout(deferred, offsetof(CheckDeferredCut, intrinsic_calls), counts, top_calls, call_map, call_bases);
+        valid = valid && call_total <= input->intrinsic_call_capacity;
+        for (uint32_t c = 0; valid && c < top_calls; c += 1)
+        {
+            CheckInputIntrinsicCall call = input->intrinsic_calls[c];
+            call.declaration = declaration_map[call.declaration];
+            intrinsic_calls[call_map[c]] = call;
+        }
+        for (uint32_t body = 0; valid && body < bodies; body += 1)
+        {
+            const CheckDeferredResult* result = deferred->results + body;
+            for (uint32_t c = 0; c < result->intrinsic_call_count; c += 1)
+            {
+                CheckInputIntrinsicCall call = result->intrinsic_calls[c];
+                const uint32_t declaration = call.declaration;
+                call.declaration = declaration_map[declaration < top_declarations ? declaration : declaration_bases[body] + (declaration - top_declarations)];
+                intrinsic_calls[call_bases[body] + c] = call;
+            }
+        }
+    }
     // The events: each body's at its cut, every handle and index into the stream mapped, and a restore's mark past the
     // top level's active declarations at the cut.
     CBindings* bindings = &reader->bindings;
@@ -1215,7 +1456,17 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
                 if (parts[1 + b].merged[t] == 0)
                 {
                     completions[type_replay_tag(&parts[1 + b], deferred->top.tags.count + t)] = result->tag_completions[t];
+                    // And a union the body made transparent, its activation.
+                    if (transparent != 0)
+                    {
+                        transparent[type_replay_tag(&parts[1 + b], deferred->top.tags.count + t)] = result->transparent[t];
+                    }
                 }
+            }
+            // The top level's tags the body completed: the top level's walk left them incomplete.
+            for (uint32_t c = 0; c < result->completed_count; c += 1)
+            {
+                completions[type_replay_tag(&parts[0], result->completed_tags[c])] = result->completed_positions[c];
             }
         }
     }
@@ -1264,6 +1515,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         check_deferred_map_id1(reader->vla_bounds, token, vla_map, top_vlas, vla_base);
         check_deferred_map_id1(reader->vla_ends, token, vla_map, top_vlas, vla_base);
         input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
+        if (intrinsics)
+        {
+            check_deferred_map_id1(input->intrinsic_ids, token, call_map, top_calls, inside ? call_bases[b] : 0);
+        }
         check_deferred_map_id1(reader->vararg_calls, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->vararg_types, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->constant_present, token, constant_map, top_constants, constant_base);
@@ -1297,19 +1552,16 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
     {
         reader->file_function_name_ids[i] = reader->file_function_name_ids[i] != BUSTER_CHECK_NONE ? string_map[reader->file_function_name_ids[i]] : BUSTER_CHECK_NONE;
     }
-    for (uint32_t i = 0; valid && i < input->intrinsic_declaration_count; i += 1)
-    {
-        BuiltinIntrinsicTypeResult* decoded = &input->intrinsic_declarations[i].types;
-        decoded->function_type = check_deferred_type(&parts[0], decoded->function_type);
-        decoded->result_type = check_deferred_type(&parts[0], decoded->result_type);
-        for (uint32_t p = 0; p < decoded->parameter_count && p < BUSTER_INTRINSIC_TYPE_MAX_PARAMETERS; p += 1)
-        {
-            decoded->parameters[p] = check_deferred_type(&parts[0], decoded->parameters[p]);
-        }
-    }
     if (valid)
     {
         (void)top_input;
+        if (intrinsics)
+        {
+            input->intrinsic_declarations = intrinsic_declarations;
+            input->intrinsic_declaration_count = declaration_total;
+            input->intrinsic_calls = intrinsic_calls;
+            input->intrinsic_call_count = call_total;
+        }
         input->strings = strings;
         input->string_count = string_total;
         input->regions = regions;
@@ -1382,6 +1634,31 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     valid = valid && c_environment_build(&deferred->environment, &reader->bindings, &deferred->memory.arena, reader->scratch);
     const uint64_t environment_end = deferred->timing ? check_deferred_now() : 0;
     deferred->environment_ns = environment_end - environment_begin;
+    // The top level's linked updates by name, each name's in position order, as the walk logged them: a counting sort.
+    const uint32_t names = reader->bindings.name_capacity;
+    deferred->linked_offsets = valid && deferred->linked_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, (uint64_t)names + 2) : 0;
+    deferred->linked_names = deferred->linked_offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredLinked, deferred->linked_count) : 0;
+    valid = valid && (deferred->linked_count == 0 || deferred->linked_names != 0);
+    if (valid && deferred->linked_count != 0)
+    {
+        uint32_t* offsets = deferred->linked_offsets;
+        memset(offsets, 0, ((uint64_t)names + 2) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < deferred->linked_count; i += 1)
+        {
+            offsets[deferred->linked[i].name + 2] += 1;
+        }
+        for (uint32_t name = 0; name < names; name += 1)
+        {
+            offsets[name + 2] += offsets[name + 1];
+        }
+        // Each record at its name's next place: offsets[name + 1] ends as the name's end, the next name's start.
+        for (uint32_t i = 0; i < deferred->linked_count; i += 1)
+        {
+            const uint32_t name = deferred->linked[i].name;
+            deferred->linked_names[offsets[name + 1]] = deferred->linked[i];
+            offsets[name + 1] += 1;
+        }
+    }
     // The top level's completions and transparency, in position order, which bodies before them withdraw.
     deferred->withdrawals = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, (uint64_t)deferred->top_changes.count + 1) : 0;
     deferred->transparencies = deferred->withdrawals != 0 ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, uint32_t, (uint64_t)deferred->top.tags.count + 1) : 0;
@@ -1602,6 +1879,12 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
     deferred->cuts = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredCut, (uint64_t)bodies + 1) : 0;
     deferred->body_capacity = bodies;
     valid = valid && deferred->cuts != 0;
+    // Room for the top level's linked updates (check_deferred_linked): two a token at most, a declarator's and its
+    // initializer's. Pages are committed as the log fills them.
+    const uint64_t linked_room = (uint64_t)count * 2 + 1;
+    deferred->linked = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredLinked, linked_room) : 0;
+    deferred->linked_capacity = linked_room < UINT32_MAX ? (uint32_t)linked_room : UINT32_MAX;
+    valid = valid && deferred->linked != 0;
     // The top level's table, with the caller's capacities, and its record of changes.
     const TypeCapacity capacity = {
         .types = types->types.capacity - BUSTER_TYPE_BUILTIN_COUNT,

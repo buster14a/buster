@@ -99,9 +99,22 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "tag-in-an-array-bound", "int a[sizeof(struct X *)];\nint f(void) { struct X *q = 0; return q != 0; }\n", true },
     { "tag-in-a-definitions-parameters", "int h(struct T *p) { struct T *q = p; return q != 0; }\n", true },
     { "tag-declared-before-a-prototype", "struct S;\nvoid g(struct S *p);\nint f(void) { struct S *q = 0; return q != 0; }\n", true },
-    // Block-scope declarations with linkage name the file-scope entity, which later declarations see: source order's.
-    { "block-scope-extern", "int g = 3;\nint f(void) { extern int g; return g; }\n", false },
+    // Block-scope declarations with linkage name the file-scope entity, which later declarations see. A lane takes one
+    // that leaves the entity as it was: declared before the body, of a type the body's declaration doesn't change, its
+    // linked declaration replaced only by one that later ones inherit the same from. The state the lane checks against is
+    // source order's at the opening, whatever the top level declares later (a definition after the body, of an
+    // array with a size). The first declaration of an entity, and one that adds to its type, are source order's.
+    { "block-scope-extern", "int g = 3;\nint f(void) { extern int g; return g; }\n", true },
+    { "block-scope-extern-before-its-definition", "extern int g;\nint f(void) { extern int g; return g; }\nint g = 3;\n", true },
+    { "block-scope-prototype-before-its-definition", "int h(int);\nint f(void) { int h(int); return h(1); }\nint g(void) { int h(int); return h(2); }\n"
+      "int h(int x) { return x; }\n", true },
+    { "block-scope-function-after-its-definition", "int f1(char *p) { return *p + 1; }\nint main(void) { char s = 1; int f1(char *); return f1(&s) != 2; }\n", true },
+    { "block-scope-array-before-its-size", "extern int a[];\nint f(void) { extern int a[]; return a[0]; }\nint a[4] = { 7 };\n", true },
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "block-scope-extern-first", "int f(void) { extern int e; return e; }\nint g(void) { extern int e; return e + 1; }\n", false },
+    { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
+    { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
+    { "block-scope-prototype-adds-parameters", "int h();\nint f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
     // statements, cached constants, compound literals and statics.
     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
@@ -137,8 +150,24 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "recursion-and-forward-calls", "static int later(int);\nint fact(int n) { return n <= 1 ? 1 : n * fact(n - 1); }\nint f(void) { return later(2); }\n"
       "static int later(int x) { return x + 1; }\nvoid empty(void) {}\nvoid empty2(void) { }\n", true },
     { "labels-and-gotos", "int f(int x) { if (x) goto out; x += 1; out: return x; }\nint g(int y) { again: if (y > 0) { y -= 1; goto again; } return y; }\n", true },
-    // A union made transparent in a body applies to what follows it: source order's.
+    // A file-scope union made transparent in a body applies to what follows it: source order's. A union the body made,
+    // which nothing after it can name, the merge takes, with its activation, which a call through a pointer reads.
     { "transparent-union-in-a-body", "union U { int* a; long* b; };\nint f(void) { typedef union U T __attribute__((transparent_union)); return 0; }\n", false },
+    { "transparent-local-union-in-a-body",
+      "int f(int* p) { union L { int* a; long* b; }; typedef union L T __attribute__((transparent_union)); int (*fp)(T) = 0; return fp ? fp(p) : 0; }\n"
+      "int g(void) { union M { char* c; }; return (int)sizeof(union M); }\n", true },
+    // Intrinsics: a body's declarations, each made once at its first use in source order, before or after the top level's
+    // (a declaration's sizeof reads the call), in one body and in several, and the calls with them.
+    { "intrinsics-in-a-body", "unsigned f(unsigned x, unsigned y) { __builtin_ia32_pause(); return __builtin_ia32_crc32si(x, y); }\nint g(void) { return 2; }\n", true },
+    { "intrinsics-in-two-bodies",
+      "unsigned f(unsigned x) { return __builtin_ia32_crc32si(x, 1) ^ __builtin_ia32_crc32si(1, x); }\n"
+      "unsigned g(unsigned y) { __builtin_ia32_pause(); return __builtin_ia32_crc32si(y, 2); }\n", true },
+    { "intrinsic-before-the-top-levels", "unsigned f(unsigned x) { return __builtin_ia32_crc32si(x, 1); }\nint n = sizeof(__builtin_ia32_crc32si(1, 2));\n"
+      "unsigned g(unsigned y) { return __builtin_ia32_crc32si(y, (unsigned)n); }\n", true },
+    { "intrinsic-after-the-top-levels", "int n = sizeof(__builtin_ia32_crc32si(1, 2));\nunsigned f(unsigned x) { return __builtin_ia32_crc32si(x, (unsigned)n); }\n", true },
+    { "intrinsic-vectors-in-bodies",
+      "typedef int V __attribute__((vector_size(16)));\nV f(V x) { return __builtin_ia32_pshufd(x, 3); }\nV g(V y) { return __builtin_ia32_pshufd(y, 1); }\n"
+      "unsigned h(unsigned z) { return __builtin_ia32_crc32si(z, 3); }\n", true },
     // A union completed after one body and made transparent at file scope after another: each body sees it as source
     // order's reader does, incomplete, complete and then transparent. Before the typedef, a pointer for it is clang's
     // error, which the expressions' phase gives after the merge, as after source order's walk.
@@ -153,8 +182,17 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "syntax-error", "int f(void) { return 1 +; }\nint g(void) { return 2; }\n", false },
     { "error-in-a-later-phase", "int f(int* p) { return p + 1.0; }\nint g(void) { return 2; }\n", true },
     // A body that completes its definition's parameter-list tag, which it declares again (#436), completes a tag the
-    // top level made: source order's, whose completion everything after the body sees. And one that only uses it.
-    { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", false },
+    // top level made, which nothing after the body can name: merged, the tag complete from the body's definition on.
+    // A union and an enum too, a tag completed after the body uses it, one in each of two bodies (on one lane, the
+    // second body's after the first's tag is given back), and one that only uses it.
+    { "parameter-list-tag-completed-in-its-body", "int f(struct T *p) { struct T { int x; }; return p->x; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-union-completed-in-its-body", "int f(union U *p) { union U { int a; float b; }; return p->a; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-enum-completed-in-its-body", "int f(enum E *p) { enum E { A, B }; return *p == B; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-tag-completed-after-a-use",
+      "int f(struct T *p) { struct T *q = p; struct T { int x; }; return q->x + (int)sizeof *p; }\nint g(void) { return 2; }\n", true },
+    { "parameter-list-tags-completed-in-two-bodies",
+      "int f(struct T *p) { struct T { int x; }; return p->x; }\nlong g(struct T *q) { struct T { long y; int z; }; return q->y + (long)sizeof *q; }\n"
+      "int h(void) { return 3; }\n", true },
     { "parameter-list-tag-used-in-its-body", "int f(struct T *p) { struct T *q = p; return q != 0; }\nint g(void) { return 2; }\n", true },
     // Structs, unions and enums defined in a parameter list (#438): a definition's tags and enumeration constants, which
     // its body declares again at its opening, whether it names them or not; and a prototype's, which end with it.
