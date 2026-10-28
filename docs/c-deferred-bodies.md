@@ -219,6 +219,12 @@ completion position are all that show it, and the merge takes the position
 from the body's result. A lane gives the tag back to the top level's state,
 incomplete, before its next body.
 
+A unit with overloadable functions stays source order's. A lane would need each
+set's index as the top level had it at the body's opening (each name's
+candidates by signature, and whether the name is overloadable yet), and its
+own candidates and calls laid out at its cut, as the intrinsics' are. None of
+the corpora below has one: C code meets them mostly in clang's `<tgmath.h>`.
+
 The fallback checks the unit from nothing, with the caller's table taken back
 to how it came: a merge that fails after its replay has filled it.
 
@@ -356,7 +362,20 @@ passes every checker test.
 The 9700X job runs `test-checker-deferred`, c-testsuite's programs with
 `--deferred 8`, and the frozen SQLite source's check with `--deferred 8`.
 
-On the laptop (Zen 4), with `--deferred 8` unless said, each against clang:
+On the 9700X, with #697's item 4 (the bodies above merged) and `--deferred 8`,
+each against clang 23.1.1: c-testsuite on the system's headers, as the 9700X
+job checks it, and the frozen corpora on their own headers
+(`--no-default-config --target=x86_64-linux-gnu -march=znver5 -nostdinc`):
+
+| Corpus | Units merged | Left to source order | Bodies read apart | Differences |
+| --- | --- | --- | --- | --- |
+| c-testsuite's 220 programs | 220 | 0 | 449 | 0 |
+| the frozen `sqlite3.c` (`-std=gnu17`, with `--symbols`) | 1 | 0 | 2,608 | 0 |
+| the frozen musl's `src` (1,524 files, its build's options) | 1,486 | 38: 37 errors in a body, 1 that doesn't parse | 21,918 | 0 |
+| the frozen Zig 0.14.1 `lib/libc` (2,315 files, 968 that don't preprocess alone, `-std=gnu17`) | 1,022 | 325: 256 that don't parse, 43 errors in a body, 26 at the top level | 3,178 | 0 |
+
+Before it, on the laptop (Zen 4), with `--deferred 8` unless said, each
+against clang:
 
 | Corpus | Units merged | Left to source order | Bodies read apart | Differences |
 | --- | --- | --- | --- | --- |
@@ -732,9 +751,10 @@ is retained.
 
 The top level, the merge and the phases after it are sequential, so the lanes
 shorten only the bodies' walks, which on `sqlite3.c` are a sixth of the reading. Bodies that do what the merge doesn't take
-(above) send their unit to source order. Intrinsic declarations, block-scope
-declarations with linkage and transparency made in a body are the next to
-merge.
+(above) send their unit to source order: on the corpora above, only bodies
+that report errors do since #697's item 4. Overloadable functions and a union
+of the top level's made transparent in a body are what the merge doesn't take
+yet.
 
 A lane's cost decides how many lanes pay, and a process's first reading pays
 most of it in its lanes' first touches of their copies' pages: on the laptop,
