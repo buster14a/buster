@@ -13,8 +13,6 @@ struct CheckInitializers
 {
     CheckInitializer* plans;
     uint32_t* declaration_tokens;
-    // Index plus one into plans; zero means this declaration has no explicit initializer.
-    uint32_t* declaration_plans;
     uint32_t count;
     uint32_t token_count;
     // Every original warning token, deduplicated across repeated range/compound planning.
@@ -23,6 +21,23 @@ struct CheckInitializers
     CheckInitStatus status;
     uint32_t token;
 };
+
+// The plan's index plus one, or zero for a token with no explicit initializer. The producer writes declaration_tokens
+// once in ascending token order; consumers need only this bounded lower bound, rather than a zero-filled token column.
+static uint32_t check_initializers_plan_index(const CheckInitializers* initializers, uint32_t token)
+{
+    uint32_t base = 0;
+    uint32_t length = initializers->count;
+    while (length > 1)
+    {
+        const uint32_t half = length / 2;
+        base = initializers->declaration_tokens[base + half] < token ? base + half : base;
+        length -= half;
+    }
+    const uint32_t lower = length != 0 ? base + (initializers->declaration_tokens[base] < token) : 0;
+    const uint32_t index = lower < initializers->count && initializers->declaration_tokens[lower] == token ? lower + 1 : 0;
+    return index;
+}
 
 static bool check_init_object_candidate(const CheckInput* input, const TypeTable* types, uint32_t token)
 {
@@ -456,13 +471,8 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         result->plans = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckInitializer, count) : 0;
         result->declaration_tokens = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count) : 0;
         result->warning_tokens = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, tokens) : 0;
-        result->declaration_plans = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)tokens + 1);
-        valid = result->declaration_plans != 0 && (count == 0 || (result->plans != 0 && result->declaration_tokens != 0 && result->warning_tokens != 0));
+        valid = count == 0 || (result->plans != 0 && result->declaration_tokens != 0 && result->warning_tokens != 0);
         result->status = valid ? CHECK_INIT_OK : CHECK_INIT_RESOURCE;
-        if (valid)
-        {
-            memset(result->declaration_plans, 0, ((uint64_t)tokens + 1) * sizeof(uint32_t));
-        }
     }
     CheckInitWarningSink warnings = { .tokens = result->warning_tokens, .capacity = count != 0 ? tokens : 0 };
     CheckInitWarningCollector collector = { 0 };
@@ -493,7 +503,6 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput* 
         if (valid)
         {
             result->declaration_tokens[at] = token;
-            result->declaration_plans[token] = at + 1;
         }
         else
         {
