@@ -1542,6 +1542,33 @@ static void check_lanes_test_driver_failing(CheckLanesTestTally* tally, const ch
     printf("  driver: %u failing programs' diagnostics on lanes and with the ids in another order, each one lane's\n", compared);
 }
 
+// The benchmark's untimed object warm-ups must place named sections as -c does, and reject a section -c refuses.
+// Timed runs still measure only the function emission. One pass and two requested lanes are sufficient for these
+// acceptance controls; no timing is judged here. The benchmark command is only present in the vector host build.
+static void check_lanes_test_benchmark_sections(CheckLanesTestTally* tally, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* source;
+        int status;
+    } fixtures[] = {
+        { "int f(void) __attribute__((section(\".text.x\")));\nint f(void) { return 17; }\nint main(void) { return f() - 17; }\n", 0 },
+        { "__asm__(\".section .data.x,\\\"aw\\\",@progbits\\n.byte 11\\n.text\");\nint main(void) { return 0; }\n", 0 },
+        { "int f(void) __attribute__((section(\".note.x\")));\nint f(void) { return 17; }\nint main(void) { return f() - 17; }\n", 1 },
+    };
+    for (uint32_t i = 0; BUSTER_HOST_VECTOR && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        char source[PATH_MAX];
+        char errors[PATH_MAX];
+        snprintf(source, sizeof(source), "%s/benchmark_section_%u.c", directory, i);
+        snprintf(errors, sizeof(errors), "%s/benchmark_section_%u.errors", directory, i);
+        const bool wrote = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
+        char* arguments[] = { (char*)executable, (char*)"benchmark-check-lanes", (char*)"--passes", (char*)"1", (char*)"--lanes", (char*)"1,2", source, NULL };
+        const int status = wrote ? check_lanes_test_run(arguments, errors) : -1;
+        check_lanes_test_expect(tally, status == fixtures[i].status, "the lane benchmark keeps -c's section acceptance", source);
+    }
+}
+
 static int run_check_lanes_tests(int argc, char** argv)
 {
     CheckLanesTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
@@ -1608,6 +1635,7 @@ static int run_check_lanes_tests(int argc, char** argv)
         check_lanes_test_rule(&tally, directory);
         check_lanes_test_driver(&tally, executable, directory, programs, id_order);
         check_lanes_test_driver_failing(&tally, executable, directory, id_order);
+        check_lanes_test_benchmark_sections(&tally, executable, directory);
         if (!keep && tally.failures == 0)
         {
             char* remove[] = { (char*)"rm", (char*)"-rf", directory, 0 };

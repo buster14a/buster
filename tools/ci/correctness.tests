@@ -136,6 +136,22 @@ musl="$corpus/libc/musl"
 # which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in the build,
 # so asking clang -fsyntax-only again (--clang) only repeats that.
 ./build/compiler test-parser -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h $(sed -n 's/^sources=(\(.*\))$/\1/p' build.sh | tr ' ' '\n' | grep -v main_unit_)
+== Check the repository's translation units with the checker
+# #619: run in both hosted variants and the target suite, using the build's expanded arguments (including
+# its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
+flags_file=$(mktemp)
+sources_file=$(mktemp)
+BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags > "$flags_file"
+./build.sh print-sources > "$sources_file"
+mapfile -d '' -t flags < "$flags_file"
+mapfile -d '' -t sources < "$sources_file"
+test "${#flags[@]}" -gt 0
+test "${#sources[@]}" -gt 0
+for unit in "${sources[@]}"; do
+    [[ "${unit##*/}" == main_unit_* ]] && continue
+    ./build/compiler -fsyntax-only "${flags[@]}" "$unit"
+done
+rm "$flags_file" "$sources_file"
 == Test the object writer
 # --cross-check also lists every object with readelf and llvm-readobj, compares it with GNU as's object of the
 # same unit, and links the test programs with GNU ld, lld, mold and wild (through cc for those that call libc)

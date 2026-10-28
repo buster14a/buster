@@ -66,6 +66,13 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "loop-conflict-type-error", "void f(int n) {\n#pragma clang loop unroll_count(4) unroll(full)\n while(n--) { *n = 1; } }\n", false },
     { "loop-placement", "void f(int n) {\n#pragma unroll\n n = 1; }\n", false },
     { "loop-conflict-control-error", "void f(int n) {\n#pragma clang loop unroll(full) unroll_count(4)\n while(n--) { L:; L:; } }\n", false },
+    // #619: a unit with #pragma clang section is source order's (its settings and conflicts read the walk's declarations in
+    // order), as is one whose body has a section attribute (a lane refuses its section event); #pragma clang optimize
+    // changes nothing a body's reading does, at the top level or in a body.
+    { "section-pragma", "#pragma clang section text = \".x\"\nint f(void) { return 1; }\n#pragma clang section text = \"\"\nint g(void) { return 2; }\n", false },
+    { "section-attribute-in-a-body", "int f(void) { static int s __attribute__((section(\".x\"))) = 1; return s; }\nint g(void) { return 2; }\n", false },
+    { "optimize-pragma", "#pragma clang optimize off\nint f(void) { return 1; }\n#pragma clang optimize on\nint g(void) { return 2; }\n", true },
+    { "optimize-pragma-in-a-body", "int f(void) {\n#pragma clang optimize off\n return 1; }\nint g(void) { return 2; }\n", true },
     // The issue's three: a later declaration and a later completion aren't seen by an earlier body, and an
     // initializer's enumerator is.
     { "later-declaration", "int f(void) { return later; }\nint later = 7;\n", true },
@@ -113,6 +120,14 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
     { "block-scope-function-after-its-definition", "int f1(char *p) { return *p + 1; }\nint main(void) { char s = 1; int f1(char *); return f1(&s) != 2; }\n", true },
     { "block-scope-array-before-its-size", "extern int a[];\nint f(void) { extern int a[]; return a[0]; }\nint a[4] = { 7 };\n", true },
     { "block-scope-function", "int f(void) { int h(int); return h(1); }\nint h(int x) { return x; }\n", false },
+    { "visibility-extern-source-order", "int shared;\n#pragma GCC visibility push(hidden)\nint hidden;\n"
+      "int f(void){extern int shared;return shared;}\nint g(void){extern int shared;return shared;}\n#pragma GCC visibility pop\n", false },
+    { "visibility-attribute-extern-source-order", "int shared;\n"
+      "int f(void){extern int shared __attribute__((visibility(\"hidden\")));return shared;}\nint g(void){return shared;}\n", false },
+    { "visibility-locals-still-merge", "#pragma GCC visibility push(hidden)\n"
+      "int f(void){int local=3;return local;}\nint g(void){int local=7;return local;}\n#pragma GCC visibility pop\n", true },
+    { "implicit-functions-source-order", "typedef __typeof__(top_missing()) T;\nint f(void){return first_missing();}\n"
+      "int g(void){return second_missing();}\nint h(void){return third_missing();}\n", false },
     { "block-scope-extern-first", "int f(void) { extern int e; return e; }\nint g(void) { extern int e; return e + 1; }\n", false },
     { "block-scope-extern-adds-a-size", "extern int a[];\nint f(void) { extern int a[3]; return (int)sizeof a; }\nint g(void) { return 2; }\n", false },
     { "block-scope-extern-conflicts", "int g = 3;\nint f(void) { extern long g; return (int)g; }\n", false },
