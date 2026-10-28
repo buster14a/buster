@@ -254,7 +254,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
 static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode mode)
 {
     const CheckInputBindingMode selected = mode != CHECK_INPUT_BINDINGS_DEFAULT ? mode :
-                                           reader->parser->options.scalar ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
+                                           BUSTER_SCALAR_PATH(reader->parser->options.scalar) ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
     const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
     return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
 }
