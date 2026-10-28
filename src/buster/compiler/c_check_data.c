@@ -446,6 +446,22 @@ static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary,
     return keys;
 }
 
+// Scalar representations are at most 32 bytes. Keep ordinary byte/word/float copies at fixed widths instead of
+// adding a variable-length libc call for both cache encoding and replay of each dense initializer element.
+static void check_data_copy_scalar(uint8_t* destination, const uint8_t* source, uint32_t size)
+{
+    switch (size)
+    {
+        case 1: destination[0] = source[0]; break;
+        case 2: memcpy(destination, source, 2); break;
+        case 4: memcpy(destination, source, 4); break;
+        case 8: memcpy(destination, source, 8); break;
+        case 16: memcpy(destination, source, 16); break;
+        case 32: memcpy(destination, source, 32); break;
+        default: memcpy(destination, source, size); break;
+    }
+}
+
 // All writes were validated and encoded in source order. Usually every write is zero, or an unoverwritten write
 // proves the object nonzero. Otherwise sort their bit boundaries and walk backwards, assigning each disjoint interval
 // to its last writer with the initializer's next-uncovered disjoint set. Each interval is visited once; large
@@ -796,7 +812,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             if (status == CHECK_DATA_OK)
             {
                 uint8_t* encoded = values + (uint64_t)i * value_stride;
-                memcpy(encoded, scalar.bytes, scalar.size);
+                check_data_copy_scalar(encoded, scalar.bytes, scalar.size);
                 const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
                 part_nonzero = check_data_nonzero_bits(encoded, 0, bits, false);
                 if (part->bit_width == 0 && scalar.object != 0 && live_parts[i])
@@ -879,7 +895,14 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
             else if (size != 0)
             {
-                memcpy(plan->bytes + offset, part->kind == CHECK_INIT_BYTES ? part->bytes : values + (uint64_t)i * value_stride, size);
+                if (part->kind == CHECK_INIT_BYTES)
+                {
+                    memcpy(plan->bytes + offset, part->bytes, size);
+                }
+                else
+                {
+                    check_data_copy_scalar(plan->bytes + offset, values + (uint64_t)i * value_stride, (uint32_t)size);
+                }
             }
         }
         if (status == CHECK_DATA_OK && values != 0)
