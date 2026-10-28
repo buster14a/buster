@@ -1055,7 +1055,7 @@ static bool check_constant_attribute_prepare(CheckConstantInput* input, uint32_t
                 {
                     uint32_t begin = attribute->argument_first;
                     uint32_t end = attribute->argument_end;
-                    valid = scalar || check_input_attribute_argument(reader->parser, attribute, argument, &begin, &end);
+                    valid = scalar || check_input_attribute_argument(attribute, argument, &begin, &end);
                     if (valid)
                     {
                         memset(input->attribute_syntax + begin - input->first, 0, end - begin);
@@ -1152,7 +1152,7 @@ static bool check_constant_attribute_evaluate(CheckConstantInput* input, CheckCo
         {
             uint32_t first = attribute->argument_first;
             uint32_t end = attribute->argument_end;
-            valid = scalar || check_input_attribute_argument(reader->parser, attribute, argument, &first, &end);
+            valid = scalar || check_input_attribute_argument(attribute, argument, &first, &end);
             const bool type_argument = valid && attribute->kind == CHECK_ATTRIBUTE_ALIGNAS &&
                                        (input->raw ? check_constant_raw_type_start(input, first) : check_constant_type_start(reader->parser, first));
             int64_t integer = 0;
@@ -1520,10 +1520,8 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
     {
         const uint64_t mark = reader->scratch->length;
         const TypeId control_type = check_constant_control_type(reader, &control);
-        TypeId* seen = arena_push_array(reader->scratch, token - separator, sizeof(TypeId), 4);
-        reader->output->resource |= seen == 0;
-        valid = seen != 0 && control_type != 0;
-        uint32_t seen_count = 0;
+        CheckGenericSet seen;
+        valid = control_type != 0 && check_generic_initialize(reader, &seen, token - separator, control_type, token + 1);
         uint32_t chosen_first = BUSTER_CHECK_NONE;
         uint32_t chosen_end = 0;
         uint32_t default_first = BUSTER_CHECK_NONE;
@@ -1546,19 +1544,11 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
                 valid = type != 0 && type_is_complete(reader->types, type) && kind != BUSTER_TYPE_KIND_FUNCTION &&
                         kind != BUSTER_TYPE_KIND_VOID && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
-                for (uint32_t prior = 0; valid && prior < seen_count; prior += 1)
-                {
-                    const TypeAnswer answer = type_compatible_at(reader->types, type, seen[prior], reader->transparent_unions, reader->types->tags.count, token + 1);
-                    reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                    valid = answer == TYPE_ANSWER_NO;
-                }
+                bool matches = false;
+                valid = valid && check_generic_association(reader, &seen, type, &matches);
                 if (valid)
                 {
-                    seen[seen_count++] = type;
-                    const TypeAnswer answer = type_compatible_at(reader->types, type, control_type, reader->transparent_unions, reader->types->tags.count, token + 1);
-                    reader->output->resource |= answer == TYPE_ANSWER_FULL;
-                    valid = answer != TYPE_ANSWER_FULL;
-                    if (answer == TYPE_ANSWER_YES)
+                    if (matches)
                     {
                         valid &= chosen_first == BUSTER_CHECK_NONE;
                         chosen_first = colon + 1;
@@ -1836,6 +1826,33 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         CheckBuiltinX86Result result;
         check_x86_action(reader->types, &call, &typed, &result);
         *checked = result.action;
+    }
+    else if (action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type))
+    {
+        // Type queries run before the retained graph supplies its vector-member records. Give the ordinary
+        // member action the same decoded selector here, with lane storage borrowed only for this action.
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* bytes = intern_bytes(reader->pp->table, action->member);
+        const uint32_t length = intern_length(reader->pp->table, action->member);
+        CheckVectorMember member;
+        bool decoded = check_vector_member_decode(bytes, length, 0, 0, &member);
+        if (!decoded)
+        {
+            uint8_t* lanes = arena_push_array(reader->scratch, length, sizeof(uint8_t), 1);
+            decoded = lanes != 0 && check_vector_member_decode(bytes, length, lanes, length, &member);
+        }
+        if (decoded)
+        {
+            CheckAction typed = *action;
+            typed.vector_member = &member;
+            check_action_scalar(reader->types, &typed, checked);
+        }
+        else
+        {
+            reader->output->resource = true;
+            *checked = (CheckActionResult){ .diagnostic = CHECK_DIAG_RESOURCE };
+        }
+        arena_pop_to(reader->scratch, mark);
     }
     else if (head != 0 || pending_arguments)
     {

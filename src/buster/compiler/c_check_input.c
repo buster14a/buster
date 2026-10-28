@@ -252,6 +252,7 @@ struct CheckInputSpecifierJob
     uint32_t signedness;
     uint32_t storage;
     uint32_t restrict_token;
+    uint32_t vla_begin;
     TypeId base;
     TypeId result;
     CheckInputAttributes* attributes;
@@ -327,8 +328,7 @@ struct CheckInputReader
     uint32_t* intrinsic_names;
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
-    uint32_t* overload_linked_heads;
-    uint32_t* overload_linked_next;
+    CheckOverloadIndex overload_index;
     bool declarator_overloadable;
     uint16_t* builtins;
     uint32_t* builtin_type_ends;
@@ -343,6 +343,9 @@ struct CheckInputReader
     uint32_t* vla_ends;
     uint32_t* vla_scope_ends;
     uint32_t* vla_sizes;
+    // Appended records of the next definition's header, retained separately from the body's later records.
+    uint32_t parameter_vla_begin;
+    uint32_t parameter_vla_end;
     uint8_t* expression_commas;
     uint8_t* conditions;
     uint32_t* region_roots;
@@ -1405,6 +1408,7 @@ static CheckOp check_input_binary(uint8_t kind);
 // bounded explicit stacks for casts, size/alignment queries, selections, operators and supported builtin calls.
 // Resolve names in source order before visiting the expression's postorder, preserving binding-event ordering.
 #include "c_check_builtin_evidence.c"
+#include "c_check_generic.c"
 #include "c_check_constant.c"
 #include "c_check_select.c"
 #include "c_check_vla_input.c"
@@ -1442,7 +1446,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
                 uint32_t first;
                 uint32_t last;
                 int64_t value;
-                valid = check_input_attribute_argument(reader->parser, attribute, argument, &first, &last) &&
+                valid = check_input_attribute_argument(attribute, argument, &first, &last) &&
                         check_input_constant_ice(reader, first, last, &value) && check_input_attribute_argument_value(reader, &parsed, i, argument, value);
             }
         }
@@ -2312,10 +2316,12 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 valid = packed != 0;
                 reader->output->resource |= !valid;
                 uint32_t written = 0;
+                bool anonymous_names = false;
                 for (uint32_t member = frame->first; valid && member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
                     const TypeMember value = members[member].member;
                     packed[written++] = value;
+                    anonymous_names |= value.name == 0 && value.bit_width == BUSTER_TYPE_NOT_BIT_FIELD;
                     if (value.name != 0)
                     {
                         reader->member_seen[value.name] = members[member].previous;
@@ -2332,7 +2338,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     }
                 }
                 uint32_t failed_member = BUSTER_CHECK_NONE;
-                valid = valid && check_input_record_names(reader, packed, frame->count, frame->close - frame->token + 1, &failed_member);
+                // Direct names were checked by member_seen while reading and their previous stamps are restored
+                // above. Only an anonymous non-bit-field can add a namespace conflict or an invalid nonrecord.
+                valid = valid && (!anonymous_names || check_input_record_names(reader, packed, frame->count, frame->close - frame->token + 1, &failed_member));
                 for (uint32_t member = frame->first; !valid && member != BUSTER_CHECK_NONE && failed_member != BUSTER_CHECK_NONE; member = members[member].next)
                 {
                     if (failed_member == 0)
@@ -2695,6 +2703,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
     }
     const bool continuation = reader->declaration_bases[first] != 0;
+    const CheckInputSpecifierJob* specifier_job = reader->specifier_jobs[first];
+    const uint32_t vla_begin = specifier_job != 0 ? specifier_job->vla_begin : reader->output->vla_count;
     const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
     const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
     uint32_t i = first + continuation;
@@ -2707,6 +2717,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_owner = BUSTER_CHECK_NONE;
     if (reader->specifier_pending)
     {
+        reader->specifier_jobs[first]->vla_begin = vla_begin;
         reader->specifier_pending = false;
         return;
     }
@@ -2774,7 +2785,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= kind == PARSE_KIND_EQUAL || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
             valid = valid && check_input_attribute_definition(reader, attributes, function && !is_typedef, function && !is_typedef && kind == PARSE_KIND_L_BRACE);
             valid &= file || storage != C_NAME_EXTERN || kind != PARSE_KIND_EQUAL;
-            valid &= check_input_vla_declaration(reader, first, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
+            valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, kind == PARSE_KIND_EQUAL, thread_local);
             if (valid && function && !is_typedef && !reader->pp->options.freestanding && intern_length(reader->pp->table, parser->tokens.names[name]) == 4 &&
                 memcmp(intern_bytes(reader->pp->table, parser->tokens.names[name]), "main", 4) == 0)
             {
@@ -2817,6 +2828,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 }
                 if (function && kind == PARSE_KIND_L_BRACE)
                 {
+                    reader->parameter_vla_begin = vla_begin;
+                    reader->parameter_vla_end = reader->output->vla_count;
                     reader->output->body_declarations[i] = name;
                     reader->function_specifiers[i] = first;
                     reader->parameters[i] = parameters;
@@ -2892,9 +2905,14 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         TypeId previous = 0;
         if (overload)
         {
-            for (uint32_t linked = reader->overload_linked_heads[name]; previous == 0 && linked != 0; linked = reader->overload_linked_next[linked - 1])
+            uint64_t signature_hash = 0;
+            const bool hashed = check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
+            reader->output->resource |= !hashed;
+            const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
+            const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+            for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); previous == 0 && linked != UINT32_MAX; linked = reader->overload_index.linked_next[linked])
             {
-                const TypeId candidate = reader->overload_candidates[linked - 1].type;
+                const TypeId candidate = reader->overload_candidates[linked].type;
                 const TypeAnswer signature = check_overload_signature(reader->types, candidate, type);
                 reader->output->resource |= signature == TYPE_ANSWER_FULL;
                 previous = signature == TYPE_ANSWER_YES ? candidate : 0;
@@ -4353,6 +4371,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
 
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
+#include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
 
 // Which tokens are written in a system header, where clang suppresses its warnings that default to errors
@@ -5213,6 +5232,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 if (check_input_region_initialize(&reader))
                 {
                     check_input_expressions(&reader);
+                }
+                if (!input->resource && input->graph.x86_count != 0 && counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
+                {
+                    check_input_x86_contexts(&reader);
                 }
                 if (!input->resource)
                 {

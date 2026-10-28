@@ -19,13 +19,18 @@
 // Named semantic symbols are selected from the final Link, after all maps. Each lane counts and then compacts its
 // ID range into one checked arena allocation; the ordered prefixes preserve IDs across lanes. The exact twin runs
 // on lane zero. All name loads are logically bounded, and the descriptor lives through writing. -s skips selection.
-// On more than one lane the command starts one team once its options are valid (lane_team_start, #501): the
-// resolution, the conversion and the writer each run on its threads, which wait on futexes between them and keep
-// their scratch arenas from one to the next (lane_team_keep_scratch), rather than on a group of their own, and the
-// release stage stops it. Without its threads the link fails before resolving.
+// The lanes (#594): --lanes N runs N, at most one per CPU the process may run on; without it, the link runs on as many
+// as its objects' bytes pay for (foreign_driver_lanes), at most BUSTER_FOREIGN_DRIVER_LANES and one per CPU, which the
+// command line's first inputs decide: the calling thread opens them, as one lane's open phase would, until their
+// objects come to the bytes that pay for the most lanes (foreign_open_first), and the lanes open the rest. A link of a
+// few objects so runs on one lane, as fast as with --lanes 1, and starts no thread.
+// On more than one lane the command then starts one team (lane_team_start, #501): the resolution, the conversion and
+// the writer each run on its threads, which wait on futexes between them and keep their scratch arenas from one to the
+// next (lane_team_keep_scratch), rather than on a group of their own, and the release stage stops it. Without its
+// threads a link of --lanes fails before resolving, and one that chose its lanes runs on one.
 // --time reports each stage's wall time on standard error after the link, as wild's --time and mold's --perf do: the
-// team's start, the resolution's phases (the slowest lane's), the conversion, the optional passes and the writer's
-// phases (lane 0's).
+// first inputs' opening with their objects' bytes, the team's start, the resolution's phases (the slowest lane's), the
+// conversion, the optional passes and the writer's phases (lane 0's).
 
 typedef struct ForeignDriver ForeignDriver;
 struct ForeignDriver
@@ -37,6 +42,7 @@ struct ForeignDriver
     String8 soname;
     RuntimeKind kind;
     ForeignPath path;
+    // --lanes's, or 0 for the lanes the link's objects pay for (foreign_driver_lanes).
     uint32_t lanes;
     bool gc;
     bool merge_strings;
@@ -74,7 +80,8 @@ static void foreign_driver_usage(void)
                     "                    [--no-dynamic-linker] [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]\n"
                     "                    [-s|--strip-all] [-S|--strip-debug] [--scalar] [--lanes N] [--time] INPUT... [-L DIR] [-l LIB] [-u NAME]\n"
-                    "Defaults: static executable, a.out, entry _start, one lane; GC, string merging and unwind deduplication off.\n"
+                    "Defaults: static executable, a.out, entry _start, the lanes its objects' bytes pay for (--lanes N runs N, at most\n"
+                    "one per CPU); GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
                     "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
                     "Static output searches archives by default; PIE and shared output prefer shared libraries.\n"
@@ -113,7 +120,6 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         .entry = foreign_string("_start"),
         .kind = RUNTIME_KIND_STATIC,
         .path = FOREIGN_PATH_VECTOR,
-        .lanes = 1,
     };
     char** inputs = argc >= 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)argc + 2) : 0;
     bool valid = inputs != 0;
@@ -513,8 +519,9 @@ static void foreign_driver_write_lane(void* argument)
 typedef enum ForeignDriverStage
 {
     FOREIGN_DRIVER_STAGE_ARGUMENTS,
-    FOREIGN_DRIVER_STAGE_LANES,
     FOREIGN_DRIVER_STAGE_INTERPRETER,
+    FOREIGN_DRIVER_STAGE_OPEN,
+    FOREIGN_DRIVER_STAGE_LANES,
     FOREIGN_DRIVER_STAGE_RESOLVE,
     FOREIGN_DRIVER_STAGE_CONVERT,
     FOREIGN_DRIVER_STAGE_DEDUP_UNWIND,
@@ -523,6 +530,22 @@ typedef enum ForeignDriverStage
     FOREIGN_DRIVER_STAGE_RELEASE,
     FOREIGN_DRIVER_STAGES,
 } ForeignDriverStage;
+
+// The objects' bytes that pay for a lane past the first (foreign_driver_lanes), from the 9700X's sweep of
+// benchmark-link's programs on 1 to 8 lanes (docs/foreign-driver.md, "The default lanes").
+#define BUSTER_FOREIGN_DRIVER_LANE_BYTES (3ull << 20)
+// The most lanes a link takes without --lanes: on the 9700X, the whole link of synth's shape is fastest on 7 or 8 lanes,
+// one per core, and slower on the cores' SMT siblings (docs/linker-scaling.md, "Complete foreign links").
+#define BUSTER_FOREIGN_DRIVER_LANES 8
+
+// The lanes a link takes without --lanes, from its objects' bytes (foreign_open_first's): one, and one more per
+// BUSTER_FOREIGN_DRIVER_LANE_BYTES, at most `most`. A lane costs its thread's start and stop, its stack's and arenas'
+// first pages and the waits of every sync, which its share of the link must pay for (#594).
+static uint32_t foreign_driver_lanes(uint64_t bytes, uint32_t most)
+{
+    const uint64_t paid = 1 + bytes / BUSTER_FOREIGN_DRIVER_LANE_BYTES;
+    return paid < most ? (uint32_t)paid : most;
+}
 
 // The CPUs this process may run on, at least 1. Lanes past them share CPUs, and each of their syncs waits for a lane the
 // scheduler has set aside: on the 9700X, eight lanes on one CPU took a hello world's link from 0.6 ms to 342 ms, each
@@ -560,17 +583,19 @@ static void foreign_driver_resolve_phases(const Foreign* foreign, uint64_t* slow
     }
 }
 
-// The report: the whole and its lanes, each stage, the resolution's phases (`resolve`, the slowest lane's time in each),
-// the conversion's (`convert`, foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first
-// part is the lanes' dispatch and the symbol selection, up to executable_write's own start. `ends` holds each stage's
-// end, `begin` the start; a stage that didn't run ends where the one before did.
-static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends, uint64_t write_begin,
-                                  const ExecutableResult* written)
+// The report: the whole and its lanes, each stage, the first inputs' objects' `bytes`, which with `chosen` chose the
+// lanes, the resolution's phases (`resolve`, the slowest lane's time in each), the conversion's (`convert`,
+// foreign_link_build_mode's) and the writer's, from lane 0's timestamps; the writer's first part is the lanes' dispatch
+// and the symbol selection, up to executable_write's own start. `ends` holds each stage's end, `begin` the start; a
+// stage that didn't run ends where the one before did.
+static void foreign_driver_report(uint32_t lanes, bool chosen, uint64_t bytes, const uint64_t* resolve, const uint64_t* convert, uint64_t begin, const uint64_t* ends,
+                                  uint64_t write_begin, const ExecutableResult* written)
 {
     static const char* const stages[FOREIGN_DRIVER_STAGES] = {
         "arguments",
-        "lanes",
         "interpreter",
+        "open",
+        "lanes",
         "resolve",
         "convert",
         "dedup-unwind",
@@ -614,6 +639,10 @@ static void foreign_driver_report(uint32_t lanes, const uint64_t* resolve, const
     for (uint32_t stage = 0; stage < FOREIGN_DRIVER_STAGES; stage += 1)
     {
         fprintf(stderr, "  %-13s %9.3f ms", stages[stage], (double)(ends[stage] - previous) / 1e6);
+        if (stage == FOREIGN_DRIVER_STAGE_OPEN && chosen)
+        {
+            fprintf(stderr, " objects %llu bytes", (unsigned long long)bytes);
+        }
         for (uint32_t phase = 0; stage == FOREIGN_DRIVER_STAGE_RESOLVE && phase < FOREIGN_PHASES; phase += 1)
         {
             fprintf(stderr, " %s %.3f", resolve_phases[phase], (double)resolve[phase] / 1e6);
@@ -657,31 +686,14 @@ static int run_foreign_link(int argc, char** argv)
     {
         foreign_driver_usage();
     }
+    // The most lanes the link takes: --lanes's, or without it BUSTER_FOREIGN_DRIVER_LANES, of which its objects' bytes
+    // then decide how many pay; at most one per CPU.
     const uint32_t cpus = foreign_driver_cpus();
-    driver.lanes = driver.lanes < cpus ? driver.lanes : cpus;
+    const uint32_t asked = driver.lanes != 0 ? driver.lanes : BUSTER_FOREIGN_DRIVER_LANES;
+    const uint32_t most = asked < cpus ? asked : cpus;
+    uint32_t lanes = most;
+    uint64_t object_bytes = 0;
     ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = foreign_driver_now();
-    // The command's lanes, which every stage's lane_run then takes (see the file's comment). One lane needs none, nor
-    // the team's room, 34 KB that the stack would otherwise zero, which the arena gives only to more.
-    LaneTeam* team = 0;
-    if (succeeded && !driver.help && driver.lanes > 1)
-    {
-        team = BUSTER_ARENA_PUSH_ARRAY(&arena, LaneTeam, 1);
-        if (team != 0)
-        {
-            *team = (LaneTeam){ 0 };
-        }
-        succeeded = team != 0 && lane_team_start(team, driver.lanes, 0);
-        if (succeeded)
-        {
-            // The stages follow one another: each finds the scratch pages the last one touched (#501).
-            lane_team_keep_scratch(team);
-        }
-        else
-        {
-            fprintf(stderr, "link-foreign: cannot start linker workers\n");
-        }
-    }
-    ends[FOREIGN_DRIVER_STAGE_LANES] = foreign_driver_now();
     if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
     {
         succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
@@ -692,9 +704,49 @@ static int run_foreign_link(int argc, char** argv)
         }
     }
     ends[FOREIGN_DRIVER_STAGE_INTERPRETER] = foreign_driver_now();
+    // The resolution's setup, whose failure it reports (foreign_run_lanes); without --lanes, the command line's first
+    // inputs opened here, until their objects come to the bytes that pay for the most lanes, which decide the lanes.
     if (succeeded && !driver.help)
     {
-        foreign_run(&foreign, &driver.command, driver.path, driver.lanes, 0);
+        foreign_begin(&foreign, &driver.command, driver.path, most);
+        if (driver.lanes == 0)
+        {
+            object_bytes = foreign_open_first(&foreign, (uint64_t)(most - 1) * BUSTER_FOREIGN_DRIVER_LANE_BYTES);
+            lanes = foreign_driver_lanes(object_bytes, most);
+        }
+    }
+    ends[FOREIGN_DRIVER_STAGE_OPEN] = foreign_driver_now();
+    // The command's lanes, which every stage's lane_run then takes (see the file's comment). One lane needs none, nor
+    // the team's room, 34 KB that the stack would otherwise zero, which the arena gives only to more. Without --lanes, a
+    // link whose threads can't start runs on one lane, as it would have below the lanes' bytes.
+    LaneTeam* team = 0;
+    if (succeeded && !driver.help && lanes > 1)
+    {
+        team = BUSTER_ARENA_PUSH_ARRAY(&arena, LaneTeam, 1);
+        if (team != 0)
+        {
+            *team = (LaneTeam){ 0 };
+        }
+        const bool started = team != 0 && lane_team_start(team, lanes, 0);
+        if (started)
+        {
+            // The stages follow one another: each finds the scratch pages the last one touched (#501).
+            lane_team_keep_scratch(team);
+        }
+        else if (driver.lanes == 0)
+        {
+            lanes = 1;
+        }
+        else
+        {
+            fprintf(stderr, "link-foreign: cannot start linker workers\n");
+            succeeded = false;
+        }
+    }
+    ends[FOREIGN_DRIVER_STAGE_LANES] = foreign_driver_now();
+    if (succeeded && !driver.help)
+    {
+        foreign_run_lanes(&foreign, lanes, 0);
         succeeded = foreign.failure.error == FOREIGN_ERROR_NONE;
         if (!succeeded)
         {
@@ -808,7 +860,7 @@ static int run_foreign_link(int argc, char** argv)
             .strip_all = driver.strip_all,
             .symbols_ready = true,
         };
-        succeeded = lane_run(driver.lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
+        succeeded = lane_run(lanes, foreign_driver_write_lane, &write, 0) && write.succeeded;
         written = write.result;
         if (!succeeded)
         {
@@ -834,7 +886,7 @@ static int run_foreign_link(int argc, char** argv)
     ends[FOREIGN_DRIVER_STAGE_RELEASE] = foreign_driver_now();
     if (time)
     {
-        foreign_driver_report(driver.lanes, resolve, convert, begin, ends, write_begin, &written);
+        foreign_driver_report(lanes, driver.lanes == 0, object_bytes, resolve, convert, begin, ends, write_begin, &written);
     }
     return succeeded ? 0 : 1;
 }

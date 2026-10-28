@@ -731,6 +731,8 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
 
 // Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
+static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
+
 static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functions, Arena* arena, Tier0TestCode* code, uint64_t seed)
 {
     bool result = true;
@@ -743,6 +745,17 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         const Tier0Check check = tier0_validate(function);
         result = tier0_test_expect(tally, check.error == TIER0_OK, "streams", "seed %" PRIu64 " function %u: entry %u breaks a rule: %s", seed, f, check.node,
                                    check.rule != 0 ? check.rule : "");
+        // The validation's twins (#569): the scalar validator's verdict alike; the vector path taking the function itself;
+        // and, for every fourth program, copies changed in one place, which it may take only where the scalar validator
+        // does (tier0_validate_test.c).
+        const Tier0Check twin = tier0_validate_scalar(function);
+        result = result && tier0_test_expect(tally, twin.error == check.error && twin.node == check.node && twin.rule == check.rule, "validation",
+                                             "seed %" PRIu64 " function %u: the scalar validator says %d at %u", seed, f, twin.error, twin.node);
+        uint64_t taken[2] = { 0, 0 };
+        if (result)
+        {
+            tier0_test_scan_program(tally, function, arena, seed * 64 + f, seed % 4 == 0 ? 4 : 0, taken);
+        }
         // The entries' first records asked for (Tier0Function.entry_records); and a compile without them, which must
         // make the same code and none of them.
         Tier0Function wanted = *function;
@@ -1386,6 +1399,29 @@ static int tier0_test_shell(const char* command, const char* prefix, char* line,
     return status;
 }
 
+// `clang -O0 [-fwrapv -fno-strict-aliasing] -w -c SOURCE -o OBJECT` through the oracle cache (oracle_cache.c, #542),
+// with `dialect` the repository's (the program's C) or not (the harness's), what it prints on the errors: whether it
+// compiled.
+static bool tier0_test_compile(const char* clang, bool dialect, const char* source, const char* object)
+{
+    char* program[] = { (char*)clang, "-O0", "-fwrapv", "-fno-strict-aliasing", "-w", "-c", (char*)source, "-o", (char*)object, 0 };
+    char* harness[] = { (char*)clang, "-O0", "-w", "-c", (char*)source, "-o", (char*)object, 0 };
+    const char* files[] = { object };
+    OracleRun run = {
+        .purpose = "tier0: clang -O0 -c",
+        .arguments = dialect ? program : harness,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+    };
+    const bool ran = oracle_run(&run);
+    fputs(run.output != 0 ? run.output : "", stderr);
+    fputs(run.errors != 0 ? run.errors : "", stderr);
+    const bool result = ran && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0;
+    oracle_run_release(&run);
+    return result;
+}
+
 // The cross-check: `count` programs, each compiled by clang -O0 (as C) and by Tier 0 (as an object), linked into one
 // harness that runs both on the same inputs; their results and globals must agree. Also reports the code's sizes (clang's
 // .text, Tier 0's functions) and the harness's times. With records (#137), each program is also linked mixed, its even
@@ -1461,10 +1497,18 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                 // does, and the objects' checksums read floating parts' bits through integer lvalues. The library of the
                 // globals Tier 0 reaches through the GOT is a shared library the executable finds by its run path, data
                 // alone, which GNU as assembles and ld links without the C runtime's files.
-                snprintf(command, sizeof(command),
-                         "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
-                         "%s -O0 -w -o %s %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
-                         clang, source, source, library, library, library, library, clang, executable, harness, source, object, library, directory);
+                // clang's compiles go through the oracle cache (tier0_test_compile), the harness's on its own; the rest, which
+                // reads Tier 0's objects, runs every time.
+                char program_object[620];
+                char harness_object[620];
+                char mixed_program_object[620];
+                snprintf(program_object, sizeof(program_object), "%s.o", source);
+                snprintf(harness_object, sizeof(harness_object), "%s.o", harness);
+                snprintf(mixed_program_object, sizeof(mixed_program_object), "%s.o", mixed_source);
+                const bool compiled = tier0_test_compile(clang, true, source, program_object) && (!mixed || tier0_test_compile(clang, true, mixed_source, mixed_program_object)) &&
+                                tier0_test_compile(clang, false, harness, harness_object);
+                snprintf(command, sizeof(command), "as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && %s -O0 -w -o %s %s %s %s %s.so -Wl,-rpath,%s 2>&1", library,
+                         library, library, library, clang, executable, harness_object, program_object, object, library, directory);
                 if (mixed)
                 {
                     // The mixed build's: clang's object with its even functions weak, Tier 0's even ones taking their
@@ -1479,13 +1523,11 @@ static void tier0_test_cross(Tier0TestTally* tally, Tier0Tables* tables, uint64_
                         length += written > 0 ? (uint64_t)written : 0;
                     }
                     snprintf(command, sizeof(command),
-                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && "
-                             "%s -O0 -fwrapv -fno-strict-aliasing -w -c %s -o %s.o 2>&1 && objcopy%s %s.o 2>&1 && "
-                             "%s -O0 -w -o %s %s %s.o %s %s.o %s %s.so -Wl,-rpath,%s 2>&1",
-                             clang, source, source, library, library, library, library, clang, mixed_source, mixed_source, weaken, mixed_source, clang, executable,
-                             harness, source, object, mixed_source, mixed_object, library, directory);
+                             "as -o %s.o %s 2>&1 && ld -shared -o %s.so %s.o 2>&1 && objcopy%s %s 2>&1 && %s -O0 -w -o %s %s %s %s %s %s %s.so -Wl,-rpath,%s 2>&1",
+                             library, library, library, library, weaken, mixed_program_object, clang, executable, harness_object, program_object, object,
+                             mixed_program_object, mixed_object, library, directory);
                 }
-                ok = tier0_test_expect(tally, tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
+                ok = tier0_test_expect(tally, compiled && tier0_test_shell(command, 0, line, sizeof(line)) == 0, "cross-check", "seed %" PRIu64 ": can't compile or link (%s)",
                                        program_seed, directory);
                 snprintf(command, sizeof(command), "size -A %s.o", source);
                 if (ok && tier0_test_shell(command, ".text ", line, sizeof(line)) == 0)
@@ -5145,9 +5187,13 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_vector_test.c"
 #include "buster/compiler/tier0_label_test.c"
 #include "buster/compiler/tier0_deep_test.c"
+#include "buster/compiler/tier0_validate_test.c"
 
 static int run_tier0_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint64_t seed = 1;
     uint32_t count = 300;
     uint32_t cross_count = 60;
@@ -5263,6 +5309,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_labels(&tally);
                 tier0_test_report("labels", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_validation(&tally);
+                tier0_test_report("validation", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
@@ -5453,8 +5506,10 @@ static int run_tier0_tests(int argc, char** argv)
         {
             total.failures += 1;
         }
+        oracle_cache_report(oracle_cache(), "test-tier0");
         printf("test-tier0: %" PRIu64 " checks, %" PRIu64 " failed\n", total.checks, total.failures);
         result = total.failures == 0 ? 0 : 1;
     }
+    oracle_epoch_end(epoch);
     return result;
 }

@@ -66,6 +66,7 @@ struct CheckDeferredCut
     uint32_t strings;
     uint32_t regions;
     uint32_t vlas;
+    uint32_t parameter_vla_begin;
     uint32_t asms;
     uint32_t varargs;
     uint32_t constants;
@@ -291,6 +292,7 @@ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening)
             .strings = reader->output->string_count,
             .regions = reader->output->region_count,
             .vlas = reader->output->vla_count,
+            .parameter_vla_begin = reader->parameter_vla_begin,
             .asms = reader->output->asm_count,
             .varargs = reader->vararg_count,
             .constants = reader->cached_constant_count,
@@ -617,6 +619,8 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
     reader->function_result = 0;
     reader->function_end = 0;
     reader->function_body = BUSTER_CHECK_NONE;
+    reader->parameter_vla_begin = cut->parameter_vla_begin;
+    reader->parameter_vla_end = cut->vlas;
     reader->specifier_owner = BUSTER_CHECK_NONE;
     reader->specifier_query_depth = 0;
     reader->specifier_pending = false;

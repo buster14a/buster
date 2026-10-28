@@ -140,13 +140,11 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
                                      const char* path, bool preprocess, CheckCorpusOracle* result)
 {
     *result = (CheckCorpusOracle){ 0 };
-    FILE* diagnostics = tmpfile();
-    char** argv = calloc((size_t)argument_count + 10, sizeof(char*));
-    bool ready = diagnostics != 0 && argv != 0;
-    pid_t child = -1;
+    char** argv = calloc((size_t)argument_count + 12, sizeof(char*));
+    char** environment = pp_test_clang_environment();
+    bool ready = argv != 0 && environment != 0;
     int status = 0;
     char* text = 0;
-    size_t length = 0;
     if (ready)
     {
         uint32_t used = 0;
@@ -160,28 +158,26 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
         argv[used++] = "-fno-caret-diagnostics";
         argv[used++] = "-fno-color-diagnostics";
         argv[used++] = "-ferror-limit=1";
+        if (preprocess)
+        {
+            // Only its diagnostics are read: the text goes to /dev/null, as it did through standard output.
+            argv[used++] = "-o";
+            argv[used++] = "/dev/null";
+        }
         argv[used++] = (char*)path;
-        child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output < 0 || dup2(output, STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            close(output);
-            execvp(executable, argv);
-            _exit(127);
-        }
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        ready = child > 0 && waited == child && WIFEXITED(status) && pp_test_read_output(diagnostics, &text, &length);
+        argv[used] = 0;
+        // Through the oracle cache (oracle_cache.c, #542), without CPATH and C_INCLUDE_PATH.
+        OracleRun run = {
+            .purpose = "checker corpus: clang's first error",
+            .arguments = argv,
+            .environment = environment,
+            .dependencies = true,
+        };
+        ready = oracle_run(&run) && WIFEXITED(run.status);
+        status = run.status;
+        text = run.errors;
+        run.errors = 0;
+        oracle_run_release(&run);
     }
     bool unaccounted = false;
     for (char* at = text; ready && at != 0 && *at != 0; )
@@ -224,12 +220,9 @@ static bool check_corpus_clang_phase(const char* executable, const char* const* 
     {
         fprintf(stderr, "checker-corpus: Clang oracle process or diagnostic accounting failed for %s (status=%d)\n", path, status);
     }
-    if (diagnostics != 0)
-    {
-        ready = fclose(diagnostics) == 0 && ready;
-    }
     free(text);
     free(argv);
+    free(environment);
     return ready;
 }
 
@@ -1012,8 +1005,9 @@ static void check_corpus_symbols_feature(CheckCorpusSymbols* symbols, const char
 // clang -O0 -c of `file` with the oracle's arguments into `object`, its output and errors discarded: whether it succeeded.
 static bool check_corpus_clang_object(const CheckCorpusSymbols* symbols, const char* file, const char* object)
 {
-    char** argv = calloc((size_t)symbols->argument_count + 8, sizeof(char*));
-    bool succeeded = argv != 0;
+    char** argv = calloc((size_t)symbols->argument_count + 9, sizeof(char*));
+    char** environment = pp_test_clang_environment();
+    bool succeeded = argv != 0 && environment != 0;
     if (succeeded)
     {
         uint32_t used = 0;
@@ -1028,29 +1022,22 @@ static bool check_corpus_clang_object(const CheckCorpusSymbols* symbols, const c
         argv[used++] = "-o";
         argv[used++] = (char*)object;
         argv[used++] = (char*)file;
-        const pid_t child = fork();
-        if (child == 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (null < 0 || dup2(null, STDOUT_FILENO) < 0 || dup2(null, STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            execvp(symbols->clang, argv);
-            _exit(127);
-        }
-        int status = 0;
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        succeeded = child > 0 && waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        argv[used] = 0;
+        // Through the oracle cache (oracle_cache.c, #542), without CPATH and C_INCLUDE_PATH.
+        const char* files[] = { object };
+        OracleRun run = {
+            .purpose = "checker corpus: clang -O0 -c",
+            .arguments = argv,
+            .environment = environment,
+            .files = files,
+            .file_count = 1,
+            .dependencies = true,
+        };
+        succeeded = oracle_run(&run) && WIFEXITED(run.status) && WEXITSTATUS(run.status) == 0;
+        oracle_run_release(&run);
     }
     free(argv);
+    free(environment);
     return succeeded;
 }
 
@@ -1191,7 +1178,7 @@ static void check_corpus_symbols_file(CheckCorpusSymbols* symbols, const char* f
     CheckProgramCode code = { .status = CHECK_PROGRAM_RESOURCE, .token = BUSTER_CHECK_NONE };
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE };
     bool valid = output.base != 0 && bytes.base != 0 &&
-                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, &path->output_arena, &path->scratch);
+                 check_data_prepare(&data, &path->input, &path->stream, &path->initializers, &path->types, parser->options.scalar, &path->output_arena, &path->scratch);
     CheckProgramOptions options = {
         .initializers = &path->initializers,
         .asms = &path->asms,
@@ -3188,6 +3175,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     arena_release(&include_paths.arena);
     arena_release(&options_arena);
+    oracle_cache_report(oracle_cache(), "test-checker-corpus");
     return passed ? 0 : 1;
 }
 

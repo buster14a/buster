@@ -36,13 +36,14 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_DIVSC3,
     CHECK_LOWER_RUNTIME_DIVDC3,
     CHECK_LOWER_RUNTIME_DIVXC3,
+    CHECK_LOWER_RUNTIME_MEMMOVE,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
     "__floatuntidf",    "__floatuntixf", "__fixsfti", "__fixdfti",   "__fixxfti",  "__fixunssfti", "__fixunsdfti", "__fixunsxfti", "__mulsc3",
-    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3",
+    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -91,10 +92,15 @@ struct CheckProgramLowered
     uint32_t token;
     uint32_t backend_node;
     // What a failure was about, for its diagnostic: the feature CHECK_PROGRAM_UNSUPPORTED names, or the rule of
-    // tier0_validate's that a lowered function broke (CHECK_PROGRAM_INVALID). NULL when nothing names it.
+    // tier0_validate's that a lowered function broke (CHECK_PROGRAM_INVALID), or an exhausted capacity's name
+    // (CHECK_PROGRAM_RESOURCE). NULL when nothing names it.
     const char* reason;
     uint64_t entries;
     uint64_t output_bytes;
+    // Evaluated expression occurrences, and those expanded by the straight-line templates (#624).
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
+    uint64_t classified_nodes;
     // The symbols of the labels whose addresses the program takes (GNU C's &&label), each function's in the order of its
     // Tier0Function.label_entries, the functions' one after another: the emission defines each at its label's record
     // (Tier0Code.label_records). A jump table's labels are among them, at its dispatch (check_lower_switch_dispatch).
@@ -162,7 +168,49 @@ struct CheckLowerTask
     bool initialized;
     // An expression whose value nobody reads (a statement's): an aggregate's assignment then leaves no address.
     bool discard;
+    // COPY retains volatile accesses through the existing inline pieces, including self-assignment.
+    bool volatile_copy;
 };
+
+// The pending stack keeps two words instead of a padded 32-byte C record. Instructions, addresses,
+// copies and complex operations use the full value word; their type is absent or an instruction class.
+// Other tasks have a full TypeId and a 32-bit value (a local identity). The original task is decoded at pop.
+typedef struct CheckLowerTaskPacked CheckLowerTaskPacked;
+struct CheckLowerTaskPacked
+{
+    uint64_t control;
+    uint64_t payload;
+};
+
+_Static_assert(sizeof(CheckLowerTaskPacked) == 16, "a pending lowering task takes two words");
+_Static_assert(CHECK_LOWER_COMPLEX_TRUTH <= UINT8_MAX && sizeof(TypeId) == sizeof(uint32_t), "pending task tags and type identities fit their fields");
+
+static inline __attribute__((always_inline)) CheckLowerTaskPacked check_lower_task_pack(CheckLowerTask task)
+{
+    const bool full = task.kind == CHECK_LOWER_INSTRUCTION || task.kind == CHECK_LOWER_ADDRESS || task.kind == CHECK_LOWER_COPY || task.kind == CHECK_LOWER_COMPLEX;
+    return (CheckLowerTaskPacked){
+        .control = task.node | (uint64_t)task.kind << 32 | (uint64_t)task.address << 40 | (uint64_t)task.initialized << 41 | (uint64_t)task.discard << 42 |
+                   (uint64_t)task.volatile_copy << 43 |
+                   (task.kind == CHECK_LOWER_INSTRUCTION ? (uint64_t)task.type << 48 : 0),
+        .payload = full ? task.value : task.type | task.value << 32,
+    };
+}
+
+static inline __attribute__((always_inline)) CheckLowerTask check_lower_task_unpack(CheckLowerTaskPacked packed)
+{
+    const CheckLowerTaskKind kind = (CheckLowerTaskKind)((packed.control >> 32) & UINT8_MAX);
+    const bool full = kind == CHECK_LOWER_INSTRUCTION || kind == CHECK_LOWER_ADDRESS || kind == CHECK_LOWER_COPY || kind == CHECK_LOWER_COMPLEX;
+    return (CheckLowerTask){
+        .kind = kind,
+        .node = (uint32_t)packed.control,
+        .type = kind == CHECK_LOWER_INSTRUCTION ? (uint16_t)(packed.control >> 48) : full ? 0 : (uint32_t)packed.payload,
+        .value = full ? packed.payload : packed.payload >> 32,
+        .address = ((packed.control >> 40) & 1) != 0,
+        .initialized = ((packed.control >> 41) & 1) != 0,
+        .discard = ((packed.control >> 42) & 1) != 0,
+        .volatile_copy = ((packed.control >> 43) & 1) != 0,
+    };
+}
 
 typedef struct CheckLowerAbi CheckLowerAbi;
 struct CheckLowerAbi
@@ -196,13 +244,19 @@ struct CheckLowerCaseRange
     uint32_t label;
 };
 
+// A classification vector holds at most 16 operator/type words. Payloads belong to reached fragments;
+// classification never follows an operand, reads a local map or makes a reachability decision.
+#define BUSTER_CHECK_LOWER_BATCH 16u
+
+_Static_assert(BUSTER_CHECK_LOWER_BATCH == 16, "the classification window is one vector of 32-bit node indices");
+
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
     const CheckProgram* program;
     CheckProgramLowered* output;
     CheckLowerAbi* abi;
-    CheckLowerTask* tasks;
+    CheckLowerTaskPacked* tasks;
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
@@ -290,6 +344,7 @@ struct CheckLowerWriter
     // Every type's class and facts, made before the bodies (CheckLowerShared's), `type_count` of each, by type index.
     const uint8_t* type_classes;
     const uint8_t* type_facts;
+    const uint32_t* type_templates;
     uint32_t type_count;
     uint32_t hidden;
     // A variadic definition's (#137): va_start's offsets past the named registers, from the function's own call as
@@ -318,6 +373,9 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
+    uint64_t classified_nodes;
     // The function's labels whose addresses the program takes (CHECK_CONTROL_LABEL with a symbol): each one's control
     // entry, then its entry (Tier0Function.label_entries), and the room for them, one per control entry.
     uint32_t* label_entries;
@@ -354,6 +412,16 @@ static void check_lower_fail(CheckLowerWriter* writer, CheckProgramStatus status
         writer->output->status = status;
         writer->output->token = writer->token;
     }
+}
+
+// Keep a hard limit distinct from the writer's allocated storage, and preserve the first failure through rollback.
+static void check_lower_resource(CheckLowerWriter* writer, const char* reason)
+{
+    if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        writer->output->reason = reason;
+    }
+    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
 }
 
 // A construct the backend doesn't take yet, named for the diagnostic (#145: a program outside the subset fails with
@@ -447,6 +515,7 @@ static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 #define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
 #define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
 #define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
+#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
 #define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
 
 // A type's facts (BUSTER_CHECK_LOWER_TYPE_*): the rule that the table of every type's holds (check_lower_classify_types),
@@ -533,6 +602,92 @@ static void check_lower_classify_types(const TypeTable* types, uint32_t count, u
             facts[index] = check_lower_type_facts(types, type);
         }
     }
+}
+
+// A record's volatile subobjects are computed once before bodies share this immutable column. Pointer pointees are
+// not contained storage. The explicit memoized DFS visits each type and by-value edge once, with no depth cap.
+// A bounded member scan avoids the graph and its scratch when the unit has no volatile member.
+static bool check_lower_copy_type_facts(const TypeTable* types, uint32_t count, uint8_t* facts, Arena* scratch, bool scalar)
+{
+    bool needed = false;
+    const uint32_t members = types->members.count;
+    if (scalar)
+    {
+        for (uint32_t m = 1; !needed && m < members; m += 1)
+        {
+            needed = (type_qualifiers(types->members.type[m]) & BUSTER_TYPE_VOLATILE) != 0;
+        }
+    }
+    else
+    {
+        for (uint32_t m = 1; !needed && m < members; m += 16)
+        {
+            const uint32_t left = members - m;
+            const __mmask16 active = left < 16 ? (__mmask16)((1u << left) - 1) : UINT16_MAX;
+            const __m512i values = _mm512_maskz_loadu_epi32(active, types->members.type + m);
+            needed = _mm512_test_epi32_mask(values, _mm512_set1_epi32(BUSTER_TYPE_VOLATILE)) != 0;
+        }
+    }
+    const uint64_t mark = scratch->length;
+    uint8_t* state = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint32_t* nodes = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    uint32_t* next = needed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    bool valid = !needed || (state != NULL && nodes != NULL && next != NULL);
+    if (needed && valid)
+    {
+        memset(state, 0, count);
+        for (uint32_t root = 0; valid && root < count; root += 1)
+        {
+            uint32_t depth = 0;
+            if (state[root] == 0)
+            {
+                nodes[depth] = root;
+                next[depth++] = 0;
+                state[root] = 1;
+            }
+            while (valid && depth != 0)
+            {
+                const uint32_t index = nodes[depth - 1];
+                const uint8_t kind = types->types.kind[index];
+                const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                const bool base = type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+                const uint32_t tag = record ? types->types.index[index] : 0;
+                const uint32_t children = record ? types->tags.member_count[tag] : base ? 1 : 0;
+                const uint32_t child_at = next[depth - 1];
+                if (child_at == children || (facts[index] & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0)
+                {
+                    state[index] = 2;
+                    depth -= 1;
+                }
+                else
+                {
+                    const TypeId child = record ? types->members.type[types->tags.member_begin[tag] + child_at] : types->types.base[index];
+                    const uint32_t child_index = type_index(child);
+                    if ((type_qualifiers(child) & BUSTER_TYPE_VOLATILE) != 0)
+                    {
+                        facts[index] |= BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY;
+                    }
+                    else if (child_index >= count || state[child_index] == 1)
+                    {
+                        valid = false;
+                    }
+                    else if (state[child_index] == 2)
+                    {
+                        facts[index] |= facts[child_index] & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY;
+                        next[depth - 1] += 1;
+                    }
+                    else
+                    {
+                        nodes[depth] = child_index;
+                        next[depth++] = 0;
+                        state[child_index] = 1;
+                    }
+                }
+            }
+        }
+    }
+    scratch->length = mark;
+    return valid;
 }
 
 // A type's class (check_lower_type_class's) from the writer's table of every type's (check_lower_classify_types). The
@@ -848,7 +1003,7 @@ static __attribute__((noinline)) void check_lower_emit_tracked(CheckLowerWriter*
         // reading or changing the pending value, and works for narrow, floating and pointer classes alike.
         if (writer->count + 2 >= writer->capacity || writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES)
         {
-            check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            check_lower_resource(writer, writer->count + 2 >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
         }
         else
         {
@@ -881,7 +1036,7 @@ static void check_lower_emit(CheckLowerWriter* writer, uint8_t kind, uint8_t cla
     }
     else if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, count >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
     }
     else if (writer->track)
     {
@@ -934,7 +1089,7 @@ static void check_lower_push(CheckLowerWriter* writer, CheckLowerTask task)
 {
     if (writer->depth < writer->capacity)
     {
-        writer->tasks[writer->depth++] = task;
+        writer->tasks[writer->depth++] = check_lower_task_pack(task);
     }
     else
     {
@@ -951,12 +1106,26 @@ static void check_lower_instruction(CheckLowerWriter* writer, uint8_t kind, uint
 // complex, both have one class on the stack, a value's or both an aggregate's address, and `to` isn't _Bool, whose
 // conversion normalizes even a _Bool's value. An array's decay to a pointer, a pointer's to another and a change of
 // qualifiers are such conversions, which need no task.
-static bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
+static inline __attribute__((always_inline)) bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
 {
-    const uint8_t from_facts = check_lower_facts(writer, from);
-    const uint8_t to_facts = check_lower_facts(writer, to);
-    const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, from);
-    const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, to);
+    uint32_t from_info = 0;
+    uint32_t to_info = 0;
+    if (writer->type_templates != NULL)
+    {
+        const uint32_t a = type_index(from);
+        const uint32_t b = type_index(to);
+        from_info = a < writer->type_count ? writer->type_templates[a] : UINT8_MAX;
+        to_info = b < writer->type_count ? writer->type_templates[b] : UINT8_MAX;
+    }
+    else
+    {
+        from_info = check_lower_class(writer, from) | (uint32_t)check_lower_facts(writer, from) << 8;
+        to_info = check_lower_class(writer, to) | (uint32_t)check_lower_facts(writer, to) << 8;
+    }
+    const uint8_t from_facts = (uint8_t)(from_info >> 8);
+    const uint8_t to_facts = (uint8_t)(to_info >> 8);
+    const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_info;
+    const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_info;
     return source == target && source < BUSTER_TYPED_CLASSES && ((from_facts ^ to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 &&
            ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 && (to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0;
 }
@@ -1078,7 +1247,7 @@ static uint32_t check_lower_temporary(CheckLowerWriter* writer, uint8_t class)
     }
     else
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, local >= BUSTER_TIER0_MAX_LOCALS ? "Tier 0 per-function local limit" : "lowering local storage");
     }
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
@@ -1111,7 +1280,7 @@ static uint32_t check_lower_object(CheckLowerWriter* writer, uint64_t size, uint
     }
     else
     {
-        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+        check_lower_resource(writer, local >= BUSTER_TIER0_MAX_LOCALS ? "Tier 0 per-function local limit" : "lowering local storage");
     }
     return local;
 }
@@ -1246,12 +1415,98 @@ static void check_lower_scale(CheckLowerWriter* writer, TypeId pointer, uint64_t
     }
 }
 
+static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
+
+static bool check_lower_copy_volatile(const CheckLowerWriter* writer, const CheckValue* source, TypeId destination)
+{
+    return ((type_qualifiers(source->type) | type_qualifiers(destination)) & BUSTER_TYPE_VOLATILE) != 0 ||
+           (source->flags & BUSTER_CHECK_VOLATILE_PART) != 0 ||
+           ((check_lower_facts(writer, source->type) | check_lower_facts(writer, destination)) & BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY) != 0;
+}
+
+// Aggregate comma, conditional and statement values forward an address after lvalue conversion erased its qualifier.
+// Follow only those value edges, not earlier side effects or an assignment whose volatile accesses already ran. The
+// unused tail of this writer's task array is a bounded private worklist; no pending task or source-token state changes.
+static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t pending = 0;
+    uint32_t budget = stream->count;
+    uint32_t at = node;
+    bool volatile_copy = false;
+    while (!volatile_copy && at < stream->count && budget != 0 && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        budget -= 1;
+        volatile_copy = check_lower_copy_volatile(writer, &stream->values[at], 0);
+        uint32_t next = BUSTER_CHECK_NONE;
+        if (!volatile_copy)
+        {
+            const CheckOp op = graph->ops[at];
+            if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_CONVERT)
+            {
+                next = graph->operand0[at];
+            }
+            else if (op == CHECK_OP_COMMA)
+            {
+                next = graph->operand1[at];
+            }
+            else if (op == CHECK_OP_CONDITIONAL)
+            {
+                bool truth = false;
+                if (check_program_runtime_truth(program, at, graph->operand0[at], &truth))
+                {
+                    next = truth ? graph->operand1[at] : graph->operand2[at];
+                }
+                else if (pending < writer->capacity - writer->depth)
+                {
+                    writer->tasks[writer->depth + pending++].control = graph->operand2[at];
+                    next = graph->operand1[at];
+                }
+                else
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+                }
+            }
+        }
+        at = next;
+        if (at == BUSTER_CHECK_NONE && pending != 0)
+        {
+            at = (uint32_t)writer->tasks[writer->depth + --pending].control;
+        }
+    }
+    if (!volatile_copy && at < stream->count && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    return volatile_copy;
+}
+
+static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t node, TypeId destination)
+{
+    const CheckValue* source = &writer->program->stream->values[node];
+    bool volatile_copy = check_lower_copy_volatile(writer, source, destination);
+    if (!volatile_copy && (source->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
+    {
+        const CheckOp op = writer->program->input->graph.ops[node];
+        if (op == CHECK_OP_SELECT || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_CONVERT || op == CHECK_OP_COMMA || op == CHECK_OP_CONDITIONAL)
+        {
+            volatile_copy = check_lower_copy_forward_volatile(writer, node);
+        }
+    }
+    return volatile_copy;
+}
+
 // `size` bytes copied from the source's address on top of the stack to the destination's under it, which stays when
-// `keep` (an assignment's value): one COPY, or COPYs of up to BUSTER_TIER0_MAX_COPY_BYTES each, the source's address
-// in a temporary between them. A kept destination's address goes in a temporary too, pushed again after the last COPY:
-// its consumer's class is read from the entry before it (tier0_validate), which a COPY, of class VOID, can't give.
+// `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger nonvolatile ones call memmove through the ordinary
+// runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
+// the same source and destination, which C aggregate assignment does too. The nonvolatile stream never grows with size.
+// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same.
+// A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
+// which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep)
+static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep, bool volatile_copy)
 {
     if (size == 0)
     {
@@ -1265,6 +1520,19 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     {
         check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
     }
+    else if (size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy)
+    {
+        // Pointers and size_t use the same U64 INTEGER ABI as unsigned long on the generated SysV x86-64 target.
+        // Reuse that builtin type so lowering creates no type after the shared ABI classifications are published.
+        const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
+        const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMMOVE, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, size);
+        check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+        if (!keep)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
     else
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
@@ -1272,7 +1540,6 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         if (keep)
         {
-            // The destination's address, left under the SET_LOCAL of its class, stays the first COPY's operand.
             check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
         }
         for (uint64_t offset = 0; offset < size && writer->output->status == CHECK_PROGRAM_OK; offset += BUSTER_TIER0_MAX_COPY_BYTES)
@@ -1641,8 +1908,6 @@ static void check_lower_truth(CheckLowerWriter* writer, TypeId type, bool negate
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
     }
 }
-
-static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRuntime runtime, TypeId result, const TypeId* arguments, uint32_t count, uint32_t object);
 
 // A conversion of the value on top of the stack from `from` to `to`, neither of them complex (but to void): a complex
 // one's are check_lower_complex_conversion's, which converts its parts here. Always inlined into both copies of the
@@ -3105,6 +3370,21 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         const uint32_t index = writer->miscellaneous_count++;
         CBuiltinMiscLowerCall* call = writer->miscellaneous + index;
         *call = (CBuiltinMiscLowerCall){ .id = stream->misc[selected].runtime_builtin, .argument_count = count };
+        if (count == 3 && (call->id == CBUILTIN_MEMCPY || call->id == CBUILTIN_MEMMOVE || call->id == CBUILTIN_MEMSET || call->id == CBUILTIN_MEMCMP))
+        {
+            const uint32_t size_node = graph->argument_nodes[first + 2];
+            const CheckOp size_op = graph->ops[size_node];
+            const CheckValue* size = stream->values + size_node;
+            // Match ordinary constant emission's proof: a retained folded value is not a runtime size when a
+            // floating environment or evaluation effect still matters. Argument evaluation remains below.
+            if (size_op != CHECK_OP_BUILTIN_QUERY && size_op != CHECK_OP_STATEMENT_VALUE && size_op != CHECK_OP_INITIALIZE &&
+                size->category == CHECK_RVALUE && size->constant_kind == CHECK_CONSTANT_INTEGER && size->fault == CHECK_FAULT_NONE &&
+                (size->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 && (uint64_t)size->integer <= UINT32_MAX)
+            {
+                call->constant_size_known = true;
+                call->constant_size = (uint32_t)(uint64_t)size->integer;
+            }
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const TypeId type = stream->argument_conversions[first + i].type;
@@ -3402,13 +3682,12 @@ static void check_lower_region(CheckLowerWriter* writer, CheckLowerTask task)
 }
 
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, CheckLowerTask task)
+static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized, bool discard)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const uint32_t node = task.node;
     const CheckOp op = graph->ops[node];
     const CheckValue* value = stream->values + node;
     const uint32_t a = graph->operand0[node];
@@ -3424,7 +3703,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     writer->token = graph->tokens[node];
     const bool constant = value->constant_kind != CHECK_CONSTANT_NONE && value->fault == CHECK_FAULT_NONE &&
                           (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
-    if (op == CHECK_OP_VALUE && !task.initialized && value->object != 0 && value->object < program->object_count &&
+    if (op == CHECK_OP_VALUE && !initialized && value->object != 0 && value->object < program->object_count &&
         program->input->compound_objects[value->object - 1] && !program->input->static_objects[value->object - 1])
     {
         const uint32_t selected = program->initializers != 0 ? program->initializers->declaration_plans[value->object - 1] : 0;
@@ -3434,20 +3713,20 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            task.initialized = true;
-            check_lower_push(writer, task);
+            initialized = true;
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = initialized, .discard = discard });
             check_lower_initializer(writer, (CheckControl){ .token = value->object - 1, .target = selected - 1 });
         }
     }
     else if (op == CHECK_OP_STATEMENT_VALUE)
     {
-        check_lower_region(writer, task);
+        check_lower_region(writer, (CheckLowerTask){ .kind = CHECK_LOWER_EXPRESSION, .node = node, .address = address, .initialized = initialized, .discard = discard });
     }
     else if (constant && op != CHECK_OP_INITIALIZE && op != CHECK_OP_BUILTIN_QUERY &&
-             ((value->category == CHECK_RVALUE && !task.address) || ((task.address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
+             ((value->category == CHECK_RVALUE && !address) || ((address || address_value) && value->constant_kind == CHECK_CONSTANT_ADDRESS)))
     {
         // A discarded one (a comma's, whose operands have no effects) is nothing.
-        if (!task.discard)
+        if (!discard)
         {
             check_lower_constant(writer, value);
         }
@@ -3459,7 +3738,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             // The final value of a statement region without an expression statement is void.
         }
-        else if (task.address || address_value)
+        else if (address || address_value)
         {
             check_lower_address(writer, object, value->offset);
         }
@@ -3494,7 +3773,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_SELECT)
     {
-        check_lower_operand(writer, node, 0, task.address, 0);
+        check_lower_operand(writer, node, 0, address, 0);
     }
     else if (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY)
     {
@@ -3502,7 +3781,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         const bool complex = type_kind(types, type_strip_aligned(types, input_type)) == BUSTER_TYPE_KIND_COMPLEX;
         if (!complex && op == CHECK_OP_REAL)
         {
-            check_lower_operand(writer, node, 0, task.address, 0);
+            check_lower_operand(writer, node, 0, address, 0);
         }
         else if (!complex)
         {
@@ -3513,7 +3792,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             // The part at its offset from the value's address: an lvalue's, or a complex rvalue's, whose value is its
             // object's address.
-            if (!task.address)
+            if (!address)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
             }
@@ -3633,7 +3912,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_DEREFERENCE)
     {
-        if (!task.address && !address_value)
+        if (!address && !address_value)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
         }
@@ -3661,11 +3940,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else
         {
-            if (bit_field && !task.address)
+            if (bit_field && !address)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_READ, .type = check_lower_bit_pack(&field) });
             }
-            else if (!task.address && !address_value)
+            else if (!address && !address_value)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
             }
@@ -3713,7 +3992,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_COMMA)
     {
-        check_lower_operand(writer, node, 1, task.address, task.discard ? BUSTER_TYPE_VOID : value->type);
+        check_lower_operand(writer, node, 1, address, discard ? BUSTER_TYPE_VOID : value->type);
         check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
     }
     else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL)
@@ -3793,17 +4072,21 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
     else if (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
-        check_lower_bit_assign(writer, node, task.discard);
+        check_lower_bit_assign(writer, node, discard);
     }
     else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
-        check_lower_bit_update(writer, node, task.discard);
+        check_lower_bit_update(writer, node, discard);
     }
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
         // A struct's or union's assignment copies its bytes, and the destination's address is its value.
         const uint32_t declaration = op == CHECK_OP_INITIALIZE ? writer->initializer_declarations[node] : BUSTER_CHECK_NONE;
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !task.discard });
+        const TypeId destination = op == CHECK_OP_ASSIGN ? stream->values[a].type :
+                                   declaration < program->input->token_count ? program->input->declared_types[declaration] : value->type;
+        const bool volatile_copy = check_lower_copy_node_volatile(writer, op == CHECK_OP_INITIALIZE ? a : b, destination) ||
+                                   (op == CHECK_OP_ASSIGN && (stream->values[a].flags & BUSTER_CHECK_VOLATILE_PART) != 0);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, value->type), .address = !discard, .volatile_copy = volatile_copy });
         check_lower_operand(writer, node, op == CHECK_OP_INITIALIZE ? 0 : 1, false, value->type);
         if (op == CHECK_OP_ASSIGN)
         {
@@ -3884,7 +4167,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             }
             else
             {
-                if (op == CHECK_OP_SUBSCRIPT && !task.address && !address_value)
+                if (op == CHECK_OP_SUBSCRIPT && !address && !address_value)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
                 }
@@ -3918,6 +4201,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     }
 }
 
+#include "c_check_program_batch.c"
+
 // The token a task's entries take, set as it is popped (check_lower_drain_sources): an expression's node's, a statement's
 // own, or for any other task the one it was pushed under (CheckLowerWriter.task_sources, or `source` for one pushed since
 // it last changed).
@@ -3937,98 +4222,123 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
 // before it runs (check_lower_task_source). A constant in each, so that the plain loop does none of it.
 static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLowerWriter* writer, bool sources)
 {
+    uint64_t expression_nodes = 0;
     while (writer->depth != 0 && writer->output->status == CHECK_PROGRAM_OK)
     {
-        const CheckLowerTask task = writer->tasks[--writer->depth];
+        const CheckLowerTaskPacked* task = writer->tasks + --writer->depth;
+        // The x86 host word has node bytes 0..3, kind 4, flags 5 and instruction class 6.
+        const uint8_t* control = (const uint8_t*)&task->control;
+        const uint8_t flags = control[5];
+        const CheckLowerTaskKind kind = (CheckLowerTaskKind)control[4];
+        const uint32_t node = (uint32_t)task->control;
+        const TypeId type = (uint32_t)task->payload;
+        const uint64_t value = task->payload;
         if (sources)
         {
-            check_lower_task_source(writer, task);
+            check_lower_task_source(writer, check_lower_task_unpack(*task));
         }
         // Six of the tasks' functions are always_inline, as clang inlines them into a loop it compiles once: with a call in
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
-        if (task.kind == CHECK_LOWER_INSTRUCTION)
+        if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
         {
-            check_lower_emit(writer, (uint8_t)task.node, (uint8_t)task.type, task.value);
+            if (kind == CHECK_LOWER_EXPRESSION)
+            {
+                const bool value_node = writer->program->input->graph.ops[node] == CHECK_OP_VALUE;
+                const bool simple = !value_node && !sources && !writer->scalar && writer->type_templates != NULL && ((flags >> 2) & 1) == 0 &&
+                                    check_lower_value(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0);
+                const bool plain = !value_node && !simple && !sources && !writer->scalar && check_lower_plain(writer, node, (flags & 1) != 0);
+                const bool batched = !value_node && !plain && !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && (flags & 5) == 0 &&
+                                     check_lower_batch_expression(writer, node);
+                if (!batched)
+                {
+                    if (!simple && !plain)
+                    {
+                        check_lower_expand(writer, node, (flags & 1) != 0, ((flags >> 1) & 1) != 0, ((flags >> 2) & 1) != 0);
+                    }
+                    expression_nodes += 1;
+                }
+            }
+            else
+            {
+                check_lower_emit(writer, (uint8_t)node, control[6], value);
+            }
         }
-        else if (task.kind == CHECK_LOWER_CONVERSION)
+        else if (kind == CHECK_LOWER_CONVERSION)
         {
-            check_lower_conversion(writer, task.node, task.type);
+            check_lower_conversion(writer, node, type);
         }
-        else if (task.kind == CHECK_LOWER_LABEL)
+        else if (kind == CHECK_LOWER_LABEL)
         {
-            check_lower_place(writer, task.node);
+            check_lower_place(writer, node);
         }
-        else if (task.kind == CHECK_LOWER_CONTROL)
+        else if (kind == CHECK_LOWER_CONTROL)
         {
-            check_lower_control(writer, task.node);
+            check_lower_control(writer, node);
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN)
+        else if (kind == CHECK_LOWER_BUILTIN)
         {
-            check_lower_builtin_emit(writer, task);
+            check_lower_builtin_emit(writer, check_lower_task_unpack(*task));
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN_MISC)
+        else if (kind == CHECK_LOWER_BUILTIN_MISC)
         {
-            check_lower_miscellaneous_emit(writer, task);
+            check_lower_miscellaneous_emit(writer, check_lower_task_unpack(*task));
         }
-        else if (task.kind == CHECK_LOWER_BUILTIN_FLOAT || task.kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
+        else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
-            check_lower_floating_emit(writer, task);
+            check_lower_floating_emit(writer, check_lower_task_unpack(*task));
         }
-        else if (task.kind == CHECK_LOWER_CONSTANT)
+        else if (kind == CHECK_LOWER_CONSTANT)
         {
-            check_lower_constant(writer, writer->program->stream->values + task.node);
+            check_lower_constant(writer, writer->program->stream->values + node);
         }
-        else if (task.kind == CHECK_LOWER_ADDRESS)
+        else if (kind == CHECK_LOWER_ADDRESS)
         {
-            check_lower_address(writer, task.node, (int64_t)task.value);
+            check_lower_address(writer, node, (int64_t)value);
         }
-        else if (task.kind == CHECK_LOWER_QUERY)
+        else if (kind == CHECK_LOWER_QUERY)
         {
-            check_lower_constant(writer, &writer->program->stream->queries[task.node].runtime_value);
+            check_lower_constant(writer, &writer->program->stream->queries[node].runtime_value);
         }
-        else if (task.kind == CHECK_LOWER_TERMINATE)
+        else if (kind == CHECK_LOWER_TERMINATE)
         {
             check_lower_terminate(writer);
         }
-        else if (task.kind == CHECK_LOWER_COPY)
+        else if (kind == CHECK_LOWER_COPY)
         {
-            check_lower_copy(writer, task.value, task.address);
+            check_lower_copy(writer, value, (flags & 1) != 0, ((flags >> 3) & 1) != 0);
         }
-        else if (task.kind == CHECK_LOWER_FILL)
+        else if (kind == CHECK_LOWER_FILL)
         {
-            check_lower_fill(writer, writer->program->initializers->plans[task.node].parts + task.type, (uint32_t)task.value);
+            check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32));
         }
-        else if (task.kind == CHECK_LOWER_CLEAR)
+        else if (kind == CHECK_LOWER_CLEAR)
         {
-            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = task.type };
-            check_lower_fill(writer, &clear, (uint32_t)task.value);
+            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = type };
+            check_lower_fill(writer, &clear, (uint32_t)(value >> 32));
         }
-        else if (task.kind == CHECK_LOWER_BIT_READ)
+        else if (kind == CHECK_LOWER_BIT_READ)
         {
-            check_lower_bit_read(writer, task.type);
+            check_lower_bit_read(writer, type);
         }
-        else if (task.kind == CHECK_LOWER_BIT_STORE)
+        else if (kind == CHECK_LOWER_BIT_STORE)
         {
-            check_lower_bit_store(writer, task.type, (uint32_t)task.value, task.discard);
+            check_lower_bit_store(writer, type, (uint32_t)(value >> 32), ((flags >> 2) & 1) != 0);
         }
-        else if (task.kind == CHECK_LOWER_VARARGS)
+        else if (kind == CHECK_LOWER_VARARGS)
         {
-            check_lower_varargs_emit(writer, task);
+            check_lower_varargs_emit(writer, check_lower_task_unpack(*task));
         }
-        else if (task.kind == CHECK_LOWER_SIZE)
+        else if (kind == CHECK_LOWER_SIZE)
         {
-            check_lower_vla_size(writer, task.type, BUSTER_TYPED_CLASS_I64);
+            check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_I64);
         }
-        else if (task.kind >= CHECK_LOWER_COMPLEX)
+        else if (kind >= CHECK_LOWER_COMPLEX)
         {
             // The complex values' tasks, the kinds' last, behind one compare: few functions have them.
-            check_lower_complex_task(writer, task);
-        }
-        else
-        {
-            check_lower_expand(writer, task);
+            check_lower_complex_task(writer, check_lower_task_unpack(*task));
         }
     }
+    writer->expression_nodes += expression_nodes;
 }
 
 static void check_lower_drain(CheckLowerWriter* writer)
@@ -4075,7 +4385,7 @@ static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart
 
 // Part `index` of plan `plan` written into frame object `object`, as tasks: its zeros or bytes (check_lower_fill), or
 // its value stored at its offset, or for an aggregate copied there.
-static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uint32_t index, uint32_t object)
+static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uint32_t index, uint32_t object, TypeId destination)
 {
     const TypeTable* types = writer->program->types;
     const CheckInitPart* write = &writer->program->initializers->plans[plan].parts[index];
@@ -4128,7 +4438,12 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     {
         if (aggregate)
         {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type) });
+            // Initializer plans carry a part's value type; the declared object's volatility still governs its stores.
+            const TypeId copy_type = write->type | type_qualifiers(destination);
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, write->type),
+                                                     .volatile_copy = write->node < writer->program->stream->count ?
+                                                                      check_lower_copy_node_volatile(writer, write->node, copy_type) :
+                                                                      check_lower_copy_volatile(writer, &write->value, copy_type) });
         }
         else
         {
@@ -4170,7 +4485,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
             check_lower_source(writer, write->token);
             if (object)
             {
-                check_lower_object_part(writer, control.target, part, local);
+                check_lower_object_part(writer, control.target, part, local, program->input->declared_types[declaration]);
             }
             else if (write->bit_offset != 0 || write->bit_width != 0 || write->kind == CHECK_INIT_BYTES)
             {
@@ -4483,7 +4798,8 @@ static void check_lower_return_aggregate(CheckLowerWriter* writer, uint32_t node
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         if (node != BUSTER_CHECK_NONE)
         {
-            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false });
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .address = false,
+                                                     .volatile_copy = check_lower_copy_node_volatile(writer, node, writer->result) });
             check_lower_expression(writer, node, false, 0);
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, writer->hidden);
         }
@@ -4980,6 +5296,7 @@ struct CheckLowerShared
     // of each, one per type of the program's table, which the lowering doesn't grow.
     uint8_t* type_classes;
     uint8_t* type_facts;
+    uint32_t* type_templates;
     uint32_t type_count;
     uint32_t* initializer_declarations;
     uint32_t* local_map;
@@ -5038,6 +5355,9 @@ struct CheckLowerPart
     const char* reason;
     uint32_t final_token;
     uint64_t entries;
+    uint64_t expression_nodes;
+    uint64_t batch_nodes;
+    uint64_t classified_nodes;
     const SymbolId* label_symbols;
     uint32_t label_symbol_count;
     uint32_t runtime_count;
@@ -5134,7 +5454,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;
     shared->builtin_count = builtin_count;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
-    // or from a floating type, an update's two), each of up to two arguments. The runtime functions' provisional symbols
+    // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
+    // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
     // (check_lower_runtime) follow the helpers'.
     const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements + 1 : 0;
@@ -5170,8 +5491,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Every type's classification first: a body's struct or union result decides its returns (check_lower_by_value),
     // and a variadic definition's named registers its va_start; abi_assign takes each part's signatures together after.
     // The lowering makes no type, so the table needs rows for the types the unit has, not for the type table's room.
-    valid = valid && abi_initialize_types(&shared->table, scratch, types, 16, types->types.count);
-    if (valid)
+    // Calls, returns and va_arg belong to function bodies. Object initializers and generated helpers don't read this
+    // table, so a unit without a body needs neither its columns nor its classifications (#613).
+    valid = valid && (program->body_count == 0 || abi_initialize_types(&shared->table, scratch, types, 16, types->types.count));
+    if (valid && program->body_count != 0)
     {
         if (scalar)
         {
@@ -5197,6 +5520,23 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         else
         {
             check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
+        }
+        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
+        // One bounded lookup obtains both columns for the leaf and vector kernels. The optional table's
+        // failure retains scalar expression expansion; scalar/source-row lowering allocates none.
+        shared->type_templates = valid && !scalar && !sources && program->body_count != 0 ?
+                                 BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)shared->type_count + 1) : NULL;
+        for (uint32_t first = 0; shared->type_templates != NULL && first < shared->type_count; first += 16)
+        {
+            const uint32_t count = shared->type_count - first < 16 ? shared->type_count - first : 16;
+            const __mmask16 active = (__mmask16)((1u << count) - 1);
+            const __m512i classes = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, shared->type_classes + first));
+            const __m512i facts = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(active, shared->type_facts + first));
+            _mm512_mask_storeu_epi32(shared->type_templates + first, active, _mm512_or_si512(classes, _mm512_slli_epi32(facts, 8)));
+        }
+        if (shared->type_templates != NULL)
+        {
+            shared->type_templates[shared->type_count] = UINT8_MAX;
         }
     }
     shared->signatures = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 1) : 0;
@@ -5323,6 +5663,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
+        .type_templates = shared->type_templates,
         .type_count = shared->type_count,
         .local_map = shared->local_map,
         .switch_locals = shared->switch_locals,
@@ -5337,7 +5678,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .provisional_tables = shared->provisional_tables,
     };
 #define BUSTER_CHECK_LOWER_COLUMN(field, type, length) writer->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= writer->field != 0
-    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTask, capacity);
+    // Give the following columns the same offset modulo 4 KB relative to the task stack as 32-byte
+    // records. Padding is at most 4080 bytes, while each active task still touches just 16 bytes.
+    BUSTER_CHECK_LOWER_COLUMN(tasks, CheckLowerTaskPacked, (uint64_t)capacity + (capacity & 255u));
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
@@ -5454,6 +5797,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     writer->runtime_count = 0;
     part->stage = CHECK_LOWER_STAGE_NONE;
     part->entries = 0;
+    writer->expression_nodes = 0;
+    writer->batch_nodes = 0;
+    writer->classified_nodes = 0;
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
@@ -5913,9 +6259,13 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                     function->parameters = parameters;
                 }
             }
-            // Inlined as clang inlined tier0_validate when the lowering was compiled once: with a call in each copy, it left
-            // it out of line, which took up to 0.5 million more instructions on a 31,000-line program (#426).
-            const Tier0Check check = status->status == CHECK_PROGRAM_OK ? tier0_validate_inline(function) : (Tier0Check){ .error = TIER0_OK };
+            // The stream's rules, by the vector path where it takes the stream and by the scalar validator otherwise, which
+            // --scalar runs alone (#569).
+            Tier0Check check = { .error = TIER0_OK };
+            if (status->status == CHECK_PROGRAM_OK)
+            {
+                check = shared->scalar ? tier0_validate_scalar(function) : tier0_validate(function);
+            }
             if (check.error != TIER0_OK)
             {
                 status->status = CHECK_PROGRAM_INVALID;
@@ -5934,6 +6284,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->label_symbol_count = status->label_symbol_count;
     writer->label_symbol_used += status->label_symbol_count;
     part->runtime_count = writer->runtime_count;
+    part->expression_nodes = writer->expression_nodes;
+    part->batch_nodes = writer->batch_nodes;
+    part->classified_nodes = writer->classified_nodes;
     memcpy(part->runtimes, writer->runtimes, CHECK_LOWER_RUNTIMES);
 }
 
@@ -6000,6 +6353,9 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             written += parts[p].label_symbol_count;
         }
         lowered->entries += parts[p].entries;
+        lowered->expression_nodes += parts[p].expression_nodes;
+        lowered->batch_nodes += parts[p].batch_nodes;
+        lowered->classified_nodes += parts[p].classified_nodes;
         for (uint32_t i = 0; i < parts[p].runtime_count; i += 1)
         {
             const uint32_t runtime = parts[p].runtimes[i];

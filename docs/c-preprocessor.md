@@ -530,11 +530,43 @@ copied (#121). A redefinition that differs (C 6.10.4p2: the same form,
 parameters, replacement list, and whitespace in the same places) is diagnosed,
 and replaces the old definition either way.
 
+Complete empty and one-name parameter lists take a direct definition path;
+variadics and malformed lists keep the ordered reader. Parameter validation
+keeps a bounded source-list scan for up to 16 names (#615). The seventeenth
+parameter materializes a temporary name-to-ordinal
+index, with a geometrically grown, half-full hash table in scratch memory.
+Its descriptor also lives in scratch memory, so ordinary macros carry no
+inline index arrays in their stack frame.
+Duplicate checks stay in source order, and the same index validates every
+`#parameter` in a large replacement list. The count stays 32-bit until the
+4,096-parameter limit has been checked, including malformed longer lists.
+Allocation failure is fatal and releases the temporary index.
+
 A function-like macro is compiled at its first expansion (`pp_compile_macro`)
 into body items: tokens, parameters (by index), `#` with its parameter, `##`,
 and `__VA_OPT__` with its content. Each parameter gets a bit saying whether it
 is ever substituted expanded, so arguments only `#` or `##` use are never
 expanded.
+
+That first expansion stores the parameter ids as before. Small lists look
+them up in place through a cached id view and count: 0--4 names use a bounded
+scalar lookup, and 5--16 a masked AVX-512 comparison with its scalar twin.
+Larger lists rebuild the temporary
+index to resolve replacement identifiers and stringizing operands. The
+implicit `__VA_ARGS__` keeps an earlier explicit parameter's ordinal;
+GNU named variadics use their own name. The index is released after each
+definition or first expansion. Unused definitions retain no extra table, and
+later invocations consume the already compiled parameter ordinals.
+
+The [locked 9700X qualification](https://github.com/buster14a/buster-performance/blob/e062c126339b017b5bec5d24f7413eec3a0d9708/docs/measurements/macro-parameters-615-2026-10-27/README.md)
+compares `92c025e7` with implementation `ef1300a3` over six frontend code
+placements and fresh executable copies. At 4,000 parameters, invoked macros
+take 5.399 to 0.980 ms and 161.32 to 8.32 million instructions; unused
+definitions take 3.613 to 0.691 ms and 115.84 to 2.40 million instructions.
+The 10,000 four-parameter macro control retains a 0.032 ms wall cost (+0.88%)
+and +1.60% user cycles. Empty/one-name instruction counts stay near baseline;
+SQLite does not establish a whole-compiler timing gain. The record retains
+all samples, memory observations, comparison floors and earlier candidates.
 
 The producer `pp_compile_macro` also records literal runs for the consumer
 `pp_substitute`. A `PP_ITEM_TOKEN` uses its otherwise unused 16-bit
@@ -634,6 +666,30 @@ macro's expansion, an argument being expanded, or a directive's line):
   other macro's is painted where the expansion goes straight out. An empty
   expansion's trailing space is any of its items' but a `##`'s, which
   `pp_substitute` doesn't read.
+- **Arguments of direct objects** (#117). An argument of a simple macro's
+  collected invocation whose enabled macros' names are all direct objects
+  (object-like, not builtins, with a body without `##` that names no macro:
+  `pp_direct_object`, `pp_direct_argument`) has the expansion the main loop
+  would give it behind its barrier, made in place without a capture
+  (`pp_expand_direct_argument`, from `pp_finish_simple`, in the general path's
+  order). Its other tokens are copied in runs, and each direct object's body
+  takes its name's place under an expansion record of its own, its first token
+  with the name's flags, as `pp_expand_object` gives them. A disabled macro's
+  name isn't painted there, where the main loop paints it: the expansion's rescan
+  or `pp_emit_simple` paints it as surely, as for an argument that needs no
+  expansion. The tokens go at the end of `pp->arguments`, where the argument's record
+  then points, so the templates and `pp_substitute_simple` take them as they
+  take an argument written so. The statistics are the main loop's: the expanded
+  argument, its direct expansions, and a buffer run where the argument starts
+  and after each name it expands, while tokens are left. An empty object, an
+  object whose body names a macro, a function-like name, or one argument of
+  that kind leaves the invocation to the main loop. An argument without room to
+  expand in (its tokens, or its origins as the history records them) is a fatal
+  error that ends the run before anything is substituted, as the main loop stops
+  before it substitutes. Only vectorized runs take
+  this path, with the history deferred or recorded, so the scalar twins' general
+  path is its twin. On `sqlite3.c`, 2,125 of the 3,529 invocations that took the
+  invocation stack take it.
 - **Function-like macros** (`pp_invoke`). When the `(` and `)` are both in the
   top context, which is the common case, `pp_collect_arguments` finds the `)`
   and the separating commas 64 kinds at a time and copies the arguments in one
@@ -654,6 +710,40 @@ macro's expansion, an argument being expanded, or a directive's line):
   collection goes on past an included file's end into the includer (#109's
   seed 2106). If collection leaves the file where an expansion started, -E
   replays that exit before printing the expansion, as clang does (#370).
+- **Nested raw argument slices** (#616). During an argument's prescan,
+  `pp_collect_argument_slice` lets a nested invocation name slices of the same
+  `pp->arguments` buffer. Its argument barrier retains the owning invocation's
+  tokens until substitution; the nested invocation saves the current stack
+  count and frees only what it appends. Kinds, flags, locations and origins
+  remain unchanged. A call crossing a context boundary keeps the ordinary
+  collectors, including their handling of disabled macros and directives.
+  Prescan, substitution, rescan and expansion-history recording use the
+  existing invocation and capture machinery.
+
+  At 128 remaining tokens, `pp_index_arguments` lazily reserves one 32-bit
+  delimiter-link column. It classifies 64 kinds with bounded masked loads
+  (one-at-a-time classification in the scalar twin). Openers and commas form
+  an explicit stack within that column; closing a level reverses its comma
+  links once, recording its closer and separators. Each newly appended token
+  is indexed once. Writes after a stack rewind invalidate the overwritten
+  suffix; live contexts retain bounded, unchanged prefixes. Allocation failure
+  is fatal. Small buffers retain the existing collectors until indexed.
+
+  Each indexed suffix comes from a completed argument collection; it is not a
+  continuation of an unmatched opener in an earlier suffix. Collection closes
+  before its argument barrier is prescanned. Rewinding keeps the live owner's
+  complete prefix, and later collections append separate complete segments.
+  The pairing stack therefore starts empty at each appended segment. Only
+  complete invocations within the consuming context can be borrowed, even if
+  other argument tokens contain unmatched delimiters.
+
+  An identity nest consequently retains one outer argument copy and a linear
+  number of invocation records, without scanning or copying each suffix.
+  `c_preprocessor_arguments_test.c` checks depths through 8,000 with a linear
+  raw-token budget, real token-limit failures, partial stack reuse with a live
+  owner prefix, allocation failure through `pp_invoke`,
+  protected tails, independent delimiter pairing and semantic fixtures against
+  Clang, both kernels and deferred history replay.
 - **Nothing nests through calls.** An argument that names an enabled macro is
   expanded before substitution by pushing it as a barrier context with a
   capture. The main loop fills the capture until the barrier ends, and then
@@ -2566,9 +2656,31 @@ the checker's unit by 16 to 2,048 bytes changed `-fsyntax-only` of `sqlite3.c`
 by up to 2.2% on main `35f26f6`, and there the templates, rebased onto it,
 took 1.5% fewer user cycles than main at the same shift.
 
+Its third step expands arguments of direct objects in place ("Arguments of
+direct objects" in "The main loop", [the
+record](https://github.com/buster14a/buster-performance/tree/44e42c04/docs/measurements/preprocessor-direct-arguments-117-2026-10-27)).
+Against main at `530304fc`, with the preprocessor's unit at six placements
+(#509's `build.sh shifts`) and main's executables again as the floor, the
+history deferred, the medians of 12 runs:
+
+| | main | with the arguments expanded in place | main again |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, directive tables and main loop | 4.757 ms | 4.623 ms | 4.749 ms |
+| `sqlite3.c`, main loop | 4.445 ms | 4.311 ms | 4.436 ms |
+| `sqlite3.c`, instructions/input token | 105.56 | 102.57 | 105.56 |
+| `main.c`, main loop | 20.721 ms | 20.541 ms | 20.723 ms |
+
+`sqlite3.c`'s main loop takes 0.13 ms (3%) less, its runs' ranges apart from
+main's at every placement. As whole processes, by `time-runs --copies 3` over
+the same placements, `-E` and `parse` of `sqlite3.c` take 0.8 to 1.1% fewer
+user cycles in each of three rounds (main against itself within 0.22%), about
+0.1 to 0.15 ms of 18.3 ms, and `-fsyntax-only` doesn't change measurably.
+
 The budget is 2 ms; `sqlite3.c`'s directive tables and main loop take about
-4.77 ms. The next piece is the arguments expanded before substitution, and the
-rest needs #149 or another budget.
+4.62 ms. Of the invocations still left to the invocation stack, most have an
+argument that invokes a function-like macro (1,143 of the 3,346 arguments
+expanded first, before this step) or names an object-like macro whose body
+names a macro; the rest needs #149 or another budget.
 
 ## Assembly output spacing
 

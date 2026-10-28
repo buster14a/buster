@@ -15,6 +15,11 @@
 // nor spare arena capacity is readable input. Attribute classification is deliberately an explicit vocabulary;
 // advisory entries preserve their spelling/arguments and affect diagnostics or optimization, not C type identity.
 // Unknown attributes fail explicitly instead of making arbitrary syntax invisible to the checker.
+// Lists of two or more arguments retain exactly count - 1 comma token indices in the output arena. Counting
+// and filling use two forward delimiter walks, skipping grouped expressions through the parser's parent links.
+// check_input_attribute_argument consumes that table in constant time without reading tokens. The first/last
+// bounds already describe zero/single arguments, so those allocate nothing. Copies/merges share the immutable
+// boundaries for the arena's lifetime; shape checking and each once-only ICE evaluation reuse the same ranges.
 
 #define BUSTER_CHECK_ATTRIBUTE_IMPLEMENTATION 1
 
@@ -172,6 +177,7 @@ struct CheckInputAttribute
     CheckInputAttributeSchema schema;
     int64_t value;
     int64_t* argument_values;
+    uint32_t* argument_ends;
     String8 text;
     bool resolved;
     bool standard;
@@ -434,34 +440,23 @@ static uint32_t check_input_attribute_after_group(const Parser* parser, uint32_t
     return result;
 }
 
-// Finds an argument without descending into its grouped expressions. Its returned end excludes a separating comma.
-static bool check_input_attribute_argument(const Parser* parser, const CheckInputAttribute* attribute, uint32_t wanted, uint32_t* first, uint32_t* end)
+// Half-open source range, excluding the separating comma. Only validated lists publish their boundary table.
+static bool check_input_attribute_argument(const CheckInputAttribute* attribute, uint32_t wanted, uint32_t* first, uint32_t* end)
 {
-    uint32_t i = attribute->argument_first;
-    uint32_t index = 0;
-    uint32_t begin = i;
-    bool valid = i < attribute->argument_end;
-    while (valid && i < attribute->argument_end && index <= wanted)
+    uint32_t begin = attribute->argument_first;
+    uint32_t after = attribute->argument_end;
+    bool valid = wanted < attribute->argument_count && (attribute->argument_count <= 1 || attribute->argument_ends != 0);
+    if (valid && wanted != 0)
     {
-        if (parser->tokens.kinds[i] == PARSE_KIND_COMMA)
-        {
-            if (index == wanted)
-            {
-                break;
-            }
-            begin = i + 1;
-            index += 1;
-            i += 1;
-        }
-        else
-        {
-            i = check_input_attribute_after_group(parser, i, attribute->argument_end);
-            valid = i <= attribute->argument_end;
-        }
+        begin = attribute->argument_ends[wanted - 1] + 1;
     }
-    valid &= index == wanted && i > begin;
+    if (valid && wanted + 1 < attribute->argument_count)
+    {
+        after = attribute->argument_ends[wanted];
+    }
+    valid &= after > begin;
     *first = begin;
-    *end = i;
+    *end = after;
     return valid;
 }
 
@@ -654,7 +649,7 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
         {
             uint32_t first = attribute->argument_first;
             uint32_t end = attribute->argument_end;
-            check_input_attribute_argument(reader->parser, attribute, argument, &first, &end);
+            check_input_attribute_argument(attribute, argument, &first, &end);
             check_input_attribute_error(reader, attributes, first, end, reader->output->resource ? CHECK_ATTRIBUTE_ERROR_RESOURCE : CHECK_ATTRIBUTE_ERROR_INTEGER);
         }
     }
@@ -687,11 +682,28 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
     attribute->argument_count = count;
     valid &= count >= minimum && (maximum == 255 || count <= maximum);
     CheckInputAttributeError error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+    if (valid && count > 1)
+    {
+        attribute->argument_ends = arena_push_array(reader->arena, count - 1, sizeof(uint32_t), 4);
+        reader->output->resource |= attribute->argument_ends == 0;
+        valid = attribute->argument_ends != 0;
+    }
+    begin = attribute->argument_first;
     for (uint32_t argument = 0; valid && argument < count; argument += 1)
     {
-        uint32_t first = 0;
-        uint32_t end = 0;
-        valid = check_input_attribute_argument(parser, attribute, argument, &first, &end);
+        const uint32_t first = begin;
+        uint32_t end = attribute->argument_end;
+        if (argument + 1 < count)
+        {
+            i = begin;
+            while (i < attribute->argument_end && parser->tokens.kinds[i] != PARSE_KIND_COMMA)
+            {
+                i = check_input_attribute_after_group(parser, i, attribute->argument_end);
+            }
+            end = i;
+            attribute->argument_ends[argument] = end;
+            begin = end + 1;
+        }
         const bool identifier = attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER || (attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS && argument == 0);
         const bool string = attribute->schema == CHECK_ATTRIBUTE_STRING || attribute->schema == CHECK_ATTRIBUTE_STRING_LIST;
         if (valid && identifier)
@@ -1315,7 +1327,7 @@ static bool check_input_attribute_function(CheckInputReader* reader, CheckInputA
             {
                 uint32_t first = attribute->name_token;
                 uint32_t after = attribute->end;
-                check_input_attribute_argument(reader->parser, attribute, failed, &first, &after);
+                check_input_attribute_argument(attribute, failed, &first, &after);
                 check_input_attribute_error(reader, attributes, first, after, CHECK_ATTRIBUTE_ERROR_PARAMETER);
             }
         }

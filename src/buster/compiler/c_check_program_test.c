@@ -63,6 +63,397 @@ static void check_test_program_addressed(CheckTest* test)
     }
 }
 
+#define BUSTER_CHECK_TEST_SCAN_COLUMNS 16u
+#define BUSTER_CHECK_TEST_SCAN_TOKENS 129u
+
+// #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
+// they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
+// initializers' tokens; the variable-length arrays' declarations; the reached builtins; the static objects' declarations,
+// needs and naked functions, with room for their column and without (whose symbols #442's kernels number:
+// check_test_program_declaring); and at 64 and 128 tokens, the cases' marks, against a test of each token.
+static void check_test_program_scans(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[BUSTER_CHECK_TEST_SCAN_COLUMNS] = { 0 };
+    bool ready = page >= BUSTER_CHECK_TEST_SCAN_TOKENS * sizeof(uint32_t);
+    for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
+    {
+        mappings[column] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready = mappings[column] != MAP_FAILED && ready;
+        if (mappings[column] != MAP_FAILED)
+        {
+            ready = mprotect(mappings[column] + page, page, PROT_NONE) == 0 && ready;
+        }
+    }
+    CheckTestTypes types = { 0 };
+    ready = check_test_types_open(&types) && ready;
+    check_test_expect(test, ready, "check_program's scanned columns have protected tails");
+    // A static declaration's attributes: GNU's naked one, naked but ignored, and another (CheckProgram.object_naked).
+    CheckInputAttribute records[3] = {
+        {
+            .kind = CHECK_ATTRIBUTE_NAKED,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_NAKED,
+            .ignored = true,
+        },
+        {
+            .kind = CHECK_ATTRIBUTE_NO_STACK_PROTECTOR,
+        },
+    };
+    CheckInputAttributes kinds_of_attributes[3] = {
+        {
+            .records = records,
+            .count = 1,
+        },
+        {
+            .records = records + 1,
+            .count = 1,
+        },
+        {
+            .records = records + 1,
+            .count = 2,
+        },
+    };
+    CheckInputAttributes* attributes[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+    const TypeId runtime = ready ? type_variable_array(&types.table, BUSTER_TYPE_INT, 1) : 0;
+    for (uint32_t count = 0; ready && count <= BUSTER_CHECK_TEST_SCAN_TOKENS; count += 1)
+    {
+        uint32_t* body_declarations = (uint32_t*)(mappings[0] + page - (uint64_t)count * sizeof(uint32_t));
+        uint32_t* initializer_nodes = (uint32_t*)(mappings[1] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* deferred = mappings[2] + page - count;
+        uint32_t* declarations = (uint32_t*)(mappings[3] + page - (uint64_t)count * sizeof(uint32_t));
+        uint32_t* declaration_bodies = (uint32_t*)(mappings[4] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* declaration_kinds = mappings[5] + page - count;
+        uint8_t* static_objects = mappings[6] + page - count;
+        uint32_t* objects = (uint32_t*)(mappings[7] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* defined = mappings[8] + page - count;
+        uint8_t* tentative = mappings[9] + page - count;
+        CheckOp* ops = (CheckOp*)(mappings[10] + page - (uint64_t)count * sizeof(CheckOp));
+        uint32_t* reached = (uint32_t*)(mappings[11] + page - (uint64_t)count * sizeof(uint32_t));
+        uint8_t* roles = mappings[12] + page - count;
+        uint8_t* kinds = mappings[13] + page - count;
+        TypeId* declared_types = (TypeId*)(mappings[14] + page - (uint64_t)count * sizeof(TypeId));
+        uint32_t* parents = (uint32_t*)(mappings[15] + page - (uint64_t)count * sizeof(uint32_t));
+        const uint32_t node_count = count;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t draw = check_test_random(test);
+            body_declarations[token] = draw % 7 == 0 ? draw % (count + 1) : BUSTER_CHECK_NONE;
+            initializer_nodes[token] = draw % 5 == 0 ? (draw >> 8) % node_count : draw % 5 == 1 ? node_count + draw % 3 : BUSTER_CHECK_NONE;
+            deferred[token] = (uint8_t)(draw % 11 == 0);
+            declarations[token] = draw % 3 != 0 ? token : (draw >> 4) % count;
+            declaration_bodies[token] = draw % 13 != 0 ? (draw >> 6) % count : count + draw % 2;
+            declaration_kinds[token] = (uint8_t)(draw % 9 != 0 ? C_BINDING_OBJECT : C_BINDING_OBJECT + 1);
+            static_objects[token] = (uint8_t)((draw >> 9) % 3 == 0);
+            objects[token] = (draw >> 3) % (count + 2);
+            defined[token] = (uint8_t)((draw >> 11) & 1);
+            tentative[token] = (uint8_t)((draw >> 12) & 1);
+            ops[token] = (CheckOp)((draw >> 13) % 4 == 0 ? CHECK_OP_BUILTIN_UNARY + (draw >> 15) % (CHECK_OP_COUNT - CHECK_OP_BUILTIN_UNARY) : (draw >> 15) % CHECK_OP_COUNT);
+            reached[token] = (draw >> 20) % 3 == 0 ? 0 : 1 + (draw >> 22) % 4;
+            roles[token] = (uint8_t)((draw >> 23) % 5 == 0 ? PARSE_ROLE_CLOSE_CASE : (draw >> 23) % 5 == 1 ? PARSE_ROLE_TERMINATOR : PARSE_ROLE_LEAF_RIGHT);
+            kinds[token] = (uint8_t)((draw >> 26) % 4 == 0 ? PARSE_KIND_SWITCH : PARSE_KIND_IDENTIFIER);
+            declared_types[token] = (draw >> 28) % 2 == 0 ? runtime : BUSTER_TYPE_INT;
+            parents[token] = (draw >> 29) % 4 == 0 ? BUSTER_CHECK_NONE : (draw >> 10) % count;
+            const uint32_t attribute = (draw >> 16) % 8;
+            attributes[token] = attribute < 3 ? &kinds_of_attributes[attribute] : NULL;
+        }
+        for (uint32_t variant = 0; variant < 2; variant += 1)
+        {
+            const CheckInput input = {
+                .token_count = count,
+                .deferred_tokens = variant == 0 ? deferred : NULL,
+                .declarations = declarations,
+                .declared_types = declared_types,
+                .declaration_kinds = declaration_kinds,
+                .objects = objects,
+                .static_objects = static_objects,
+                .defined = defined,
+                .tentative = tentative,
+                .initializer_nodes = initializer_nodes,
+                .body_declarations = body_declarations,
+                .declaration_bodies = declaration_bodies,
+                .attributes = attributes,
+            };
+            uint32_t openings[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t initializers[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t bodies[2];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                memset(initializers[path], 0xff, sizeof(initializers[path]));
+                bodies[path] = check_program_openings(&input, node_count, openings[path], initializers[path], path == 0);
+            }
+            check_test_expect(test, bodies[0] == bodies[1] && memcmp(openings[0], openings[1], bodies[0] * sizeof(uint32_t)) == 0 &&
+                                   memcmp(initializers[0], initializers[1], sizeof(initializers[0])) == 0,
+                              "check_program's openings and initializers agree with their scalar twin at every guarded tail");
+            Parser parser = { 0 };
+            parser.tree.roles = roles;
+            parser.tree.parents = parents;
+            parser.tokens.kinds = kinds;
+            parser.tokens.count = count;
+            uint32_t allocation_first[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            CheckProgram programs[2] = { 0 };
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                programs[path] = (CheckProgram){ .input = &input, .types = &types.table, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+                memset(allocation_first[path], 0xff, sizeof(allocation_first[path]));
+                memset(allocation_next[path], 0xa5, sizeof(allocation_next[path]));
+                memset(vla_blocks[path], 0, sizeof(vla_blocks[path]));
+                memset(vla_saves[path], 0, sizeof(vla_saves[path]));
+                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path], path == 0);
+            }
+            check_test_expect(test, programs[0].status == programs[1].status && programs[0].token == programs[1].token &&
+                                   memcmp(allocation_first[0], allocation_first[1], sizeof(allocation_first[0])) == 0 &&
+                                   memcmp(allocation_next[0], allocation_next[1], sizeof(allocation_next[0])) == 0 &&
+                                   memcmp(vla_blocks[0], vla_blocks[1], sizeof(vla_blocks[0])) == 0 && memcmp(vla_saves[0], vla_saves[1], sizeof(vla_saves[0])) == 0,
+                              "check_program's variable-length array declarations agree with their scalar twin at every guarded tail");
+            const CheckGraph graph = { .ops = ops, .count = node_count };
+            uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t builtin_counts[2];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                builtin_counts[path] = check_program_builtins(&graph, reached, NULL, path == 0);
+                const uint32_t listed = check_program_builtins(&graph, reached, builtins[path], path == 0);
+                check_test_expect(test, listed == builtin_counts[path], "check_program's builtins count what they list");
+            }
+            check_test_expect(test, builtin_counts[0] == builtin_counts[1] && memcmp(builtins[0], builtins[1], builtin_counts[0] * sizeof(uint32_t)) == 0,
+                              "check_program's reached builtins agree with their scalar twin at every guarded tail");
+            uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            bool rooms[2];
+            // The naked column in an arena of its own, every other time one with no room for it.
+            _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
+            for (uint32_t path = 0; path < 2; path += 1)
+            {
+                Arena naked = {
+                    .base = naked_bytes[path],
+                    .capacity = variant == 0 ? sizeof(naked_bytes[path]) : 0,
+                };
+                programs[path] = (CheckProgram){ .input = &input, .object_declarations = object_declarations[path] };
+                memset(needed[path], 0, sizeof(needed[path]));
+                memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
+                needed[path][count / 2] = (uint8_t)(count % 2);
+                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0);
+            }
+            const bool naked_same = (programs[0].object_naked == 0) == (programs[1].object_naked == 0) &&
+                                    (programs[0].object_naked == 0 || memcmp(programs[0].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
+                                   rooms[0] == rooms[1] && naked_same,
+                              "check_program's static objects and naked functions agree with their scalar twin at every guarded tail");
+            for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
+            {
+                uint64_t cases = 0;
+                const uint64_t marked = check_program_case_marks(&parser, &input, block, &cases);
+                uint64_t expected_marked = 0;
+                uint64_t expected_cases = 0;
+                for (uint32_t lane = 0; lane < 64; lane += 1)
+                {
+                    const uint32_t token = block + lane;
+                    const bool kept = input.deferred_tokens == NULL || input.deferred_tokens[token] == 0;
+                    expected_marked |= (uint64_t)(kept && (roles[token] == PARSE_ROLE_CLOSE_CASE || kinds[token] == PARSE_KIND_SWITCH)) << lane;
+                    expected_cases |= (uint64_t)(kept && roles[token] == PARSE_ROLE_CLOSE_CASE) << lane;
+                }
+                check_test_expect(test, marked == expected_marked && cases == expected_cases, "check_program's case marks agree with each token's test at a guarded tail");
+            }
+        }
+    }
+    check_test_types_close(&types);
+    for (uint32_t column = 0; column < BUSTER_CHECK_TEST_SCAN_COLUMNS; column += 1)
+    {
+        if (mappings[column] != MAP_FAILED)
+        {
+            munmap(mappings[column], page * 2);
+        }
+    }
+}
+
+// #530's review: bodies whose controls check_control_children's columns decide, several in one unit: switches of their own
+// (one case in a nested block, a range, a nested switch), nested blocks, labels of one name in two bodies with gotos
+// forward and back, loops' breaks and continues, and a statement expression with a switch, a label and a goto of its own.
+static const char check_test_program_bodies_source[] =
+    "static int classify(int x){int r=0;switch(x&7){case 0:r=1;break;case 1:case 2:r=2;{int y=x;switch(y%3){case 0:r+=10;break;default:r+=20;}}break;"
+    "case 3 ... 5:r=3;goto out;default:{r=4;case 6:r+=5;}}r*=2;out:return r;}"
+    "static int walk(int n){int s=0;int i=0;top:if(i>=n)goto out;{int j=0;while(j<i){if(j==3){j++;continue;}s+=j;j++;}}"
+    "switch(i%4){case 0:s+=100;break;case 2:i++;goto top;default:s-=1;}i++;goto top;out:do{s+=1;if(s>1000)break;}while(s%3!=0);return s;}"
+    "static int region(int n){int t=0;for(int i=0;i<n;i++){t+=({int u=0;switch(i%3){case 0:u=1;break;case 1:u=2;break;default:if(i>7)break;u=3;}"
+    "again:u+=1;if(u<3)goto again;u;});if(t>50)break;}return t;}"
+    "int tested(int n){int a=n<0?-n:n;return classify(a)+walk(a&15)*3+region(a&15)*7+classify(a+1);}";
+
+// The next of `parent`'s children in the unit-wide lists, from `child` (BUSTER_CHECK_NONE for its first), that is in
+// [opening, closing]: the children a body's own lists keep.
+static uint32_t check_test_program_inside_child(const uint32_t* first, const uint32_t* next, uint32_t parent, uint32_t child, uint32_t opening, uint32_t closing)
+{
+    uint32_t at = child == BUSTER_CHECK_NONE ? first[parent] : next[child];
+    while (at != BUSTER_CHECK_NONE && (at < opening || at > closing))
+    {
+        at = next[at];
+    }
+    return at;
+}
+
+// #530's review: check_control_children's columns for each body against the unit-wide construction they replaced, the
+// independent expectation (the scalar and vector paths share the builder, so their comparison can't see its bugs). For
+// every body of `source`, each column starting poisoned: each token's children in order and in reverse, those outside the
+// body left out; the labels and cases numbered from 0 in the body's token order and every other token unlabeled; the cases'
+// targets the labels and the body's run of the program's cases exactly its own; and no loop's stop or repeat yet.
+static void check_test_program_body_columns(CheckTest* test, const char* source, const char* name)
+{
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = {
+        .language = { .standard = 2017, .gnu = true },
+        .no_standard_includes = true,
+    };
+    const ParseOptions parse_options = { 0 };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                 pp_run_source(&pp, name, (const uint8_t*)source, (uint32_t)strlen(source)) &&
+                 parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0;
+    const uint32_t count = ready ? parser.tokens.count : 0;
+    const uint64_t slots = (uint64_t)count + 1;
+    uint32_t* columns = ready ? malloc(slots * 13 * sizeof(uint32_t)) : 0;
+    ready = ready && columns != 0;
+    check_test_expect(test, ready, "the body columns' source parses");
+    uint32_t bodies = 0;
+    uint32_t labels_seen = 0;
+    uint32_t cases_seen = 0;
+    bool equal = ready;
+    if (ready)
+    {
+        const uint32_t* parents = parser.tree.parents;
+        const uint8_t* roles = parser.tree.roles;
+        uint32_t* unit_first = columns;
+        uint32_t* unit_last = unit_first + slots;
+        uint32_t* unit_next = unit_last + slots;
+        uint32_t* unit_previous = unit_next + slots;
+        uint32_t* case_map = unit_previous + slots;
+        memset(columns, 0xff, slots * 5 * sizeof(uint32_t));
+        uint32_t case_count = 0;
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t parent = parents[token];
+            if (parent < count)
+            {
+                unit_previous[token] = unit_last[parent];
+                if (unit_last[parent] != BUSTER_CHECK_NONE)
+                {
+                    unit_next[unit_last[parent]] = token;
+                }
+                else
+                {
+                    unit_first[parent] = token;
+                }
+                unit_last[parent] = token;
+            }
+            if (roles[token] == PARSE_ROLE_CLOSE_CASE)
+            {
+                case_map[token] = case_count++;
+            }
+        }
+        CheckProgramCase* cases = calloc((uint64_t)case_count + 1, sizeof(CheckProgramCase));
+        CheckProgram program = { .status = CHECK_PROGRAM_OK, .cases = cases, .case_count = case_count, .token = BUSTER_CHECK_NONE };
+        uint32_t* body_columns = case_map + slots;
+        memset(body_columns, 0xa5, slots * 8 * sizeof(uint32_t));
+        CheckControlWriter writer = {
+            .program = &program,
+            .parser = &parser,
+            .first = body_columns,
+            .last = body_columns + slots,
+            .next = body_columns + slots * 2,
+            .previous = body_columns + slots * 3,
+            .case_map = case_map,
+            .source_labels = body_columns + slots * 4,
+            .stops = body_columns + slots * 5,
+            .repeats = body_columns + slots * 6,
+            .labels = body_columns + slots * 7,
+            .capacity = count + 1,
+        };
+        equal = cases != 0;
+        for (uint32_t opening = 0; equal && opening < count; opening += 1)
+        {
+            const uint32_t closing = parents[opening];
+            if (roles[opening] == PARSE_ROLE_OPEN_BODY && closing < count && closing > opening)
+            {
+                writer.label_count = 0;
+                check_control_children(&writer, opening, closing);
+                bodies += 1;
+                uint32_t label = 0;
+                uint32_t case_start = BUSTER_CHECK_NONE;
+                uint32_t case_end = 0;
+                for (uint32_t token = opening; equal && token <= closing; token += 1)
+                {
+                    // In order, then in reverse, each child the unit's lists give that is in the body.
+                    uint32_t ours = writer.first[token];
+                    uint32_t expected = check_test_program_inside_child(unit_first, unit_next, token, BUSTER_CHECK_NONE, opening, closing);
+                    for (uint32_t steps = 0; equal && steps <= count && (ours != BUSTER_CHECK_NONE || expected != BUSTER_CHECK_NONE); steps += 1)
+                    {
+                        equal = ours == expected;
+                        ours = equal ? writer.next[ours] : ours;
+                        expected = equal ? check_test_program_inside_child(unit_first, unit_next, token, expected, opening, closing) : expected;
+                    }
+                    ours = writer.last[token];
+                    expected = check_test_program_inside_child(unit_last, unit_previous, token, BUSTER_CHECK_NONE, opening, closing);
+                    for (uint32_t steps = 0; equal && steps <= count && (ours != BUSTER_CHECK_NONE || expected != BUSTER_CHECK_NONE); steps += 1)
+                    {
+                        equal = ours == expected;
+                        ours = equal ? writer.previous[ours] : ours;
+                        expected = equal ? check_test_program_inside_child(unit_last, unit_previous, token, expected, opening, closing) : expected;
+                    }
+                    const bool labeled = token != opening && token != closing && (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE);
+                    const uint32_t expected_label = labeled ? label : BUSTER_CHECK_NONE;
+                    equal = equal && writer.source_labels[token] == expected_label && writer.stops[token] == BUSTER_CHECK_NONE &&
+                            writer.repeats[token] == BUSTER_CHECK_NONE;
+                    if (labeled && roles[token] == PARSE_ROLE_CLOSE_CASE)
+                    {
+                        equal = equal && cases[case_map[token]].target == expected_label;
+                        case_start = case_start == BUSTER_CHECK_NONE ? case_map[token] : case_start;
+                        case_end = case_map[token] + 1;
+                        cases_seen += 1;
+                    }
+                    label += labeled;
+                }
+                equal = equal && writer.label_count == label && writer.case_start == case_start && writer.case_end == case_end &&
+                        program.status == CHECK_PROGRAM_OK;
+                labels_seen += label;
+            }
+        }
+        free(cases);
+    }
+    printf("  %s: %u bodies' own columns against the unit-wide lists, with %u labels and %u cases\n", name, bodies, labels_seen, cases_seen);
+    char description[256];
+    snprintf(description, sizeof(description), "%s: each of %u bodies' own columns are the unit-wide lists' within it, with its %u labels and %u cases",
+             name, bodies, labels_seen, cases_seen);
+    check_test_expect(test, equal && bodies != 0, description);
+    free(columns);
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
+static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
+
+// The bodies fixture's columns, and those of a unit of many small bodies, each with a switch, its own labels of one name,
+// a goto back, and an empty body and a label alone among them; then the bodies fixture compiled and run against clang.
+static void check_test_program_bodies(CheckTest* test, const char* clang)
+{
+    check_test_program_body_columns(test, check_test_program_bodies_source, "bodies-columns");
+    char many[16384];
+    int length = snprintf(many, sizeof(many), "void empty(void){}void lone(void){only:;}");
+    for (uint32_t i = 0; length > 0 && (size_t)length < sizeof(many) && i < 24; i += 1)
+    {
+        length += snprintf(many + length, sizeof(many) - (size_t)length,
+                           "int f%u(int x){int r=0;again:switch(x%%%u){case 0:r+=%u;break;case 1:{case 2:r+=1;}if(r<%u){x++;goto again;}break;default:r--;}"
+                           "for(int i=0;i<3;i++){if(i==1)continue;r+=i;}done:return r;}",
+                           i, i + 3, i, i + 2);
+    }
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(many), "the many bodies' source fits");
+    check_test_program_body_columns(test, many, "many-bodies-columns");
+    check_test_program_source(test, check_test_program_bodies_source, "bodies-controls", clang);
+}
+
 // `bytes` at the end of a mapping whose next page is PROT_NONE, so that an access past them faults: the start, or 0.
 static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, uint64_t bytes)
 {
@@ -77,7 +468,8 @@ static uint8_t* check_test_program_guarded(uint8_t** mapping, uint64_t* mapped, 
 
 // #442's kernels, each path against the test's own reading of its contract, every column (and output) ending at a
 // PROT_NONE page: the declaring tokens, without and with the initializers' nodes, for every count to 200 and larger
-// ones, and the needed objects' count and numbering (object 0 never a symbol), at every density.
+// ones, the declarations with initializers (#592's check_init_declarations), and the needed objects' count and
+// numbering (object 0 never a symbol), at every density.
 static void check_test_program_declaring(CheckTest* test)
 {
     static const uint32_t larger[] = { 255, 256, 257, 1023, 1024, 1025, 4095, 4096, 4097, 70001 };
@@ -89,8 +481,8 @@ static void check_test_program_declaring(CheckTest* test)
         const uint32_t count = c <= 200 ? c : larger[c - 201];
         for (uint32_t density = 0; density < 4; density += 1)
         {
-            uint8_t* maps[7] = { 0 };
-            uint64_t sizes[7] = { 0 };
+            uint8_t* maps[9] = { 0 };
+            uint64_t sizes[9] = { 0 };
             uint32_t* declarations = (uint32_t*)check_test_program_guarded(&maps[0], &sizes[0], (uint64_t)count * sizeof(uint32_t));
             uint32_t* nodes = (uint32_t*)check_test_program_guarded(&maps[1], &sizes[1], (uint64_t)count * sizeof(uint32_t));
             // The tokens' room: count + 16, as the kernel's contract asks, and not one more.
@@ -137,6 +529,32 @@ static void check_test_program_declaring(CheckTest* test)
                     }
                 }
             }
+            // The declarations with initializers (check_init_declarations, #592): room for exactly `count`.
+            uint32_t* begins = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)count * sizeof(uint32_t));
+            uint32_t* initialized = (uint32_t*)check_test_program_guarded(&maps[8], &sizes[8], (uint64_t)count * sizeof(uint32_t));
+            ready &= begins != 0 && initialized != 0;
+            uint32_t begun = 0;
+            for (uint32_t t = 0; ready && t < count; t += 1)
+            {
+                state = state * 6364136223846793005u + 1442695040888963407u;
+                const uint32_t random = (uint32_t)(state >> 33);
+                const bool has = density == 3 || (density != 0 && random % (density == 1 ? 16 : 2) == 0);
+                begins[t] = has ? (random >> 4) % (count + 2) : BUSTER_CHECK_NONE;
+                expected[begun] = t;
+                begun += has;
+            }
+            for (uint32_t path = 0; ready && path < 2; path += 1)
+            {
+                const CheckInput input = { .initializer_begins = begins, .token_count = count };
+                const uint32_t got = check_init_declarations(&input, count, initialized, path == 0);
+                const bool same = got == begun && memcmp(initialized, expected, (uint64_t)begun * sizeof(uint32_t)) == 0;
+                all &= same;
+                checked += 1;
+                if (!same)
+                {
+                    printf("  initialized declarations: count %u density %u %s path: %u tokens, expected %u\n", count, density, path == 0 ? "scalar" : "vector", got, begun);
+                }
+            }
             const uint32_t objects = count + 1;
             uint32_t want = 0;
             for (uint32_t object = 1; ready && object < objects; object += 1)
@@ -173,7 +591,7 @@ static void check_test_program_declaring(CheckTest* test)
                 }
             }
             all &= ready;
-            for (uint32_t m = 0; m < 7; m += 1)
+            for (uint32_t m = 0; m < 9; m += 1)
             {
                 if (maps[m] != 0)
                 {
@@ -536,6 +954,344 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     return valid;
 }
 
+// check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
+// check_test_program_sparse compares check_data_prepare's records and check_data_latest with.
+typedef struct CheckTestDataPrepared CheckTestDataPrepared;
+struct CheckTestDataPrepared
+{
+    CheckDataObject* objects;
+    uint32_t count;
+    uint32_t* references;
+    uint32_t reference_count;
+    uint32_t* reference_offsets;
+    uint32_t* reference_counts;
+    uint32_t* latest_declarations;
+    uint32_t object_count;
+    LinkCapacity capacity;
+    uint32_t token;
+    CheckDataInputStatus status;
+};
+
+static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const CheckInput* input, const CheckStream* stream,
+                                          const CheckInitializers* initializers, TypeTable* types, Arena* output, Arena* scratch)
+{
+    *result = (CheckTestDataPrepared){ .token = BUSTER_CHECK_NONE };
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t count = input->token_count;
+    bool valid = output != scratch && count < UINT32_MAX && stream->count == input->graph.count &&
+                 stream->status == CHECK_STATUS_OK && stream->report_count == 0 && input->report_count == 0 && !input->resource &&
+                 initializers->status == CHECK_INIT_OK && initializers->token_count == count && initializers->declaration_plans != 0;
+    result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_INVALID;
+    result->latest_declarations = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* definition = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+    if (valid && (result->latest_declarations == 0 || definition == 0 || alignments == 0))
+    {
+        valid = false;
+        result->status = CHECK_DATA_INPUT_RESOURCE;
+    }
+    for (uint32_t object = 0; valid && object <= count; object += 1)
+    {
+        result->latest_declarations[object] = BUSTER_CHECK_NONE;
+        definition[object] = BUSTER_CHECK_NONE;
+        alignments[object] = 0;
+    }
+    for (uint32_t token = 0; valid && token < count; token += 1)
+    {
+        if (input->declarations[token] == token && input->static_objects[token])
+        {
+            const uint32_t object = input->objects[token];
+            valid = object != 0 && object <= count;
+            if (valid)
+            {
+                result->latest_declarations[object] = token;
+                const CheckInputAttributes* attributes = input->attributes != 0 ? input->attributes[token] : 0;
+                if (attributes != 0 && attributes->alignment_log2 > alignments[object])
+                {
+                    alignments[object] = attributes->alignment_log2;
+                }
+                if (input->declaration_kinds[token] == C_BINDING_OBJECT && (input->defined[token] || input->tentative[token]))
+                {
+                    const uint32_t previous = definition[object];
+                    if (previous == BUSTER_CHECK_NONE || !input->defined[previous])
+                    {
+                        definition[object] = token;
+                    }
+                }
+            }
+            else
+            {
+                result->status = CHECK_DATA_INPUT_INVALID;
+                result->token = token;
+            }
+        }
+    }
+    uint64_t object_capacity = input->string_count;
+    uint64_t reference_capacity = 0;
+    for (uint32_t object = 1; valid && object <= count; object += 1)
+    {
+        const uint32_t token = definition[object];
+        if (token != BUSTER_CHECK_NONE)
+        {
+            object_capacity += 1;
+            const uint32_t plan_index = initializers->declaration_plans[token];
+            valid = plan_index <= initializers->count &&
+                    (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
+            reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
+            if (!valid)
+            {
+                result->status = CHECK_DATA_INPUT_INVALID;
+                result->token = token;
+            }
+        }
+    }
+    if (valid && (object_capacity > UINT32_MAX || reference_capacity > UINT32_MAX))
+    {
+        valid = false;
+        result->status = CHECK_DATA_INPUT_RESOURCE;
+    }
+    if (valid)
+    {
+        result->objects = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataObject, object_capacity) : 0;
+        result->reference_offsets = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
+        result->reference_counts = object_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, object_capacity) : 0;
+        result->references = reference_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, reference_capacity) : 0;
+        valid = (object_capacity == 0 || (result->objects != 0 && result->reference_offsets != 0 && result->reference_counts != 0)) &&
+                (reference_capacity == 0 || result->references != 0);
+        result->status = valid ? CHECK_DATA_INPUT_OK : CHECK_DATA_INPUT_RESOURCE;
+    }
+    for (uint32_t object = 1; valid && object <= count; object += 1)
+    {
+        const uint32_t selected = definition[object];
+        if (selected != BUSTER_CHECK_NONE)
+        {
+            const uint32_t latest = result->latest_declarations[object];
+            const uint32_t plan_index = initializers->declaration_plans[selected];
+            const CheckInitializer* plan = plan_index != 0 ? initializers->plans + plan_index - 1 : 0;
+            TypeId type = input->declared_types[latest];
+            const TypeId stripped = type_strip_aligned(types, type);
+            if (plan == 0 && input->tentative[selected] && type_kind(types, stripped) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            {
+                // Tentative arrays acquire one element at translation-unit end; earlier uses retain their
+                // historical incomplete TypeIds and cannot gain a retroactive sizeof result.
+                type = type_array(types, types->types.base[type_index(stripped)], 1);
+                if (type != 0)
+                {
+                    type |= type_qualifiers(stripped);
+                    if (type_kind(types, input->declared_types[latest]) == BUSTER_TYPE_KIND_ALIGNED)
+                    {
+                        type = type_aligned(types, type, type_alignment_log2(types, input->declared_types[latest]));
+                    }
+                }
+                valid = type != 0;
+                if (!valid)
+                {
+                    result->status = types->last_error == TYPE_ERROR_FULL ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
+                    result->token = selected;
+                }
+            }
+            if (valid)
+            {
+                const uint32_t at = result->count;
+                result->objects[at] = (CheckDataObject){
+                    .type = type,
+                    .object = object,
+                    .initializer = input->initializer_nodes[selected],
+                    .token = selected,
+                    .initializer_plan = plan,
+                    .alignment_log2 = alignments[object] != 0 ? (uint8_t)(alignments[object] - 1) : 0,
+                };
+                result->reference_offsets[at] = result->reference_count;
+                const uint64_t reference_mark = scratch->length;
+                uint32_t* references = 0;
+                uint32_t reference_count = 0;
+                if (plan != 0)
+                {
+                    // Use the opposite arena roles for this temporary result. The helper restores its scratch
+                    // suffix in output, and we copy the surviving references before releasing its result suffix.
+                    const CheckInitStatus status = check_initializer_references(types, plan, scratch, output, &references, &reference_count);
+                    valid = status == CHECK_INIT_OK;
+                    if (!valid)
+                    {
+                        result->status = status == CHECK_INIT_RESOURCE ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
+                        result->token = selected;
+                    }
+                }
+                valid = valid && reference_count <= reference_capacity - result->reference_count;
+                for (uint32_t reference = 0; valid && reference < reference_count; reference += 1)
+                {
+                    valid = references[reference] != 0 && references[reference] <= count;
+                    if (valid)
+                    {
+                        result->references[result->reference_count++] = references[reference];
+                    }
+                }
+                if (!valid && result->status == CHECK_DATA_INPUT_OK)
+                {
+                    result->status = CHECK_DATA_INPUT_INVALID;
+                    result->token = selected;
+                }
+                arena_pop_to(scratch, reference_mark);
+                result->reference_counts[at] = result->reference_count - result->reference_offsets[at];
+                result->count += 1;
+            }
+        }
+    }
+    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
+    {
+        const CheckInitString* string = input->strings + i;
+        valid = string->object != 0 && string->object <= count && result->latest_declarations[string->object] == BUSTER_CHECK_NONE;
+        if (valid)
+        {
+            const uint32_t at = result->count++;
+            result->objects[at] = (CheckDataObject){
+                .type = string->type,
+                .object = string->object,
+                .initializer = BUSTER_CHECK_NONE,
+                .token = string->token,
+                .literal_bytes = string->bytes,
+                .literal_size = string->byte_count,
+                .string_pool = true,
+            };
+            result->reference_offsets[at] = result->reference_count;
+            result->reference_counts[at] = 0;
+        }
+        else
+        {
+            result->status = CHECK_DATA_INPUT_INVALID;
+            result->token = string->token;
+        }
+    }
+    if (valid)
+    {
+        result->object_count = count + 1;
+        result->capacity = (LinkCapacity){
+            .atoms = result->count,
+            .fixups = result->reference_count,
+            .wide_addends = result->reference_count,
+        };
+    }
+    else
+    {
+        const CheckDataInputStatus status = result->status;
+        const uint32_t token = result->token;
+        arena_pop_to(output, output_mark);
+        *result = (CheckTestDataPrepared){ .status = status, .token = token };
+    }
+    arena_pop_to(scratch, scratch_mark);
+    return valid;
+}
+
+
+static int check_test_program_key_order(const void* a, const void* b)
+{
+    const uint64_t left = *(const uint64_t*)a;
+    const uint64_t right = *(const uint64_t*)b;
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+// The passes #592 made sparse, on a checked program, against what they did before: check_data_prepare (`data`, of
+// this program's unit) against the dense oracle above, record for record, with check_data_latest of every object, on
+// both paths, check_program_token_body of every token against the column of every body's tokens the selection filled,
+// and the objects check_program_object_access finds the unit defines, by both paths, against a walk of every token.
+static bool check_test_program_sparse(const CheckProgram* program, const CheckDataPrepared* data, const CheckInput* input, const CheckStream* stream,
+                                      const CheckInitializers* initializers, TypeTable* types, bool scalar, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t count = input->token_count;
+    CheckTestDataPrepared dense = { 0 };
+    CheckDataPrepared other = { 0 };
+    bool same = check_test_data_prepare_dense(&dense, input, stream, initializers, types, output, scratch) &&
+                check_data_prepare(&other, input, stream, initializers, types, !scalar, output, scratch);
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        const CheckDataPrepared* prepared = path == 0 ? data : &other;
+        same = prepared->status == dense.status && prepared->count == dense.count && prepared->reference_count == dense.reference_count &&
+               prepared->object_count == dense.object_count && memcmp(&prepared->capacity, &dense.capacity, sizeof(dense.capacity)) == 0 &&
+               (dense.count == 0 || (memcmp(prepared->reference_offsets, dense.reference_offsets, (uint64_t)dense.count * sizeof(uint32_t)) == 0 &&
+                                     memcmp(prepared->reference_counts, dense.reference_counts, (uint64_t)dense.count * sizeof(uint32_t)) == 0)) &&
+               (dense.reference_count == 0 || memcmp(prepared->references, dense.references, (uint64_t)dense.reference_count * sizeof(uint32_t)) == 0);
+        for (uint32_t i = 0; same && i < dense.count; i += 1)
+        {
+            const CheckDataObject* a = prepared->objects + i;
+            const CheckDataObject* b = dense.objects + i;
+            same = a->type == b->type && a->object == b->object && a->initializer == b->initializer && a->token == b->token &&
+                   a->initializer_plan == b->initializer_plan && a->literal_bytes == b->literal_bytes && a->literal_size == b->literal_size &&
+                   a->string_pool == b->string_pool && a->alignment_log2 == b->alignment_log2;
+        }
+        for (uint32_t object = 0; same && object <= count + 1; object += 1)
+        {
+            same = check_data_latest(prepared, object) == (object <= count ? dense.latest_declarations[object] : BUSTER_CHECK_NONE);
+        }
+        // The static declarations' keys: each static declaration's object and token, in object and then token order.
+        uint64_t* keys = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + 1) : 0;
+        uint32_t key_count = 0;
+        for (uint32_t token = 0; keys != 0 && token < count; token += 1)
+        {
+            if (input->declarations[token] == token && input->static_objects[token])
+            {
+                keys[key_count++] = (uint64_t)input->objects[token] << 32 | token;
+            }
+        }
+        if (keys != 0)
+        {
+            qsort(keys, key_count, sizeof(uint64_t), check_test_program_key_order);
+        }
+        same = keys != 0 && key_count == prepared->declaration_count &&
+               (key_count == 0 || memcmp(keys, prepared->declaration_keys, (uint64_t)key_count * sizeof(uint64_t)) == 0);
+    }
+    uint32_t* token_bodies = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 2) : 0;
+    same = same && token_bodies != 0 && check_program_bodies_ordered(program);
+    if (same)
+    {
+        memset(token_bodies, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
+        for (uint32_t body = 0; body < program->body_count; body += 1)
+        {
+            const uint32_t close = program->parser->tree.parents[program->bodies[body].opening];
+            for (uint32_t token = program->bodies[body].opening; token <= close && token < count; token += 1)
+            {
+                token_bodies[token] = body + 1;
+            }
+        }
+    }
+    for (uint32_t token = 0; same && token <= count + 1; token += 1)
+    {
+        same = check_program_token_body(program, token) == token_bodies[token];
+    }
+    // The objects the unit defines, by both paths, against the walk of every declaring token that found them before.
+    uint8_t* defined = same ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
+    uint8_t* expected = defined != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
+    uint8_t* access = expected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
+    same = same && access != 0;
+    if (same)
+    {
+        memset(expected, 0, (uint64_t)program->object_count + 1);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            expected[program->bodies[b].object] = 1;
+        }
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t object = input->objects[token];
+            if (input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
+                (input->defined[token] || input->tentative[token]))
+            {
+                expected[object] = 1;
+            }
+        }
+    }
+    for (uint32_t path = 0; same && path < 2; path += 1)
+    {
+        check_program_object_access(program, access, defined, path == 0);
+        same = memcmp(defined, expected, (uint64_t)program->object_count + 1) == 0;
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+    return same;
+}
+
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), against clang's build of
 // it with the same.
 static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
@@ -572,7 +1328,7 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
                 check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &options, &stream) && stream.report_count == 0 &&
                 check_initializers_run(&initializers, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
-                check_data_prepare(&data, &input, &stream, &initializers, &types.table, &input_arena, &scratch);
+                check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -585,6 +1341,11 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
+        if (ready)
+        {
+            snprintf(description, sizeof(description), "%s: %s static data and token bodies are what the dense passes made", name, path == 0 ? "scalar" : "vector");
+            check_test_expect(test, check_test_program_sparse(&program, &data, &input, &stream, &initializers, &types.table, path == 0, &output, &scratch), description);
+        }
         if (!ready)
         {
             fprintf(stderr, "test-checker: program source input=%u stream=%u init=%u data=%u program=%u token=%u\n",
@@ -606,11 +1367,11 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
                               "runtime accessor identity and genuine pointer ABI agree across unit batches");
             if (lower[0].errno_symbol != 0)
             {
-                const bool fresh = lower[0].runtime_symbol_count == 1;
-                check_test_expect(test, lower[0].runtime_symbol_count <= 1 &&
-                                       type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
+                const bool fresh = lower[0].errno_symbol > program.symbol_count;
+                check_test_expect(test, type_kind(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_KIND_POINTER &&
                                        type_element(program.types, lower[0].errno_pointer_type) == BUSTER_TYPE_INT &&
-                                       (fresh ? lower[0].errno_symbol == program.symbol_count + lower[0].helpers.count + 1 :
+                                       (fresh ? lower[0].runtime_symbol_count != 0 && lower[0].runtime_order[0] == CHECK_LOWER_RUNTIME_ERRNO &&
+                                                lower[0].errno_symbol == program.symbol_count + lower[0].helpers.count + 1 :
                                                 lower[0].errno_symbol <= program.symbol_count),
                                   "errno accessor uses one reserved runtime symbol or an existing compatible global");
             }
@@ -707,6 +1468,18 @@ static void check_test_program_boundary_reason(CheckTest* test, const char* sour
                 }
                 check_test_expect(test, program.reference_count == references && writes == initializations,
                                   "checked body preserves exact live reference and ordered initializer counts");
+                if (program.body_count == 0)
+                {
+                    const uint64_t output_mark = output.length;
+                    const uint64_t scratch_mark = scratch.length;
+                    CheckLowerShared shared = { 0 };
+                    CheckProgramLowered prepared = { 0 };
+                    const bool prepared_ok = check_lower_prepare(&shared, &prepared, &program, path == 0, false, &output, &scratch);
+                    check_test_expect(test, prepared_ok && shared.table.capacity == 0 && shared.table.rows == 0,
+                                      "a unit without function bodies allocates no ABI table, including one with object initializers");
+                    arena_pop_to(&output, output_mark);
+                    arena_pop_to(&scratch, scratch_mark);
+                }
                 CheckProgramLowered lowered = { 0 };
                 const uint64_t mark = output.length;
                 const CheckControl* controls = program.controls;
@@ -842,6 +1615,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_region_input_test.c"
 #include "c_check_program_atomic_test.c"
 #include "c_check_program_asm_test.c"
+#include "c_check_program_copy_test.c"
 
 // A program the checker refused, which may have no stream or input: lowering refuses it by its status, on both paths,
 // before reading either, and writes nothing.
@@ -1001,12 +1775,32 @@ static __attribute__((noinline)) void check_test_program_long_double_builtins(Ch
         "return a*10000+f*1000+(b+1)*100+g*10+h+c*2;}", "long-double-fenv-classification-and-exceptions", clang);
 }
 
+#include "c_check_program_batch_test.c"
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
+    check_test_program_copies(test, clang);
+    check_test_program_batch(test);
+    check_test_program_source(test,
+        "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
+        "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
+        "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
+        "v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}",
+        "batch-ordinary-and-ordered-fallback", clang);
+    check_test_program_source(test,
+        "struct part{char tag;int value;double real;struct part*next;};"
+        "static volatile int side;static int touch(int n){side+=n&3;return side;}"
+        "int tested(int n){struct part b={2,n+7,(double)n*0.5,0},a={1,n-3,0.25,&b};"
+        "struct part*p=&a;p->value=(short)(unsigned char)(n+9);"
+        "int v=(short)(unsigned char)p->value+(int)p->next->real+(int)(double)p->next->value;"
+        "v+=(_Bool)p->next->value;v+=n?touch(p->value):touch(p->next->value);return v+side;}",
+        "batch-member-address-load-conversion-chains", clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);
     check_test_program_addressed(test);
+    check_test_program_scans(test);
+    check_test_program_bodies(test, clang);
     check_test_program_declaring(test);
     check_test_program_refused(test);
     check_test_program_type_facts(test);
@@ -1289,6 +2083,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
         "vla-typedef-captures-bound-once", clang);
     check_test_program_source(test,
+        "int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;"
+        "x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];"
+        "return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}", "vla-declaration-span-scopes-and-commas", clang);
+    check_test_program_source(test,
         "int tested(int n){n+=10;int(*p)[++n],x=(n*=2),(*q)[++n];return (int)sizeof(*p)+(int)sizeof(*q)+n+x;}",
         "vla-declarator-and-initializer-order", clang);
     check_test_program_source(test,
@@ -1402,6 +2200,32 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);"
         "return (int)__builtin_strlen(b)+(__builtin_memcmp(a,b,k)>0)-(__builtin_memcmp(a,b,k)<0)+b[2];}",
         "memory-builtin-runtime-loops", clang);
+    check_test_program_source(test,
+        "unsigned char a[512],b[512];int tested(int n){unsigned k=(unsigned)n%300;"
+        "for(unsigned i=0;i<512;i++)a[i]=(unsigned char)(1+i%255);"
+        "__builtin_memset(b,0x180,512);__builtin_memcpy(b+3,a+1,k);__builtin_memmove(b+4,b+3,k);"
+        "__builtin_memmove(b+2,b+4,k);b[k+2]=0;"
+        "return (int)__builtin_strlen((char*)b+2)+__builtin_memcmp(a+1,b+2,k)+b[400];}",
+        "memory-builtin-wide-runtime", clang);
+    check_test_program_source(test,
+        "unsigned char a[128],b[128];int effects[3];int tested(int n){effects[0]=effects[1]=effects[2]=0;"
+        "for(unsigned i=0;i<128;i++)a[i]=(unsigned char)(i+n);"
+        "__builtin_memset(b,0x1a5,33);__builtin_memcpy(b,a,32);"
+        "__builtin_memmove(b+1,b,15);__builtin_memmove(b,b+1,16);"
+        "__builtin_memcpy((effects[0]++,b+40),(effects[1]++,a+40),(effects[2]++,8));"
+        "int r=__builtin_memcmp(a+40,b+40,8);__builtin_memset((effects[0]++,b),7,(0));"
+        "return r+effects[0]+effects[1]*10+effects[2]*100+b[7]+b[15]+b[32]+__builtin_memcmp(a,b,1)+__builtin_memcmp(a,b,0);}",
+        "memory-builtin-small-constants-and-effects", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int change_rounding(int);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;change_rounding(n);"
+        "__builtin_memcpy(b,a,(unsigned long)(1.0+0x1.fffffffffffffp-1));change_rounding(0);return b[0]+b[1]*256;}",
+        "memory-builtin-runtime-size-under-fenv", clang);
+    check_test_program_source(test,
+        "#pragma STDC FENV_ACCESS ON\n"
+        "int clear_fp(void);int fp_state(void);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;clear_fp();"
+        "__builtin_memcpy(b,a,__builtin_constant_p(1.0/3.0));return b[0]+b[1]*256+fp_state()*65536;}",
+        "memory-builtin-size-query-runtime-answer", clang);
     check_test_program_source(test,
         "int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);"
         "long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);"
@@ -1953,6 +2777,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_source(test, source, name, clang);
     }
     check_test_program_boundary(test, "", "empty-program", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S0{int x;};struct S1{struct S0 x;};", "types-only-no-abi", true, true, 0, 0);
+    check_test_program_boundary(test, "struct S{int x;};struct S value={42};int values[3]={1,2,3};", "objects-only-no-abi", true, true, 0, 0);
     check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
     check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
     check_test_program_boundary(test, "int tested(int n){return (int)__builtin_sqrt(n+4);}", "math-runtime-symbol-rollback", true, true, 0, 0);
