@@ -1470,6 +1470,29 @@ static void check_test_compare_graph(CheckTest* test, TypeTable* table, const Ch
     check_test_expect(test, scalar_valid && scalar.status == CHECK_STATUS_OK && scalar.count == graph->count, "scalar graph run failed");
     check_test_expect(test, scratch->length == scratch_mark, "scalar graph retained scratch storage");
     const uint64_t scalar_end = output->length;
+    CheckGraph recorded = *graph;
+    recorded.recorded = (CheckGraphValidation){ 0 };
+    recorded.recorded_nodes = 0;
+    recorded.recorded_ready = false;
+    recorded.recorded_pure = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    const bool recorded_room = graph->count == 0 || recorded.recorded_pure != NULL;
+    check_test_expect(test, recorded_room, "recorded graph oracle allocation");
+    if (scalar_valid && recorded_room)
+    {
+        check_graph_record_finish(&recorded);
+        for (uint32_t path = 0; path < 4; path += 1)
+        {
+            const CheckOptions options = { .scalar = (path & 1) != 0, .verify = path >= 2 };
+            CheckStream stream;
+            const uint64_t recorded_mark = scratch->length;
+            const bool checked = check_graph_run(table, &recorded, output, scratch, &options, &stream);
+            check_test_expect(test, checked && check_test_stream_equal(&scalar, &stream, graph->argument_count),
+                              "recorded graph facts agree with both validators and both production schedules");
+            check_test_expect(test, scratch->length == recorded_mark, "recorded graph run releases only its own scratch");
+            arena_pop_to(output, scalar_end);
+        }
+    }
+    arena_pop_to(scratch, scratch_mark);
     for (uint32_t batch = partitions ? 1 : BUSTER_CHECK_BATCH; scalar_valid && batch <= BUSTER_CHECK_BATCH; batch += 1)
     {
         const CheckOptions vector_options = {
@@ -1604,6 +1627,73 @@ static __attribute__((noinline)) void check_test_graph_random(CheckTest* test, T
         }
         check_test_compare_graph(test, table, &graph, output, scratch, world < 2);
     }
+    arena_pop_to(storage, mark);
+}
+
+static void check_test_graph_recorded(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = storage->length;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    CheckGraph graph;
+    bool ready = check_graph_initialize(&graph, storage, 33, 0);
+    graph.recorded_pure = ready ? BUSTER_ARENA_PUSH_ARRAY(storage, uint8_t, graph.capacity) : NULL;
+    ready = ready && graph.recorded_pure != NULL;
+    check_test_expect(test, ready, "recorded graph mutation fixture allocation");
+    if (ready)
+    {
+        uint32_t previous = BUSTER_CHECK_NONE;
+        for (uint32_t node = 0; node < 32; node += 1)
+        {
+            // Match the source reader's protocol: finish the preceding node only after its caller filled it.
+            check_graph_record_nodes(&graph);
+            previous = node == 0 ? check_test_leaf(&graph, node, check_test_integer(BUSTER_TYPE_INT, 7)) :
+                       check_graph_add(&graph, CHECK_OP_POSITIVE, node, previous, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+        }
+        check_graph_record_finish(&graph);
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            const CheckOptions options = { .scalar = scalar != 0, .verify = true };
+            CheckStream stream;
+            bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
+            check_test_expect(test, checked, "incremental recorded graph facts verify across a vector block boundary");
+            arena_pop_to(output, output_mark);
+            const CheckGraphValidation original = graph.recorded;
+            for (uint32_t byte = 0; byte < offsetof(CheckGraphValidation, vector_blocks); byte += sizeof(uint32_t))
+            {
+                ((uint8_t*)&graph.recorded)[byte] ^= 1;
+                checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
+                check_test_expect(test, !checked && stream.status == CHECK_STATUS_INVALID_GRAPH &&
+                                  output->length == output_mark && scratch->length == scratch_mark,
+                                  "verification rejects every stale allocation counter without publishing output");
+                graph.recorded = original;
+            }
+            for (uint32_t node = 0; node < graph.count; node += 1)
+            {
+                graph.recorded_pure[node] ^= 1;
+                checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
+                check_test_expect(test, !checked && stream.status == CHECK_STATUS_INVALID_GRAPH && stream.failed_node == node &&
+                                  output->length == output_mark && scratch->length == scratch_mark,
+                                  "verification identifies each stale purity byte and rolls back");
+                graph.recorded_pure[node] ^= 1;
+            }
+            graph.operand0[31] = graph.count;
+            checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
+            check_test_expect(test, !checked && stream.status == CHECK_STATUS_INVALID_GRAPH && stream.failed_node == 31,
+                              "verification still checks the reader graph's operand topology");
+            graph.operand0[31] = 30;
+        }
+        check_test_leaf(&graph, graph.count, check_test_integer(BUSTER_TYPE_INT, 8));
+        check_test_expect(test, !graph.recorded_ready, "appending a node invalidates a previously published summary");
+        graph.operand0[31] = graph.count;
+        const CheckOptions options = { 0 };
+        CheckStream stream;
+        const bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
+        check_test_expect(test, !checked && stream.status == CHECK_STATUS_INVALID_GRAPH && stream.failed_node == 31,
+                          "an invalidated summary uses the ordinary validator without the verify option");
+    }
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
     arena_pop_to(storage, mark);
 }
 
@@ -1923,6 +2013,25 @@ static uint32_t check_test_source_line(const Parser* parser, Preprocessor* pp, u
     return line;
 }
 
+static void check_test_input_recorded(CheckTest* test, const CheckGraph* graph, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint8_t* pure = graph->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)graph->count + 1) : NULL;
+    const bool room = graph->count == 0 || pure != NULL;
+    check_test_expect(test, room && graph->recorded_ready && graph->recorded_nodes == graph->count,
+                      "source reader publishes complete graph facts even for a diagnostic-only prefix");
+    for (uint32_t scalar = 0; room && scalar < 2; scalar += 1)
+    {
+        CheckGraphValidation validation;
+        uint32_t failed;
+        const bool valid = scalar ? check_graph_validate(graph, pure, &validation, &failed) :
+                                    check_graph_validate_vector(graph, pure, &validation, &failed);
+        check_test_expect(test, valid && check_graph_recorded_equal(graph, &validation, pure, &failed),
+                          "every source fixture's reader facts equal both independent validation paths");
+    }
+    arena_pop_to(scratch, mark);
+}
+
 static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture, const char* path, const ParseTestClang* clang)
 {
     static InternTable identifiers;
@@ -1986,6 +2095,10 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
         if (!rejected[p])
         {
             const bool adapted = check_input(&input[p], &parsers[p], &pp, &types[p].table, &input_storage[p], &scratch[p]);
+            if (adapted || input[p].diagnostic_graph)
+            {
+                check_test_input_recorded(test, &input[p].graph, &scratch[p]);
+            }
             char resource_message[256];
             snprintf(resource_message, sizeof(resource_message), "%s: %s source adapter exhausted fixture resources", fixture->name, p == 0 ? "scalar" : "vector");
             check_test_expect(test, !input[p].resource, resource_message);
@@ -2012,7 +2125,8 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
             if (adapted)
             {
                 const CheckOptions options = {
-                    .scalar = p == 0
+                    .scalar = p == 0,
+                    .verify = true
                 };
                 checked[p] = check_graph_run(&types[p].table, &input[p].graph, &output_storage[p], &scratch[p], &options, &streams[p]);
                 check_test_expect(test, checked[p], "source adapter emitted an invalid graph");
@@ -4508,6 +4622,7 @@ static int run_checker_tests(int argc, char** argv)
             check_test_literals(&test, &scratch);
             check_test_graph_fixtures(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_random(&test, &types.table, &storage, &output, &scratch);
+            check_test_graph_recorded(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_limits(&test, &types.table, &storage, &output, &scratch);
             check_test_graph_type_order(&test, &storage, &output, &scratch);
             check_test_graph_arguments(&test, &types.table, &storage, &output, &scratch);
