@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Straight-line checked expressions (#624), included by c_check_program_lower.c. Sixteen checked records are
-// classified together; reached leaves supply payloads and small contiguous subtrees share an entry template.
-// Each lane retains four bounded windows so a task's descent and return do not repeatedly classify a window.
-// The original task loop is the exact twin. A bulk write is published only after its whole template fits.
+// Ordinary expression fragments and ready instruction runs (#624), included by c_check_program_lower.c.
+// Partial vectors classify operators, classes and facts into register words. Reached leaves supply payloads;
+// occupied-slot masks expand their templates into typed columns. The original task loop is the exact twin.
 
 #define BUSTER_CHECK_LOWER_BATCH_VALUE 254u
 #define BUSTER_CHECK_LOWER_BATCH_WRAPPER 255u
@@ -36,44 +35,26 @@ static const uint8_t check_lower_batch_ops[64] __attribute__((aligned(64))) = {
     [CHECK_OP_SELECT] = BUSTER_CHECK_LOWER_BATCH_WRAPPER,
 };
 
-static void check_lower_batch_reset(CheckLowerWriter* writer)
-{
-    for (uint32_t i = 0; i < BUSTER_CHECK_LOWER_WINDOWS; i += 1)
-    {
-        writer->batches[i].first = BUSTER_CHECK_NONE;
-    }
-}
-
-// Cache only immutable operators and type facts. Semantic payloads are read only for expressions the
-// task loop actually reaches; preparing all constants and local maps made short expressions slower.
-static __attribute__((noinline)) void check_lower_batch_prepare(CheckLowerWriter* writer, CheckLowerBatch* batch, uint32_t node)
+// Classify at most 16 immutable operator/type records. The register result avoids an intermediate plan
+// or speculative payload walk; production callers supply a reached fragment or unary chain.
+static __attribute__((noinline)) __m512i check_lower_batch_classify(CheckLowerWriter* writer, uint32_t first, uint32_t count)
 {
     const CheckStream* stream = writer->program->stream;
     const CheckGraph* graph = &writer->program->input->graph;
-    batch->first = node & ~(BUSTER_CHECK_LOWER_BATCH - 1);
-    const uint32_t count = stream->count - batch->first < BUSTER_CHECK_LOWER_BATCH ? stream->count - batch->first : BUSTER_CHECK_LOWER_BATCH;
     const __mmask16 active = (__mmask16)((1u << count) - 1);
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
-    const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + batch->first, 1);
+    const __m512i types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, stream->values + first, 1);
     const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
     const __mmask16 typed = active & _mm512_cmplt_epu32_mask(indices, _mm512_set1_epi32((int)writer->type_count));
     const __m512i metadata = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(UINT8_MAX), typed, indices, writer->type_templates, 4);
-    const __m512i classes = _mm512_and_si512(metadata, _mm512_set1_epi32(UINT8_MAX));
-    const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + batch->first);
+    const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
     const __mmask16 small = active & _mm512_cmplt_epu32_mask(ops, _mm512_set1_epi32(64));
     const __m512i keys = _mm512_castsi128_si512(_mm512_cvtepi32_epi8(ops));
     const __m128i selected = _mm512_castsi512_si128(_mm512_permutexvar_epi8(keys, _mm512_load_si512(check_lower_batch_ops)));
     const __m512i recipes = _mm512_maskz_mov_epi32(small, _mm512_cvtepu8_epi32(selected));
-    const __m512i forbidden = _mm512_set1_epi32((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS) << 8);
-    batch->valid = active & _mm512_cmpge_epu32_mask(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8)) &
-                   _mm512_cmple_epu32_mask(classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_F64)) &
-                   _mm512_cmpeq_epi32_mask(_mm512_and_si512(metadata, forbidden), _mm512_setzero_si512());
-    _mm256_mask_storeu_epi16(batch->kinds, active, _mm512_cvtepi32_epi16(recipes));
-    _mm256_mask_storeu_epi16(batch->classes, active, _mm512_cvtepi32_epi16(classes));
-    _mm512_mask_storeu_epi32(batch->types, active, types);
-    _mm512_mask_storeu_epi32(batch->metadata, active, metadata);
     writer->classified_nodes += count;
+    return _mm512_or_si512(metadata, _mm512_slli_epi32(recipes, 16));
 }
 
 static bool check_lower_batch_proof(const CheckValue* value, CheckOp op)
@@ -148,19 +129,20 @@ static void check_lower_batch_write(CheckLowerWriter* writer, uint32_t kinds, ui
     writer->count += (uint32_t)__builtin_popcount(occupied);
 }
 
-// Isolated VALUE nodes need no speculative window. Their scalar template uses the same packed type
+// Isolated VALUE nodes and proven constants need no speculative window. Their scalar template uses the same packed type
 // lookup; taking an address keeps the original helper, including VLA indirection and storage flags.
 static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWriter* writer, uint32_t node, bool address, bool initialized)
 {
     const CheckProgram* program = writer->program;
     const CheckValue* value = program->stream->values + node;
     bool valid = false;
-    if (program->input->graph.ops[node] == CHECK_OP_VALUE)
+    const CheckOp op = program->input->graph.ops[node];
+    if (op == CHECK_OP_VALUE || (!address && check_lower_batch_proof(value, op)))
     {
         const uint32_t object = value->object;
         const bool known = object != 0 && object < program->object_count;
-        const bool compound = !initialized && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
-        if (address && value->category == CHECK_LVALUE && value->type != BUSTER_TYPE_VOID && value->overload_head == 0 && known && !compound)
+        const bool compound = op == CHECK_OP_VALUE && !initialized && known && program->input->compound_objects[object - 1] && !program->input->static_objects[object - 1];
+        if (op == CHECK_OP_VALUE && address && value->category == CHECK_LVALUE && value->type != BUSTER_TYPE_VOID && value->overload_head == 0 && known && !compound)
         {
             writer->token = program->input->graph.tokens[node];
             check_lower_address(writer, object, value->offset);
@@ -183,72 +165,195 @@ static inline __attribute__((always_inline)) bool check_lower_value(CheckLowerWr
     return valid;
 }
 
-static inline __attribute__((always_inline)) bool check_lower_batch_expression(CheckLowerWriter* writer, uint32_t node)
+// Consecutive instruction tasks have no remaining evaluation or conversion to decide. Transpose up to
+// four compact records in LIFO order, stopping before any other task. Tracked/source emission keeps its twin.
+static __attribute__((noinline)) bool check_lower_instruction_batch(CheckLowerWriter* writer)
+{
+    const uint32_t count = writer->depth < 3 ? writer->depth + 1 : 4;
+    const CheckLowerTaskPacked* first = writer->tasks + writer->depth - (count - 1);
+    const __m512i data = _mm512_maskz_loadu_epi64((__mmask8)((1u << (2 * count)) - 1), first);
+    const __m512i reverse = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(count - 1), _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7)), 1);
+    const __m512i control = _mm512_permutexvar_epi64(reverse, data);
+    const __m512i values = _mm512_permutexvar_epi64(_mm512_add_epi64(reverse, _mm512_set1_epi64(1)), data);
+    const __m512i tags = _mm512_and_si512(_mm512_srli_epi64(control, 32), _mm512_set1_epi64(UINT8_MAX));
+    const __mmask8 active = (__mmask8)((1u << count) - 1);
+    const uint32_t matches = active & _mm512_cmpeq_epi64_mask(tags, _mm512_set1_epi64(CHECK_LOWER_INSTRUCTION));
+    const uint32_t run = (uint32_t)__builtin_ctz(~matches);
+    const __mmask8 take = (__mmask8)((1u << run) - 1);
+    const __m512i classes = _mm512_and_si512(_mm512_srli_epi64(control, 48), _mm512_set1_epi64(UINT8_MAX));
+    const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
+    const bool valid = run >= 3 && (_mm512_cmplt_epu64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASSES)) & take) == take &&
+                       writer->count <= room && run <= room - writer->count;
+    if (valid)
+    {
+        _mm_mask_storeu_epi8(writer->kinds + writer->count, take, _mm512_cvtepi64_epi8(control));
+        _mm_mask_storeu_epi8(writer->classes + writer->count, take, _mm512_cvtepi64_epi8(classes));
+        _mm512_mask_storeu_epi64(writer->values + writer->count, take, values);
+        writer->count += run;
+        writer->depth -= run - 1;
+    }
+    return valid;
+}
+
+static inline __attribute__((always_inline)) bool check_lower_batch_fragment(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckValue* value = program->stream->values + node;
     const CheckOp op = graph->ops[node];
     const uint8_t recipe = op < 64 ? check_lower_batch_ops[op] : 0;
-    bool valid = recipe != 0 && recipe != BUSTER_CHECK_LOWER_BATCH_VALUE && value->overload_head == 0 && !check_lower_batch_proof(value, op);
+    const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR;
+    const bool pointer = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
+    const uint32_t nodes = 2 + binary;
+    const uint32_t entries = 1 + binary + (recipe != BUSTER_CHECK_LOWER_BATCH_WRAPPER);
+    const uint32_t a = graph->operand0[node];
+    const uint32_t b = binary ? graph->operand1[node] : 0;
+    const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
+    bool valid = recipe != 0 && recipe != BUSTER_CHECK_LOWER_BATCH_VALUE && value->overload_head == 0 && !check_lower_batch_proof(value, op) &&
+                 node >= 1 + binary && a + 1 + binary == node && (!binary || b + 1 == node) && writer->count <= room &&
+                 entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth;
     if (valid)
     {
-        CheckLowerBatch* batch = writer->batches + ((node / BUSTER_CHECK_LOWER_BATCH) & (BUSTER_CHECK_LOWER_WINDOWS - 1));
-        if (node < batch->first || node - batch->first >= BUSTER_CHECK_LOWER_BATCH)
-        {
-            check_lower_batch_prepare(writer, batch, node);
-        }
-        const uint32_t root = node - batch->first;
-        const uint8_t kind = (uint8_t)batch->kinds[root];
-        const uint8_t class = (uint8_t)batch->classes[root];
-        const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR;
-        const bool pointer = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT;
         const TypeId left = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE ? value->type :
                             op == CHECK_OP_SELECT ? 0 : program->stream->conversions[node].operands[0].type;
         const TypeId right = binary ? program->stream->conversions[node].operands[1].type : 0;
-        valid = ((batch->valid >> root) & 1) != 0 && check_lower_batch_target(writer, left, pointer) &&
-                (!binary || check_lower_batch_target(writer, right, pointer));
+        valid = (graph->ops[a] == CHECK_OP_VALUE || program->stream->values[a].constant_kind == CHECK_CONSTANT_INTEGER) &&
+                (!binary || graph->ops[b] == CHECK_OP_VALUE || program->stream->values[b].constant_kind == CHECK_CONSTANT_INTEGER) &&
+                (left == 0 || left == program->stream->values[a].type || check_lower_conversion_empty(writer, program->stream->values[a].type, left)) &&
+                (!binary || right == 0 || right == program->stream->values[b].type || check_lower_conversion_empty(writer, program->stream->values[b].type, right)) &&
+                check_lower_batch_target(writer, left, pointer) && (!binary || check_lower_batch_target(writer, right, pointer));
         if (valid)
         {
-            uint32_t nodes = 1;
-            const uint32_t a = graph->operand0[node];
-            const uint32_t b = binary ? graph->operand1[node] : 0;
-            const uint32_t entries = 1 + binary + (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER);
-            const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
-            bool joined = root >= 1 + binary && a + 1 + binary == node && (!binary || b + 1 == node) &&
-                          (left == 0 || left == batch->types[root - 1 - binary]) && (!binary || right == 0 || right == batch->types[root - 1]) &&
-                          writer->count <= room && entries <= room - writer->count && writer->depth <= writer->capacity && 5 <= writer->capacity - writer->depth;
+            const __m128i classified = _mm512_castsi512_si128(check_lower_batch_classify(writer, a, nodes));
+            const uint32_t a_info = (uint32_t)_mm_cvtsi128_si32(classified);
+            const uint32_t b_info = (uint32_t)_mm_extract_epi32(classified, 1);
+            const uint32_t root_info = binary ? (uint32_t)_mm_extract_epi32(classified, 2) : b_info;
+            const uint8_t kind = (uint8_t)(root_info >> 16);
+            const uint8_t class = (uint8_t)root_info;
             uint8_t a_kind = 0;
             uint8_t b_kind = 0;
             uint64_t a_bits = 0;
             uint64_t b_bits = 0;
-            joined = joined && check_lower_value_payload(writer, a, batch->metadata[root - 1 - binary], false, &a_kind, &a_bits);
-            joined = joined && (!binary || check_lower_value_payload(writer, b, batch->metadata[root - 1], false, &b_kind, &b_bits));
-            writer->token = graph->tokens[node];
-            if (joined)
+            valid = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
+                    (root_info & ((BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_ADDRESS) << 8)) == 0 &&
+                    check_lower_value_payload(writer, a, a_info, false, &a_kind, &a_bits) &&
+                    (!binary || check_lower_value_payload(writer, b, b_info, false, &b_kind, &b_bits));
+            if (valid)
             {
                 const uint32_t kinds = a_kind | (uint32_t)b_kind << 8 | (uint32_t)(kind == BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 0 : kind) << 16;
-                const uint32_t classes = batch->classes[root - 1 - binary] | (binary ? (uint32_t)batch->classes[root - 1] << 8 : 0) | (uint32_t)class << 16;
+                const uint32_t classes = (uint8_t)a_info | (binary ? (uint32_t)(uint8_t)b_info << 8 : 0) | (uint32_t)class << 16;
                 const uint8_t occupied = 1 | (binary ? 2 : 0) | (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER ? 4 : 0);
                 check_lower_batch_write(writer, kinds, classes, a_bits, b_bits, occupied);
                 writer->token = graph->tokens[binary ? b : a];
-                nodes += 1 + binary;
+                writer->expression_nodes += nodes;
+                writer->batch_nodes += nodes;
             }
-            else
-            {
-                if (kind != BUSTER_CHECK_LOWER_BATCH_WRAPPER)
-                {
-                    check_lower_instruction(writer, kind, class, 0);
-                }
-                if (binary)
-                {
-                    check_lower_operand(writer, node, 1, false, right);
-                }
-                check_lower_operand(writer, node, 0, false, left);
-            }
-            writer->expression_nodes += nodes;
-            writer->batch_nodes += nodes;
         }
     }
     return valid;
+}
+
+// Unary member/convert chains are common in source C. Four slots per node hold its optional conversion
+// or byte offset, address add and load. One occupancy word supplies every output position by prefix popcount.
+static __attribute__((noinline)) bool check_lower_batch_chain(CheckLowerWriter* writer, uint32_t node, bool address)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    uint32_t first = node;
+    uint32_t count = 1;
+    bool valid = true;
+    bool leaf = false;
+    while (valid && !leaf && count <= 4)
+    {
+        const CheckOp op = graph->ops[first];
+        leaf = op == CHECK_OP_VALUE || check_lower_batch_proof(stream->values + first, op);
+        if (!leaf)
+        {
+            const bool unary = op == CHECK_OP_ARROW || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
+            valid = unary && first != 0 && graph->operand0[first] + 1 == first && count < 4;
+            if (valid)
+            {
+                first -= 1;
+                count += 1;
+            }
+        }
+    }
+    valid = valid && leaf && count > 1 && (!address || graph->ops[node] == CHECK_OP_ARROW);
+    const uint32_t room = writer->capacity < BUSTER_TIER0_MAX_ENTRIES ? writer->capacity : BUSTER_TIER0_MAX_ENTRIES;
+    valid = valid && writer->count <= room && 4 * count <= room - writer->count && writer->depth <= writer->capacity && 4 * count + 1 <= writer->capacity - writer->depth;
+    uint32_t metadata[16];
+    uint8_t kinds[16] = { 0 };
+    uint8_t classes[16] = { 0 };
+    uint64_t values[16] = { 0 };
+    uint32_t occupied = 0;
+    if (valid)
+    {
+        _mm512_storeu_si512(metadata, check_lower_batch_classify(writer, first, count));
+        valid = check_lower_value_payload(writer, first, metadata[0], false, kinds, values);
+        classes[0] = (uint8_t)metadata[0];
+        occupied = 1;
+    }
+    for (uint32_t i = 1; valid && i < count; i += 1)
+    {
+        const uint32_t n = first + i;
+        const CheckValue* value = stream->values + n;
+        const CheckValue* child = value - 1;
+        const CheckOp op = graph->ops[n];
+        const uint8_t class = (uint8_t)metadata[i];
+        const uint8_t from = (uint8_t)metadata[i - 1];
+        const uint32_t slot = i * 4;
+        const uint32_t forbidden = (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS) << 8;
+        valid = value->overload_head == 0 && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_F64 &&
+                (metadata[i] & forbidden) == 0 && !check_lower_batch_proof(value, op);
+        valid = valid && (op != CHECK_OP_SELECT || class == from);
+        if (valid && op == CHECK_OP_ARROW)
+        {
+            const TypeId target = stream->conversions[n].operands[0].type;
+            valid = (value->flags & BUSTER_CHECK_BIT_FIELD) == 0 && (target == 0 || child->type == target || check_lower_conversion_empty(writer, child->type, target));
+            uint64_t offset = 0;
+            const uint32_t member = valid ? type_find_member(program->types, type_element(program->types, target), graph->members[n], &offset) : 0;
+            valid = valid && member != 0 && offset % 8 == 0;
+            if (valid)
+            {
+                kinds[slot] = BUSTER_TYPED_CONST;
+                classes[slot] = BUSTER_TYPED_CLASS_U64;
+                values[slot] = offset / 8;
+                kinds[slot + 1] = BUSTER_TYPED_PTR_ADD;
+                classes[slot + 1] = BUSTER_TYPED_CLASS_U64;
+                values[slot + 1] = 1;
+                occupied |= offset != 0 ? 3u << slot : 0;
+                kinds[slot + 2] = BUSTER_TYPED_LOAD;
+                classes[slot + 2] = class;
+                occupied |= !address || n != node ? 4u << slot : 0;
+            }
+        }
+        else if (valid && op != CHECK_OP_SELECT && child->type != value->type)
+        {
+            valid = (metadata[i] & (BUSTER_CHECK_LOWER_TYPE_BOOL << 8)) == 0;
+            kinds[slot] = BUSTER_TYPED_CONVERT;
+            classes[slot] = class;
+            occupied |= class != from ? 1u << slot : 0;
+        }
+    }
+    if (valid)
+    {
+        _mm_mask_compressstoreu_epi8(writer->kinds + writer->count, (__mmask16)occupied, _mm_loadu_si128((const __m128i*)kinds));
+        _mm_mask_compressstoreu_epi8(writer->classes + writer->count, (__mmask16)occupied, _mm_loadu_si128((const __m128i*)classes));
+        _mm512_mask_compressstoreu_epi64(writer->values + writer->count, (__mmask8)occupied, _mm512_loadu_si512(values));
+        const uint32_t low = (uint32_t)__builtin_popcount(occupied & UINT8_MAX);
+        _mm512_mask_compressstoreu_epi64(writer->values + writer->count + low, (__mmask8)(occupied >> 8), _mm512_loadu_si512(values + 8));
+        writer->count += (uint32_t)__builtin_popcount(occupied);
+        writer->token = graph->tokens[first];
+        writer->expression_nodes += count;
+        writer->batch_nodes += count;
+    }
+    return valid;
+}
+
+static inline __attribute__((always_inline)) bool check_lower_batch_expression(CheckLowerWriter* writer, uint32_t node, bool address)
+{
+    const CheckOp op = writer->program->input->graph.ops[node];
+    const bool chain = op == CHECK_OP_ARROW || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT;
+    return chain ? check_lower_batch_chain(writer, node, address) : !address && check_lower_batch_fragment(writer, node);
 }

@@ -168,67 +168,73 @@ module), so that tools and the comparisons below read them alike.
 
 ## Straight-line expression templates (#624)
 
-`c_check_program_batch.c` handles ordinary checked expressions before the task
-loop expands them. Each lane's writer keeps four 16-node windows. Byte permutes
-and bounded gathers classify operators, type classes and facts together. The
-cache holds only these immutable templates. It reads no semantic payload or
-local map speculatively: the popped expression supplies those facts when it is
-actually reached.
+`c_check_program_batch.c` handles ordinary leaves, reached operation fragments
+and consecutive ready instructions before the general task loop expands them.
+The original scalar expansion remains the oracle (`--scalar`).
 
-Isolated `VALUE` nodes use a scalar leaf template and the packed type lookup,
+Isolated `VALUE` nodes and proven integer constants use a scalar leaf template and a packed type lookup,
 without preparing a speculative window. Addressed lvalues keep the original
-address helper, including storage flags and VLA indirection. These scalar leaf
+address helper, including storage flags and VLA indirection. These leaf
 templates can also use the original tracked emitter. They are excluded from
 the reported vector share.
 
-A vector-classified unary operation or binary operation can join its immediately
-preceding leaf operands when their consuming edges need no conversion. Their
-occupied entry slots form a small mask, whose prefix popcounts give the output
-positions; compress stores expand the slots into the kind, class and value
-columns. An empty cast or selection wrapper has no final slot. The join proves
-the same evaluation order, entry room and a conservative bound on the original
-task stack before publishing a bulk write. Every input load is bounded by the
-graph's count. There is no graph-sized allocation or recursive traversal.
+A unary operation or binary operation can join its immediately preceding leaf
+operands when their consuming edges need no conversion. Short unary chains of
+casts, conversions and `->` accesses join up to four reached nodes, including
+ordinary numeric conversions, member byte offsets, loads and addressed members. Bounded gathers and
+byte permutes classify their partial vector of operator/type records, up to 16
+rows per invocation. Each 32-bit result word carries kind, class and type
+facts in registers. Reached leaves supply their payloads. Occupied slots form
+a mask, whose prefix popcounts give output positions; compress stores expand
+the slots into the kind, class and value columns. A cast whose classes already agree or a selection wrapper
+has no final slot. A chain assigns four slots per node for its optional
+conversion or member offset, address add and load. The join proves evaluation order, entry room and a
+conservative bound on the original task stack before publishing a bulk write.
+There is no graph-sized workspace, persistent plan or recursive traversal.
 
-An ordinary operation with other operands expands its cached native entry and
-keeps the original operand helpers, including their conversions and resource
-failures. Thus a call or member access inside an arithmetic expression need not
-force that arithmetic operation through the general dispatcher. Shared or
-reordered operands and window edges also keep those operand tasks. Constant
-proofs skip the same children as the scalar loop. Calls, builtins, bit-fields,
-pointer arithmetic, short-circuit and conditional expressions, memory classes,
-floating constants, address-taking and automatic compound initialization retain
-their existing rules. Operations in functions that track their evaluation stack, and source-row
-emission for `-g`, retain the task loop. `--scalar` selects that original loop
-for every expression.
+Other shapes keep the scalar task rules, including their complex or boolean conversions and
+resource failures. Constant proofs skip the same children. Calls, builtins,
+bit-fields, pointer arithmetic, short-circuit and conditional expressions,
+memory classes, floating constants and automatic compound initialization retain
+their existing handling. Operations in tracked functions and source-row
+emission for `-g` also keep scalar expression expansion.
 
-Window preparation may inspect a neighboring body's immutable checked types,
-but reads no mutable local map: another lane can own it. Each body invalidates
-its windows before assigning its locals. Coverage is accumulated in each part
-and merged in source order, without shared counters.
+Ready instruction tasks need no further semantic decision. In an untracked
+function without source rows, a consecutive prefix of at least three entries
+is transposed from one vector of at most four compact task records and appended
+to all three typed columns. It stops before any other task. If a class is
+unsupported or the whole prefix does not fit, the original single-entry emitter
+preserves the exact first failure and partial output. Tracked and source-row
+emission keep that emitter for every instruction.
 
-The pending task stack uses two words per task instead of a padded 32-byte C
-record. The control word holds the full node identity, kind and flags, and an
-instruction's class. Instructions, address addends, byte copies and complex
-operations retain all 64 payload bits. Other tasks keep their full TypeId and
-32-bit local identity in the payload word. The dispatch reads those words
-directly; only a consumer which needs a complete task decodes the original C
-record. Expression expansion takes its node and flags directly, so its common
-cases reconstruct no aggregate argument. The scalar expansion uses the same storage and original task rules;
-the codec has an independent field-for-field boundary test.
+The pending stack uses two words per task instead of a padded 32-byte C record.
+The control word holds the full node identity, kind and flags, and an
+instruction's class. Instructions, address addends, copies and complex
+operations retain all 64 payload bits; other tasks keep their full TypeId and
+32-bit local identity. Dispatch reads those words directly. Expression
+expansion takes its node and flags directly, reconstructing no task record in
+its common cases. The codec has an independent field-for-field boundary test.
 
-With `--time-stages`, `-c` and the executable driver also print
-`lowering-nodes`: evaluated expression occurrences, those handled by templates,
-and their percentage, plus the count of records classified (including cache
-misses). The denominator counts expression expansion visits, including repeated
-graph uses, and excludes unevaluated operands and unselected definitions. The
-optional packed per-type lookup table costs four bytes per type; without room
-for it the task loop remains available. `test-checker` compares every
-typed column with the task loop, including guarded partial batches, window
-edges, promoted operands, folded subtrees, shared/reordered uses, task and entry
-capacity failures, cache eviction, missing optional workspace and a guarded
-neighboring body's local map. Its source
-fixtures also compare native results and effects with Clang.
+Classification reads only immutable checked types and operators. A neighboring
+body's mutable local map is never inspected speculatively. Payloads belong only
+to reached expressions, and counters belong to each writer's part and are
+merged in source order, without shared counters.
+
+With `--time-stages`, `-c` and the executable driver print `lowering-nodes`:
+evaluated expression occurrences, those handled by vector operation fragments,
+their percentage, and records classified. This counts repeated graph uses and
+excludes unevaluated operands and unselected definitions. Scalar leaf templates
+and ready-instruction emission are excluded from the vector expression-node
+share. The optional packed type table costs four bytes per type; failure keeps
+scalar expression expansion available. Ready-instruction batching needs no such
+table.
+
+`test-checker` compares every column, failure and diagnostic token with the
+task loop. Guarded tests cover partial vectors, folds, promotions, shared and
+reordered uses, numeric and boolean conversion chains, missing optional workspace, addresses, VLA indirection, compound
+initialization and a neighboring body's local map. Guarded pending stacks check
+instruction prefixes, labels, every entry-capacity limit, invalid classes and
+untouched output tails. Source fixtures also compare native effects with Clang.
 
 ## Against clang -O0's objects
 

@@ -1403,6 +1403,14 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
         "v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}",
         "batch-ordinary-and-ordered-fallback", clang);
+    check_test_program_source(test,
+        "struct part{char tag;int value;double real;struct part*next;};"
+        "static volatile int side;static int touch(int n){side+=n&3;return side;}"
+        "int tested(int n){struct part b={2,n+7,(double)n*0.5,0},a={1,n-3,0.25,&b};"
+        "struct part*p=&a;p->value=(short)(unsigned char)(n+9);"
+        "int v=(short)(unsigned char)p->value+(int)p->next->real+(int)(double)p->next->value;"
+        "v+=(_Bool)p->next->value;v+=n?touch(p->value):touch(p->next->value);return v+side;}",
+        "batch-member-address-load-conversion-chains", clang);
     check_test_program_long_double_builtins(test, clang);
     check_test_control_masks(test);
     check_test_control_walks(test);

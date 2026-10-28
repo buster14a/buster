@@ -238,24 +238,11 @@ struct CheckLowerCaseRange
     uint32_t label;
 };
 
-// Immutable operator/type templates in a bounded window. Payloads belong to reached expressions alone;
+// A classification vector holds at most 16 operator/type words. Payloads belong to reached fragments;
 // classification never follows an operand, reads a local map or makes a reachability decision.
 #define BUSTER_CHECK_LOWER_BATCH 16u
-#define BUSTER_CHECK_LOWER_WINDOWS 4u
 
 _Static_assert(BUSTER_CHECK_LOWER_BATCH == 16, "the classification window is one vector of 32-bit node indices");
-_Static_assert((BUSTER_CHECK_LOWER_WINDOWS & (BUSTER_CHECK_LOWER_WINDOWS - 1)) == 0, "the window cache has a power-of-two slot count");
-
-typedef struct CheckLowerBatch CheckLowerBatch;
-struct CheckLowerBatch
-{
-    uint16_t kinds[BUSTER_CHECK_LOWER_BATCH];
-    uint16_t classes[BUSTER_CHECK_LOWER_BATCH];
-    TypeId types[BUSTER_CHECK_LOWER_BATCH];
-    uint32_t metadata[BUSTER_CHECK_LOWER_BATCH];
-    uint64_t valid;
-    uint32_t first;
-};
 
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
@@ -380,7 +367,6 @@ struct CheckLowerWriter
     bool scalar;
     bool track;
     bool sources;
-    CheckLowerBatch batches[BUSTER_CHECK_LOWER_WINDOWS];
     uint64_t expression_nodes;
     uint64_t batch_nodes;
     uint64_t classified_nodes;
@@ -4019,7 +4005,13 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
         if (kind == CHECK_LOWER_INSTRUCTION)
         {
-            check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
+            const bool batched = !sources && !writer->scalar && !writer->track && writer->depth >= 2 &&
+                                 ((writer->tasks[writer->depth - 1].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION &&
+                                 ((writer->tasks[writer->depth - 2].control >> 32) & UINT8_MAX) == CHECK_LOWER_INSTRUCTION && check_lower_instruction_batch(writer);
+            if (!batched)
+            {
+                check_lower_emit(writer, (uint8_t)node, (uint8_t)(packed.control >> 48), value);
+            }
         }
         else if (kind == CHECK_LOWER_CONVERSION)
         {
@@ -4099,15 +4091,15 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             const bool simple = !sources && !writer->scalar && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
                                 check_lower_value(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0);
-            const bool batched = !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 40) & 5) == 0 &&
-                                 check_lower_batch_expression(writer, node);
+            const bool batched = !simple && !sources && !writer->scalar && !writer->track && writer->type_templates != NULL && ((packed.control >> 42) & 1) == 0 &&
+                                 check_lower_batch_expression(writer, node, ((packed.control >> 40) & 1) != 0);
             if (!batched)
             {
-                writer->expression_nodes += 1;
                 if (!simple)
                 {
                     check_lower_expand(writer, node, ((packed.control >> 40) & 1) != 0, ((packed.control >> 41) & 1) != 0, ((packed.control >> 42) & 1) != 0);
                 }
+                writer->expression_nodes += 1;
             }
         }
     }
@@ -5284,8 +5276,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         {
             check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
         }
-        // One bounded gather per node obtains both columns. This optional table is only for the batch path;
-        // no room leaves its exact task loop available, and scalar/source-row lowering allocates none.
+        // One bounded lookup obtains both columns for the leaf and vector kernels. The optional table's
+        // failure retains scalar expression expansion; scalar/source-row lowering allocates none.
         shared->type_templates = !scalar && !sources && program->body_count != 0 ?
                                  BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)shared->type_count + 1) : NULL;
         for (uint32_t first = 0; shared->type_templates != NULL && first < shared->type_count; first += 16)
@@ -5576,7 +5568,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->table_current = BUSTER_CHECK_NONE;
         writer->table_pending = false;
         writer->depth = 0;
-        check_lower_batch_reset(writer);
         if (sources)
         {
             writer->filled = 0;

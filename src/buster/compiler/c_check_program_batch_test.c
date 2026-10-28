@@ -7,8 +7,83 @@
 #define BUSTER_CHECK_BATCH_TEST_NODES 321u
 #define BUSTER_CHECK_BATCH_TEST_ENTRIES (BUSTER_CHECK_BATCH_TEST_NODES * 4)
 
+static void check_test_program_instruction_batch(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* memory = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const bool ready = memory != MAP_FAILED && mprotect(memory + page, page, PROT_NONE) == 0;
+    check_test_expect(test, ready, "instruction task batches have a protected stack tail");
+    for (uint32_t count = 1; ready && count <= 17; count += 1)
+    {
+        CheckLowerTaskPacked* tasks = (CheckLowerTaskPacked*)(memory + page - count * sizeof(CheckLowerTaskPacked));
+        for (uint32_t mode = 0; mode < 3; mode += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const bool label = mode == 1 && i == count / 2;
+                tasks[count - 1 - i] = check_lower_task_pack((CheckLowerTask){
+                    .kind = label ? CHECK_LOWER_LABEL : CHECK_LOWER_INSTRUCTION,
+                    .node = label ? 0 : i % 2 == 0 ? BUSTER_TYPED_CONST : BUSTER_TYPED_NEG,
+                    .type = label ? 0 : mode == 2 && i == count / 2 ? UINT8_MAX : i % BUSTER_TYPED_CLASSES,
+                    .value = label ? 0 : UINT64_C(0x1234567800000000) + i,
+                });
+            }
+            for (uint32_t capacity = 0; capacity <= count + 1; capacity += 1)
+            {
+                uint8_t kinds[2][32];
+                uint8_t classes[2][32];
+                uint64_t values[2][32];
+                uint32_t labels[2][1] = { { BUSTER_CHECK_NONE }, { BUSTER_CHECK_NONE } };
+                memset(kinds, 0xa5, sizeof(kinds));
+                memset(classes, 0xa5, sizeof(classes));
+                memset(values, 0xa5, sizeof(values));
+                CheckProgramLowered status[2] = { 0 };
+                CheckLowerWriter writers[2];
+                for (uint32_t path = 0; path < 2; path += 1)
+                {
+                    writers[path] = (CheckLowerWriter){
+                        .output = status + path,
+                        .tasks = tasks,
+                        .depth = count,
+                        .capacity = capacity,
+                        .kinds = kinds[path],
+                        .classes = classes[path],
+                        .values = values[path],
+                        .labels = labels[path],
+                        .label_count = 1,
+                        .token = 123,
+                        .scalar = path == 0,
+                    };
+                    if (path == 1 && count == 8 && mode == 0 && capacity == 8)
+                    {
+                        const CheckLowerTaskPacked first = tasks[--writers[path].depth];
+                        const bool batched = check_lower_instruction_batch(writers + path);
+                        check_test_expect(test, batched, "consecutive instruction tasks actually take the vector output kernel");
+                        if (!batched)
+                        {
+                            const CheckLowerTask task = check_lower_task_unpack(first);
+                            check_lower_emit(writers + path, (uint8_t)task.node, (uint8_t)task.type, task.value);
+                        }
+                    }
+                    check_lower_drain(writers + path);
+                }
+                check_test_expect(test, status[0].status == status[1].status && status[0].token == status[1].token &&
+                                  writers[0].count == writers[1].count && writers[0].depth == writers[1].depth && labels[0][0] == labels[1][0] &&
+                                  memcmp(kinds[0], kinds[1], sizeof(kinds[0])) == 0 && memcmp(classes[0], classes[1], sizeof(classes[0])) == 0 &&
+                                  memcmp(values[0], values[1], sizeof(values[0])) == 0,
+                                  "guarded instruction batches preserve columns, untouched tails, labels and the first capacity/class failure");
+            }
+        }
+    }
+    if (memory != MAP_FAILED)
+    {
+        munmap(memory, 2 * page);
+    }
+}
+
 static void check_test_program_batch(CheckTest* test)
 {
+    check_test_program_instruction_batch(test);
     for (uint32_t kind = CHECK_LOWER_EXPRESSION; kind <= CHECK_LOWER_COMPLEX_TRUTH; kind += 1)
     {
         for (uint32_t flags = 0; flags < 8; flags += 1)
@@ -118,7 +193,7 @@ static void check_test_program_batch(CheckTest* test)
         };
         // Plain postorder, promoted edges, folded subtrees (gaps), and repeated/reordered operands. Each mode
         // still compares the actual scalar task output; fallback must not hide a stricter eligibility rule.
-        for (uint32_t mode = 0; mode < 7; mode += 1)
+        for (uint32_t mode = 0; mode < 10; mode += 1)
         {
             memset(stream.values, 0, (uint64_t)count * sizeof(CheckValue));
             memset(stream.conversions, 0, (uint64_t)count * sizeof(CheckNodeConversions));
@@ -162,6 +237,15 @@ static void check_test_program_batch(CheckTest* test)
                         graph->operand1[n] = n - 2;
                     }
                 }
+                if (mode >= 7 && n != 0)
+                {
+                    const TypeId numeric[] = { BUSTER_TYPE_INT, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_FLOAT };
+                    graph->ops[n] = n % 2 != 0 ? CHECK_OP_CAST : CHECK_OP_CONVERT;
+                    graph->operand0[n] = mode == 9 && n > 1 && n % 3 == 0 ? n - 2 : n - 1;
+                    graph->operand1[n] = BUSTER_CHECK_NONE;
+                    stream.values[n].constant_kind = CHECK_CONSTANT_NONE;
+                    stream.values[n].type = mode == 8 && n % 4 == 1 ? BUSTER_TYPE_BOOL : numeric[n % BUSTER_ARRAY_LENGTH(numeric)];
+                }
             }
             uint8_t kinds[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
             uint8_t classes[3][BUSTER_CHECK_BATCH_TEST_ENTRIES];
@@ -198,12 +282,21 @@ static void check_test_program_batch(CheckTest* test)
                     };
                     indirect[path][0] = mode == 6 ? BUSTER_CHECK_LOWER_VLA_ALLOCATED : BUSTER_CHECK_LOWER_VLA_NONE;
                     local_flags[path][0] = 0;
-                    check_lower_batch_reset(writers + path);
                     if (path == 1)
                     {
-                        check_lower_batch_prepare(writers + path, writers[path].batches + (((count - 1) / BUSTER_CHECK_LOWER_BATCH) & (BUSTER_CHECK_LOWER_WINDOWS - 1)), count - 1);
+                        const uint32_t first = count > BUSTER_CHECK_LOWER_BATCH ? count - BUSTER_CHECK_LOWER_BATCH : 0;
+                        uint32_t classified[BUSTER_CHECK_LOWER_BATCH];
+                        _mm512_storeu_si512(classified, check_lower_batch_classify(writers + path, first, count - first));
+                        bool same_metadata = true;
+                        for (uint32_t i = 0; i < count - first; i += 1)
+                        {
+                            const uint32_t index = type_index(stream.values[first + i].type);
+                            const uint32_t expected = index < types.table.types.count ? type_templates[index] : UINT8_MAX;
+                            same_metadata = same_metadata && (classified[i] & UINT16_MAX) == expected;
+                        }
+                        check_test_expect(test, same_metadata, "every guarded classification lane agrees with the scalar type facts");
                     }
-                    check_lower_expression(writers + path, count - 1, mode >= 5, 0);
+                    check_lower_expression(writers + path, count - 1, mode == 5 || mode == 6, 0);
                     check_lower_drain(writers + path);
                 }
                 const bool same = writers[0].count == writers[1].count && status[0].status == status[1].status && status[0].token == status[1].token &&
@@ -324,8 +417,7 @@ static void check_test_program_batch(CheckTest* test)
             .type_templates = type_templates,
             .type_count = types.table.types.count,
         };
-        check_lower_batch_reset(&writer);
-        check_lower_batch_prepare(&writer, writer.batches, 0);
+        (void)check_lower_batch_classify(&writer, 0, 2);
         const bool lowered = check_lower_value(&writer, 0, false, false);
         check_test_expect(test, lowered && writer.count == 1 && kinds[0] == BUSTER_TYPED_LOCAL && classes[0] == BUSTER_TYPED_CLASS_I32 && values[0] == 0,
                           "a window across bodies never reads another lane's mutable local map");
@@ -334,13 +426,31 @@ static void check_test_program_batch(CheckTest* test)
         source_values[0].constant_kind = CHECK_CONSTANT_INTEGER;
         source_values[0].integer = 7;
         writer.count = 0;
-        check_lower_batch_reset(&writer);
         check_test_expect(test, !check_lower_value(&writer, 0, false, false) && writer.count == 0,
                           "an automatic compound literal always defers its initializer, before testing constant proofs");
         check_test_expect(test, !check_lower_value(&writer, 0, true, false) && writer.count == 0,
                           "an automatic compound literal also initializes before an addressed leaf");
         check_test_expect(test, check_lower_value(&writer, 0, false, true) && writer.count == 1 && kinds[0] == BUSTER_TYPED_CONST && values[0] == 7,
                           "an initialized compound expression can then take its constant leaf template");
+        ops[0] = CHECK_OP_CAST;
+        writer.count = 0;
+        check_test_expect(test, check_lower_value(&writer, 0, false, false) && writer.count == 1 && values[0] == 7,
+                          "a proven cast is a leaf without inspecting its skipped operand or another body's map");
+        const CheckOp ordered[] = { CHECK_OP_STATEMENT_VALUE, CHECK_OP_INITIALIZE, CHECK_OP_BUILTIN_QUERY };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ordered); i += 1)
+        {
+            ops[0] = ordered[i];
+            check_test_expect(test, !check_lower_value(&writer, 0, false, false) && writer.count == 1,
+                              "a constant annotation never bypasses a region, initializer or query's evaluation rule");
+        }
+        ops[0] = CHECK_OP_CAST;
+        source_values[0].flags = BUSTER_CHECK_SIDE_EFFECT;
+        check_test_expect(test, !check_lower_value(&writer, 0, false, false), "a cast with side effects retains the scalar evaluation rule");
+        source_values[0].flags = BUSTER_CHECK_FP_ENVIRONMENT;
+        check_test_expect(test, !check_lower_value(&writer, 0, false, false), "a cast with floating environment effects retains runtime evaluation");
+        source_values[0].flags = 0;
+        source_values[0].fault = CHECK_FAULT_SIGNED_OVERFLOW;
+        check_test_expect(test, !check_lower_value(&writer, 0, false, false), "a faulted constant retains the original lowering rule");
     }
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sizes); c += 1)
     {
