@@ -1032,7 +1032,7 @@ static ForeignLinkResult foreign_link_copies(ForeignLink* output, const Foreign*
         const uint32_t count = names->count - first < 16 ? names->count - first : 16;
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count);
         const __m512i ordered = foreign_order_digits(names->order + first, count, 0);
-        const __m512i symbols = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, ordered, output->names, 4);
+        const __m512i symbols = foreign_order_values(names->order + first, count, output->names);
         const __m512i bits = _mm512_srlv_epi32(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, _mm512_srli_epi32(symbols, 5), copied, 4),
                                                _mm512_and_si512(symbols, _mm512_set1_epi32(31)));
         uint32_t name_ids[16];

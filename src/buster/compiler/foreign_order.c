@@ -19,6 +19,22 @@ static __m512i foreign_order_digits(const uint64_t* keys, uint32_t count, uint32
     return _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
 }
 
+// Values at opaque u32 name IDs: i32 gather indices would sign-extend IDs with bit 31 set. Keep the zero-extended
+// low half of each packed key in an i64 index, including the full legal ID range and masked tails.
+static __m512i foreign_order_values(const uint64_t* keys, uint32_t count, const uint32_t* values)
+{
+    const uint32_t first = count < 8 ? count : 8;
+    const uint32_t second = count > 8 ? count - 8 : 0;
+    const __mmask8 a_mask = (__mmask8)_bzhi_u32(0xff, first);
+    const __mmask8 b_mask = (__mmask8)_bzhi_u32(0xff, second);
+    const __m512i ids = _mm512_set1_epi64(UINT32_MAX);
+    const __m512i low = _mm512_and_si512(_mm512_maskz_loadu_epi64(a_mask, keys), ids);
+    const __m512i high = _mm512_and_si512(_mm512_maskz_loadu_epi64(b_mask, keys + first), ids);
+    const __m256i a = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), a_mask, low, values, 4);
+    const __m256i b = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), b_mask, high, values, 4);
+    return _mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1);
+}
+
 // The high half is the complete checked first-record ordinal, the low half the opaque name ID. Stable byte radix
 // count/place/fill, with the same conflict/rank scheme as this project's c_bindings_sort. The scalar twin takes all
 // four digits; vector skips only digits proved constant while keys were packed. IDs never break an ordinal tie:

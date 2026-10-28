@@ -11,6 +11,26 @@
 
 static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
 {
+    ForeignTestEdge values_edge = { 0 };
+    const bool mapped = foreign_test_edge(&values_edge, (uint64_t)UINT32_MAX * 4);
+    foreign_test_expect(tally, mapped, "reserve sparse value map for unsigned high-ID addressing", 0);
+    if (mapped)
+    {
+        uint32_t* values = (uint32_t*)values_edge.end - UINT32_MAX;
+        values[0] = 11;
+        values[0x80000000u] = 23;
+        values[UINT32_MAX - 2] = 37;
+        const uint64_t keys[] = { 0x1234567800000000ull, 0x1234567880000000ull, 0x12345678fffffffdull };
+        uint32_t gathered[16];
+        _mm512_storeu_si512(gathered, foreign_order_values(keys, BUSTER_ARRAY_LENGTH(keys), values));
+        bool correct = gathered[0] == 11 && gathered[1] == 23 && gathered[2] == 37;
+        for (uint32_t i = BUSTER_ARRAY_LENGTH(keys); i < BUSTER_ARRAY_LENGTH(gathered); i += 1)
+        {
+            correct = correct && gathered[i] == 0;
+        }
+        foreign_test_expect(tally, correct, "gather zero-extends IDs at bit 31 and UINT32_MAX, with inactive tails", 0);
+    }
+    foreign_test_edge_release(&values_edge);
     for (uint32_t test = 0; test < 69; test += 1)
     {
         const uint32_t count = test < 66 ? test : 4095 + test - 66;
@@ -237,6 +257,77 @@ static bool foreign_order_test_section(String8 reference, String8 actual, bool d
     return result;
 }
 
+// The real command path: the expanded archive has the same loaded member and thousands of unused index entries.
+// Its default partition count differs, without any testing override in the driver or production environment.
+static void foreign_order_test_driver(const char* directory, Arena* arena, ForeignTestTally* tally, bool dynamic, String8 interpreter)
+{
+    const uint64_t saved = arena->length;
+    String8 reference = { 0 };
+    for (uint32_t archive = 0; archive < 2; archive += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
+            {
+                ForeignTestPath executable;
+                ForeignTestPath output;
+                ForeignTestPath errors;
+                char lanes[16];
+                snprintf(executable, sizeof(executable), "%s/fo_driver_%u_%u_%u_%u", directory, dynamic, archive, path, foreign_test_lanes[l]);
+                snprintf(output, sizeof(output), "%s.out", executable);
+                snprintf(errors, sizeof(errors), "%s.err", executable);
+                snprintf(lanes, sizeof(lanes), "%u", foreign_test_lanes[l]);
+                char* arguments[24] = {
+                    (char*)"/proc/self/exe", (char*)"link-foreign", (char*)"--lanes", lanes, (char*)"-o", executable,
+                };
+                uint32_t count = 6;
+                if (path == 0)
+                {
+                    arguments[count++] = (char*)"--scalar";
+                }
+                if (dynamic)
+                {
+                    arguments[count++] = (char*)"-pie";
+                    arguments[count++] = (char*)"--dynamic-linker";
+                    arguments[count++] = interpreter.pointer;
+                    arguments[count++] = foreign_test_path(directory, "fo_3.so", arena);
+                }
+                arguments[count++] = foreign_test_path(directory, dynamic ? "fo_start_1.o" : "fo_start_0.o", arena);
+                arguments[count++] = foreign_test_path(directory, "fo_0.o", arena);
+                arguments[count++] = foreign_test_path(directory, archive == 0 ? "fo_small.a" : "fo_expanded.a", arena);
+                arguments[count] = 0;
+                const uint64_t iteration = arena->length;
+                const bool linked = object_test_run(arguments, output, errors) == 0;
+                char detail[96];
+                snprintf(detail, sizeof(detail), "%s archive %u path %u lanes %u", dynamic ? "PIE" : "static", archive, path, foreign_test_lanes[l]);
+                foreign_test_expect(tally, linked, "real driver publishes foreign-order fixture", detail);
+                const String8 diagnostics = foreign_test_read(arena, errors);
+                foreign_test_expect(tally, linked && diagnostics.pointer != 0 && diagnostics.length == 0, "real driver has no unexpected diagnostics", detail);
+                foreign_test_expect(tally, linked && foreign_dynamic_test_run(directory, executable, 0, arena), "real driver output runs GOT/bounds/copy/archive checks", detail);
+                const String8 bytes = linked ? foreign_test_read(arena, executable) : (String8){ 0 };
+                if (reference.pointer != 0)
+                {
+                    foreign_test_expect(tally, bytes.pointer != 0 && reference.length == bytes.length && memcmp(reference.pointer, bytes.pointer, bytes.length) == 0,
+                                        "real driver is byte-identical after unused-index and lane perturbations", detail);
+                    foreign_test_expect(tally, foreign_order_test_section(reference, bytes, dynamic, ".symtab") && foreign_order_test_section(reference, bytes, dynamic, ".got"),
+                                        "real driver preserves canonical symtab and GOT bytes", detail);
+                    if (dynamic)
+                    {
+                        foreign_test_expect(tally, foreign_order_test_section(reference, bytes, true, ".dynsym"), "real driver preserves canonical dynsym bytes", detail);
+                    }
+                }
+                arena_pop_to(arena, iteration);
+                if (reference.pointer == 0 && linked)
+                {
+                    reference = foreign_test_read(arena, executable);
+                    foreign_test_expect(tally, reference.pointer != 0, "retain original driver bytes", detail);
+                }
+            }
+        }
+    }
+    arena_pop_to(arena, saved);
+}
+
 static void foreign_order_test_program(const char* directory, Arena* arena, ForeignTestTally* tally, bool dynamic, String8 interpreter)
 {
     const uint64_t saved = arena->length;
@@ -357,6 +448,11 @@ static bool foreign_order_test(const char* directory, Arena* arena)
         if (loader)
         {
             foreign_order_test_program(directory, arena, &tally, true, runtime.loader_path);
+        }
+        foreign_order_test_driver(directory, arena, &tally, false, (String8){ 0 });
+        if (loader)
+        {
+            foreign_order_test_driver(directory, arena, &tally, true, runtime.loader_path);
         }
     }
     runtime_release(&runtime);
