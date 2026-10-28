@@ -608,7 +608,9 @@ static uint32_t pp_test_diagnostic_note_includes(void)
     snprintf(first, sizeof(first), "%s/first.h", directory);
     snprintf(second, sizeof(second), "%s/second.h", directory);
     snprintf(source_name, sizeof(source_name), "%s/source.c", directory);
-    const bool files = created && pp_test_write_file(first, "int first;\n") && pp_test_write_file(second, "int second;\n");
+    const char source[] = "#include \"first.h\"\n#include \"second.h\"\n";
+    const bool files = created && pp_test_write_file(first, "int first;\n") && pp_test_write_file(second, "int second;\n") &&
+                       pp_test_write_file(source_name, source);
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
         for (uint32_t collect = 0; collect < 2; collect += 1)
@@ -623,9 +625,8 @@ static uint32_t pp_test_diagnostic_note_includes(void)
             };
             InternTable identifiers = { 0 };
             Preprocessor pp = { 0 };
-            const char source[] = "#include \"first.h\"\n#include \"second.h\"\n";
             bool ready = files && diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
-                         pp_run_source(&pp, source_name, (const uint8_t*)source, sizeof(source) - 1) && pp.output.count == 6;
+                         pp_run(&pp, source_name) && pp.output.count == 6;
             if (ready)
             {
                 const PPOutputDiagnosticNote note = { 1, "previous definition is here" };
@@ -637,7 +638,8 @@ static uint32_t pp_test_diagnostic_note_includes(void)
             }
             char* text = NULL;
             size_t length = 0;
-            ready = ready && pp_test_read_output(diagnostics, &text, &length);
+            const bool read = pp_test_read_output(diagnostics, &text, &length);
+            ready = ready && read;
             char expected[4096];
             const int written = snprintf(expected, sizeof(expected),
                 "In file included from %s:2:\n%s:1:5: error: first primary\n%s:1:5: note: previous definition is here\n"
@@ -648,7 +650,7 @@ static uint32_t pp_test_diagnostic_note_includes(void)
             failures += !exact;
             if (!exact)
             {
-                printf("diagnostic note includes scalar=%u collect=%u: %s\n", scalar, collect, text != NULL ? text : "unavailable");
+                printf("diagnostic note includes scalar=%u collect=%u tokens=%u: %s\n", scalar, collect, pp.output.count, text != NULL ? text : "unavailable");
             }
             free(text);
             pp_release(&pp);
@@ -661,6 +663,7 @@ static uint32_t pp_test_diagnostic_note_includes(void)
     }
     unlink(first);
     unlink(second);
+    unlink(source_name);
     if (created)
     {
         rmdir(directory);
