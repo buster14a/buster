@@ -68,7 +68,7 @@ typedef enum CheckFault
 #define BUSTER_CHECK_INACTIVE_UNION_READ 0x40000u
 #define BUSTER_CHECK_INACTIVE_UNION_ADDRESS 0x80000u
 // A symbolic address can remain valid when Clang refuses a value read through its source path: a changed
-// pointee type (including a void round trip), or decay of an array without a declared bound. This evidence
+// pointee type (including a void round trip), or an array member without a declared bound. This evidence
 // follows the selected pointer, not unrelated/discarded operands. Qualifier-only casts keep the read proof.
 #define BUSTER_CHECK_CONST_READ_RESTRICTED 0x100000u
 
@@ -683,7 +683,6 @@ static CheckValue check_action_operand(TypeTable* table, const CheckAction* acti
         {
             value.type = pointer;
             value.category = CHECK_RVALUE;
-            value.flags |= kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? BUSTER_CHECK_CONST_READ_RESTRICTED : 0;
             value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER);
             if (!action->constant_evaluated && (value.flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS)
             {
@@ -1741,6 +1740,8 @@ static void check_action_member(TypeTable* table, const CheckAction* action, Che
             result->value.category = arrow || base.category == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
             check_action_inherit(&result->value, &base);
             result->value.flags |= base.flags & (BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED);
+            result->value.flags |= type_kind(table, type_strip_aligned(table, result->value.type)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ?
+                                   BUSTER_CHECK_CONST_READ_RESTRICTED : 0;
             result->value.flags |= arrow && (base.flags & BUSTER_CHECK_INACTIVE_UNION_ADDRESS) != 0 ? BUSTER_CHECK_INACTIVE_UNION_READ : 0;
             if (!check_action_const_member(table, action, &base, record, member))
             {
