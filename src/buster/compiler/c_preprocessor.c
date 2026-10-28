@@ -3815,9 +3815,9 @@ static bool file_cache_directory_exact(int fd)
     return result;
 }
 
-// Snapshot a search directory on one lane, lazily on its first include (the run-ahead does this before its lanes
-// start). A failed/incomplete listing, unsupported filesystem or exhausted optional arena is an ordinary-probe
-// fallback. Keep the failed directory record too, so an unreadable directory is not opened again for every name.
+// Snapshot a search directory on one lane after its first missing candidate; the run-ahead publishes between waves.
+// A failed/incomplete listing, unsupported filesystem or exhausted optional arena retains the ordinary probe.
+// Keep the failed directory record too, so an unreadable directory is not opened again for every name.
 static void file_cache_list_directory(FileCache* cache, const char* path, uint32_t length)
 {
     FileCacheDirectory* existing = cache->directories;
