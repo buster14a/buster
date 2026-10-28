@@ -111,6 +111,11 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h+(a*3)[n&3];}",
         },
         {
+            "volatile-vector-values",
+            "int tested(int n){unsigned h=2166136261u;volatile v4si a={n,2,3,4};v4si b=a;a=b+1;"
+            "int x=((v4si)a)[n&3];v4si c=(0,a);int y=c[(n+1)&3];FOLD(b);FOLD(x);FOLD(y);return (int)h;}",
+        },
+        {
             "vector-aligned-locals",
             "typedef int v16si __attribute__((vector_size(64)));typedef double v4df __attribute__((vector_size(32)));"
             "int tested(int n){unsigned h=2166136261u;v16si a={n},b={2};a=a*b+a;FOLD(a);v4df d={(double)n,1.0};d=d*d;FOLD(d);"
@@ -134,36 +139,101 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
 // What the lowering refuses by name, with vectors of each kind it can't take yet.
 static void check_test_program_vector_refusals(CheckTest* test, const X86Target* target)
 {
-    static const char* const refused[][3] = {
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* reason;
+        uint32_t initializations;
+    } refused[] = {
         {
             "vector-multiply-bytes",
             "typedef char v16qi __attribute__((vector_size(16)));int tested(int n){v16qi a={(char)n},b={2};a=a*b;return a[0];}",
             "vector multiplication of 8-bit elements",
+            2,
         },
         {
             "vector-divide-integers",
             "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=a/b;return a[0];}",
             "vector division of integers",
+            2,
         },
         {
             "vector-shift-bytes",
             "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
             "vector shifts of 8-bit elements",
+            2,
         },
         {
             "vector-of-8-bytes",
             "typedef int v2si __attribute__((vector_size(8)));int tested(int n){v2si a={n},b={2};a=b;return a[0];}",
             "vector types of other than 16, 32 or 64 bytes",
+            2,
+        },
+        {
+            "volatile-vector-element-read",
+            "typedef int V __attribute__((vector_size(16)));int tested(volatile V*p,int i){return (*p)[i&3];}",
+            "element access through volatile vectors",
+            0,
+        },
+        {
+            "volatile-vector-element-write",
+            "typedef int V __attribute__((vector_size(16)));void tested(volatile V*p,int i){(*p)[i&3]=i;}",
+            "element access through volatile vectors",
+            0,
+        },
+        {
+            "volatile-vector-element-update",
+            "typedef int V __attribute__((vector_size(16)));int tested(volatile V*p,int i){return (*p)[i&3]+=i;}",
+            "element access through volatile vectors",
+            0,
+        },
+        {
+            "volatile-vector-element-member",
+            "typedef int V __attribute__((vector_size(16)));struct S{volatile V v;};int tested(struct S*p,int i){return p->v[i&3];}",
+            "element access through volatile vectors",
+            0,
+        },
+        {
+            "volatile-vector-element-side-effect-base",
+            "typedef int V __attribute__((vector_size(16)));int tested(volatile V*p,int*i){return p[(*i)++][0];}",
+            "element access through volatile vectors",
+            0,
+        },
+        {
+            "vector-logical-not",
+            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2};return (!a)[0];}",
+            "vector logical operators and conditions",
+            1,
+        },
+        {
+            "vector-logical-and",
+            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a&&b)[0];}",
+            "vector logical operators and conditions",
+            2,
+        },
+        {
+            "vector-logical-or",
+            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a||b)[0];}",
+            "vector logical operators and conditions",
+            2,
+        },
+        {
+            "vector-condition",
+            "typedef int V __attribute__((ext_vector_type(4)));int tested(int n){V a={n,0,1,2},b={1,n,0,1};return (a?a:b)[0];}",
+            "vector logical operators and conditions",
+            2,
         },
         {
             "vector-integer-cast",
             "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n};__int128 x=(__int128)a;return (int)x;}",
             "casts between vectors and integers or vectors of other sizes",
+            2,
         },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
-        check_test_program_boundary_target(test, refused[i][1], refused[i][0], true, false, 0, 2, refused[i][2], target);
+        check_test_program_boundary_target(test, refused[i].source, refused[i].name, true, false, 0, refused[i].initializations, refused[i].reason, target);
     }
     // Without AVX-512F and AVX-512VL, a vector value of any kind.
     check_test_program_boundary_reason(test, "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=b;return a[0];}",
