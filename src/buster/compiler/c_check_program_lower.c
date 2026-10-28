@@ -381,7 +381,8 @@ struct CheckLowerWriter
     uint32_t x87_constant_capacity;
     bool x87;
     // Whether the function has 128-bit integer values (Tier0Function.int128's): an entry of class I128 or U128; and vector
-    // values (Tier0Function.vectors's): an entry of class VECTOR, which every function with X86 entries has.
+    // values or X86 entries (Tier0Function.vectors's): an entry of class VECTOR, or an x86 builtin's X86 entry, whose
+    // values may all be integers (an opmask's).
     bool int128;
     bool vectors;
     // The function's machine operations (Tier0Function.operations), each X86 entry's row by its index: the vector
@@ -4035,11 +4036,19 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
         const TypeId result = stream->values[node].type;
+        // ktestz's result is whether its row's is 0: an int from the test, converted to the call's type.
+        const bool zero_test = check_x86_lower_zero_test(info->name, info->name_length);
         if (row.result_class != BUSTER_TYPED_CLASS_VOID && row.result_class != BUSTER_TYPED_CLASS_VECTOR)
         {
-            check_lower_convert(writer, check_lower_class_type(row.result_class), result);
+            check_lower_convert(writer, zero_test ? BUSTER_TYPE_INT : check_lower_class_type(row.result_class), result);
+        }
+        if (zero_test)
+        {
+            check_lower_truth(writer, check_lower_class_type(row.result_class), true);
         }
         check_lower_instruction(writer, BUSTER_TYPED_X86, row.result_class, index);
+        // An X86 entry makes the function one with vectors (Tier0Function.vectors), whatever its values' classes.
+        writer->vectors = true;
         for (uint32_t a = count; a-- > 0;)
         {
             if (a != skipped)
@@ -6562,11 +6571,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         // The function has long double values (Tier0Function.x87) where its result is one or an entry is of class F80,
         // 128-bit integer ones (Tier0Function.int128) where an entry is of class I128 or U128, and vectors
-        // (Tier0Function.vectors) where one is of class VECTOR.
+        // (Tier0Function.vectors) where one is of class VECTOR or an x86 builtin made an X86 entry.
         const uint32_t memory = BUSTER_SCALAR_PATH(writer->scalar) ? check_lower_entry_classes_scalar(writer->classes, writer->count) : check_lower_entry_classes(writer->classes, writer->count);
         writer->x87 = writer->x87 || (memory & BUSTER_CHECK_LOWER_ENTRIES_X87) != 0;
         writer->int128 = (memory & BUSTER_CHECK_LOWER_ENTRIES_WIDE) != 0;
-        writer->vectors = (memory & BUSTER_CHECK_LOWER_ENTRIES_VECTOR) != 0;
+        writer->vectors = writer->vectors || (memory & BUSTER_CHECK_LOWER_ENTRIES_VECTOR) != 0;
 #define BUSTER_CHECK_LOWER_COPY(field, source, type, length) \
         if (status->status == CHECK_PROGRAM_OK && (length) != 0) \
         { \

@@ -230,13 +230,16 @@ does, each rule checked against clang's answers on probes of it:
   before expressions have types, so whether an element initializes a whole
   struct, or starts brace elision, comes from the tree: the element's root's
   type, from an identifier's declaration, a compound literal's type, a `?:`'s
-  third operand, a parenthesized expression or a call of a function by its name,
-  and a subscript's, a member's and an indirection's of these (`x[1]`,
+  third operand, a parenthesized expression or a call of a function by its name
+  (of an intrinsic, by the prototype the reader keeps at the call's `)`), and a
+  subscript's, a member's and an indirection's of these (`x[1]`,
   `bind->runtime->libc.soname`, `*p`), each step applied to its base's type from
   the innermost out. It came from the last typed token in the element, and so a
   compound literal with a member's value, `(struct L){ .target = n }`, read as
   `n`'s type, and `{ x[1], x[2] }` of structs as a struct's first two members:
-  one element where clang has two.
+  one element where clang has two. An intrinsic's call, which no declaration
+  types, still read so: `{ __builtin_ia32_compressqi512_mask(a, w, m), a }` of
+  byte vectors as its mask's scalar, one element where clang has two.
 - **Compound literals in a static object's initializer**, in a function too:
   clang folds a block-scope compound literal's value, an automatic object's, as
   GNU C does, into a `static` array's element or a `static` struct, where its
@@ -1024,6 +1027,35 @@ What the lowering covers past scalars (#145's programs):
   as the intrinsics' types are, is a frame object of its alignment, for which
   Tier 0 realigns the function's frame
   ([the Tier 0 guide](tier0.md#realigned-frames-136)).
+- **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
+  X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
+  name, of its family's records with its rule's form, as clang -O0's code
+  computes it, its arguments at their prototype's types (an 8- or 16-bit
+  integer widened to the 32 bits a general register's field reads) and its
+  immediates constants. The families: compares into an opmask and selects under
+  one, KMOV, masked loads and stores, two-vector operations and permutes,
+  shifts, an element's extraction (of a 256-bit vector's high lane, after
+  extracting the lane) and insertion, the elements' top bits, BMI2's PDEP, PEXT
+  and BZHI, undefined vectors (zeros), the opmask operations (KAND, KADD,
+  KUNPCK, KOR, KXOR, KSHIFTL, and `ktestz`'s, whose row's result the caller
+  tests), compression and expansion (into a vector and into memory), masks of
+  the elements' top bits and vectors of a mask's, truncating conversions of a
+  low element, lanes extracted under a mask and inserted, VALIGN, VSHUFI and
+  VGF2P8AFFINEQB by an immediate, VPSHUFD, VPROLD and VPSLLDQ, VPCONFLICT,
+  VPTERNLOG, VPDPBUSD and VPERMT2, truncations under a mask, gathers and
+  scatters, VPBLENDVB and VPSHUFBITQMB. A function with an X86 entry has vectors
+  (`Tier0Function.vectors`) whatever its values' classes: an opmask's are
+  integers. A builtin the table doesn't name is refused by name ("this x86
+  builtin"), and so are one whose instructions the target hasn't, a gather's or
+  a scatter's scale other than 1, 2, 4 or 8, and those whose instructions name
+  fixed registers or have legacy encodings (`rdtsc`, `xgetbv`, `pause`,
+  `monitorx`, `mwaitx`, `tzcnt`), which no row takes. `test-checker`'s x86
+  programs (`c_check_program_x86_test.c`) call each family's builtins at their
+  prototypes' types, the masks' and the vectors' from the call's argument, with
+  every result folded into the program's hash, by both paths against clang
+  -O0's code for znver5; they run where the host has the rows' features
+  (`x86_target_native`), and compile and link elsewhere. `test-checker
+  --program-vectors` runs them and the vector programs alone.
 - **Complex values (#133).** `_Complex float`, `double` and `long double` are
   aggregates of their two elements, the real part then the imaginary one
   (`check_lower_complex`): their locals, parameters and temporaries are frame
