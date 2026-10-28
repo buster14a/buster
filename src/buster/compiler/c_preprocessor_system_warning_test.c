@@ -53,6 +53,7 @@ static bool pp_test_system_warnings(const char* directory, bool with_clang)
         { "system directory", "#include <system.h>\n", messages, true, 1, 5, 0 },
         { "pragma system_header", "#include <system.h>\n", "#pragma message(\"before\")\n#pragma GCC system_header\n#warning kept\n#pragma message(\"after\")\n#pragma GCC warning \"after gcc\"\n#define VALUE 1\n#define VALUE 2\n#pragma clang diagnostic pop\n", false, 2, 6, 0 },
         { "predefined macro whitespace", "#include <system.h>\n", "#define __INT64_C(c) c ## L\n", true, 0, 1, 0 },
+        { "unmatched pop after trailing comment", "#include <system.h>\n", "#pragma clang diagnostic pop  /* tail */\n", true, 0, 1, 0 },
         { "system macro used in ordinary source", "#include <system.h>\nMESSAGE\n", "#define MESSAGE _Pragma(\"message(\\\"from user\\\")\")\n", true, 1, 1, 0 },
         { "ordinary macro used in a system header", "#define MESSAGE _Pragma(\"message(\\\"from system\\\")\")\n#include <system.h>\n", "MESSAGE\n", true, 0, 1, 0 },
         { "nested system include", "#include <system.h>\n", "#include \"nested.h\"\n", true, 1, 2, 0 },

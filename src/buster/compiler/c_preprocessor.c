@@ -14014,7 +14014,9 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         if (range != BUSTER_PP_NONE)
         {
             const PPRange* source = pp->ranges + range;
-            diagnostic_location = source->base + pp_identifier_end(pp, source->bytes, source->length, diagnostic_location - source->base);
+            const uint32_t after = pp_identifier_end(pp, source->bytes, source->length, diagnostic_location - source->base);
+            const ScalarLexer lexer = { .source = source->bytes, .length = source->length, .trigraphs = pp->options.trigraphs };
+            diagnostic_location = source->base + (uint32_t)pp_skip_blanks(&lexer, after);
         }
         pp_diagnose(pp, PP_SEVERITY_WARNING, diagnostic_location, pop ? "pragma diagnostic pop could not pop, no matching push"
                                                            : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
