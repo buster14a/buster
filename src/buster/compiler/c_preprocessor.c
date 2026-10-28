@@ -19674,9 +19674,13 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
     *markers = true;
     // -trigraphs, -ftrigraphs and -fno-trigraphs override the mode's default (-1 for none).
     int trigraphs = -1;
-    int32_t implicit_enabled = 0;
-    int32_t implicit_error = 0;
-    bool all_warnings = false;
+    // Fold this diagnostic's option mappings in source order for both possible language defaults. The final -std
+    // chooses one: disabling then enabling a default error leaves a warning, while enabling an error preserves it.
+    uint8_t implicit_before_c99 = 1;
+    uint8_t implicit_since_c99 = 3;
+    bool implicit_mapped = false;
+    bool implicit_no_error = false;
+    bool implicit_everything = false;
     bool warning_errors = false;
     // The last -std= or -ansi, the only one clang's driver reads.
     const char* standard = 0;
@@ -19777,26 +19781,36 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
             embeds[options->embed_directory_count] = argument + 12;
             options->embed_directory_count += 1;
         }
-        else if (strcmp(argument, "-Wno-implicit-function-declaration") == 0)
+        else if (strcmp(argument, "-Wno-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-implicit") == 0 ||
+                 strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
         {
-            implicit_enabled = -1;
+            implicit_before_c99 = 1;
+            implicit_since_c99 = 1;
+            implicit_mapped = true;
+            implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
         }
-        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0)
+        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0)
         {
-            implicit_error = -1;
+            implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
+            implicit_no_error = true;
         }
-        else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0)
+        else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0 || strcmp(argument, "-Werror=implicit") == 0 ||
+                 strcmp(argument, "-Werror-implicit-function-declaration") == 0)
         {
-            implicit_enabled = 1;
-            implicit_error = 1;
+            implicit_before_c99 = 3;
+            implicit_since_c99 = 3;
+            implicit_mapped = true;
         }
-        else if (strcmp(argument, "-Wimplicit-function-declaration") == 0)
+        else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
         {
-            implicit_enabled = 1;
+            implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
+            implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
+            implicit_mapped = true;
         }
-        else if (strcmp(argument, "-Wall") == 0 || strcmp(argument, "-Wno-all") == 0)
+        else if (strcmp(argument, "-Weverything") == 0)
         {
-            all_warnings = strcmp(argument, "-Wall") == 0;
+            implicit_everything = true;
         }
         else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
         {
@@ -19891,9 +19905,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         fprintf(stderr, "error: invalid value '%s' in '%s'\n", mode, standard);
         result = false;
     }
-    const bool implicit_warning = implicit_enabled > 0 || (implicit_enabled == 0 && (options->language.standard >= 1999 || all_warnings));
-    const bool implicit_fatal = implicit_error > 0 || (implicit_error == 0 && (options->language.standard >= 1999 || warning_errors));
-    options->implicit_function_diagnostic = !implicit_warning ? 1 : implicit_fatal ? 3 : 2;
+    uint8_t implicit = options->language.standard >= 1999 ? implicit_since_c99 : implicit_before_c99;
+    implicit = implicit == 1 && !implicit_mapped && implicit_everything ? 2 : implicit;
+    options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;

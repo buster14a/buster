@@ -33,8 +33,29 @@ static void check_test_driver_implicit(CheckTest* test, const char* clang, const
         { "-std=gnu89", NULL, NULL },
         { "-std=gnu89", "-Wimplicit-function-declaration", NULL },
         { "-std=gnu23", "-Wno-implicit-function-declaration", NULL },
+        { "-std=gnu89", "-Wimplicit", NULL },
+        { "-std=gnu89", "-Werror=implicit", NULL },
+        { "-std=gnu17", "-Wno-implicit", NULL },
+        { "-std=gnu17", "-Wno-error=implicit", NULL },
+        { "-std=gnu17", "-Wno-implicit-function-declaration", "-Wimplicit-function-declaration" },
+        { "-std=gnu17", "-Wno-implicit", "-Wimplicit-function-declaration" },
+        { "-std=gnu17", "-Wimplicit-function-declaration", "-Wno-implicit" },
+        { "-std=gnu17", "-Wimplicit", "-Wno-implicit-function-declaration" },
+        { "-std=gnu17", "-Wno-implicit-function-declaration", "-Wimplicit" },
+        { "-std=gnu17", "-Werror=implicit", "-Wno-error=implicit-function-declaration" },
+        { "-std=gnu17", "-Wno-error=implicit-function-declaration", "-Werror=implicit" },
+        { "-std=gnu17", "-Werror=implicit-function-declaration", "-Wno-error=implicit" },
+        { "-std=gnu17", "-Wno-error=implicit", "-Werror=implicit-function-declaration" },
+        { "-std=gnu17", "-Wno-all", NULL },
+        { "-std=gnu17", "-Wall", "-Wno-all" },
+        { "-std=gnu17", "-Wno-all", "-Wall" },
+        { "-std=gnu17", "-Wno-everything", NULL },
+        { "-std=gnu89", "-Weverything", NULL },
+        { "-std=gnu17", "-Wno-implicit", "-Weverything" },
+        { "-std=gnu89", "-Werror-implicit-function-declaration", NULL },
     };
-    static const char source[] = "int first(void){int x=missing(1);return x+missing(2);}\nint second(void){return missing(3);}\n";
+    static const char source[] = "int first(void);int second(void);\nint first(void){int x=missing(1);return x+missing(2);}\n"
+        "int second(void){return missing(3);}\n";
     char path[512];
     char objects[2][512];
     snprintf(path, sizeof(path), "%s/implicit.c", directory);
