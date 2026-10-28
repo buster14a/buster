@@ -639,6 +639,11 @@ assertion's top-level comma. String operands in the condition remain checked.
 This removes a parser-ancestor walk per string, whose repeated traversal of a
 long initializer's separator chain was quadratic (#593). Both changes consume
 existing reader facts; they add no search pass or per-initializer allocation.
+The parser rejects nonstring message operands before this span is ignored;
+regressions also check a C23 assertion with no message. The retained scaling
+campaign measures the default production path. Scalar/vector semantic checks
+establish equality, while the scalar reference's separate value-chain walks
+remain outside this string-specific scaling claim.
 
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be

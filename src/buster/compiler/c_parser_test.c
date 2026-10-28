@@ -622,6 +622,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "#define A(x) x\nint f(void){ A(return 1 return 2;) }\n", "2:25: expected ';' after return statement", 0 },
     // A _Static_assert's message is string literals.
     { "_Static_assert(1, \"x\" \"y\" \"z\");\n", "", 0 },
+    { "_Static_assert(1, identifier);\n", "1:19: expected string literal for diagnostic message in static_assert", 0, true },
     { "_Static_assert(1, \"x\" + 1);\n", "1:23: expected ')'", 0 },
     { "_Static_assert(1, \"x\", 2);\n", "1:22: expected ')'", 0 },
     // A type name where an operand would be.

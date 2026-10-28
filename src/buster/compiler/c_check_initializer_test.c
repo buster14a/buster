@@ -915,6 +915,8 @@ static void check_init_test_flexible(CheckTest* test, const char* clang)
         },
     };
     check_init_test_source(test, indexed, indexed_expected, BUSTER_ARRAY_LENGTH(indexed_expected), true, true, clang);
+    const CLanguage c23 = { .standard = 2023 };
+    check_init_test_source_language(test, "static_assert(sizeof \"condition\" == 10);\n", 0, 0, true, false, clang, c23);
     check_init_test_source(test, "void f(void){struct F{int n;int v[];} empty={1,{}};}", 0, 0, true, false, clang);
     static const char* invalid[] = {
         "void f(void){struct F{int n;int v[];} local={1,{2,3}};}",
