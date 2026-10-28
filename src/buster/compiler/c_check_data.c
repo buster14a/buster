@@ -424,6 +424,28 @@ static uint32_t check_data_boundary_position(const uint64_t* boundaries, uint32_
     return begin;
 }
 
+// Reuse the existing stable scalar/vector radix kernel, whose key is the high 32-bit half. Rotate once to sort
+// the low half, then restore and sort the high half. Both buffers remain count-bounded; no gather/scatter is added.
+static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary, uint32_t count, bool scalar)
+{
+    for (uint32_t half = 0; half < 2; half += 1)
+    {
+        uint32_t any = 0;
+        uint32_t every = UINT32_MAX;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint64_t key = (keys[i] << 32) | (keys[i] >> 32);
+            keys[i] = key;
+            any |= (uint32_t)(key >> 32);
+            every &= (uint32_t)(key >> 32);
+        }
+        uint64_t* sorted = c_bindings_sort(keys, temporary, count, !scalar, any ^ every);
+        temporary = sorted == keys ? temporary : keys;
+        keys = sorted;
+    }
+    return keys;
+}
+
 // All writes were validated and encoded in source order. Usually every write is zero, or an unoverwritten write
 // proves the object nonzero. Otherwise sort their bit boundaries and walk backwards, assigning each disjoint interval
 // to its last writer with the initializer's next-uncovered disjoint set. Each interval is visited once; large
@@ -461,28 +483,9 @@ static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, co
         boundaries[count++] = part->bit_offset;
         boundaries[count++] = part->bit_offset + bits;
     }
-    for (uint32_t shift = 0; status == CHECK_DATA_OK && shift < 64; shift += 8)
+    if (status == CHECK_DATA_OK)
     {
-        uint32_t counts[256] = { 0 };
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            counts[(boundaries[i] >> shift) & 255] += 1;
-        }
-        uint32_t total = 0;
-        for (uint32_t bucket = 0; bucket < 256; bucket += 1)
-        {
-            const uint32_t size = counts[bucket];
-            counts[bucket] = total;
-            total += size;
-        }
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            const uint32_t bucket = (uint32_t)((boundaries[i] >> shift) & 255);
-            temporary[counts[bucket]++] = boundaries[i];
-        }
-        uint64_t* swap = boundaries;
-        boundaries = temporary;
-        temporary = swap;
+        boundaries = check_data_sort_boundaries(boundaries, temporary, count, false);
     }
     uint32_t unique = 0;
     for (uint32_t i = 0; status == CHECK_DATA_OK && i < count; i += 1)

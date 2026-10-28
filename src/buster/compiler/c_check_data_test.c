@@ -1754,6 +1754,55 @@ static void check_data_test_zero_batch(CheckTest* test, TypeTable* types)
     check_data_test_close(&fixture);
 }
 
+static void check_data_test_boundary_sort(CheckTest* test)
+{
+    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    uint8_t* mappings[2];
+    bool ready = true;
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        mappings[i] = mmap(0, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ready &= mappings[i] != MAP_FAILED && mprotect(mappings[i] + page, page, PROT_NONE) == 0;
+    }
+    check_test_expect(test, ready, "boundary sort guarded storage");
+    for (uint32_t shape = 0; ready && shape < 6; shape += 1)
+    {
+        for (uint32_t count = 0; count <= 200; count += 1)
+        {
+            uint64_t* keys = (uint64_t*)(mappings[0] + page) - count;
+            uint64_t* temporary = (uint64_t*)(mappings[1] + page) - count;
+            uint64_t scalar[200];
+            uint64_t scalar_temporary[200];
+            uint64_t expected[200];
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                uint64_t value = ((uint64_t)check_test_random(test) << 32) | check_test_random(test);
+                value = shape == 1 ? value & UINT32_MAX : shape == 2 ? value << 32 : shape == 3 ? UINT64_MAX :
+                        shape == 4 ? count - i : shape == 5 ? (i % 2 == 0 ? UINT64_MAX : 0) : value;
+                keys[i] = scalar[i] = value;
+                uint32_t at = i;
+                while (at != 0 && expected[at - 1] > value)
+                {
+                    expected[at] = expected[at - 1];
+                    at -= 1;
+                }
+                expected[at] = value;
+            }
+            const uint64_t* vector = check_data_sort_boundaries(keys, temporary, count, false);
+            const uint64_t* twin = check_data_sort_boundaries(scalar, scalar_temporary, count, true);
+            check_test_expect(test, memcmp(vector, expected, (uint64_t)count * 8) == 0 && memcmp(twin, expected, (uint64_t)count * 8) == 0,
+                              "64-bit boundary sort matches independent insertion oracle and scalar twin at guarded tails");
+        }
+    }
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (mappings[i] != MAP_FAILED)
+        {
+            munmap(mappings[i], page * 2);
+        }
+    }
+}
+
 static void check_data_test_dense_cache(CheckTest* test, TypeTable* types)
 {
     enum { COUNT = 8, SIZE = 256 };
@@ -1897,6 +1946,7 @@ static __attribute__((noinline)) void check_test_data(CheckTest* test, TypeTable
     check_data_test_zero_bits(test);
     check_data_test_symbolic_zero(test, types);
     check_data_test_zero_batch(test, types);
+    check_data_test_boundary_sort(test);
     check_data_test_dense_cache(test, types);
     check_data_test_overwrite_oracle(test, types);
 }
