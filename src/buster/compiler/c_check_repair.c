@@ -516,8 +516,7 @@ static bool check_repair_graph_report(const CheckRepair* repair, const CheckGrap
                 case CHECK_FAULT_SIGNED_OVERFLOW:
                 case CHECK_FAULT_DIVIDE_BY_ZERO:
                 case CHECK_FAULT_SHIFT_COUNT:
-                case CHECK_FAULT_SHIFT_VALUE:
-                case CHECK_FAULT_FLOAT_RANGE: result = true; break;
+                case CHECK_FAULT_SHIFT_VALUE: result = true; break;
                 default: break;
             }
         }

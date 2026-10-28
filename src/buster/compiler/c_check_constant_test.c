@@ -677,10 +677,9 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
             .rejected = true,
         },
         {
+            // C2y's extension, which clang takes (-Wc2y-extensions): it matches no control.
             .name = "declaration generic incomplete association",
-            .source = "struct S; enum { N=_Generic(1,int:1,struct S:2) }; struct S { int x; };\n",
-            .rejected = true,
-            .extension = true,
+            .source = "struct S; enum { N=_Generic(1,int:1,struct S:2,void:3) }; _Static_assert(N==1, \"int\"); struct S { int x; };\n",
         },
         {
             .name = "declaration GNU choose expression",
@@ -742,9 +741,7 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
         },
         {
             .name = "generic source incomplete association",
-            .source = "struct S; int f(void) { return _Generic(1,int:1,struct S:2); } struct S { int x; };\n",
-            .rejected = true,
-            .extension = true,
+            .source = "struct S; int f(void) { return _Generic(1,int:1,struct S:2,int[]:3); } struct S { int x; };\n",
         },
         {
             .name = "generic rejects invalid unselected expression",
