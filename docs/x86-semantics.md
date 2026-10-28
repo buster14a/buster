@@ -445,8 +445,10 @@ is the processor. A harness runs records in the test's own process:
 - a fault names the record.
 
 **The effects table.** Every covered form but those that branch or trap runs
-12 times (`--runs`), its operands random registers and memory in turn. Each
-run checks that:
+12 times (`--runs`), its operands random registers and memory in turn, where
+#180's table lets the host's target run it (`x86_target_native`): a form the
+table leaves unclassified (`endbr64`) or whose features the host lacks is
+listed instead. Each run checks that:
 
 - what the form doesn't write stays as it was: registers, vector registers to
   bit 511, kept flags, the x87's state and its control word, and the bytes of

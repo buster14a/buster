@@ -1585,6 +1585,7 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     uint32_t witness_runs = 0;
     uint32_t never_shown = 0;
     uint32_t unavailable = 0;
+    uint32_t unclassified = 0;
     uint16_t unavailable_forms[32];
     uint32_t wide_state = 0;
     for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
@@ -1596,6 +1597,9 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
         }
         else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_native[form])
         {
+            // #180's table leaves the form unclassified (unavailable on every target), or the host lacks a feature it
+            // requires.
+            unclassified += x86_target_requirement(form) == 0;
             if (unavailable < 32)
             {
                 unavailable_forms[unavailable] = (uint16_t)form;
@@ -1638,7 +1642,8 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     printf("effects: %u covered forms executed %u times each and %u more until every write showed (%u forms with one that never did), %u that branch, call, "
            "return or trap left to the fixtures\n",
            forms, runs, witness_runs, never_shown, skipped);
-    printf("effects: %u covered forms require unavailable host features", unavailable);
+    printf("effects: %u covered forms not executed, %u of them unclassified by #180's table and the rest of features this host lacks", unavailable,
+           unclassified);
     for (uint32_t i = 0; i < unavailable && i < 32; i += 1)
     {
         printf("%s %s", i == 0 ? ":" : "", x86_semantics_test_name(unavailable_forms[i]));
