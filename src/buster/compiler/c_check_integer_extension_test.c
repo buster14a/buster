@@ -52,6 +52,61 @@ static bool check_test_integer_extension_assertion(FILE* source, CheckIntegerFol
     return written;
 }
 
+// Pin nonzero source-warning rows as well as the oracle's warning groups: the enum's evaluated overflow
+// must survive while the adjacent sizeof operand contributes no row, including the default-ignored GNU fact.
+static void check_test_sizeof_warning_rows(CheckTest* test)
+{
+    const struct
+    {
+        const char* source;
+        uint32_t rows;
+        uint32_t visible;
+    } fixtures[] =
+    {
+        { "int f(void){return (int)sizeof(2147483647+1);}", 0, 0 },
+        { "int f(void){return (int)sizeof(sizeof(2147483647+1));}", 0, 0 },
+        { "int f(void){enum{N=2147483647+1};return N;}", 2, 1 },
+        { "int f(void){enum{N=2147483647+1};return N+(int)sizeof(2147483647+1);}", 2, 1 },
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(fixtures); fixture += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            InternTable identifiers = { 0 };
+            Preprocessor pp = { 0 };
+            Parser parser = { 0 };
+            CheckTestTypes types = { 0 };
+            CheckInput input = { 0 };
+            Arena output = arena_reserve(UINT64_C(1) << 24);
+            Arena scratch = arena_reserve(UINT64_C(1) << 24);
+            const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+            const ParseOptions parsing = { .scalar = path == 0 };
+            const char* source = fixtures[fixture].source;
+            bool ready = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) &&
+                         pp_initialize(&pp, &options, &identifiers) && parse_initialize(&parser, &parsing, options.language) &&
+                         check_test_types_open(&types) && pp_run_source(&pp, "sizeof-warning-rows.c", (const uint8_t*)source, strlen(source)) &&
+                         parse_translation_unit(&parser, &pp) && check_input(&input, &parser, &pp, &types.table, &output, &scratch);
+            uint32_t rows = 0;
+            uint32_t visible = 0;
+            for (uint32_t token = 0; ready && token < input.token_count; token += 1)
+            {
+                rows += input.constant_warnings[token] != 0;
+                visible += (input.constant_warnings[token] & ~input.constant_warning_ignored[token]) != 0;
+            }
+            char description[192];
+            snprintf(description, sizeof(description), "sizeof warning rows fixture %u path %u: %u/%u rows, %u/%u visible", fixture, path,
+                     rows, fixtures[fixture].rows, visible, fixtures[fixture].visible);
+            check_test_expect(test, ready && input.report_count == 0 && rows == fixtures[fixture].rows && visible == fixtures[fixture].visible, description);
+            check_test_types_close(&types);
+            parse_release(&parser);
+            pp_release(&pp);
+            intern_release(&identifiers);
+            arena_release(&scratch);
+            arena_release(&output);
+        }
+    }
+}
+
 static void check_test_integer_source_warnings(CheckTest* test, const char* clang, const char* source_path, const char* output_path, const char* error_path)
 {
     const char* sources[] =
@@ -73,6 +128,16 @@ static void check_test_integer_source_warnings(CheckTest* test, const char* clan
         "typedef int T [[gnu::aligned(sizeof(2147483647+1))]];\n",
         "typedef int T [[gnu::aligned(((1<<33)<0)?16:8)]];\n",
         "enum { N=sizeof(2147483647+1) };\n",
+        "int f(void){return (int)sizeof(2147483647+1); }\n",
+        "int f(void){enum{N=2147483647+1};return N+(int)sizeof(2147483647+1); }\n",
+        "int f(void){return (int)sizeof(1<<32)+(int)sizeof(1<<-1)+(int)sizeof(-1<<1); }\n",
+        "int f(void){return (int)sizeof(sizeof(2147483647+1)); }\n",
+        "int f(void){return (int)__alignof__(2147483647+1); }\n",
+        "int f(void){return 2147483647+1; }\n",
+        "int f(int n){return (int)sizeof(int[n++]); }\n",
+        "int f(void){return (int)sizeof(int[(2147483647+1)<0]); }\n",
+        "int f(void){return (int)sizeof(struct {int a[(2147483647+1)<0];}); }\n",
+        "int f(void){return (int)sizeof(__builtin_choose_expr(1,1,(2147483647+1))); }\n",
         "enum { N=1||(2147483647+1) };\n",
         "enum { N=0 ? sizeof(int[(2147483647+1)<0]) : 1 };\n",
         "enum { N=0 ? sizeof(int[(1<<32)<0]) : 1 };\n",
@@ -391,6 +456,21 @@ static __attribute__((noinline)) void check_test_integer_extensions(CheckTest* t
             .rejected = true,
         },
         {
+            .name = "sizeof retains invalid arithmetic operand constraints",
+            .source = "int f(void){return (int)sizeof(1+(void)0); }\n",
+            .rejected = true,
+        },
+        {
+            .name = "sizeof retains a selected builtin argument constraint",
+            .source = "int f(void){return (int)sizeof(__builtin_choose_expr(1,__builtin_add_overflow(1,2,1),0)); }\n",
+            .rejected = true,
+        },
+        {
+            .name = "sizeof retains an unselected builtin argument constraint",
+            .source = "int f(void){return (int)sizeof(__builtin_choose_expr(1,0,__builtin_add_overflow(1,2,1))); }\n",
+            .rejected = true,
+        },
+        {
             .name = "GNU folding still rejects an evaluated zero divisor",
             .source = "enum { A=1/0 };\n",
             .rejected = true,
@@ -412,6 +492,7 @@ static __attribute__((noinline)) void check_test_integer_extensions(CheckTest* t
     }
     if (directory_ready)
     {
+        check_test_sizeof_warning_rows(test);
         check_test_integer_source_warnings(test, clang, source_path, output_path, error_path);
         unlink(source_path);
         unlink(output_path);

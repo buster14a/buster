@@ -4553,6 +4553,12 @@ static void check_input_expressions(CheckInputReader* reader)
                 op = CHECK_OP_COUNT;
                 supported = node != BUSTER_CHECK_NONE;
             }
+            else
+            {
+                // Resolving the operand's type may fold its arithmetic and record source warnings. The sizeof
+                // action checks that type but does not evaluate those operations; independent bounds stay live.
+                check_input_warning_suppress(reader, token + 1, reader->ends[token] + 1, check_constant_unevaluated_warnings());
+            }
         }
         if (op != CHECK_OP_COUNT && supported)
         {
