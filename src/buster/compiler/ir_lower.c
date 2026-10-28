@@ -186,7 +186,8 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                     depth -= 2;
                     break;
                 case BUSTER_TYPED_CALL:
-                    depth -= input->call_argument_counts[value];
+                    // An indirect call's address (a calls table's target 0) is under its arguments.
+                    depth -= input->call_argument_counts[value] + (input->call_targets[value] == 0);
                     if (class != BUSTER_TYPED_CLASS_VOID)
                     {
                         stack[depth] = class;
@@ -498,7 +499,9 @@ static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sin
     }
 }
 
-static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments)
+// Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
+// BUSTER_IR_NONE) an indirect one through it.
+static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, const uint32_t* arguments, uint32_t callee)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
     const uint32_t count = input->call_argument_counts[call];
@@ -524,7 +527,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     sink->sizes.call_count += 1;
     sink->sizes.extra_count += count;
     sink->sizes.call_type_count += count;
-    return ir_typed_emit(sink, IR_CALL, result_type, input->call_targets[call], descriptor, BUSTER_IR_NONE, 0);
+    return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor,
+                         BUSTER_IR_NONE, 0);
 }
 
 // Expose the existing count/fill output contracts before the compiler makes inlining decisions. All construction
@@ -628,7 +632,7 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_CALL && (input->call_targets[value] == 0 || input->call_targets[value] >= symbol_count))
+        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] >= symbol_count)
         {
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;

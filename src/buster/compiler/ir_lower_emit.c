@@ -170,7 +170,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
             case BUSTER_TYPED_CALL:
             {
                 depth -= input->call_argument_counts[value];
-                const uint32_t result = ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth);
+                // An indirect call's address (U64) was pushed before its arguments, under them.
+                const bool indirect = input->call_targets[value] == 0;
+                const uint32_t callee = indirect ? ir_typed_emit(&sink, IR_INTTOPTR, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0) : BUSTER_IR_NONE;
+                const uint32_t result = ir_typed_call(&sink, input, (uint32_t)value, type, stack + depth, callee);
+                depth -= indirect;
                 if (class != BUSTER_TYPED_CLASS_VOID)
                 {
                     stack[depth] = result;

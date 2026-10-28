@@ -372,10 +372,11 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
                 value = frame->slots[a];
                 break;
             case IR_SYMBOL_ADDR:
-                ok = a != 0 && a <= global_count;
+                // A global's bytes, or a function's address: its IrFunction's, which only an indirect call reads.
+                ok = a != 0 && a - 1 < (uint64_t)global_count + function_count;
                 if (ok)
                 {
-                    value = (uintptr_t)(globals + data->offsets[a - 1]);
+                    value = a <= global_count ? (uintptr_t)(globals + data->offsets[a - 1]) : (uintptr_t)&functions[a - global_count - 1];
                 }
                 break;
             case IR_ADDRESS:
@@ -401,18 +402,23 @@ static uint64_t ir_lower_test_interpret(const IrFunction* functions, uint32_t fu
                 break;
             }
             case IR_CALL:
+            case IR_CALL_INDIRECT:
             {
                 const IrCall* call = &function->calls[b];
-                const uint32_t callee = a - global_count - 1;
+                // An indirect call's pointer is a function's IrFunction (IR_SYMBOL_ADDR above), at a whole element.
+                const uint64_t offset = av - (uintptr_t)functions;
+                const bool element = op == IR_CALL || offset % sizeof(IrFunction) == 0;
+                const uint64_t callee = op == IR_CALL ? (uint64_t)a - global_count - 1 : offset / sizeof(IrFunction);
                 uint64_t passed[BUSTER_TIER0_MAX_CALL_ARGUMENTS];
-                ok = a > global_count && callee < function_count && depth < BUSTER_IR_LOWER_TEST_FRAMES && call->argument_count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+                ok = (op == IR_CALL_INDIRECT || a > global_count) && element && callee < function_count && depth < BUSTER_IR_LOWER_TEST_FRAMES &&
+                     call->argument_count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS;
                 for (uint32_t p = 0; ok && p < call->argument_count; p += 1)
                 {
                     passed[p] = frame->values[function->extra[call->argument_first + p]];
                 }
                 if (ok)
                 {
-                    ok = ir_lower_test_frame(&frames[depth], &functions[callee], passed, call->argument_count, i, arena);
+                    ok = ir_lower_test_frame(&frames[depth], &functions[(uint32_t)callee], passed, call->argument_count, i, arena);
                     depth += ok;
                 }
                 has_value = false;
@@ -641,6 +647,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     uint64_t functions_seen = 0;
     uint64_t copies = 0;
     uint64_t objects = 0;
+    uint64_t indirect_calls = 0;
     uint64_t stack_ops[3] = { 0 };
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
@@ -674,6 +681,10 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 for (uint32_t l = 0; l < source->local_count; l += 1)
                 {
                     objects += tier0_is_object(source, l);
+                }
+                for (uint32_t i = 0; i < functions[f].instruction_count; i += 1)
+                {
+                    indirect_calls += functions[f].op[i] == IR_CALL_INDIRECT;
                 }
                 ir_lower_test_promote(tally, &functions[f], &promoted, &twin_promoted, &scratch, program_seed, f);
             }
@@ -727,8 +738,13 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     {
         ir_lower_test_expect(tally, stack_ops[0] != 0 && stack_ops[1] != 0 && stack_ops[2] != 0, "generated execution covers all three stack operations", seed, count);
     }
-    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies; stack ops=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n", name,
-           functions_seen, entries, instructions, objects, copies, stack_ops[0], stack_ops[1], stack_ops[2]);
+    if (options.indirect)
+    {
+        ir_lower_test_expect(tally, indirect_calls != 0, "generated execution covers indirect calls", seed, count);
+    }
+    printf("IR lowering generated programs (%s): %" PRIu64 " functions, %" PRIu64 " typed entries, %" PRIu64 " IR instructions, %" PRIu64 " objects, %" PRIu64 " copies, %" PRIu64
+           " indirect calls; stack ops=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n", name, functions_seen, entries, instructions, objects, copies, indirect_calls, stack_ops[0],
+           stack_ops[1], stack_ops[2]);
     tier0_tables_close(&tables);
     arena_release(&native);
     arena_release(&promoted);
@@ -1815,8 +1831,12 @@ static int run_ir_lower_tests(int argc, char** argv)
         };
         Tier0ProgramOptions objects = values;
         objects.objects = true;
+        // Calls through pointers to functions: locals that hold a function's address, and the address itself.
+        Tier0ProgramOptions indirect = values;
+        indirect.indirect = true;
         ir_lower_test_programs(&tally, seed, count, values, "values");
         ir_lower_test_programs(&tally, seed, count, objects, "objects");
+        ir_lower_test_programs(&tally, seed, count, indirect, "indirect calls");
         // Strict execution keeps undefined-byte checking enabled. Full representation COPY can include uninitialized
         // struct padding, and the older generator's FP->integer cases include the documented CVTT oracle boundary.
         // These are independent acceptance gaps, not grounds to weaken the dynamic storage checks.
