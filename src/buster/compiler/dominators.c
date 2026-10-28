@@ -685,8 +685,8 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
     if (status == DOMINATOR_OK && result->loop_count != 0)
     {
         const uint64_t vector_bytes = kept_bytes + matrix_bytes + 2 * row_bytes;
-        result->loop_path = !BUSTER_HOST_VECTOR || options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-        if (BUSTER_HOST_VECTOR && options.path == DOMINATOR_VECTOR && result->loop_path != DOMINATOR_VECTOR)
+        result->loop_path = options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+        if (options.path == DOMINATOR_VECTOR && result->loop_path != DOMINATOR_VECTOR)
         {
             status = DOMINATOR_MATRIX_LIMIT;
         }
@@ -743,7 +743,7 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
                 {
                     result->loop_header[loop] = header;
                     uint64_t* body = result->loop_bodies + (uint64_t)loop * result->row_words;
-                    if (BUSTER_HOST_VECTOR && result->loop_path == DOMINATOR_VECTOR)
+                    if (result->loop_path == DOMINATOR_VECTOR)
                     {
                         dominators_loop_vector(cfg, result, header, body, predecessor_rows, frontier, next);
                     }
@@ -861,12 +861,12 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
         {
             dominators_order(cfg, &candidate, frames, dfs_begin, dfs_end);
             const uint64_t vector_bytes = matrix_bytes + row_bytes;
-            candidate.path = !BUSTER_HOST_VECTOR || options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
-            if (BUSTER_HOST_VECTOR && options.path == DOMINATOR_VECTOR && candidate.path != DOMINATOR_VECTOR)
+            candidate.path = options.path == DOMINATOR_SCALAR || vector_bytes > options.max_matrix_bytes ? DOMINATOR_SCALAR : DOMINATOR_VECTOR;
+            if (options.path == DOMINATOR_VECTOR && candidate.path != DOMINATOR_VECTOR)
             {
                 status = DOMINATOR_MATRIX_LIMIT;
             }
-            if (BUSTER_HOST_VECTOR && status == DOMINATOR_OK && candidate.path == DOMINATOR_VECTOR)
+            if (status == DOMINATOR_OK && candidate.path == DOMINATOR_VECTOR)
             {
                 const uint64_t phase_start = scratch->length;
                 uint64_t* sets = arena_push(scratch, matrix_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);

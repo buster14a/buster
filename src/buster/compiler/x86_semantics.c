@@ -822,10 +822,8 @@ static __attribute__((unused)) bool x86_instruction_flags_substitutable(const X8
 // general registers 0 to 15, as x86_encode does.
 static uint64_t x86_register_resource(uint8_t value, bool vector)
 {
-    (void)vector;
-
     const uint32_t general = (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3) : (value & 15);
-    return BUSTER_VECTOR_PATH(vector) ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
+    return vector ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
 }
 
 // What one record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a

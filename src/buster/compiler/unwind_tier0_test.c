@@ -1003,6 +1003,11 @@ static bool unwind_tier0_test(void)
     const bool ready = arena.base != 0 && x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize();
     if (unwind_tier0_test_expect(&test, ready, "initialize analyzer test dependencies", 0))
     {
+        // XMM4 and RSP share an operand number but are different resources,
+        // regardless of the host implementation's vector capability.
+        unwind_tier0_test_expect(&test, x86_register_resource(4, true) == BUSTER_X86_RESOURCE_VECTOR(4) &&
+                                           x86_register_resource(4, false) == BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP),
+                                 "vector register 4 is not the stack pointer", 0);
         unwind_tier0_test_shapes(&test);
         unwind_tier0_test_mutations(&test);
         unwind_tier0_test_boundaries(&test);

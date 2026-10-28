@@ -2,11 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // The tests of x86_semantics.c (test-x86-semantics). The processor is the oracle: a harness runs records in this process
-// (x86_semantics_test_enter loads every general register, the flags and ZMM0 to ZMM15 from a state, runs the code and
-// stores them back; memory operands are RIP-relative into a data page, and RSP points into a stack of the harness's own),
+// (x86_semantics_test_enter loads every general register, the flags and the available 128- or 512-bit vector state,
+// runs the code and stores them back; memory operands are RIP-relative into a data page, and RSP points into a stack of
+// the harness's own),
 // so a table's claim about a form is checked against what the instruction does, not against another table:
 //   - the effects table: every covered form but those that branch or trap, from random states, its operands registers
-//     and memory: what it doesn't write stays as it was (registers, vector registers to bit 511, flags, the bytes of
+//     and memory: what it doesn't write stays as it was (registers, available vector bits, flags, the bytes of
 //     memory around an operand), a narrower write keeps or zeroes what its rest says, defined flags and results don't
 //     change when everything it doesn't read changes, and every write changes something in some run;
 //   - fixtures of the effects the issue names (division, variable shifts, partial writes, 32-bit zero extension, inc's
@@ -97,7 +98,7 @@ static bool x86_semantics_report(const X86SemanticsTally* tally)
 // The harness
 
 // What the harness loads into the processor and stores back: the general registers (RSP the stack's), RFLAGS and ZMM0 to
-// ZMM15. x86_semantics_test_enter's offsets are these.
+// ZMM15, or their low 128 bits on a host without AVX-512. x86_semantics_test_enter's offsets are these.
 typedef struct X86SemanticsState X86SemanticsState;
 struct X86SemanticsState
 {
@@ -114,8 +115,9 @@ static __attribute__((used)) uint64_t x86_semantics_test_saved_rsp;
 static __attribute__((used)) X86SemanticsState* x86_semantics_test_state;
 static __attribute__((used)) uint64_t x86_semantics_test_code;
 static __attribute__((used)) uint64_t x86_semantics_test_scratch;
+static __attribute__((used)) uint8_t x86_semantics_test_wide;
 
-// Loads the state (ZMM0 to ZMM15, the flags, then the general registers, RSP last but RDI, which held the state) and jumps
+// Loads the available vector state, the flags, then the general registers (RSP last but RDI, which held the state) and jumps
 // to x86_semantics_test_code, which ends with a jump back to x86_semantics_test_return. There it stores the general
 // registers, the flags (pushed on the C stack, after RSP is stored) and the vector registers into the state, restores the
 // C stack and the callee-saved registers, and returns. The test code may change any register but the trampoline's
@@ -131,6 +133,8 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "push r15\n"
                      "mov qword ptr [rip + x86_semantics_test_saved_rsp], rsp\n"
                      "mov qword ptr [rip + x86_semantics_test_state], rdi\n"
+                     "cmp byte ptr [rip + x86_semantics_test_wide], 0\n"
+                     "je .Lsemantics_load_sse\n"
                      "vmovdqu64 zmm0, zmmword ptr [rdi + 192]\n"
                      "vmovdqu64 zmm1, zmmword ptr [rdi + 256]\n"
                      "vmovdqu64 zmm2, zmmword ptr [rdi + 320]\n"
@@ -147,6 +151,25 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "vmovdqu64 zmm13, zmmword ptr [rdi + 1024]\n"
                      "vmovdqu64 zmm14, zmmword ptr [rdi + 1088]\n"
                      "vmovdqu64 zmm15, zmmword ptr [rdi + 1152]\n"
+                     "jmp .Lsemantics_loaded\n"
+                     ".Lsemantics_load_sse:\n"
+                     "movdqu xmm0, xmmword ptr [rdi + 192]\n"
+                     "movdqu xmm1, xmmword ptr [rdi + 256]\n"
+                     "movdqu xmm2, xmmword ptr [rdi + 320]\n"
+                     "movdqu xmm3, xmmword ptr [rdi + 384]\n"
+                     "movdqu xmm4, xmmword ptr [rdi + 448]\n"
+                     "movdqu xmm5, xmmword ptr [rdi + 512]\n"
+                     "movdqu xmm6, xmmword ptr [rdi + 576]\n"
+                     "movdqu xmm7, xmmword ptr [rdi + 640]\n"
+                     "movdqu xmm8, xmmword ptr [rdi + 704]\n"
+                     "movdqu xmm9, xmmword ptr [rdi + 768]\n"
+                     "movdqu xmm10, xmmword ptr [rdi + 832]\n"
+                     "movdqu xmm11, xmmword ptr [rdi + 896]\n"
+                     "movdqu xmm12, xmmword ptr [rdi + 960]\n"
+                     "movdqu xmm13, xmmword ptr [rdi + 1024]\n"
+                     "movdqu xmm14, xmmword ptr [rdi + 1088]\n"
+                     "movdqu xmm15, xmmword ptr [rdi + 1152]\n"
+                     ".Lsemantics_loaded:\n"
                      "push qword ptr [rdi + 128]\n"
                      "popfq\n"
                      "mov rax, qword ptr [rdi + 0]\n"
@@ -189,6 +212,8 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "mov qword ptr [rdi + 120], r15\n"
                      "mov rax, qword ptr [rip + x86_semantics_test_scratch]\n"
                      "mov qword ptr [rdi + 56], rax\n"
+                     "cmp byte ptr [rip + x86_semantics_test_wide], 0\n"
+                     "je .Lsemantics_store_sse\n"
                      "vmovdqu64 zmmword ptr [rdi + 192], zmm0\n"
                      "vmovdqu64 zmmword ptr [rdi + 256], zmm1\n"
                      "vmovdqu64 zmmword ptr [rdi + 320], zmm2\n"
@@ -205,6 +230,26 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "vmovdqu64 zmmword ptr [rdi + 1024], zmm13\n"
                      "vmovdqu64 zmmword ptr [rdi + 1088], zmm14\n"
                      "vmovdqu64 zmmword ptr [rdi + 1152], zmm15\n"
+                     "vzeroupper\n"
+                     "jmp .Lsemantics_stored\n"
+                     ".Lsemantics_store_sse:\n"
+                     "movdqu xmmword ptr [rdi + 192], xmm0\n"
+                     "movdqu xmmword ptr [rdi + 256], xmm1\n"
+                     "movdqu xmmword ptr [rdi + 320], xmm2\n"
+                     "movdqu xmmword ptr [rdi + 384], xmm3\n"
+                     "movdqu xmmword ptr [rdi + 448], xmm4\n"
+                     "movdqu xmmword ptr [rdi + 512], xmm5\n"
+                     "movdqu xmmword ptr [rdi + 576], xmm6\n"
+                     "movdqu xmmword ptr [rdi + 640], xmm7\n"
+                     "movdqu xmmword ptr [rdi + 704], xmm8\n"
+                     "movdqu xmmword ptr [rdi + 768], xmm9\n"
+                     "movdqu xmmword ptr [rdi + 832], xmm10\n"
+                     "movdqu xmmword ptr [rdi + 896], xmm11\n"
+                     "movdqu xmmword ptr [rdi + 960], xmm12\n"
+                     "movdqu xmmword ptr [rdi + 1024], xmm13\n"
+                     "movdqu xmmword ptr [rdi + 1088], xmm14\n"
+                     "movdqu xmmword ptr [rdi + 1152], xmm15\n"
+                     ".Lsemantics_stored:\n"
                      "cld\n"
                      "pop r15\n"
                      "pop r14\n"
@@ -212,7 +257,6 @@ static __attribute__((naked, noinline)) void x86_semantics_test_enter(X86Semanti
                      "pop r12\n"
                      "pop rbp\n"
                      "pop rbx\n"
-                     "vzeroupper\n"
                      "ret\n"
                      ".att_syntax prefix\n");
 }
@@ -242,6 +286,7 @@ static char x86_semantics_test_case[256];
 
 // The forms #180's baseline target (a zero X86Target) allows (x86_target_forms), which run_x86_semantics_tests fills.
 static uint8_t x86_semantics_test_baseline[X86_FORM_COUNT];
+static uint8_t x86_semantics_test_native[X86_FORM_COUNT];
 
 static void x86_semantics_test_fault(int signal_number)
 {
@@ -1102,11 +1147,14 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         for (uint32_t v = 0; v < 16; v += 1)
         {
             const bool written = (writes & BUSTER_X86_RESOURCE_VECTOR(v)) != 0;
-            x86_semantics_expect(tally, written || memcmp(output.vector[v], input.vector[v], 64) == 0, "%s changed vector register %u, which it doesn't write",
+            x86_semantics_expect(tally, written || memcmp(output.vector[v], input.vector[v], x86_semantics_test_wide ? 64 : 16) == 0, "%s changed vector register %u, which it doesn't write",
                                  x86_semantics_test_case, v);
-            const bool upper_kept = memcmp(output.vector[v] + 16, input.vector[v] + 16, 48) == 0;
-            x86_semantics_expect(tally, !written || !(effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || upper_kept, "%s changed vector register %u's bits above 127",
-                                 x86_semantics_test_case, v);
+            if (x86_semantics_test_wide)
+            {
+                const bool upper_kept = memcmp(output.vector[v] + 16, input.vector[v] + 16, 48) == 0;
+                x86_semantics_expect(tally, !written || !(effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) || upper_kept,
+                                     "%s changed vector register %u's bits above 127", x86_semantics_test_case, v);
+            }
         }
         const uint8_t values[BUSTER_X86_ROLES] = { record->reg, record->rm, record->vvvv };
         // Two operands that write the same register (xchg al, ah) each change the other's bytes: their rests aren't checked.
@@ -1215,7 +1263,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         {
             if (!(reads & BUSTER_X86_RESOURCE_VECTOR(v)))
             {
-                for (uint32_t i = 0; i < 64; i += 8)
+                for (uint32_t i = 0; i < (x86_semantics_test_wide ? 64u : 16u); i += 8)
                 {
                     const uint64_t bits = x86_test_random(state);
                     memcpy(&second_input.vector[v][i], &bits, 8);
@@ -1236,7 +1284,8 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
         {
             // The whole register, bits 511 to 128 included: an unread register is changed whole.
             const bool written = (writes & BUSTER_X86_RESOURCE_VECTOR(v)) != 0;
-            x86_semantics_expect(tally, !written || memcmp(second_output.vector[v], output.vector[v], 64) == 0, "%s wrote ZMM%u from something it doesn't read",
+            x86_semantics_expect(tally, !written || memcmp(second_output.vector[v], output.vector[v], x86_semantics_test_wide ? 64 : 16) == 0,
+                                 "%s wrote vector register %u from something it doesn't read",
                                  x86_semantics_test_case, v);
         }
         const uint8_t defined_difference = (x86_semantics_flags(second_output.flags) ^ x86_semantics_flags(output.flags)) & flags_written;
@@ -1313,12 +1362,17 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     uint32_t skipped = 0;
     uint32_t witness_runs = 0;
     uint32_t never_shown = 0;
+    uint32_t unavailable = 0;
     for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
     {
         const X86Effects* effects = x86_effects(form);
         if (effects->operation != X86_OPERATION_NONE && x86_effects_control(effects) != BUSTER_X86_CONTROL_NONE)
         {
             skipped += 1;
+        }
+        else if (effects->operation != X86_OPERATION_NONE && !x86_semantics_test_native[form])
+        {
+            unavailable += 1;
         }
         else if (effects->operation != X86_OPERATION_NONE)
         {
@@ -1350,6 +1404,7 @@ static bool x86_semantics_check_table(X86SemanticsMachine* machine, uint64_t see
     printf("effects: %u covered forms executed %u times each and %u more until every write showed (%u forms with one that never did), %u that branch, call, "
            "return or trap left to the fixtures\n",
            forms, runs, witness_runs, never_shown, skipped);
+    printf("effects: %u covered forms require unavailable host features\n", unavailable);
     return x86_semantics_report(&tally);
 }
 
@@ -2698,6 +2753,13 @@ static int run_x86_semantics_tests(int argc, char** argv)
         const bool initialized = x86_encoder_initialize() && x86_semantics_initialize();
         const X86Target baseline = { 0 };
         x86_target_forms(&baseline, x86_semantics_test_baseline);
+        const X86Target native = x86_target_native();
+        x86_target_forms(&native, x86_semantics_test_native);
+        x86_semantics_test_wide = __builtin_cpu_supports("avx512f") != 0;
+        if (!x86_semantics_test_wide)
+        {
+            printf("x86 semantics: native vector state checked through 128 bits (AVX-512 unavailable)\n");
+        }
         printf("x86 semantics: seed %llu, %u choice rows, initialization %s\n", (unsigned long long)seed, x86_choice_row_count, initialized ? "ok" : "failed");
         result = initialized;
         X86SemanticsMachine machine = { 0 };

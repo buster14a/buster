@@ -11845,7 +11845,6 @@ BUSTER_PARSER_ENTRY bool parse_initialize(Parser* parser, const ParseOptions* op
         .options = *options,
         .language = language,
     };
-    parser->options.scalar |= !BUSTER_HOST_VECTOR;
     parser->scratch = arena_reserve(1ull << 36);
     return parser->scratch.capacity != 0;
 }
@@ -11976,7 +11975,11 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+            // Preserve the requested parser protocol on scalar hosts, using the kernels' scalar twins.
+            // The fallback and its whole-unit retry are part of that protocol, independent of host ISA.
+            const ParseKernelResult vector = BUSTER_HOST_VECTOR ? parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers)
+                                                                 : parse_twins(&parser->kernels, &input, parser->predeclared, parser->buffers.typed,
+                                                                               parser->buffers.statements);
             parser->statistics.fallback_items = vector.fallback.items;
             parser->statistics.fallback_tokens = vector.fallback.tokens;
             parser->statistics.flagged_tokens = vector.flagged_tokens;
@@ -11992,7 +11995,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         }
         arena_pop_to(temporary, temporary_mark);
     }
-    if (result && scalar && !BUSTER_SCALAR_PATH(parser->options.scalar))
+    if (result && scalar && !parser->options.scalar)
     {
         // The fallback's declarations may have left typedef names' meanings changed: the scalar parser starts afresh.
         result = parse_prepare_meanings(parser, pp->table);
