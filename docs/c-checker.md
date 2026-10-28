@@ -741,6 +741,51 @@ campaign measures the default production path. Scalar/vector semantic checks
 establish equality, while the scalar reference's separate value-chain walks
 remain outside this string-specific scaling claim.
 
+### Large integer literal tables (#658)
+
+`c_check_literal_table_input.c` recognizes file-scope integer arrays with at least
+128 elements whose complete initializer consists of number tokens, optional
+unary minus signs, commas and one outer brace pair. The scalar path checks the
+same grammar; the vector path carries predecessor masks across bounded
+64-token blocks. Sixteen spellings form a conversion batch: short decimal and
+two-digit hexadecimal literals decode together, while other integer spellings
+reuse the existing literal parser and unary action. Each value must fit its
+8-, 16-, 32- or 64-bit element exactly. A case needing a conversion warning,
+an excess-element warning, another numeric format or general expression
+checking falls back before the producer changes any source state.
+
+Successful lists retain one `CheckInputLiteralTable` record and one immutable
+`CHECK_INIT_BYTES` part. Their elements produce no expression nodes,
+`CheckValue` rows or individual initializer/data-plan parts. Inferred array
+lengths are completed through the ordinary type constructor; omitted tails
+remain zero-filled by the existing static-data consumer. Declaration order and
+canonical object identity remain unchanged. The records are linked in source
+order, and `check_initializers_run` advances through them with its declarations.
+Compact and ordinary plans publish the same ascending `declaration_tokens`
+index, so sparse lookup and retained string indices keep their usual contracts.
+The payload and part belong to the input arena and remain alive with its
+initializer plans. Deferred checking replays their array TypeIds with the
+top-level declaration types. A failed payload or record reservation restores
+the unpublished output suffix and scratch and sets the resource status.
+
+Automatic arrays, volatile and atomic elements, floating/128-bit elements,
+designators, nested braces and nonliteral expressions retain ordinary
+checking and planning. `check_input_tables_reference` provides that exact
+source path for tests. Permanent tests compare complete bytes and array bounds
+between it and both compact paths, exercise protected syntax/output tails,
+reservation rollback and deferred replay/fallback, and execute representative
+generated objects against Clang. This bounded path leaves the reader's existing
+token columns in place; their initialization and the parser remain substantial
+costs on very large tables. It does not establish the full memory/work target
+described in #658 or a general compilation speedup.
+
+The [frozen native qualification record](https://github.com/buster14a/buster-performance/blob/32b96dd2a12c12c7aaf25be3639a31b7fc87cdd9/docs/measurements/unclaimed-perf-2026-10-28/issue-658/target/RESULTS.md)
+measured 2.32 to 2.98 times lower whole-process wall time for its eligible byte
+tables on the original base and candidate. Those exact-revision measurements
+do not establish the gain on a later publication stack. Fallback and ordinary
+SQLite controls, complete objects, runtime checks and remaining costs are
+retained alongside them.
+
 The source bridge owns symbols, names and Link tables in `output`; `bytes`
 owns initialized contents and `scratch` is temporary. The three arenas must be
 distinct. The lower-level emitter accepts an existing Link and object-to-symbol
