@@ -1883,7 +1883,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                         if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, &stream, repairing ? &repair : NULL,
                                                   original_pragmas_ready ? &original_pragmas : NULL, additional, additional_count,
                                                   excess_tokens, excess_count, quiet, &scratch) ||
-                            !check_driver_warning_events(checking, &pp, publication_end, &input, &types, &input.warning_events, repairing ? &repair : NULL, &scratch))
+                            !check_driver_warning_events_at(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, &scratch))
                         {
                             fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                             ready = false;
@@ -1994,7 +1994,7 @@ static int run_check_command_mode(int count, char** arguments, bool executable, 
                 {
                     if (!check_driver_reports(checking, &parser, &pp, publication_end, &input, NULL, repairing ? &repair : NULL,
                                               original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, &scratch) ||
-                        !check_driver_warning_events(checking, &pp, publication_end, &input, &types, &input.warning_events, repairing ? &repair : NULL, &scratch))
+                        !check_driver_warning_events_at(checking, &pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, &scratch))
                     {
                         fprintf(stderr, "fatal error: checker diagnostic capacity exhausted\n");
                     }

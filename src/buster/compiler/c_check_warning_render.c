@@ -148,8 +148,8 @@ static const char* check_driver_warning_note(const Preprocessor* pp, const Check
     return result;
 }
 
-static bool check_driver_warning_events(const Parser* parser, Preprocessor* pp, uint32_t publication_end, const CheckInput* input, const TypeTable* types,
-                                        const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                            const CheckWarningEvents* view, const CheckRepair* repair, uint32_t publication_end, Arena* scratch)
 {
     bool valid = view != NULL && (view->count == 0 || view->events != NULL) && (view->note_count == 0 || view->notes != NULL);
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
@@ -202,4 +202,12 @@ static bool check_driver_warning_events(const Parser* parser, Preprocessor* pp, 
         }
     }
     return valid;
+}
+
+// Whole-unit callers have no retained original lookahead beyond their parser. Prefix/repair driver routes use
+// the explicit entry point above so a completed source group cannot drift behind later preprocessing events.
+static bool check_driver_warning_events(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                        const CheckWarningEvents* view, const CheckRepair* repair, Arena* scratch)
+{
+    return check_driver_warning_events_at(parser, pp, input, types, view, repair, pp->output.count, scratch);
 }
