@@ -848,6 +848,16 @@ jobs:
                   # Both modules, including the scaling fixture's include, use the same harness and generator.
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
+                  # The shared harness includes the host-ISA adapter. Keep each revision's headers when present;
+                  # a base predating the adapter uses the current compatibility headers on this vector-only host.
+                  for header in host_isa.h host_scalar.h host_scalar_vectors.h; do
+                      dest="$ab_dir/$side/src/buster/compiler/$header"
+                      if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
+                          git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
+                      else
+                          cp "src/buster/compiler/$header" "$dest"
+                      fi
+                  done
               done
               before="$ab_dir/before/src/buster/compiler"
               new='branch_sizing_lengths(records, count, offsets, vector)'
@@ -868,7 +878,10 @@ jobs:
               sha256sum "$fixture/benchmark-main.c" "$fixture/scaling.c"
               for side in before after; do
                   tree="$ab_dir/$side/src"
-                  sha256sum "$tree"/buster/compiler/*.c
+                  sha256sum "$tree"/buster/compiler/*.[ch]
+                  host_defines=$(clang "${flags[@]}" -I "$tree" -dM -E \
+                      -include "$tree/buster/compiler/host_isa.h" -x c /dev/null)
+                  grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"
                   timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
                       "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
                   timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"
