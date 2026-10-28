@@ -412,6 +412,67 @@ static bool pp_test_history(const char* directory, bool with_clang)
 {
     static const PPHistoryCase cases[] = {
         {
+            .name = "undefined function-like name",
+            .source = "#if IS_IN (libc)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in elif",
+            .source = "#if 0\n#elif MISSING/**/(1) && 1\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in short-circuited operands",
+            .source = "#if 0 && MISSING(1)\n#endif\n#if 1 || UNKNOWN(2)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like alias",
+            .source = "#define ALIAS MISSING\n#if ALIAS(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name in nested expansion",
+            .source = "#define INNER MISSING\n#define OUTER INNER\n#define ID(x) x\n#if ID(OUTER)(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like self expansion",
+            .source = "#define SELF SELF\n#if SELF(1)\n#endif\n",
+        },
+        {
+            .name = "disabled function-like recursive expansion",
+            .source = "#define F(x) F\n#if F(1)(2)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like Unicode name",
+            .source = "#if caf\\u00e9(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like long name is not truncated",
+            .source = "#if UNDEFINED_FUNCTION_WITH_A_NAME_LONGER_THAN_SIXTY_FOUR_BYTES_FOR_FULL_DIAGNOSTIC_SPELLING(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like name before a splice",
+            .source = "#if MISSING\\\n(1)\n#endif\n",
+        },
+        {
+            .name = "undefined function-like included name",
+            .source = "#line 40 \"caller.c\"\n#include \"history.h\"\n",
+            .header = "#define ALIAS UNKNOWN\n#line 70 \"renamed.h\"\n#if ALIAS(1)\n#endif\n",
+        },
+        {
+            .name = "number before parentheses keeps its operator diagnostic",
+            .source = "#define NUMBER 1\n#if NUMBER(2)\n#endif\n",
+        },
+        {
+            .name = "defined before parentheses keeps its operator diagnostic",
+            .source = "#if defined(X)(1)\n#endif\n",
+        },
+        {
+            .name = "name after a value keeps its operator diagnostic",
+            .source = "#if 1 MISSING(1)\n#endif\n",
+        },
+        {
+            .name = "parenthesized name keeps its operator diagnostic",
+            .source = "#if (MISSING)(1)\n#endif\n",
+        },
+        {
             .name = "object",
             .source = "#define OBJ \"bad\"\n#if OBJ\n#endif\n",
         },

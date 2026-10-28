@@ -15330,11 +15330,23 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             }
             else if (kind == C_TOKEN_RAW_IDENTIFIER)
             {
-                // An identifier left after expansion is 0; in C23, true is 1 (and false 0).
-                const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 2023;
-                values[value_count] = (PPValue){ .bits = is_true };
-                value_count += 1;
-                expect_operand = false;
+                // A remaining name followed by '(' is an undefined function-like invocation, even if expansion
+                // painted a recursive macro name. Diagnose the name before the ordinary identifier-to-zero rule.
+                if (i + 1 < end && tokens->kinds[i + 1] == C_TOKEN_L_PAREN)
+                {
+                    const IdentId name = tokens->values[i];
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, token_location, "function-like macro '%.*s' is not defined",
+                                (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                    valid = false;
+                }
+                else
+                {
+                    // An identifier left after expansion is 0; in C23, true is 1 (and false 0).
+                    const bool is_true = tokens->values[i] == C_NAME_TRUE && pp->options.language.standard >= 2023;
+                    values[value_count] = (PPValue){ .bits = is_true };
+                    value_count += 1;
+                    expect_operand = false;
+                }
             }
             else
             {

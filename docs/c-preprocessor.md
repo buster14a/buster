@@ -816,6 +816,10 @@ arenas. Popping a context gives its tokens back when they are on top.
   `pp_evaluate` with an explicit stack, over C23's integer constants: binary,
   digit separators, `true` and `false` in C23 mode, and character constants
   with clang's values (unsigned with `-funsigned-char`: "The `-f` options").
+  A name left before `(` is diagnosed at that name as Clang 23's undefined
+  function-like macro, including disabled recursive names and short-circuited
+  operands. Names alone still become zero; numeric and parenthesized values
+  followed by `(` retain the invalid-binary-operator diagnostic (#706).
   A line is copied to `pp->arguments` (64 tokens at a time, but for a line of
   up to three) and expanded through a barrier and a capture. A line whose
   expansion would only write its tokens into the capture is expanded straight
