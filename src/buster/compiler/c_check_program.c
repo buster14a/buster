@@ -1389,7 +1389,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                 else if (entry->kind == CHECK_CONTROL_CASE)
                 {
                     const CheckProgramCase* item = program->cases + entry->target;
-                    const uint32_t condition = program->input->token_nodes[item->owner];
+                    const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
                     const CheckValue* value = pass != 0 ? check_program_runtime_value(program, condition, condition) : NULL;
                     CheckProgramCase selected = { .type = item->type };
                     const bool known = value != NULL && check_program_integer_value(program, value, item->type, &selected.lower);

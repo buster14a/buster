@@ -41,6 +41,7 @@ static void check_test_driver_returns(CheckTest* test, const char* clang, const 
         { "struct S{long a,b;};struct S f(struct S s){switch(__builtin_constant_p(s.a)){case 0:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};enum E{A,B};struct S f(enum E e,struct S s){switch(e){case A:return s;case B:return s;}}\n", "-Werror=return-type", NULL },
         { "struct S{long a,b;};enum E{A,B};struct S f(struct S s){switch(A){case B:return s;}}\n", "-Werror=return-type", NULL },
+        { "struct S{long a,b;};struct S f(_Bool n,struct S s){switch(n){case 0:return s;case 1:return s;}}\n", "-Werror=return-type", "-Wno-switch-bool" },
     };
     char source[512];
     char objects[2][512];

@@ -950,8 +950,8 @@ What the lowering covers past scalars (#145's programs):
   handling until their noreturn and exhaustive-enumerator facts are available
   to the control graph. Constant switch dispatch follows converted selector
   values and signed case ranges only in the warning walk; the Tier 0 walk
-  retains every dispatch edge. Source/native tests cover register and hidden results,
-  branches, switch, loops, labels and defined paths through partial returns.
+  retains every dispatch edge. Source/native tests cover register and hidden
+  results, branches, switch, loops, labels and defined paths through partial returns.
 - **Variadic definitions (#137).** `va_start`, `va_arg`, `va_copy` and `va_end`
   expand to `c_builtin_varargs_lower.c`'s recipes over the function's incoming
   frame ([the Tier 0 guide](tier0.md#incoming-variadic-frames)): at the first
