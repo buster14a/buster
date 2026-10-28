@@ -317,12 +317,12 @@ struct PPOptions
     // Count the diagnostics without printing them: test-preprocessor's fuzz runs compare acceptance, and print a
     // difference's diagnostics when they run its case again.
     bool quiet;
-    // Semantic consumers retain the ordered warning options, independently of preprocessing's own policy. The
+    // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
+    bool system_header_warnings;
+    // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
     // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;
     uint32_t semantic_warning_option_count;
-    // -Wsystem-headers overrides location-based suppression of ordinary preprocessing warnings.
-    bool system_header_warnings;
     // Diagnostic publication policy. Zero leaves errors unlimited; the command-line default permits nineteen
     // ordinary errors, followed by Clang's twentieth, fatal cutoff. Suppressed warnings are not counted.
     uint32_t error_limit;
@@ -20056,7 +20056,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPO
         }
         else if (strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
         {
-            // Semantic extension policy is retained in semantic_warning_options above.
+            // The semantic warning consumer reads these from the ordered options above.
         }
         else if (strncmp(argument, "-ferror-limit=", 14) == 0)
         {

@@ -55,6 +55,8 @@ struct CheckDeferredSample
     uint64_t positions[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t lanes[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t merge[BUSTER_CHECK_SOURCE_MAX_PASSES];
+    // The merge's parts (CheckDeferred.merge_replay_ns and the rest).
+    uint64_t merge_parts[6][BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t rest[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t active[BUSTER_CHECK_SOURCE_MAX_PASSES];
     uint64_t copies[BUSTER_CHECK_SOURCE_MAX_PASSES];
@@ -168,6 +170,12 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                 sample->positions[pass] = deferred.position_ns;
                 sample->lanes[pass] = deferred.lanes_ns;
                 sample->merge[pass] = deferred.merge_ns;
+                sample->merge_parts[0][pass] = deferred.merge_replay_ns;
+                sample->merge_parts[1][pass] = deferred.merge_tables_ns;
+                sample->merge_parts[2][pass] = deferred.merge_events_ns;
+                sample->merge_parts[3][pass] = deferred.merge_tags_ns;
+                sample->merge_parts[4][pass] = deferred.merge_pass_ns;
+                sample->merge_parts[5][pass] = deferred.merge_rest_ns;
                 const uint64_t phases = deferred.top_ns + deferred.environment_ns + deferred.lanes_ns + deferred.merge_ns;
                 sample->rest[pass] = time > phases ? time - phases : 0;
                 sample->active[pass] = deferred.active;
@@ -218,6 +226,11 @@ static bool check_deferred_benchmark_file(const char* file, char** options, uint
                    (double)check_source_median(sample->rest, count) / tokens, (double)check_source_median(sample->positions, count) / per_body,
                    check_source_median(sample->copy, count), check_source_median(sample->dispatch, count), check_source_median(sample->wake, count),
                    check_source_median(sample->arenas, count), sample->largest_first, count);
+            printf("checker-deferred:   lanes=%u merge's parts: replay=%.3f tables=%.3f events=%.3f tags=%.3f pass=%.3f rest=%.3f ns/token\n",
+                   way == 0 ? 1 : lanes, (double)check_source_median(sample->merge_parts[0], count) / tokens,
+                   (double)check_source_median(sample->merge_parts[1], count) / tokens, (double)check_source_median(sample->merge_parts[2], count) / tokens,
+                   (double)check_source_median(sample->merge_parts[3], count) / tokens, (double)check_source_median(sample->merge_parts[4], count) / tokens,
+                   (double)check_source_median(sample->merge_parts[5], count) / tokens);
         }
     }
     else
