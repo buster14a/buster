@@ -840,6 +840,37 @@ What the lowering covers past scalars (#145's programs):
   cleared first (stores of 8 down to 1 bytes, or a loop of 8-byte stores past
   128 bytes) unless its first part clears it whole, then each part's zeros,
   bytes or value is stored, an aggregate's copied.
+  Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
+  plans use a readonly byte image and one call to the target C library's
+  `memcpy` (#598). The image ends at the last explicit value; omitted trailing
+  storage is cleared separately. Images with internal holes larger than their
+  payload keep the existing writes, avoiding large readonly zero gaps for sparse
+  initializers. This preserves checked string truncation,
+  embedded NULs, wide characters, designated overrides and local mutability.
+  Pool preparation reads the same immutable by-value volatile-containment facts
+  as aggregate-copy lowering. The unit prepares those facts once before pool
+  planning; each initializer uses one bounded lookup, without a type-sized
+  visited table or graph walk. The many-record regression retains complete
+  prefixes using only 256 bytes of plan scratch despite hundreds of unused
+  types in the unit.
+  A mixed runtime plan retains its ordered parts, pooling an individual string
+  part above the same threshold. Small payloads, volatile parts, bit-fields and
+  values needing address relocations retain their existing lowering. Pools are
+  immutable before function lanes start, have deterministic local symbols, and
+  require no generated ISA beyond the ordinary C runtime call ABI.
+  The [locked 9700X record](https://github.com/buster14a/buster-performance/tree/a1cfed5a9927bcbf4cca3130943efdf3fcd1af7f/docs/measurements/local-initializers-598-2026-10-27)
+  compares `92c025e7` with `b5b679ad`: signed `int[40000]` compiles in
+  18.676 → 15.428 ms without stage clocks (−17.4%), emits 680,026 → 96 bytes
+  of text plus 160,000 bytes of readonly data, and takes 11,929 → 1,275 ns per
+  warm repeated call. Strings above the threshold stay at 100 text bytes,
+  14 typed entries and 24 machine records through 32,769 total bytes.
+  Small objects are byte-identical and their timing differences are below 1%;
+  tiny-input compiler peak RSS rises about 2 MiB, and the frozen SQLite
+  whole-object control is 0.88% slower (same-binary A/A 0.20%). Large baseline
+  string compiles that exhaust code capacity remain failure observations,
+  with no baseline runtime speedup claimed for them. The record includes raw
+  samples, identities, native/Clang scalar/vector checks and source-corpus
+  receipts, including the successful pinned c-testsuite rerun.
 - **Calls.** A call through a pointer is indirect (callee 0, the address pushed
   before the arguments), its callee evaluated first. A struct or union argument
   is its address, its size in `argument_sizes`, and Tier 0 passes its bytes

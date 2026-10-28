@@ -37,13 +37,14 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_DIVDC3,
     CHECK_LOWER_RUNTIME_DIVXC3,
     CHECK_LOWER_RUNTIME_MEMMOVE,
+    CHECK_LOWER_RUNTIME_MEMCPY,
     CHECK_LOWER_RUNTIMES,
 } CheckLowerRuntime;
 
 static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     "__errno_location", "__divti3",    "__udivti3",   "__modti3",    "__umodti3",  "__floattisf",  "__floattidf",  "__floattixf",  "__floatuntisf",
     "__floatuntidf",    "__floatuntixf", "__fixsfti", "__fixdfti",   "__fixxfti",  "__fixunssfti", "__fixunsdfti", "__fixunsxfti", "__mulsc3",
-    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove",
+    "__muldc3",         "__mulxc3",    "__divsc3",    "__divdc3",    "__divxc3", "memmove", "memcpy",
 };
 
 // A switch's jump table (#136's item 7, check_lower_switch_tables): its function and its SWITCH control's index in the
@@ -68,6 +69,17 @@ struct CheckLowerTable
     uint32_t fallback;
 };
 
+// Immutable type facts shared by pool preparation and expression/body lowering.
+#define BUSTER_CHECK_LOWER_TYPE_AGGREGATE 0x01u
+#define BUSTER_CHECK_LOWER_TYPE_COMPLEX 0x02u
+#define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
+#define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
+#define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
+#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
+#define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
+
+#include "c_check_program_initializers.c"
+
 typedef struct CheckProgramLowered CheckProgramLowered;
 struct CheckProgramLowered
 {
@@ -75,6 +87,7 @@ struct CheckProgramLowered
     // The builtin helpers, then the asm statements' (c_check_program_asm.c), whose plans `asms` has.
     CheckProgramHelpers helpers;
     CheckProgramAsms asms;
+    CheckLowerInitializers initializers;
     SymbolId errno_symbol;
     TypeId errno_pointer_type;
     // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
@@ -139,6 +152,7 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_FILL,
     // Frame object `value` cleared whole, `type` bytes, before an initializer's parts: what they don't write is zero.
     CHECK_LOWER_CLEAR,
+    CHECK_LOWER_INITIALIZER_COPY,
     // A bit-field's value from the address of its first byte (check_lower_bit_read), `type` its packed place.
     CHECK_LOWER_BIT_READ,
     // The value on the stack stored into a bit-field (check_lower_bit_store): `type` its packed place, `value` the local
@@ -510,14 +524,6 @@ static TypeId check_lower_complex_element(const TypeTable* types, TypeId type)
 // which nothing loads through: a function's, an array's or an aggregate's; whether it is a pointer; and whether it is
 // _Bool. BUSTER_CHECK_LOWER_TYPE_KIND marks the kinds whose types take their class and facts from the kind alone
 // (check_lower_kind_facts), in that table alone.
-#define BUSTER_CHECK_LOWER_TYPE_AGGREGATE 0x01u
-#define BUSTER_CHECK_LOWER_TYPE_COMPLEX 0x02u
-#define BUSTER_CHECK_LOWER_TYPE_ADDRESS 0x04u
-#define BUSTER_CHECK_LOWER_TYPE_POINTER 0x08u
-#define BUSTER_CHECK_LOWER_TYPE_BOOL 0x10u
-#define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
-#define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
-
 // A type's facts (BUSTER_CHECK_LOWER_TYPE_*): the rule that the table of every type's holds (check_lower_classify_types),
 // which the bodies read (check_lower_facts).
 static uint8_t check_lower_type_facts(const TypeTable* types, TypeId type)
@@ -1589,13 +1595,19 @@ static uint8_t check_lower_piece_class(uint32_t piece)
 // An initializer's zeros (CHECK_INIT_CLEAR) or bytes (CHECK_INIT_BYTES) written into frame object `object`: stores of 8
 // bytes, then 4, 2 and 1 for the rest, the bytes as constants of the stores' classes (the host's byte order is the
 // target's); past BUSTER_CHECK_LOWER_FILL_UNROLLED bytes, the zeros' words by a loop.
-static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part, uint32_t object)
+static void check_lower_initializer_copy(CheckLowerWriter* writer, uint32_t pool, uint32_t object, uint64_t offset);
+
+static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part, uint32_t object, uint32_t pool)
 {
     const uint64_t begin = part->bit_offset / 8;
     const uint64_t size = part->byte_count;
     if (part->bit_offset % 8 != 0 || part->bit_width != 0 || (part->kind == CHECK_INIT_BYTES && size != 0 && part->bytes == NULL))
     {
         check_lower_unsupported(writer, "bit-field initializers in local objects");
+    }
+    else if (pool != BUSTER_CHECK_NONE)
+    {
+        check_lower_initializer_copy(writer, pool, object, begin);
     }
     else
     {
@@ -2669,6 +2681,20 @@ static uint32_t check_lower_runtime_call(CheckLowerWriter* writer, CheckLowerRun
         }
     }
     return call;
+}
+
+// A readonly image and a fresh automatic object's exact range are disjoint. The ordinary call ABI preserves live
+// values and handles external-symbol access; its ignored result needs no temporary or source-level declaration.
+static void check_lower_initializer_copy(CheckLowerWriter* writer, uint32_t pool, uint32_t object, uint64_t offset)
+{
+    const CheckLowerInitializers* pools = &writer->output->initializers;
+    const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG, BUSTER_TYPE_ULONG };
+    const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMCPY, BUSTER_TYPE_VOID, arguments, 3, BUSTER_CHECK_NONE);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+    check_lower_offset(writer, offset);
+    check_lower_emit(writer, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, pools->symbol_base + pool);
+    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, pools->items[pool].size);
+    check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_VOID, call);
 }
 
 // An operation of `kind` on the two values on top of the stack, of `class`, as instructions pushed for after them: its
@@ -4323,12 +4349,17 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         }
         else if (kind == CHECK_LOWER_FILL)
         {
-            check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32));
+            check_lower_fill(writer, writer->program->initializers->plans[node].parts + type, (uint32_t)(value >> 32),
+                             check_lower_init_pool(&writer->output->initializers, node, type));
         }
         else if (kind == CHECK_LOWER_CLEAR)
         {
-            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .byte_count = type };
-            check_lower_fill(writer, &clear, (uint32_t)(value >> 32));
+            const CheckInitPart clear = { .kind = CHECK_INIT_CLEAR, .bit_offset = (uint64_t)node * 8, .byte_count = type };
+            check_lower_fill(writer, &clear, (uint32_t)(value >> 32), BUSTER_CHECK_NONE);
+        }
+        else if (kind == CHECK_LOWER_INITIALIZER_COPY)
+        {
+            check_lower_initializer_copy(writer, node, (uint32_t)(value >> 32), 0);
         }
         else if (kind == CHECK_LOWER_BIT_READ)
         {
@@ -4487,12 +4518,22 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         const CheckInitializer* plan = &initializers->plans[control.target];
         const uint32_t local = writer->local_map[program->input->objects[declaration]];
         const bool object = local != BUSTER_CHECK_NONE && writer->local_sizes[local] != 0;
+        const uint32_t pool = object ? check_lower_init_pool(&writer->output->initializers, control.target, BUSTER_CHECK_NONE) : BUSTER_CHECK_NONE;
         const uint8_t class = check_lower_class(writer, plan->type);
         if (local == BUSTER_CHECK_NONE || (!object && class == UINT8_MAX))
         {
             check_lower_unsupported(writer, "initializers of this type");
         }
-        for (uint32_t part = plan->count; part-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        if (pool != BUSTER_CHECK_NONE)
+        {
+            const uint32_t size = writer->output->initializers.items[pool].size;
+            if (size < writer->local_sizes[local])
+            {
+                check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .node = size, .type = writer->local_sizes[local] - size, .value = local });
+            }
+            check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_INITIALIZER_COPY, .node = pool, .value = local });
+        }
+        for (uint32_t part = plan->count; pool == BUSTER_CHECK_NONE && part-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             const CheckInitPart* write = &plan->parts[part];
             writer->token = write->token;
@@ -4521,7 +4562,7 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
         const CheckInitPart* first = plan->count != 0 ? plan->parts : NULL;
         const bool cleared = first != NULL && first->kind == CHECK_INIT_CLEAR && first->bit_offset == 0 && first->bit_width == 0 &&
                              object && first->byte_count >= writer->local_sizes[local];
-        if (object && !cleared)
+        if (object && !cleared && pool == BUSTER_CHECK_NONE)
         {
             check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = writer->local_sizes[local], .value = local });
         }
@@ -5277,7 +5318,7 @@ static uint32_t check_lower_runtime_symbols(CheckProgramLowered* lowered, const 
         }
         if (lowered->status == CHECK_PROGRAM_OK && lowered->errno_symbol == 0)
         {
-            const uint64_t symbol = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
+            const uint64_t symbol = (uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + 1;
             if (symbol >= UINT32_MAX)
             {
                 lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -5449,6 +5490,29 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         lowered->token = lowered->asms.token;
         valid = false;
     }
+    // Freeze each type's class and by-value containment facts before pooling. Bodies and pool eligibility read
+    // the same columns; preparing a record initializer never allocates or clears a unit-sized traversal table.
+    shared->type_count = valid ? types->types.count : 0;
+    shared->type_classes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
+    shared->type_facts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
+    valid = valid && shared->type_classes != 0 && shared->type_facts != 0;
+    if (valid)
+    {
+        if (BUSTER_SCALAR_PATH(scalar))
+        {
+            check_lower_classify_types_scalar(types, shared->type_count, shared->type_classes, shared->type_facts);
+        }
+        else
+        {
+            check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
+        }
+        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
+    }
+    if (valid && !check_lower_init_pools(&lowered->initializers, program, shared->type_facts, shared->type_count, output, scratch))
+    {
+        lowered->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
+    }
     const uint32_t errno_calls = valid ? check_lower_runtime_symbols(lowered, program) : 0;
     valid = valid && lowered->status == CHECK_PROGRAM_OK;
     for (uint32_t i = 0; i < lowered->helpers.count; i += 1)
@@ -5473,9 +5537,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
     // runtime call, independent of its byte size, within the same per-node bounds. The runtime functions' provisional symbols
     // (check_lower_runtime) follow the helpers'.
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + 1;
-    const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements + 1 : 0;
-    const uint64_t provisional64 = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
+    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + 1;
+    const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
+                                                    (uint64_t)lowered->initializers.count * 3 + 1 : 0;
+    const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
+    const uint64_t provisional64 = pool_base + lowered->initializers.count;
+    lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;
     if (valid && (abi_capacity64 > UINT32_MAX || argument_capacity64 > UINT32_MAX || provisional64 + CHECK_LOWER_RUNTIMES >= UINT32_MAX))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
@@ -5521,23 +5588,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
             abi_classify_all(&shared->table, types);
         }
     }
-    // Every type's class and facts, which the bodies ask of each node's types (check_lower_class): for the types the unit
-    // has, as the lowering makes none.
-    shared->type_count = valid ? types->types.count : 0;
-    shared->type_classes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
-    shared->type_facts = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)shared->type_count + 1) : 0;
-    valid = valid && shared->type_classes != 0 && shared->type_facts != 0;
     if (valid)
     {
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            check_lower_classify_types_scalar(types, shared->type_count, shared->type_classes, shared->type_facts);
-        }
-        else
-        {
-            check_lower_classify_types(types, shared->type_count, shared->type_classes, shared->type_facts);
-        }
-        valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         // One bounded lookup obtains both columns for the leaf and vector kernels. The optional table's
         // failure retains scalar expression expansion; scalar/source-row lowering allocates none.
         shared->type_templates = valid && !BUSTER_SCALAR_PATH(scalar) && !sources && program->body_count != 0 ?
@@ -5653,6 +5705,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     *status = (CheckProgramLowered){
         .helpers = shared->lowered->helpers,
         .asms = shared->lowered->asms,
+        .initializers = shared->lowered->initializers,
         .errno_symbol = shared->lowered->errno_symbol,
         .errno_pointer_type = shared->lowered->errno_pointer_type,
         .token = BUSTER_CHECK_NONE,
@@ -6377,7 +6430,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             const uint32_t runtime = parts[p].runtimes[i];
             if (lowered->runtime_symbols[runtime] == 0)
             {
-                lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1);
+                lowered->runtime_symbols[runtime] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
                 lowered->runtime_order[lowered->runtime_symbol_count++] = (uint8_t)runtime;
             }
             runtimes |= UINT32_C(1) << runtime;
@@ -6398,7 +6451,7 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
     // The jump tables' symbols and their labels', now that the runtime's functions are all known: the lowering's own, after
     // theirs. The labels' are numbered in label_symbols, and the tables' in their dispatches' GLOBAL_ADDRESS entries (the
     // emission's merge replaces the provisional symbols in the code's references).
-    const uint64_t case_symbol_base = (uint64_t)program->symbol_count + lowered->helpers.count + lowered->runtime_symbol_count + 1;
+    const uint64_t case_symbol_base = (uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1;
     if (valid && lowered->table_count != 0 && case_symbol_base + lowered->table_count + lowered->case_symbol_count >= BUSTER_CHECK_LOWER_CASE_SYMBOL)
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
