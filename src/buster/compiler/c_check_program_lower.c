@@ -2410,7 +2410,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     if (mangled || passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
-        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" : count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 64 arguments" :
+        check_lower_unsupported(writer, mangled ? "calls of overloadable functions" : count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" :
                                         passed != NULL ? passed : returned);
     }
     else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)

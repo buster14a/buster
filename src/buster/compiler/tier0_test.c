@@ -3955,9 +3955,9 @@ static uint32_t tier0_test_aggregate_driver(X86Instruction* records, uint64_t pr
 typedef struct Tier0TestCaller Tier0TestCaller;
 struct Tier0TestCaller
 {
-    uint8_t kinds[16];
-    uint8_t classes[16];
-    uint64_t values[16];
+    uint8_t kinds[128];
+    uint8_t classes[128];
+    uint64_t values[128];
     uint8_t argument_classes[BUSTER_TIER0_TEST_PASSED];
     uint32_t argument_sizes[BUSTER_TIER0_TEST_PASSED];
     AbiLocation locations[BUSTER_TIER0_TEST_PASSED];
@@ -3974,10 +3974,20 @@ struct Tier0TestCaller
     Tier0Function function;
 };
 
-static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0TestPassing* fixture, const uint64_t* addresses, uint64_t probe, uint64_t out)
+static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0TestPassing* fixture, const uint64_t* addresses, uint64_t probe, uint64_t out, bool deep)
 {
     memset(caller, 0, sizeof(*caller));
     uint32_t count = 0;
+    for (uint32_t stack = 0; deep && stack < 2; stack += 1)
+    {
+        for (uint32_t value = 0; value < 16; value += 1)
+        {
+            caller->kinds[count] = BUSTER_TYPED_CONST;
+            caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64;
+            caller->values[count] = UINT64_C(0x3ff0000000000000) + value;
+            count += 1;
+        }
+    }
     caller->kinds[count] = BUSTER_TYPED_CONST;
     caller->classes[count] = BUSTER_TYPED_CLASS_U64;
     caller->values[count] = probe;
@@ -4007,6 +4017,15 @@ static void tier0_test_aggregate_caller(Tier0TestCaller* caller, const Tier0Test
         caller->classes[count + 2] = BUSTER_TYPED_CLASS_VOID;
         caller->values[count + 2] = fixture->result_size;
         count += 3;
+    }
+    for (uint32_t stack = 0; deep && stack < 2; stack += 1)
+    {
+        for (uint32_t value = 0; value < 16; value += 1)
+        {
+            caller->kinds[count] = BUSTER_TYPED_DISCARD;
+            caller->classes[count] = stack == 0 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+            count += 1;
+        }
     }
     caller->kinds[count] = BUSTER_TYPED_RETURN;
     caller->classes[count] = BUSTER_TYPED_CLASS_VOID;
@@ -4254,9 +4273,10 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
     uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1ull << 26);
     bool ready = tier0_test_expect(tally, shared != MAP_FAILED && data != 0 && code != MAP_FAILED && arena.base != 0, check, "no memory");
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
+    for (uint32_t f = 0; f < 2 * BUSTER_ARRAY_LENGTH(tier0_test_passings) && ready; f += 1)
     {
-        const Tier0TestPassing* fixture = &tier0_test_passings[f];
+        const Tier0TestPassing* fixture = &tier0_test_passings[f % BUSTER_ARRAY_LENGTH(tier0_test_passings)];
+        const bool deep = f >= BUSTER_ARRAY_LENGTH(tier0_test_passings);
         arena_pop_to(&arena, 0);
         ready = mprotect(code, pages, PROT_READ | PROT_WRITE) == 0;
         const uint8_t* bytes[2][BUSTER_TIER0_TEST_PASSED];
@@ -4270,7 +4290,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
             }
             Tier0TestCaller caller;
             tier0_test_aggregate_caller(&caller, fixture, addresses, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE),
-                                        (uint64_t)(uintptr_t)shared->runs[0].out);
+                                        (uint64_t)(uintptr_t)shared->runs[0].out, deep);
             ready = tier0_test_aggregate_encode(tally, check, fixture->name, &caller.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
         }
         // What the probe returns: registers of bytes of their own, and for a hidden result its bytes.
@@ -4821,7 +4841,7 @@ static void tier0_test_aggregate_errors(Tier0TestTally* tally)
         Tier0TestCaller caller;
         Tier0TestCallee callee;
         AbiCall incoming;
-        tier0_test_aggregate_caller(&caller, fixture, addresses, 0x1000, 0x2000);
+        tier0_test_aggregate_caller(&caller, fixture, addresses, 0x1000, 0x2000, false);
         tier0_test_aggregate_callee(&callee, fixture, 0x3000, 0x4000);
         const Tier0Function* function = broken->callee ? &callee.function : &caller.function;
         const Tier0Check before = tier0_validate(function);
@@ -5262,12 +5282,13 @@ static int run_tier0_tests(int argc, char** argv)
             };
             static const char* const names[4] = { "programs: one function", "programs: integers and calls", "programs: everything", "programs: larger" };
             // The larger shape with records passed and returned by value (#137): a program of its own seed for seed. And
-            // past the depth tables (tier0_select_deep): calls of up to 32 arguments and deeper expressions. And with
+            // past the depth tables (tier0_select_deep): calls of up to 127 arguments, records and deeper expressions. And with
             // objects aligned past 16 bytes too, in realigned frames, with and without variable-length arrays.
             Tier0ProgramOptions records = shapes[3];
             records.records = &tables.records;
             Tier0ProgramOptions deep = shapes[3];
             deep.deep = true;
+            deep.records = &tables.records;
             Tier0ProgramOptions aligned = deep;
             aligned.over_aligned = true;
             {
@@ -5414,7 +5435,7 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
                 tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : aligned, &instructions, &entries,
                                     &deferred, &deep_entries, frames, coverage);
-                if (s == 4)
+                if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
                     // shape is meant to (but an ignored argument with bytes, and an XMM part through a temporary, which
@@ -5431,7 +5452,7 @@ static int run_tier0_tests(int argc, char** argv)
                                   "%" PRIu64 " deep entries among %" PRIu64, deep_entries, entries);
                 // Frames are realigned for objects aligned past 16 alone, and for the records' aligned to 32: with the default
                 // count, the last shape has many, a base among them (with variable-length arrays).
-                tier0_test_expect(&tally, s < 4 || s == 5 ? frames[0] == 0 : s == 4 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
+                tier0_test_expect(&tally, s < 4 ? frames[0] == 0 : s < 6 || count < 300 || (frames[0] >= 100 && frames[1] >= 10), "realigned frames",
                                   "%" PRIu64 " realigned frames, %" PRIu64 " with a base", frames[0], frames[1]);
                 tier0_test_report(s < 4 ? names[s] : s == 4 ? "programs: records by value" : s == 5 ? "programs: deep values" : "programs: aligned past 16 bytes", tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",

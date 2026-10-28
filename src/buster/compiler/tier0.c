@@ -322,7 +322,8 @@ struct Tier0Operation
 #define BUSTER_TIER0_MAX_ENTRIES (1u << 24)
 // Local identities and homes use 32-bit indices too; the former 16-bit cap refused large generated functions (#622).
 #define BUSTER_TIER0_MAX_LOCALS BUSTER_TIER0_MAX_ENTRIES
-#define BUSTER_TIER0_MAX_CALL_ARGUMENTS 64
+#define BUSTER_TIER0_MAX_DEPTH 240
+#define BUSTER_TIER0_MAX_CALL_ARGUMENTS (BUSTER_TIER0_MAX_DEPTH - 1)
 #define BUSTER_TIER0_MAX_OBJECT_BYTES (1u << 30)
 #define BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 30
 // The alignment an ordinary frame keeps (rsp's at every call, as the convention has it), past which it is realigned.
@@ -3022,7 +3023,6 @@ struct Tier0Entries
 #define BUSTER_TIER0_DEEP_FILL_INTEGER 0x20
 #define BUSTER_TIER0_DEEP_FILL_FLOATING 0x40
 // The deepest a stack may go: the deep slots' count, with room in the depth columns' bytes.
-#define BUSTER_TIER0_MAX_DEPTH 240
 
 static bool tier0_label(const uint64_t* labels, uint32_t entry)
 {
@@ -6533,7 +6533,8 @@ static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
 // argument read from its slot, a stack one through rax into its place in the outgoing area, then each register one
 // straight into its register; an indirect call's callee into r11; then the call as tier0_emit_call makes it, its result
 // stored into its slot, and the stacks its flags fill loaded back. Nothing below the arguments is saved around it: it is
-// in the slots. Its arguments are values: tier0_select_deep leaves a call with aggregate arguments to TIER0_ERROR_DEPTH.
+// in the slots. Aggregate copies run before any ABI register is populated, so their scratch registers are free;
+// register parts then load from the saved addresses, without the ordinary path's parallel-move conflicts.
 static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, uint32_t i,
                                  Tier0Writer* writer)
 {
@@ -6558,15 +6559,52 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
     {
         uint32_t integer = 0;
         uint32_t floating = 0;
+        uint32_t temporary = 0;
         for (uint32_t a = 0; a < count; a += 1)
         {
             const uint32_t class = function->argument_classes[first + a];
+            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
             const AbiLocation location = function->argument_locations[first + a];
             const bool is_floating = tier0_class_floating(class);
             const uint32_t slot = is_floating ? tier0_deep_slot(frame, 1, floating_below + floating) : tier0_deep_slot(frame, 0, below + (indirect ? 1 : 0) + integer);
             integer += is_floating ? 0 : 1;
             floating += is_floating ? 1 : 0;
-            if (pass == 0 && location.kind == BUSTER_ABI_LOCATION_STACK)
+            if (size != 0)
+            {
+                const bool whole = tier0_aggregate_whole(location);
+                Tier0Part parts[2];
+                const uint32_t part_count = whole ? 0 : tier0_location_parts(location, size, parts);
+                if (pass == 0 && whole)
+                {
+                    tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
+                    tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, 0, size,
+                               X86_REGISTER_R10, 0);
+                }
+                else if (!whole && part_count != 0)
+                {
+                    tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
+                    for (uint32_t k = 0; k < part_count; k += 1)
+                    {
+                        const Tier0Part part = parts[k];
+                        if (pass == 0 && part.reg == BUSTER_TIER0_PART_STACK)
+                        {
+                            tier0_copy(writer, X86_REGISTER_RSP, (int32_t)location.stack_offset, X86_REGISTER_RAX, part.offset, part.bytes,
+                                       X86_REGISTER_R10, 0);
+                        }
+                        else if (pass == 0 && part.load == BUSTER_TIER0_PART_TEMPORARY)
+                        {
+                            tier0_copy(writer, X86_REGISTER_RSP, tier0_temporary(temporary), X86_REGISTER_RAX, part.offset, part.bytes,
+                                       X86_REGISTER_R10, 0);
+                        }
+                        else if (pass != 0 && part.reg != BUSTER_TIER0_PART_STACK)
+                        {
+                            tier0_load_part(writer, part, X86_REGISTER_RAX, temporary);
+                        }
+                        temporary += part.reg != BUSTER_TIER0_PART_STACK && part.load == BUSTER_TIER0_PART_TEMPORARY ? 1 : 0;
+                    }
+                }
+            }
+            else if (pass == 0 && location.kind == BUSTER_ABI_LOCATION_STACK)
             {
                 tier0_spill(writer, frame, X86_REGISTER_RAX, slot, true);
                 tier0_extend(writer, class, X86_REGISTER_RAX);
@@ -7495,8 +7533,7 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 // it from here on: tier0_emit_deep), stores its result into its slot, and loads the registers back if its exit is within
 // the table. A call deep on either stack takes its arguments from their slots (tier0_emit_deep_call). Every deep entry is
 // deferred, in both paths, and counted in *deep_count. Returns TIER0_OK, or TIER0_ERROR_DEPTH where deep values don't
-// reach: a function with long double values (whose slots its depths index), a call with aggregate arguments at depths
-// whose copies' scratch registers are past the tables, or a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth
+// reach: a function with memory-class values (whose slots its depths index), or a stack deeper than BUSTER_TIER0_MAX_DEPTH, which the depth
 // columns' bytes would wrap past.
 static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
 {
@@ -7533,8 +7570,8 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 {
                     aggregates |= function->argument_sizes[function->call_first[call] + a] != 0;
                 }
-                const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1];
-                error = aggregates && (before[0] >= limits[0] || before[1] >= limits[1]) ? TIER0_ERROR_DEPTH : TIER0_OK;
+                const bool deep = before[0] > limits[0] || exit[0] > limits[0] || before[1] > limits[1] || exit[1] > limits[1] ||
+                                  (aggregates && (before[0] >= limits[0] || before[1] >= limits[1]));
                 for (uint32_t s = 0; s < 2 && deep; s += 1)
                 {
                     flags |= BUSTER_TIER0_DEEP_CALL | (before[s] <= limits[s] ? spill_flags[s] : 0) | (exit[s] <= limits[s] ? fill_flags[s] : 0);
@@ -7692,9 +7729,23 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
         {
             const uint32_t class = function->argument_classes[first + a];
-            const uint32_t kind = function->argument_locations[first + a].kind;
+            const AbiLocation location = function->argument_locations[first + a];
+            const uint32_t kind = location.kind;
+            const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
             const uint32_t extension = tier0_class_integer(class) && tier0_class_bytes(class) < 4 ? 1 : 0;
-            count += kind == BUSTER_ABI_LOCATION_STACK ? 2 + extension : kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 + extension : 0;
+            if (size != 0)
+            {
+                uint8_t own = 0;
+                uint32_t own_set = 0;
+                count += tier0_aggregate_records(location, size, &own, &own_set);
+                // Whole stack arguments need the address once; register/split arguments in both passes.
+                Tier0Part parts[2];
+                count += tier0_aggregate_whole(location) ? 1 : tier0_location_parts(location, size, parts) != 0 ? 2 : 0;
+            }
+            else
+            {
+                count += kind == BUSTER_ABI_LOCATION_STACK ? 2 + extension : kind == BUSTER_ABI_LOCATION_REGISTERS ? 1 + extension : 0;
+            }
         }
         const bool indirect = function->call_targets[call] == 0;
         const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -11079,7 +11130,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     }
     for (uint32_t c = 0; valid && !few_calls && c < call_count; c += 1)
     {
-        // At most 65 operands: tier0_validate_tables refuses more than 64 arguments.
+        // Counts fit in a byte, including an indirect callee. More than 64 operands defer to the scalar validator.
         call_words[c] = function->call_argument_counts[c] + (function->call_targets[c] == 0 ? 1 : 0);
     }
     // The values' bounds, by BUSTER_TIER0_BOUND_* (an empty range where there is nothing to name: [1, 0]), built in
