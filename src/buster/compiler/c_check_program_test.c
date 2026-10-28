@@ -1972,6 +1972,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_copies(test, clang);
     check_test_program_batch(test);
     check_test_program_source(test,
+        "struct S{long a,b;};struct L{long a,b,c,d;};struct D{double a,b;};"
+        "struct S choose(int n,struct S s){if(n>0)return s;else{struct S z={n,n+1};return z;}}"
+        "struct L chain(int n,struct L s){if(n>0)return s;else if(n<0){s.b+=3;return s;}else{s.d+=5;return s;}}"
+        "struct D select(int n,struct D s){switch(n&3){case 0:return s;case 1:s.a+=1;return s;default:s.b+=2;return s;}}"
+        "struct S loop(int n,struct S s){for(;;){if(n&1)return s;else{s.a+=3;return s;}}}"
+        "struct L nested(int n,struct L s){if(n){if(n&1)return s;s.c+=7;}else{return s;}return s;}"
+        "struct S partial(int n,struct S s){if(n)return s;}struct L wide_partial(int n,struct L s){if(n)return s;}"
+        "struct S labels(int n,struct S s){if(n)goto live;return s;live:s.a+=11;return s;}"
+        "int tested(int n){struct S s={n,n+2};struct L l={n,n+1,n+2,n+3};struct D d={n*0.5,n*0.25};"
+        "struct S a=choose(n,s),b=loop(n,s),c=partial(1,s),e=labels(n,s);"
+        "struct L p=chain(n,l),q=nested(n,l),r=wide_partial(1,l);struct D v=select(n,d);"
+        "partial(0,s);wide_partial(0,l);return a.a+a.b+b.a+b.b+c.a+c.b+e.a+e.b+p.a+p.b+p.c+p.d+q.c+r.d+(int)(v.a*4+v.b*8);}",
+        "aggregate-return-control-flow", clang);
+    check_test_program_source(test,
         "static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}"
         "int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;"
         "int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));"
