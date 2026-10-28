@@ -71,6 +71,7 @@ static bool ssa_ir_conflict(const IrFunction* f, const Arena* arena)
         ssa_ir_owned(arena, f->block_offsets, (uint64_t)f->block_count + 1, 4) ||
         ssa_ir_owned(arena, f->extra, f->extra_count, 4) ||
         ssa_ir_owned(arena, f->constants, f->constant_count, sizeof(IrConstant)) ||
+        ssa_ir_owned(arena, f->vector_constants, f->vector_constant_count, sizeof(IrSimdValue)) ||
         ssa_ir_owned(arena, f->slots, f->slot_count, sizeof(IrSlot)) ||
         ssa_ir_owned(arena, f->addresses, f->address_count, sizeof(IrAddress)) ||
         ssa_ir_owned(arena, f->calls, f->call_count, sizeof(IrCall)) ||
@@ -553,6 +554,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     if (check.error == IR_OK)
     {
         check = ir_verify_path(input, scratch, 0, BUSTER_VECTOR_PATH(vector));
+    }
+    if (check.error == IR_OK && ir_function_has_simd(input))
+    {
+        check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
     {

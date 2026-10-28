@@ -94,7 +94,7 @@ static __attribute__((naked, noinline)) void interpreter_native_bridge(Interpret
 
 static bool interpreter_native_type(uint16_t type, bool result)
 {
-    const bool valid = type < IR_TYPE_COUNT && (result || type != IR_VOID);
+    const bool valid = type <= IR_PTR && (result || type != IR_VOID);
     return valid;
 }
 

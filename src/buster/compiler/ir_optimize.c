@@ -1227,6 +1227,10 @@ static IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* funct
 
     work->function = function;
     IrCheck check = BUSTER_SCALAR_PATH(scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
+    if (check.error == IR_OK && ir_function_has_simd(function))
+    {
+        check.error = IR_ERROR_UNSUPPORTED;
+    }
     // Entry phis are forbidden by the shared IR contract: initial invocation has no predecessor value.
     // Pruning their dead predecessors cannot invent an undef value or emit a zero-input phi.
     if (check.error == IR_OK && function->block_count != 0 && function->op[0] == IR_PHI)

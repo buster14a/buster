@@ -41,8 +41,19 @@ typedef enum IrType
     IR_F64,
     IR_F80,
     IR_PTR,
+    IR_V4I32,
+    IR_V8I32,
+    IR_V16I32,
+    IR_M8,
+    IR_M16,
+    IR_M32,
+    IR_M64,
     IR_TYPE_COUNT,
 } IrType;
+
+_Static_assert(IR_TYPE_COUNT <= 32, "IR result admission and type shifts use 32 bits");
+
+#include "ir_simd_model.c"
 
 typedef enum IrOp
 {
@@ -102,6 +113,9 @@ typedef enum IrOp
     IR_ALLOCA,
     IR_STACK_SAVE,
     IR_STACK_RESTORE,
+    IR_VCONST,
+    IR_VCMP,
+    IR_VSELECT,
     IR_OP_COUNT,
 } IrOp;
 
@@ -170,6 +184,7 @@ struct IrSizes
     uint64_t call_count;
     uint64_t call_type_count;
     uint64_t parameter_count;
+    uint64_t vector_constant_count;
 };
 
 typedef struct IrFunction IrFunction;
@@ -199,6 +214,8 @@ struct IrFunction
     uint32_t call_type_count;
     uint8_t* parameter_types;
     uint32_t parameter_count;
+    IrSimdValue* vector_constants;
+    uint32_t vector_constant_count;
     uint8_t result_type;
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
@@ -220,6 +237,7 @@ typedef enum IrError
     IR_ERROR_PHI,
     IR_ERROR_DOMINANCE,
     IR_ERROR_IO,
+    IR_ERROR_UNSUPPORTED,
 } IrError;
 
 typedef struct IrCheck IrCheck;
@@ -281,17 +299,24 @@ static __attribute__((unused)) IrError ir_build_uses(const IrFunction* function,
 static __attribute__((unused)) IrError ir_print(const IrFunction* function, Arena* scratch, FILE* output);
 
 static const uint16_t ir_type_bits[IR_TYPE_COUNT] = {
-    0,
-    1,
-    8,
-    16,
-    32,
-    64,
-    128,
-    32,
-    64,
-    80,
-    64,
+    [IR_VOID] = 0,
+    [IR_I1] = 1,
+    [IR_I8] = 8,
+    [IR_I16] = 16,
+    [IR_I32] = 32,
+    [IR_I64] = 64,
+    [IR_I128] = 128,
+    [IR_F32] = 32,
+    [IR_F64] = 64,
+    [IR_F80] = 80,
+    [IR_PTR] = 64,
+    [IR_V4I32] = 128,
+    [IR_V8I32] = 256,
+    [IR_V16I32] = 512,
+    [IR_M8] = 8,
+    [IR_M16] = 16,
+    [IR_M32] = 32,
+    [IR_M64] = 64,
 };
 static const char* const ir_type_names[IR_TYPE_COUNT] = {
     "void",
@@ -305,6 +330,13 @@ static const char* const ir_type_names[IR_TYPE_COUNT] = {
     "f64",
     "f80",
     "ptr",
+    "v4i32",
+    "v8i32",
+    "v16i32",
+    "m8",
+    "m16",
+    "m32",
+    "m64",
 };
 static const char* const ir_op_names[IR_OP_COUNT] = {
     "invalid",
@@ -363,6 +395,9 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "alloca",
     "stack_save",
     "stack_restore",
+    "vconst",
+    "vcmp",
+    "vselect",
 };
 
 static bool ir_integer(uint32_t type)
@@ -399,7 +434,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
 {
     const uint64_t mark = arena->length;
     IrError error = IR_OK;
-    if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX)
+    if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX || sizes->vector_constant_count > UINT32_MAX)
     {
         error = IR_ERROR_LIMIT;
     }
@@ -416,6 +451,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
             .call_count = (uint32_t)sizes->call_count,
             .call_type_count = (uint32_t)sizes->call_type_count,
             .parameter_count = (uint32_t)sizes->parameter_count,
+            .vector_constant_count = (uint32_t)sizes->vector_constant_count,
             .symbol_count = UINT32_MAX,
         };
         candidate.op = ir_allocate(arena, sizes->instruction_count, 1, &ok);
@@ -428,6 +464,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         candidate.block_offsets = ir_allocate(arena, sizes->block_count + 1, 4, &ok);
         candidate.extra = ir_allocate(arena, sizes->extra_count, 4, &ok);
         candidate.constants = ir_allocate(arena, sizes->constant_count, sizeof(IrConstant), &ok);
+        candidate.vector_constants = ir_allocate(arena, sizes->vector_constant_count, sizeof(IrSimdValue), &ok);
         candidate.slots = ir_allocate(arena, sizes->slot_count, sizeof(IrSlot), &ok);
         candidate.addresses = ir_allocate(arena, sizes->address_count, sizeof(IrAddress), &ok);
         candidate.calls = ir_allocate(arena, sizes->call_count, sizeof(IrCall), &ok);
@@ -483,33 +520,38 @@ typedef enum IrRule
     IR_RULE_SWITCH,
     IR_RULE_RETURN,
     IR_RULE_STACK,
+    IR_RULE_VECTOR_CONSTANT,
+    IR_RULE_VECTOR_COMPARE,
+    IR_RULE_VECTOR_SELECT,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
 #define BUSTER_IR_FLOATS ((1u << IR_F32) | (1u << IR_F64) | (1u << IR_F80))
-#define BUSTER_IR_VALUES (((1u << IR_TYPE_COUNT) - 1) & ~1u)
-#define BUSTER_IR_TYPES ((1u << IR_TYPE_COUNT) - 1)
+#define BUSTER_IR_VECTORS ((1u << IR_V4I32) | (1u << IR_V8I32) | (1u << IR_V16I32))
+#define BUSTER_IR_MASKS ((1u << IR_M8) | (1u << IR_M16) | (1u << IR_M32) | (1u << IR_M64))
+#define BUSTER_IR_TYPES (UINT32_MAX >> (32 - IR_TYPE_COUNT))
+#define BUSTER_IR_VALUES (BUSTER_IR_TYPES & ~1u)
 // op, SSA operands, occupied fields, result type set, semantic rule, terminator. These tables also drive use enumeration.
 #define BUSTER_IR_ROWS(X) \
-    X(IR_CONST,         0, 1, BUSTER_IR_VALUES, IR_RULE_CONSTANT, 0) \
+    X(IR_CONST,         0, 1, BUSTER_IR_VALUES & ~BUSTER_IR_VECTORS, IR_RULE_CONSTANT, 0) \
     X(IR_UNDEF,         0, 0, BUSTER_IR_VALUES, IR_RULE_NONE, 0) \
     X(IR_PARAM,         0, 1, BUSTER_IR_VALUES, IR_RULE_PARAMETER, 0) \
     X(IR_COPY,          1, 1, BUSTER_IR_VALUES, IR_RULE_SAME, 0) \
-    X(IR_ADD,           3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_SUB,           3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_MUL,           3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
+    X(IR_ADD,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_SUB,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
+    X(IR_MUL,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_SAME, 0) \
     X(IR_SDIV,          3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
     X(IR_UDIV,          3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
     X(IR_SREM,          3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
     X(IR_UREM,          3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_AND,           3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_OR,            3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_XOR,           3, 3, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
+    X(IR_AND,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
+    X(IR_OR,            3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
+    X(IR_XOR,           3, 3, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_SHL,           3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
     X(IR_LSHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
     X(IR_ASHR,          3, 3, BUSTER_IR_INTS, IR_RULE_SHIFT, 0) \
     X(IR_NEG,           1, 1, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
-    X(IR_NOT,           1, 1, BUSTER_IR_INTS, IR_RULE_SAME, 0) \
+    X(IR_NOT,           1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS | BUSTER_IR_MASKS, IR_RULE_SAME, 0) \
     X(IR_FADD,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
     X(IR_FSUB,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
     X(IR_FMUL,          3, 3, BUSTER_IR_FLOATS, IR_RULE_SAME, 0) \
@@ -545,7 +587,10 @@ typedef enum IrRule
     X(IR_UNREACHABLE,   0, 0, 1u << IR_VOID, IR_RULE_NONE, 1) \
     X(IR_ALLOCA,        1, 1, 1u << IR_PTR, IR_RULE_STACK, 0) \
     X(IR_STACK_SAVE,    0, 0, 1u << IR_I64, IR_RULE_NONE, 0) \
-    X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0)
+    X(IR_STACK_RESTORE, 1, 1, 1u << IR_VOID, IR_RULE_STACK, 0) \
+    X(IR_VCONST,        0, 1, BUSTER_IR_VECTORS, IR_RULE_VECTOR_CONSTANT, 0) \
+    X(IR_VCMP,          3, 7, BUSTER_IR_MASKS, IR_RULE_VECTOR_COMPARE, 0) \
+    X(IR_VSELECT,       7, 7, BUSTER_IR_VECTORS, IR_RULE_VECTOR_SELECT, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -554,7 +599,7 @@ static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_R
 static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
 #undef BUSTER_IR_FIELD_ROW
 #define BUSTER_IR_TYPE_ROW(op, uses, fields, types, rule, term) [op] = types,
-static const uint16_t ir_result_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_TYPE_ROW) };
+static const uint32_t ir_result_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_TYPE_ROW) };
 #undef BUSTER_IR_TYPE_ROW
 #define BUSTER_IR_RULE_ROW(op, uses, fields, types, rule, term) [op] = rule,
 static const uint8_t ir_rule_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_RULE_ROW) };
@@ -564,6 +609,52 @@ static const uint8_t ir_terminator_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_TERM_R
 #undef BUSTER_IR_TERM_ROW
 #undef BUSTER_IR_ROWS
 _Static_assert(IR_OP_COUNT <= 64, "IR opcode tables must fit one byte-permute register");
+
+static bool ir_vector_type(uint32_t type)
+{
+    const bool result = type >= IR_V4I32 && type <= IR_V16I32;
+    return result;
+}
+
+static bool ir_mask_type(uint32_t type)
+{
+    const bool result = type >= IR_M8 && type <= IR_M64;
+    return result;
+}
+
+static IrSimdShape ir_simd_shape(uint32_t type)
+{
+    const IrSimdShape result = type >= IR_V4I32 && type <= IR_M64 ? (IrSimdShape)(type - IR_V4I32 + IR_SIMD_V4I32) : IR_SIMD_NONE;
+    return result;
+}
+
+// Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
+// scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows.
+static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
+{
+    bool found = function->vector_constant_count != 0 || function->result_type >= IR_V4I32;
+    for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
+    {
+        found = function->type[i] >= IR_V4I32 || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
+    }
+    for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
+    {
+        found = function->parameter_types[i] >= IR_V4I32;
+    }
+    for (uint32_t i = 0; !found && i < function->call_type_count; i += 1)
+    {
+        found = function->call_types[i] >= IR_V4I32;
+    }
+    for (uint32_t i = 0; !found && i < function->call_count; i += 1)
+    {
+        found = function->calls[i].result_type >= IR_V4I32;
+    }
+    for (uint32_t i = 0; !found && i < function->slot_count; i += 1)
+    {
+        found = function->slots[i].type >= IR_V4I32;
+    }
+    return found;
+}
 
 static IrCheck ir_check(IrError error, uint32_t instruction, uint32_t detail)
 {
@@ -600,6 +691,10 @@ static IrCheck ir_check_shape(const IrFunction* f)
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     const uint32_t n = f->instruction_count;
     if (f->result_type >= IR_TYPE_COUNT || f->block_offsets == 0 || ((n == 0) != (f->block_count == 0)) || (n == 0 && f->result_type != IR_VOID) || (n != 0 && (f->op == 0 || f->type == 0 || f->flags == 0 || f->alignment_log2 == 0 || f->a == 0 || f->b == 0 || f->c == 0)) || (f->extra_count != 0 && f->extra == 0) || (f->constant_count != 0 && f->constants == 0) || (f->slot_count != 0 && f->slots == 0) || (f->address_count != 0 && f->addresses == 0) || (f->call_count != 0 && f->calls == 0) || (f->call_type_count != 0 && f->call_types == 0) || (f->parameter_count != 0 && f->parameter_types == 0))
+    {
+        check.error = IR_ERROR_STRUCTURE;
+    }
+    if (check.error == IR_OK && f->vector_constant_count != 0 && f->vector_constants == NULL)
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -723,7 +818,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_FROM_INT: valid = ir_integer(ta); break;
             case IR_RULE_FROM_FLOAT: valid = ir_floating(ta); break;
             case IR_RULE_FROM_POINTER: valid = ta == IR_PTR; break;
-            case IR_RULE_BITCAST: valid = ir_type_bits[ta] == ir_type_bits[type]; break;
+            case IR_RULE_BITCAST: valid = ir_type_bits[ta] == ir_type_bits[type] && ((!ir_mask_type(ta) && !ir_mask_type(type)) || ta == type); break;
+            case IR_RULE_VECTOR_CONSTANT: valid = a < f->vector_constant_count && ir_simd_value_valid(f->vector_constants + a, ir_simd_shape(type)); break;
+            case IR_RULE_VECTOR_COMPARE: valid = ir_vector_type(ta) && ta == tb && c < IR_PREDICATE_COUNT && type == (ta == IR_V16I32 ? IR_M16 : IR_M8); break;
+            case IR_RULE_VECTOR_SELECT: valid = ta == (type == IR_V16I32 ? IR_M16 : IR_M8) && tb == type && operand_types[2] == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count; break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
@@ -796,9 +894,9 @@ static __mmask16 ir_check_batch(const IrFunction* f, uint32_t first, uint32_t co
     const __m512i fields = ir_lookup_bytes(_mm512_loadu_si512(ir_field_table), op_bytes);
     const __m512i rules = ir_lookup_bytes(_mm512_loadu_si512(ir_rule_table), op_bytes);
     const __m512i terms = ir_lookup_bytes(_mm512_loadu_si512(ir_terminator_table), op_bytes);
-    const __m512i op_words = _mm512_cvtepu8_epi16(_mm256_zextsi128_si256(op_bytes));
-    const __m512i allowed_words = _mm512_permutex2var_epi16(_mm512_loadu_si512(ir_result_table), op_words, _mm512_loadu_si512(ir_result_table + 32));
-    const __m512i allowed = _mm512_cvtepu16_epi32(_mm512_castsi512_si256(allowed_words));
+    const __m512i allowed_low = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table), op, _mm512_loadu_si512(ir_result_table + 16));
+    const __m512i allowed_high = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 32), op, _mm512_loadu_si512(ir_result_table + 48));
+    const __m512i allowed = _mm512_mask_blend_epi32(_mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(32)), allowed_low, allowed_high);
     const __m512i one = _mm512_set1_epi32(1);
     const __m512i none = _mm512_set1_epi32(-1);
     const __m512i limit = _mm512_set1_epi32((int)f->instruction_count);
@@ -1535,6 +1633,14 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         fputc(' ', output);
                         ir_print_constant(output, f->constants[a]);
                     } break;
+                    case IR_VCONST:
+                    {
+                        fputs(" 0x", output);
+                        for (uint32_t word = ir_type_bits[f->type[i]] / 64; word-- > 0;)
+                        {
+                            fprintf(output, "%016" PRIx64, f->vector_constants[a].words[word]);
+                        }
+                    } break;
                     case IR_PARAM: fprintf(output, " %" PRIu32, a); break;
                     case IR_STACK_ADDR: fprintf(output, " $%" PRIu32, a); break;
                     case IR_SYMBOL_ADDR: fprintf(output, " @%" PRIu32, a); break;
@@ -1594,7 +1700,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                                 first = false;
                             }
                         }
-                        if (op == IR_ICMP || op == IR_FCMP)
+                        if (op == IR_ICMP || op == IR_FCMP || op == IR_VCMP)
                         {
                             static const char* const predicates[IR_PREDICATE_COUNT] = {
                                 "eq",

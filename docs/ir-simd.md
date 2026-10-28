@@ -1,10 +1,10 @@
 # Vector and mask IR slice
 
 Issue [#732](https://github.com/buster14a/buster/issues/732) supplies vector and
-mask values to shared IR. The first implementation checkpoint contains the
-independent `ir_simd_model.c` semantic model and its tests. Shared IR admission,
-text, consumer refusals and the typed adapter are subsequent integration work;
-this checkpoint alone does not complete the issue.
+mask values to shared IR. The current implementation includes shared types,
+scalar/vector verification, canonical text, explicit consumer refusals and a
+bounded independent execution oracle. The typed adapter is subsequent
+integration work; this checkpoint alone does not complete the issue.
 
 The chosen initial vector shapes are `v4i32`, `v8i32` and `v16i32`: 128, 256 and
 512 bits containing 32-bit integer lanes. Signedness belongs to comparison
@@ -24,27 +24,46 @@ Mask logic is limited to bitwise operations, never integer arithmetic.
 Values are canonical little-endian bit patterns, with every bit beyond the
 shape zero. Only the explicit SIMD oracle uses `IrSimdValue`'s eight words.
 Ordinary IR constants and `InterpreterValue` retain their two-word layouts.
-The planned shared type IDs fit in a byte; the 18 admitted types require a
-checked 32-bit result admission set in place of the current 16-bit set. Type
-and opcode limits must be compile-time assertions, rather than implicit shifts
-or narrowing conversions.
+The shared type IDs retain every old scalar ID and fit in the existing byte
+column. The 18 admitted types use checked 32-bit result admission sets in place
+of the old 16-bit sets. Compile-time assertions enforce type/opcode limits.
+Only vector constant rows allocate 64-byte sparse payloads; scalar functions
+allocate no wide payload storage.
 
 The bounded memory oracle loads/stores the exact shape width at an explicit
 offset into a caller-supplied slice. Reads, writes and ordered volatile-byte
 accesses have explicit counters. Bounds and counter overflow are checked before
 an access; failure preserves output and memory. No masked memory, atomic or
 unordered operation is inferred from these load/store actions. Memory and value
-views are disjoint; input values may alias the result. There is no allocation.
+views are disjoint; input values may alias the result. The action model
+allocates no memory.
+
+`ir_simd_execute.c` executes the shared IR subset directly after complete SSA
+validation. It supports one straight-line block with vector/mask parameters,
+constants, arithmetic, comparison, selection, copies, returns and bounded
+loads/stores. Pointer arguments and constants are logical slice offsets;
+promised alignment applies to these offsets. Its private arena frame stores
+wide values only for SIMD results. Calls, arbitrary pointer arithmetic, control
+flow, undef and other unimplemented forms refuse before execution. Allocation
+or admission failure performs no access; a dynamic access fault retains earlier
+completed effects. Input/function/memory views are disjoint from the unused
+scratch remainder; no borrowed scratch view escapes.
 
 This abstract model can run on a baseline host. It does not authorize native
 AVX-512 instructions in a baseline output target. The eventual typed adapter
 must validate #717's X86 forms and target features independently of the compiler
-host. Consumers without these semantics must reject the function before
-rewriting or execution. Register assignment/spilling and native SIMD selection
+host. The ordinary interpreter, SSA promoter, SCCP/DCE/CFG, GVN, LICM, SROA,
+inliner and native Tier 1 selection reject the whole function before rewriting
+or execution, including SIMD in unused ABI/slot metadata. Register
+assignment/spilling and native SIMD selection
 remain [#179](https://github.com/buster14a/buster/issues/179) and
 [#141](https://github.com/buster14a/buster/issues/141), respectively.
 
 The original model tests compare integer arithmetic with Clang C vector
 operators, selection and comparisons with independent lane expectations, and
-memory effects with guarded bounded slices. They do not assert IR integration,
-native Tier 1 support or a performance improvement.
+memory effects with guarded bounded slices. `test-ir` exercises actual IR
+execution, malformed types/predicates/SSA/effects and sparse storage;
+`test-ir-parse` roundtrips the hand-written vector/mask fixture;
+`test-ir-simd` checks transactional unsupported-consumer refusals in both
+verification modes. These tests establish no native Tier 1 support or
+performance improvement.

@@ -84,18 +84,36 @@ static void ir_simd_model_masks(IrSimdModelTest* test)
         memcpy(inputs[1].words, b, lanes * sizeof(uint32_t));
         const IrSimdValue* operands[3] = { inputs, inputs + 1, NULL };
         IrSimdValue compared = { 0 };
-        const IrSimdAction compare = { .operation = IR_SIMD_COMPARE, .result = mask, .operands = { shape, shape }, .predicate = IR_SIMD_LT };
-        uint64_t expected = 0;
-        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        for (uint32_t predicate = 0; predicate < IR_SIMD_PREDICATE_COUNT; predicate += 1)
         {
-            int32_t signed_a = 0;
-            int32_t signed_b = 0;
-            memcpy(&signed_a, a + lane, sizeof(signed_a));
-            memcpy(&signed_b, b + lane, sizeof(signed_b));
-            expected |= (uint64_t)(signed_a < signed_b) << lane;
+            const IrSimdAction compare = { .operation = IR_SIMD_COMPARE, .result = mask, .operands = { shape, shape }, .predicate = (IrSimdPredicate)predicate };
+            uint64_t expected = 0;
+            for (uint32_t lane = 0; lane < lanes; lane += 1)
+            {
+                int32_t signed_a = 0;
+                int32_t signed_b = 0;
+                memcpy(&signed_a, a + lane, sizeof(signed_a));
+                memcpy(&signed_b, b + lane, sizeof(signed_b));
+                bool relation = false;
+                switch (predicate)
+                {
+                    case IR_SIMD_EQ: relation = a[lane] == b[lane]; break;
+                    case IR_SIMD_NE: relation = a[lane] != b[lane]; break;
+                    case IR_SIMD_LT: relation = signed_a < signed_b; break;
+                    case IR_SIMD_LE: relation = signed_a <= signed_b; break;
+                    case IR_SIMD_GT: relation = signed_a > signed_b; break;
+                    case IR_SIMD_GE: relation = signed_a >= signed_b; break;
+                    case IR_SIMD_ULT: relation = a[lane] < b[lane]; break;
+                    case IR_SIMD_ULE: relation = a[lane] <= b[lane]; break;
+                    case IR_SIMD_UGT: relation = a[lane] > b[lane]; break;
+                    case IR_SIMD_UGE: relation = a[lane] >= b[lane]; break;
+                    default: break;
+                }
+                expected |= (uint64_t)relation << lane;
+            }
+            ir_simd_model_expect(test, ir_simd_evaluate(&compare, operands, NULL, NULL, 0, &compared) && compared.words[0] == expected &&
+                                ir_simd_value_valid(&compared, mask), "every signed/unsigned comparison creates a width-qualified mask with unused bits clear");
         }
-        ir_simd_model_expect(test, ir_simd_evaluate(&compare, operands, NULL, NULL, 0, &compared) && compared.words[0] == expected &&
-                            ir_simd_value_valid(&compared, mask), "signed comparison creates a distinct width-qualified mask with unused bits clear");
         compared.words[0] = UINT64_C(0xaa);
         const IrSimdValue* selected[3] = { &compared, inputs, inputs + 1 };
         const IrSimdAction select = { .operation = IR_SIMD_SELECT, .result = shape, .operands = { mask, shape, shape } };
@@ -127,6 +145,15 @@ static void ir_simd_model_masks(IrSimdModelTest* test)
         IrSimdValue actual = { 0 };
         ir_simd_model_expect(test, ir_simd_evaluate(&action, values, NULL, NULL, 0, &actual) && actual.words[0] == (~UINT64_C(0x55) & mask),
                             "mask logic is width-qualified through 64 bits without scalar i1/i64 conflation");
+        const IrSimdValue right = { .words = { UINT64_C(0x96) } };
+        values[1] = &right;
+        for (uint32_t operation = IR_SIMD_AND; operation <= IR_SIMD_XOR; operation += 1)
+        {
+            const IrSimdAction binary = { .operation = (IrSimdOperation)operation, .result = (IrSimdShape)shape, .operands = { (IrSimdShape)shape, (IrSimdShape)shape } };
+            const uint64_t expected = operation == IR_SIMD_AND ? UINT64_C(0x14) : operation == IR_SIMD_OR ? UINT64_C(0xd7) : UINT64_C(0xc3);
+            ir_simd_model_expect(test, ir_simd_evaluate(&binary, values, NULL, NULL, 0, &actual) && actual.words[0] == expected &&
+                                ir_simd_value_valid(&actual, (IrSimdShape)shape), "binary mask logic preserves exact width and distinct bit patterns");
+        }
     }
 }
 
