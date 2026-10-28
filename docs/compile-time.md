@@ -213,6 +213,16 @@ reads, including on dirty pages and arena copies. This reduces the scratch
 span; its RSS and system-time effect requires separate whole-process
 measurement and is not implied by the virtual byte count.
 
+The reader's zero-default `asm_ids` output column is also omitted when the
+parser's roles prove there is no assembly statement group. Declaration linkage
+labels contain `asm` keywords but need no IDs: the pinned SQLite input has 45
+such keywords and no statement groups. Its 716,157 tokens otherwise require
+2,864,632 bytes of IDs. The scalar reader keeps a dense zero column as an oracle;
+real assembly statements keep the original allocation, capacity and diagnostics.
+Every reader uses a zero-default accessor or a guarded vector load, and deferred
+ID remapping preserves an absent column. No arena freshness or high-water mark
+is assumed.
+
 ### Before and after
 
 These are the 9700X's medians, pinned to CPU 2 under the host's lock:

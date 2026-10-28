@@ -232,7 +232,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
         {
             const uint32_t first = check_input_first_token(reader, child);
             const bool empty = parser->tree.roles[child] == PARSE_ROLE_TERMINATOR && reader->first_child[child] == BUSTER_CHECK_NONE;
-            if (child > body && !empty && input->asm_ids[child] == 0 && !check_input_naked_registers(reader, first, child, body))
+            if (child > body && !empty && check_input_asm_id(input, child) == 0 && !check_input_naked_registers(reader, first, child, body))
             {
                 diagnostic.position = closing;
                 diagnostic.token = first;

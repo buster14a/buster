@@ -1156,7 +1156,10 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
         input->expression_regions[token] = check_deferred_id1(region_map, top_regions, region_base, input->expression_regions[token]);
         check_deferred_map_id1(reader->vla_bounds, token, vla_map, top_vlas, vla_base);
         check_deferred_map_id1(reader->vla_ends, token, vla_map, top_vlas, vla_base);
-        input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
+        if (input->asm_ids != NULL)
+        {
+            input->asm_ids[token] = check_deferred_id1(asm_map, top_asms, asm_base, input->asm_ids[token]);
+        }
         check_deferred_map_id1(reader->vararg_calls, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->vararg_types, token, vararg_map, top_varargs, vararg_base);
         check_deferred_map_id1(reader->constant_present, token, constant_map, top_constants, constant_base);
