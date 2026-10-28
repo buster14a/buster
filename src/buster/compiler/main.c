@@ -419,6 +419,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/streaming.c"
 #include "buster/compiler/streaming_test.c"
 #include "buster/compiler/streaming_benchmark.c"
+#include "buster/compiler/streaming_benchmark_test.c"
 int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its

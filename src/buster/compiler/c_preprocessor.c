@@ -89,11 +89,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/stat.h>
-#include <sys/vfs.h>
-#include <sys/ioctl.h>
 #include <sys/wait.h>
-#include <linux/fs.h>
-#include <linux/magic.h>
 #include "host_isa.h"
 #include "c_builtin_catalog.c"
 #include "buster/compiler/x86_target.c"
@@ -568,20 +564,6 @@ struct FileCacheCounts
     uint64_t fstats;
     uint64_t maps;
     uint64_t reads;
-    uint64_t directory_skips;
-};
-
-// A complete, searchable directory's entry-name hashes. Collisions only retain an unnecessary probe; no positive
-// result supplies a file. Listings are immutable for the cache's lifetime, like its file/path records. One lane adds
-// them; file_cache_probe only reads them, including when the per-file walk probes on several lanes.
-typedef struct FileCacheDirectory FileCacheDirectory;
-struct FileCacheDirectory
-{
-    FileCacheDirectory* next;
-    const char* path;
-    uint32_t length;
-    uint32_t slot_mask;
-    uint64_t* slots;
 };
 
 // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
@@ -668,10 +650,6 @@ struct FileCache
     uint32_t path_slot_mask;
     Arena path_arena;
     Arena arrays[4];
-    Arena directory_arena;
-    FileCacheDirectory* directories;
-    uint64_t directory_opens;
-    uint64_t directory_entries;
     // Each lane's arenas, reserved when the lane first prepares a record.
     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
     // The records prepared, and their tokens (for the tests and the benchmark).
@@ -3663,7 +3641,6 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, 
 #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
 #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
 #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
-#define BUSTER_FILE_CACHE_DIRECTORY_BYTES (16ull << 20)
 // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
 // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
 // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
@@ -3732,7 +3709,6 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
         arena_release(&cache->arrays[i]);
     }
     arena_release(&cache->path_arena);
-    arena_release(&cache->directory_arena);
     *cache = (FileCache){ 0 };
 }
 
@@ -3857,145 +3833,6 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
     return result;
 }
 
-// Exact names are required for a negative result. Restrict the optimization to known local filesystems: a remote or
-// userspace filesystem can resolve names case-insensitively, and ext4's casefold directories explicitly do. An
-// unreadable or unsearchable directory retains the original open's errors, including ACL/effective-ID decisions.
-static bool file_cache_directory_exact(int fd)
-{
-    struct statfs filesystem;
-    const bool stated = fstatfs(fd, &filesystem) == 0;
-    const bool supported = stated && (filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC);
-    long flags = 0;
-    bool result = supported && ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0 && (flags & FS_CASEFOLD_FL) == 0;
-    result = result && faccessat(fd, ".", X_OK, AT_EACCESS) == 0;
-    return result;
-}
-
-// Snapshot a search directory on one lane after its first missing candidate; the run-ahead publishes between waves.
-// A failed/incomplete listing, unsupported filesystem or exhausted optional arena retains the ordinary probe.
-// Keep the failed directory record too, so an unreadable directory is not opened again for every name.
-static void file_cache_list_directory(FileCache* cache, const char* path, uint32_t length)
-{
-    FileCacheDirectory* existing = cache->directories;
-    while (existing != 0 && (existing->length != length || memcmp(existing->path, path, length) != 0))
-    {
-        existing = existing->next;
-    }
-    if (existing == 0 && length < PATH_MAX)
-    {
-        if (cache->directory_arena.base == 0)
-        {
-            cache->directory_arena = arena_reserve_small(BUSTER_FILE_CACHE_DIRECTORY_BYTES, BUSTER_FILE_CACHE_DIRECTORY_BYTES);
-        }
-        Arena* arena = &cache->directory_arena;
-        const uint64_t mark = arena->length;
-        FileCacheDirectory* directory = arena_push_array(arena, 1, sizeof(FileCacheDirectory), _Alignof(FileCacheDirectory));
-        char* copy = directory != 0 ? arena_push(arena, (uint64_t)length + 1, 1) : 0;
-        if (copy != 0)
-        {
-            memcpy(copy, path, length);
-            copy[length] = 0;
-            *directory = (FileCacheDirectory){ .next = cache->directories, .path = copy, .length = length };
-            cache->directories = directory;
-            const uint64_t names_mark = arena->length;
-            DIR* stream = opendir(copy);
-            cache->directory_opens += 1;
-            bool complete = stream != 0 && file_cache_directory_exact(dirfd(stream));
-            uint64_t* names = 0;
-            uint32_t count = 0;
-            struct dirent* entry = 0;
-            while (complete)
-            {
-                errno = 0;
-                entry = readdir(stream);
-                if (entry == 0)
-                {
-                    complete = errno == 0;
-                    break;
-                }
-                uint64_t* name = arena_push_array(arena, 1, sizeof(uint64_t), _Alignof(uint64_t));
-                complete = name != 0;
-                if (complete)
-                {
-                    names = count == 0 ? name : names;
-                    *name = intern_hash_bytes((const uint8_t*)entry->d_name, (uint32_t)strlen(entry->d_name)) | 1;
-                    count += 1;
-                }
-            }
-            if (stream != 0)
-            {
-                closedir(stream);
-            }
-            uint32_t capacity = 2;
-            while (capacity < 2ull * count)
-            {
-                capacity *= 2;
-            }
-            uint64_t* slots = complete ? arena_push_array(arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : 0;
-            complete = slots != 0;
-            if (complete)
-            {
-                memset(slots, 0, capacity * sizeof(uint64_t));
-                for (uint32_t n = 0; n < count; n += 1)
-                {
-                    uint32_t slot = (uint32_t)names[n] & (capacity - 1);
-                    while (slots[slot] != 0 && slots[slot] != names[n])
-                    {
-                        slot = (slot + 1) & (capacity - 1);
-                    }
-                    slots[slot] = names[n];
-                }
-                directory->slots = slots;
-                directory->slot_mask = capacity - 1;
-                cache->directory_entries += count;
-            }
-            else
-            {
-                arena_pop_to(arena, names_mark);
-            }
-        }
-        else
-        {
-            arena_pop_to(arena, mark);
-        }
-    }
-}
-
-// A missing first component proves the candidate absent without opening it. Dot, dot-dot, empty and overlong
-// components retain the OS probe, preserving traversal and ENAMETOOLONG errors. Symlinks and every other entry kind
-// stay in the hash set and are always probed. Hash collisions are harmless false positives.
-static bool file_cache_directory_absent(const FileCache* cache, const char* path)
-{
-    const uint32_t length = (uint32_t)strlen(path);
-    bool result = false;
-    for (const FileCacheDirectory* directory = cache->directories; !result && directory != 0; directory = directory->next)
-    {
-        const uint32_t first = directory->length + 1;
-        if (directory->slots != 0 && length > first && path[directory->length] == '/' && memcmp(directory->path, path, directory->length) == 0)
-        {
-            uint32_t end = first;
-            while (end < length && path[end] != '/')
-            {
-                end += 1;
-            }
-            const uint32_t component = end - first;
-            const bool dot = component == 1 && path[first] == '.';
-            const bool parent = component == 2 && path[first] == '.' && path[first + 1] == '.';
-            if (component != 0 && component <= NAME_MAX && !dot && !parent)
-            {
-                const uint64_t hash = intern_hash_bytes((const uint8_t*)path + first, component) | 1;
-                uint32_t slot = (uint32_t)hash & directory->slot_mask;
-                while (directory->slots[slot] != 0 && directory->slots[slot] != hash)
-                {
-                    slot = (slot + 1) & directory->slot_mask;
-                }
-                result = directory->slots[slot] == 0;
-            }
-        }
-    }
-    return result;
-}
-
 // Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
 // record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
 // costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
@@ -4013,11 +3850,9 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
     // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
-    const bool absent = file_cache_directory_absent(cache, path);
-    const int fd = absent ? -1 : open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
-    int error = absent ? ENOENT : fd >= 0 ? 0 : errno;
-    counts->opens += !absent;
-    counts->directory_skips += absent;
+    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+    int error = fd >= 0 ? 0 : errno;
+    counts->opens += 1;
     struct stat stats;
     const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
     error = fd >= 0 && !stated ? errno : error;
@@ -4556,13 +4391,6 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
-            // A directory earns a snapshot only after a real missing candidate. Enumerating a large -I directory
-            // for a header found on its first probe would add work to a successful search. The first miss remains in
-            // the path cache; the snapshot serves later names. Quoted includer directories retain ordinary probes.
-            if (directory != BUSTER_PP_NONE && error == ENOENT)
-            {
-                file_cache_list_directory(pp->cache, prefix, prefix_length);
-            }
         }
         failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
         if (failed)

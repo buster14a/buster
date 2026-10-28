@@ -3573,6 +3573,17 @@ they compile or once they have, and the same code as a Link through
   `llvm-dwarfdump --verify` passes the units together, and `readelf` warns about
   nothing.
 
+`benchmark-streaming` reports its requested and selected lane counts and its
+allowed CPU count. It clamps direct-path lanes to inherited affinity; the
+writer uses the first two allowed CPUs unless `--cpus A,B` selects a distinct
+allowed pair. Rows without their required CPUs print `not run`, with no sample
+or validation run for that row. On one allowed CPU, only the three serial rows
+run. For parallel comparisons, use one CPU per physical core, for example
+`taskset -c 2,3 ... --lanes 2 --cpus 2,3`; the scheduled benchmark selects up
+to eight allowed physical cores. Its parallel rows previously inherited the
+single-CPU placement of the backend benchmark (#647), which measured contention
+among lanes on one CPU rather than their parallel throughput.
+
 **Measured on the 9700X** (`benchmark-streaming --units 3200`, medians of 11
 runs, the output overwritten in place on tmpfs; [the record](https://github.com/buster14a/buster-performance/tree/1cae273d7d9484451744a8abe044ccddc3420d30/docs/measurements/streaming-2026-10-24)): 3,200
 units of 32 functions, 102,400 functions of 13.1 million typed entries,

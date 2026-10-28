@@ -2881,17 +2881,16 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
         uint32_t opens;
         uint32_t fstats;
         uint32_t reads;
-        uint32_t skips;
     } cases[] = {
-        { "absent.h", false, 2, 0, 0, 0 },
-        { "absent.h", false, 0, 0, 0, 0 },
-        { "value.h", true, 2, 1, 1, 1 },
-        { "value.h", true, 0, 0, 0, 0 },
-        { "alias.h", true, 2, 1, 0, 1 },
-        { "folder.h", false, 2, 1, 0, 1 },
-        { "folder.h", false, 0, 0, 0, 0 },
-        { "loop.h", false, 2, 0, 0, 1 },
-        { "loop.h", false, 0, 0, 0, 0 },
+        { "absent.h", false, 2, 0, 0 },
+        { "absent.h", false, 0, 0, 0 },
+        { "value.h", true, 2, 1, 1 },
+        { "value.h", true, 0, 0, 0 },
+        { "alias.h", true, 2, 1, 0 },
+        { "folder.h", false, 2, 1, 0 },
+        { "folder.h", false, 0, 0, 0 },
+        { "loop.h", false, 2, 0, 0 },
+        { "loop.h", false, 0, 0, 0 },
     };
     static InternTable table;
     static Preprocessor units[2];
@@ -2913,8 +2912,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
             uint32_t found_in = BUSTER_PP_NONE;
             const uint32_t file = pp_find_include(pp, (const uint8_t*)cases[c].name, (uint32_t)strlen(cases[c].name), true, false, BUSTER_PP_NONE,
                                                    BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
-            const bool listed = pp->cache->directories != 0 && pp->cache->directories->slots != 0;
-            expected_opens += u == 0 ? cases[c].opens - (listed ? cases[c].skips : 0) : 0;
+            expected_opens += u == 0 ? cases[c].opens : 0;
             expected_fstats += u == 0 ? cases[c].fstats : 0;
             expected_reads += u == 0 ? cases[c].reads : 0;
             expected_found += cases[c].found;
@@ -2960,137 +2958,6 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
 // Real directive/query dispatch must produce the same tokens, locations, history and tables with vector/scalar
 // kernels and with timing disabled. The independent fixture counts include failed and repeated cached searches,
 // stat calls for every embed query (there is no embed path cache), and setup stats for duplicate/missing directories.
-// Directory snapshots are optional negative information only: every known first component, traversal or failed
-// listing falls back to the exact file probe. A shared cache keeps its snapshot; a fresh one sees newly created names.
-static bool pp_test_directory_snapshot(const char* root)
-{
-    char directory[PATH_MAX];
-    char present[PATH_MAX];
-    char created[PATH_MAX];
-    char alias[PATH_MAX];
-    char nested[PATH_MAX];
-    char query[PATH_MAX];
-    snprintf(directory, sizeof(directory), "%s/directory-snapshot", root);
-    snprintf(present, sizeof(present), "%s/value.h", directory);
-    snprintf(created, sizeof(created), "%s/later.h", directory);
-    snprintf(alias, sizeof(alias), "%s/alias.h", directory);
-    snprintf(nested, sizeof(nested), "%s/nested", directory);
-    bool result = mkdir(directory, 0700) == 0 && mkdir(nested, 0700) == 0 && pp_test_write_file(present, "value\n") && symlink("value.h", alias) == 0;
-    FileCache cache = { 0 };
-    FileCache fresh = { 0 };
-    FileCache failed = { 0 };
-    const uint32_t length = (uint32_t)strlen(directory);
-    if (result)
-    {
-        // First hits both beside the source and in an explicit -I directory must not enumerate the directory.
-        snprintf(query, sizeof(query), "%s/local.c", directory);
-        static InternTable local_table;
-        static Preprocessor local_unit;
-        const char* const includes[] = { directory };
-        for (uint32_t explicit = 0; result && explicit < 2; explicit += 1)
-        {
-            const PPOptions local_options = {
-                .no_standard_includes = true,
-                .quiet = true,
-                .include_directories = includes,
-                .include_directory_count = explicit,
-            };
-            result = pp_test_write_file(query, explicit == 0 ? "#include \"value.h\"\n" : "#include <value.h>\n") && intern_initialize(&local_table) &&
-                     pp_initialize(&local_unit, &local_options, &local_table) && pp_run(&local_unit, query) && local_unit.cache->directory_opens == 0;
-            pp_release(&local_unit);
-            intern_release(&local_table);
-        }
-        unlink(query);
-        file_cache_list_directory(&cache, directory, length);
-        const bool supported = cache.directories != 0 && cache.directories->slots != 0;
-        result = cache.directory_opens == 1 && !file_cache_directory_absent(&cache, present) && !file_cache_directory_absent(&cache, alias) &&
-                 file_cache_directory_absent(&cache, created) == supported;
-        snprintf(query, sizeof(query), "%s/missing/child.h", directory);
-        result = result && file_cache_directory_absent(&cache, query) == supported;
-        snprintf(query, sizeof(query), "%s/nested/child.h", directory);
-        result = result && !file_cache_directory_absent(&cache, query);
-        snprintf(query, sizeof(query), "%s/./later.h", directory);
-        result = result && !file_cache_directory_absent(&cache, query);
-        snprintf(query, sizeof(query), "%s/../later.h", directory);
-        result = result && !file_cache_directory_absent(&cache, query);
-        result = result && (uint64_t)length + NAME_MAX + 3 <= sizeof(query);
-        if (result)
-        {
-            memcpy(query, directory, length);
-            query[length] = '/';
-            memset(query + length + 1, 'q', NAME_MAX + 1);
-            query[length + NAME_MAX + 2] = 0;
-            result = !file_cache_directory_absent(&cache, query);
-        }
-        result = result && pp_test_write_file(created, "later\n");
-        file_cache_list_directory(&cache, directory, length);
-        file_cache_list_directory(&fresh, directory, length);
-        result = result && cache.directory_opens == 1 && file_cache_directory_absent(&cache, created) == supported &&
-                 fresh.directory_opens == 1 && !file_cache_directory_absent(&fresh, created);
-        // An optional listing that cannot fit cannot change an include's outcome; it is not a fatal cache failure.
-        failed.directory_arena = arena_reserve_small(128, 128);
-        file_cache_list_directory(&failed, directory, length);
-        result = result && !file_cache_directory_absent(&failed, present) && !file_cache_directory_absent(&failed, created);
-        snprintf(query, sizeof(query), "%s/missing.h", directory);
-        result = result && !file_cache_directory_absent(&failed, query);
-    }
-    arena_release(&cache.directory_arena);
-    cache = (FileCache){ 0 };
-    arena_release(&fresh.directory_arena);
-    arena_release(&failed.directory_arena);
-    unlink(present);
-    unlink(created);
-    unlink(alias);
-    rmdir(nested);
-    failed = (FileCache){ 0 };
-    if (result && geteuid() != 0)
-    {
-        result = chmod(directory, 0) == 0;
-        file_cache_list_directory(&failed, directory, length);
-        result = result && !file_cache_directory_absent(&failed, query) && failed.directories != 0 && failed.directories->slots == 0;
-        result = chmod(directory, 0700) == 0 && result;
-        arena_release(&failed.directory_arena);
-    }
-    FileCache unsupported = { 0 };
-    file_cache_list_directory(&unsupported, "/proc", 5);
-    result = result && !file_cache_directory_absent(&unsupported, "/proc/buster-absent-header.h") &&
-             unsupported.directories != 0 && unsupported.directories->slots == 0;
-    arena_release(&unsupported.directory_arena);
-    // Where the temporary filesystem permits +F, a differently cased existing header must always reach the probe.
-    const int fd = result ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
-    long flags = 0;
-    bool casefold = false;
-    if (fd >= 0 && ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
-    {
-        long folded = flags | FS_CASEFOLD_FL;
-        casefold = ioctl(fd, FS_IOC_SETFLAGS, &folded) == 0;
-    }
-    if (casefold)
-    {
-        snprintf(present, sizeof(present), "%s/MiXeD.h", directory);
-        snprintf(query, sizeof(query), "%s/mixed.h", directory);
-        result = pp_test_write_file(present, "casefold\n") && result;
-        file_cache_list_directory(&cache, directory, length);
-        const int header = open(query, O_RDONLY | O_CLOEXEC);
-        result = result && header >= 0 && !file_cache_directory_absent(&cache, query) && cache.directories != 0 && cache.directories->slots == 0;
-        if (header >= 0)
-        {
-            close(header);
-        }
-        unlink(present);
-        ioctl(fd, FS_IOC_SETFLAGS, &flags);
-        arena_release(&cache.directory_arena);
-    }
-    if (fd >= 0)
-    {
-        close(fd);
-    }
-    rmdir(directory);
-    printf("directory snapshots: %s (first components, symlinks, traversal, cache lifetime, allocation fallback%s)\n", result ? "as expected" : "WRONG",
-           casefold ? ", casefold" : "; casefold unavailable");
-    return result;
-}
-
 static bool pp_test_lookup_accounting(const char* directory)
 {
     char first[4200];
@@ -3137,7 +3004,7 @@ static bool pp_test_lookup_accounting(const char* directory)
     bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(folder, 0700) == 0 && symlink("loop.h", loop) == 0 &&
                   pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
                   link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
-    result = result && pp_test_lookup_probes(&options, missing_root) && pp_test_directory_snapshot(directory);
+    result = result && pp_test_lookup_probes(&options, missing_root);
     // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
     // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
     options.quiet = false;
@@ -3150,15 +3017,12 @@ static bool pp_test_lookup_accounting(const char* directory)
         Preprocessor* pp = &runs[k];
         result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) && pp_run(pp, path);
         const PPStatistics* stats = &pp->statistics;
-        // The first missing name earns each snapshot; later names eliminate four candidates. Listing opens are separate from file
-        // probes. On an unsupported filesystem the original ten probes remain. Every existing entry is still probed.
-        const bool listed = pp->cache->directories != 0 && pp->cache->directories->slots != 0;
-        const uint64_t include_opens = listed ? 4 : 8;
-        result = result && pp->probes.opens == include_opens + 2 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0 &&
-                 pp->probes.directory_skips == (listed ? 4u : 0u);
+        // Ten file open attempts: the unit, eight include candidates, and the embed's bytes. Four reach fstat: the
+        // unit, header, directory and resource. The three files' nonempty bytes are read once each.
+        result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
         if (options.timing)
         {
-            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == include_opens &&
+            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
                      stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
                      stats->embed_ticks != 0;
         }
