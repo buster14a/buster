@@ -1071,12 +1071,15 @@ typedef void (*Tier0TestVectorRun)(const void* code, Tier0TestVectorShared* shar
 
 // Runs `run` on `code` (`length` bytes) in a child, which must exit with status 0: the code mapped executable at a page of
 // its own, `run` calling it from C.
-// The generated rows include AVX2, BMI and AVX-512 with byte, VL and VBMI forms. Clang's CPU checks include OS save-state support.
+// The generated rows include AVX2, BMI and AVX-512 with byte, VL and VBMI forms. The shared native detector includes
+// OS save-state support independently of the host build's selected ISA, and remains readable by our own checker.
 static bool tier0_test_vector_can_run(void)
 {
-    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("bmi") && __builtin_cpu_supports("avx512f") &&
-           __builtin_cpu_supports("avx512bw") && __builtin_cpu_supports("avx512dq") && __builtin_cpu_supports("avx512vl") &&
-           __builtin_cpu_supports("avx512vbmi");
+    const X86Target native = x86_target_native();
+    const uint64_t required = BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(BMI) | BUSTER_X86_FEATURE(AVX512F) |
+                              BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL) |
+                              BUSTER_X86_FEATURE(AVX512VBMI);
+    return (native.features & required) == required;
 }
 
 static bool tier0_test_vector_native(const uint8_t* code, uint32_t length, Tier0TestVectorRun run, Tier0TestVectorShared* shared)
