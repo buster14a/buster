@@ -19215,12 +19215,16 @@ static void pp_clang_remove_links(const char* links)
 }
 
 // What --buster-headers searches after buster's directory `ours`, for clang: a new directory, made from the template
-// `links` (mkdtemp's, which gives it its name), with a link to each entry of clang's resource directory that `ours`
-// hasn't. Returns whether it made it; if not, it leaves nothing.
+// `links` (mkdtemp's, which gives it its name, where it ends in XXXXXX, and otherwise the name itself: a test's, in a
+// directory of its own, whose clang runs the oracle cache keeps only when their arguments are the same from one test
+// run to the next), with a link to each entry of clang's resource directory that `ours` hasn't. Returns whether it made
+// it; if not, it leaves nothing.
 static bool pp_clang_fallback_links(const char* ours, char* links)
 {
     char resource[PATH_MAX];
-    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && mkdtemp(links) != 0;
+    const size_t length = strlen(links);
+    const bool template = length >= 6 && strcmp(links + length - 6, "XXXXXX") == 0;
+    const bool made = pp_clang_resource_directory(resource, sizeof(resource), 0) && (template ? mkdtemp(links) != 0 : mkdir(links, 0700) == 0);
     DIR* directory = made ? opendir(resource) : 0;
     bool result = directory != 0;
     for (struct dirent* entry = result ? readdir(directory) : 0; result && entry != 0; entry = readdir(directory))
@@ -19269,8 +19273,8 @@ static bool pp_option_takes_value(const char* argument)
 // directories' options, from a preprocessor initialized with `options`: each directory pp_dedupe_directories keeps
 // (whose decisions, by identity and a system directory over a user's, clang's links would hide from it) with its
 // option, -iquote, -I, -isystem or -idirafter, and in clang's resource directory's place, when it is kept, a new
-// directory of links made from the template `links` (pp_clang_fallback_links, with buster's directory in `ours`,
-// PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
+// directory of links made from `links`, a template or a name (pp_clang_fallback_links, with buster's directory in
+// `ours`, PATH_MAX bytes). -nobuiltininc comes first, and clang adds the standard directories, /usr/local/include and
 // /usr/include, after the -isystem ones, as ours has them. `*linked` says whether the links were made, for
 // pp_clang_remove_links.
 static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* options, int count, char** arguments, char* ours, char* links, bool* linked, int* clang_count)

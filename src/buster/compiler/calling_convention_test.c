@@ -6324,6 +6324,34 @@ struct AbiTestCrossRun
     int errors;
 };
 
+// `arguments`, a compile of the C side's one source into `object`, through the oracle cache (oracle_cache.c, #542),
+// its standard output and errors into `output_path` and `error_path` as type_test_run writes them, for up to
+// BUSTER_TYPE_TEST_RUN_SECONDS: its exit status, or -1 if it didn't run, ran too long, or its output couldn't be
+// written. The cross-check's runs share their directory: a traced compile's entry has the paths it looked at in it, not
+// the other runs' files.
+static int abi_test_compile(char* const* arguments, const char* object, const char* output_path, const char* error_path)
+{
+    const char* files[] = { object };
+    OracleRun run = {
+        .purpose = "calling convention: the C side's compile",
+        .arguments = arguments,
+        .files = files,
+        .file_count = 1,
+        .dependencies = true,
+        .timeout = BUSTER_TYPE_TEST_RUN_SECONDS,
+    };
+    const bool ran = oracle_run(&run);
+    FILE* output = fopen(output_path, "w");
+    FILE* errors = fopen(error_path, "w");
+    bool written = output != 0 && errors != 0 && fwrite(run.output != 0 ? run.output : "", 1, run.output_length, output) == run.output_length &&
+                   fwrite(run.errors != 0 ? run.errors : "", 1, run.errors_length, errors) == run.errors_length;
+    written = (output == 0 || fclose(output) == 0) && written;
+    written = (errors == 0 || fclose(errors) == 0) && written;
+    const int result = ran && written && WIFEXITED(run.status) ? WEXITSTATUS(run.status) : -1;
+    oracle_run_release(&run);
+    return result;
+}
+
 // Run `index` (clang's at 16-, 32- and 64-byte vectors, then GCC's, then a compiled world's against clang and against
 // GCC, at 16 bytes, then the extension runs with signed and with unsigned char), not started.
 static AbiTestCrossRun abi_test_cross_run(uint32_t index)
@@ -6477,6 +6505,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             char ours[BUSTER_ABI_TEST_PATH_BYTES];
             char object[BUSTER_ABI_TEST_PATH_BYTES];
             char scalar_object[BUSTER_ABI_TEST_PATH_BYTES];
+            char c_object[BUSTER_ABI_TEST_PATH_BYTES];
             char program[BUSTER_ABI_TEST_PATH_BYTES];
             char output[BUSTER_ABI_TEST_PATH_BYTES];
             char errors[BUSTER_ABI_TEST_PATH_BYTES];
@@ -6485,10 +6514,13 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             snprintf(ours, sizeof(ours), "%s/%s_%u_buster.c", directory, run.file, vector_bytes);
             snprintf(object, sizeof(object), "%s/%s_%u_buster.o", directory, run.file, vector_bytes);
             snprintf(scalar_object, sizeof(scalar_object), "%s/%s_%u_buster_scalar.o", directory, run.file, vector_bytes);
+            snprintf(c_object, sizeof(c_object), "%s/%s_%u_c.o", directory, run.file, vector_bytes);
             snprintf(program, sizeof(program), "%s/%s_%u", directory, run.file, vector_bytes);
             snprintf(output, sizeof(output), "%s/%s_%u.out", directory, run.file, vector_bytes);
             snprintf(errors, sizeof(errors), "%s/%s_%u.err", directory, run.file, vector_bytes);
-            result = result && text.valid && type_test_write_file(source, &text);
+            // With SOURCE_DATE_EPOCH's time, which GCC's __TIMESTAMP__ doesn't follow, so that the oracle cache's entry of
+            // its compile, which has the file's time, is taken by the next run's (oracle_epoch_file).
+            result = result && text.valid && type_test_write_file(source, &text) && oracle_epoch_file(source);
             abi_test_expect(tally, result, "cross-check", "the C file can't be written");
             bool written = false;
             if (result && compiled)
@@ -6551,7 +6583,21 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
             if (written)
             {
                 const char* march = vector_bytes == 16 ? "-march=x86-64" : vector_bytes == 32 ? "-march=x86-64-v3" : "-march=x86-64-v4";
+                // The C side compiled through the oracle cache (abi_test_compile), then linked with ours.
                 char* compile[] = {
+                    (char*)compiler,
+                    "-std=gnu23",
+                    "-O1",
+                    "-fno-strict-aliasing",
+                    (char*)march,
+                    "-w",
+                    "-c",
+                    "-o",
+                    c_object,
+                    source,
+                    0,
+                };
+                char* link[] = {
                     (char*)compiler,
                     "-std=gnu23",
                     "-O1",
@@ -6560,12 +6606,13 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                     "-w",
                     "-o",
                     program,
-                    source,
+                    c_object,
                     object,
                     "-latomic",
                     0,
                 };
-                const int compiled = type_test_run(compile, output, errors);
+                const int c_compiled = abi_test_compile(compile, c_object, output, errors);
+                const int compiled = c_compiled == 0 ? type_test_run(link, output, errors) : c_compiled;
                 const String8 complaints = type_test_read_file(&world.types.arena, errors);
                 snprintf(detail, sizeof(detail), "%s, %u-byte vectors: compiling and linking failed: %.300s", name, vector_bytes, complaints.length != 0 ? complaints.pointer : "");
                 if (abi_test_expect(tally, compiled == 0, "cross-check", detail))
@@ -6592,6 +6639,7 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 unlink(ours);
                 unlink(object);
                 unlink(scalar_object);
+                unlink(c_object);
                 unlink(program);
                 unlink(output);
                 unlink(errors);
@@ -6879,6 +6927,7 @@ static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, 
         char object[BUSTER_ABI_TEST_PATH_BYTES];
         char scalar_object[BUSTER_ABI_TEST_PATH_BYTES];
         char records[BUSTER_ABI_TEST_PATH_BYTES];
+        char c_object[BUSTER_ABI_TEST_PATH_BYTES];
         char program[BUSTER_ABI_TEST_PATH_BYTES];
         char output[BUSTER_ABI_TEST_PATH_BYTES];
         char errors[BUSTER_ABI_TEST_PATH_BYTES];
@@ -6887,6 +6936,7 @@ static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, 
         snprintf(object, sizeof(object), "%s/%s_%u_buster.o", directory, run.file, run.vector_bytes);
         snprintf(scalar_object, sizeof(scalar_object), "%s/%s_%u_buster_scalar.o", directory, run.file, run.vector_bytes);
         snprintf(records, sizeof(records), "%s/%s_%u_records.o", directory, run.file, run.vector_bytes);
+        snprintf(c_object, sizeof(c_object), "%s/%s_%u_c.o", directory, run.file, run.vector_bytes);
         snprintf(program, sizeof(program), "%s/%s_%u", directory, run.file, run.vector_bytes);
         snprintf(output, sizeof(output), "%s/%s_%u.out", directory, run.file, run.vector_bytes);
         snprintf(errors, sizeof(errors), "%s/%s_%u.err", directory, run.file, run.vector_bytes);
@@ -6952,7 +7002,22 @@ static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, 
         free(code);
         if (result)
         {
+            // The C side compiled through the oracle cache (abi_test_compile), then linked with ours and the records'.
             char* compile[] = {
+                (char*)compiler,
+                "-std=gnu23",
+                "-O1",
+                "-fno-strict-aliasing",
+                "-march=x86-64",
+                signedness,
+                "-w",
+                "-c",
+                "-o",
+                c_object,
+                source,
+                0,
+            };
+            char* link[] = {
                 (char*)compiler,
                 "-std=gnu23",
                 "-O1",
@@ -6962,12 +7027,13 @@ static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, 
                 "-w",
                 "-o",
                 program,
-                source,
+                c_object,
                 object,
                 records,
                 0,
             };
-            const int linked = type_test_run(compile, output, errors);
+            const int c_compiled = abi_test_compile(compile, c_object, output, errors);
+            const int linked = c_compiled == 0 ? type_test_run(link, output, errors) : c_compiled;
             const String8 complaints = type_test_read_file(&text_arena, errors);
             result = linked == 0;
             snprintf(detail, sizeof(detail), "%s: compiling and linking failed: %.300s", run.name, complaints.length != 0 ? complaints.pointer : "");
@@ -6996,6 +7062,7 @@ static bool abi_test_cross_extension(AbiTestTally* tally, const char* compiler, 
             unlink(object);
             unlink(scalar_object);
             unlink(records);
+            unlink(c_object);
             unlink(program);
             unlink(output);
             unlink(errors);
@@ -7329,6 +7396,9 @@ static bool abi_test_cross_descriptors(void)
 
 static int run_calling_convention_tests(int argc, char** argv)
 {
+    // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
+    // (oracle_epoch_begin, oracle_cache.c).
+    const bool epoch = oracle_epoch_begin();
     uint64_t seed = 1;
     uint64_t count = BUSTER_ABI_TEST_DEFAULT_COUNT;
     uint64_t signatures = BUSTER_ABI_TEST_DEFAULT_SIGNATURES;
@@ -7398,8 +7468,12 @@ static int run_calling_convention_tests(int argc, char** argv)
         passed = abi_test_gcc_bit_fields() && passed;
         passed = abi_test_assignment(seed, (uint32_t)count) && passed;
         passed = (!cross_check || abi_test_cross_descriptors()) && passed;
+        // The oracle cache, set up before the cross-check's runs fork, so that their counts reach its report.
+        OracleCache* oracle = oracle_cache();
         passed = (!cross_check || abi_test_cross_check(seed, (uint32_t)signatures, clang, gcc, buster, keep)) && passed;
+        oracle_cache_report(oracle, "test-calling-convention");
         result = passed ? 0 : 1;
     }
+    oracle_epoch_end(epoch);
     return result;
 }
