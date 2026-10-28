@@ -5189,6 +5189,37 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 #include "buster/compiler/tier0_deep_test.c"
 #include "buster/compiler/tier0_validate_test.c"
 
+static void tier0_test_entry_repetitions(Tier0TestTally* tally)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 27);
+    static Tier0Program ordinary;
+    static Tier0Program once;
+    static Tier0Program repeated;
+    static Tier0Program invalid;
+    Tier0ProgramOptions options = { .functions = 3, .statements = 4, .expression_nodes = 6, .calls = true, .loops = true, .defined = true };
+    bool same = arena.base != NULL && tier0_generate_program(&ordinary, &arena, 88, options, "c_");
+    options.entry_repetitions = 1;
+    same = same && tier0_generate_program(&once, &arena, 88, options, "c_") &&
+           ordinary.entry_count == once.entry_count && ordinary.local_count == once.local_count && ordinary.text_length == once.text_length &&
+           memcmp(ordinary.kinds, once.kinds, ordinary.entry_count) == 0 && memcmp(ordinary.classes, once.classes, ordinary.entry_count) == 0 &&
+           memcmp(ordinary.values, once.values, (uint64_t)ordinary.entry_count * sizeof(uint64_t)) == 0 &&
+           memcmp(ordinary.text, once.text, ordinary.text_length) == 0;
+    tier0_test_expect(tally, same, "entry repetitions", "default and one repetition must preserve the ordinary typed stream and generated C");
+    options.entry_repetitions = BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS;
+    bool callees = same && tier0_generate_program(&repeated, &arena, 88, options, "c_");
+    const uint32_t before_entry = same ? ordinary.functions[ordinary.function_count - 1].first_entry : 0;
+    callees = callees && repeated.function_count == ordinary.function_count &&
+              repeated.functions[repeated.function_count - 1].first_entry == before_entry &&
+              memcmp(ordinary.kinds, repeated.kinds, before_entry) == 0 && memcmp(ordinary.classes, repeated.classes, before_entry) == 0 &&
+              memcmp(ordinary.values, repeated.values, (uint64_t)before_entry * sizeof(uint64_t)) == 0;
+    tier0_test_expect(tally, callees, "entry repetitions", "the repeated entry must retain every existing callee's typed body");
+    const uint64_t mark = arena.length;
+    options.entry_repetitions = BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS + 1;
+    tier0_test_expect(tally, !tier0_generate_program(&invalid, &arena, 88, options, "c_") && arena.length == mark,
+                      "entry repetitions", "work past the fixed repetition bound must reject before reserving storage");
+    arena_release(&arena);
+}
+
 static int run_tier0_tests(int argc, char** argv)
 {
     // SOURCE_DATE_EPOCH fixed where it isn't set, so that the compilers' runs it compares with can be kept
@@ -5251,6 +5282,7 @@ static int run_tier0_tests(int argc, char** argv)
         Tier0TestTally total = { 0, 0 };
         if (tier0_tables_open(&tables))
         {
+            tier0_test_entry_repetitions(&total);
             static const Tier0ProgramOptions shapes[4] = {
                 { .functions = 1, .statements = 6, .expression_nodes = 6, .calls = false, .loops = false, .floating = false, .pointers = false },
                 { .functions = 3, .statements = 12, .expression_nodes = 10, .calls = true, .loops = true, .floating = false, .pointers = false, .indirect = true,
@@ -5472,6 +5504,17 @@ static int run_tier0_tests(int argc, char** argv)
             }
             if (cross)
             {
+                Tier0TestTally repetitions = { 0, 0 };
+                Tier0ProgramOptions repeated = { .functions = 3, .statements = 4, .expression_nodes = 6, .calls = true, .loops = true, .defined = true };
+                static const uint32_t counts[] = { 2, BUSTER_TIER0_GENERATE_ENTRY_REPETITIONS };
+                for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(counts); at += 1)
+                {
+                    repeated.entry_repetitions = counts[at];
+                    tier0_test_cross(&repetitions, &tables, seed, 1, repeated, clang, keep);
+                }
+                tier0_test_report("cross-check: entry repetitions", repetitions);
+                total.checks += repetitions.checks;
+                total.failures += repetitions.failures;
                 Tier0TestTally tally = { 0, 0 };
                 Tier0ProgramOptions defined = shapes[3];
                 defined.defined = true;
