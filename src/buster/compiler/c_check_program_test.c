@@ -685,6 +685,16 @@ static bool check_test_program_oracle(const Link* link, const char* source, char
     return valid;
 }
 
+// DAZ is optional even with SSE2; FXSAVE's mask says whether MXCSR bit 6 may be written.
+static bool check_test_program_daz(void)
+{
+    uint8_t state[512] __attribute__((aligned(16)));
+    uint32_t mask;
+    __asm__ volatile("fxsave %0" : "=m"(state));
+    memcpy(&mask, state + 28, sizeof(mask));
+    return (mask & 64u) != 0;
+}
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -699,7 +709,9 @@ static const char check_test_program_harness[] =
     "int change_rounding(int n){const int modes[]={FE_TONEAREST,FE_TOWARDZERO,FE_UPWARD,FE_DOWNWARD};return fesetround(modes[(unsigned)n&3]);}\n"
     "int clear_fp(void){return feclearexcept(FE_ALL_EXCEPT);}\n"
     "int fp_state(void){int f=fetestexcept(FE_ALL_EXCEPT);return !!(f&FE_INVALID)+2*!!(f&FE_DIVBYZERO)+4*!!(f&FE_OVERFLOW)+8*!!(f&FE_UNDERFLOW)+16*!!(f&FE_INEXACT);}\n"
-    "int change_daz(int n){unsigned old=_mm_getcsr();_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
+    "int change_daz(int n){struct {unsigned char b[512];} __attribute__((aligned(16))) s;"
+    "__asm__ volatile(\"fxsave %0\":\"=m\"(s));unsigned mask;__builtin_memcpy(&mask,s.b+28,4);"
+    "unsigned old=_mm_getcsr();if(mask&64u)_mm_setcsr((old&~64u)|((unsigned)n&1u)*64u);return (old>>6)&1;}\n"
     "double fp_special(int n){const unsigned long b[]={0,0x8000000000000000UL,0x7ff0000000000000UL,0xfff0000000000000UL,"
     "0x7ff8000000000001UL,0x7ff0000000000001UL,1,0x8000000000000001UL,0x3ff8000000000000UL};"
     "union{unsigned long bits;double value;}x={b[(unsigned)n%9]};return x.value;}\n"
@@ -874,7 +886,10 @@ static void check_test_program_build_release(void)
     *build = (CheckTestProgramBuild){ 0 };
 }
 
-static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+// Compile and link every fixture. A CPU-ineligible fixture omits only the final launch and must not publish an
+// execution-result cache entry that a later eligible comparison could mistake for a successful run.
+static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* clang, bool char_unsigned, bool alignment_oracle,
+                                                       bool run_native, Arena* scratch)
 {
     char directory[] = "/tmp/buster-check-program-XXXXXX";
     const bool created = mkdtemp(directory) != 0;
@@ -893,10 +908,27 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
     uint8_t* bytes = 0;
     uint64_t size = 0;
     bool same_oracle = false;
-    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size) && check_test_program_oracle(link, source, &text, &length);
+    bool valid = created && check_test_program_object(link, object, scratch, &bytes, &size);
+    if (valid && alignment_oracle)
+    {
+        // The direct temporary's stronger alignment is Buster's contract; Clang may give the aligned(1) return
+        // type a less-aligned temporary. Compare against the independently calculated result instead.
+        const char expected[] = "int oracle_tested(int n){return 11*n+52;}\n";
+        length = sizeof(expected) - 1;
+        text = malloc(length + 1);
+        valid = text != 0;
+        if (valid)
+        {
+            memcpy(text, expected, length + 1);
+        }
+    }
+    else if (valid)
+    {
+        valid = check_test_program_oracle(link, source, &text, &length);
+    }
     valid = valid && check_test_program_prepare(clang, text, length, char_unsigned, out, err, &same_oracle);
     CheckTestProgramBuild* build = &check_test_program_build;
-    const bool same = valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
+    const bool same = run_native && valid && same_oracle && build->object != 0 && build->object_size == size && memcmp(build->object, bytes, size) == 0;
     char harness_file[32];
     snprintf(harness_file, sizeof(harness_file), "%s.o", check_test_program_harness_name(char_unsigned));
     check_test_program_build_path(harness, sizeof(harness), harness_file);
@@ -916,13 +948,13 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         executable,
         0,
     };
-    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && object_test_run(run, out, err) == 0));
+    valid = valid && (same || (object_test_run(link_command, out, err) == 0 && (!run_native || object_test_run(run, out, err) == 0)));
     if (!same)
     {
         free(build->object);
-        build->object = valid ? bytes : 0;
-        build->object_size = valid ? size : 0;
-        bytes = valid ? 0 : bytes;
+        build->object = valid && run_native ? bytes : 0;
+        build->object_size = valid && run_native ? size : 0;
+        bytes = valid && run_native ? 0 : bytes;
     }
     if (!valid && created)
     {
@@ -958,6 +990,11 @@ static bool check_test_program_execute(Link* link, const char* source, const cha
         rmdir(directory);
     }
     return valid;
+}
+
+static bool check_test_program_execute(Link* link, const char* source, const char* clang, bool char_unsigned, Arena* scratch)
+{
+    return check_test_program_execute_with_alignment(link, source, clang, char_unsigned, false, true, scratch);
 }
 
 // check_data_prepare before #592, with a token-sized column of each object's last declaration: the oracle that
@@ -1299,9 +1336,9 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
 }
 
 // A program fixture, checked and compiled with plain char signed or unsigned (-funsigned-char), for a target (null for
-// x86-64's), against clang's build of it with the same.
-static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                             int32_t expected_pools, uint32_t entry_limit, const X86Target* target)
+// x86-64's), against clang's build of it with the same; its executable runs where `run_native` says the host can run it.
+static void check_test_program_source_native_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                                    int32_t expected_pools, uint32_t entry_limit, const X86Target* target, bool run_native)
 {
     static InternTable identifiers;
     static Preprocessor pp;
@@ -1437,8 +1474,17 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
                                   "backend consumers retain final pooled-data and external memcpy access after runtime symbol numbering");
                 arena_pop_to(&scratch, access_mark);
             }
-            snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name, clang);
-            check_test_expect(test, check_test_program_execute(&code.link, source, clang, char_unsigned, &scratch), description);
+            const bool alignment_oracle = strcmp(name, "hidden-result-direct-temporary-alignment") == 0;
+            if (run_native)
+            {
+                snprintf(description, sizeof(description), "%s: generated executable agrees with %s on all repeated inputs", name,
+                         alignment_oracle ? "the independent alignment expectation" : clang);
+            }
+            else
+            {
+                snprintf(description, sizeof(description), "%s: generated object and oracle compile and link; native execution is unavailable on this CPU", name);
+            }
+            check_test_expect(test, check_test_program_execute_with_alignment(&code.link, source, clang, char_unsigned, alignment_oracle, run_native, &scratch), description);
         }
         check_test_expect(test, scratch.length == 0, "program preparation and all consumers restore scratch lifetime");
         parse_release(&parser);
@@ -1452,16 +1498,26 @@ static void check_test_program_source_limits(CheckTest* test, const char* source
     intern_release(&identifiers);
 }
 
-static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
-                                           const X86Target* target)
+static void check_test_program_source_limits(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned,
+                                             int32_t expected_pools, uint32_t entry_limit)
 {
-    check_test_program_source_limits(test, source, name, clang, char_unsigned, -1, 0, target);
+    check_test_program_source_native_limits(test, source, name, clang, char_unsigned, expected_pools, entry_limit, NULL, true);
+}
+
+static void check_test_program_source_native(CheckTest* test, const char* source, const char* name, const char* clang, bool run_native)
+{
+    check_test_program_source_native_limits(test, source, name, clang, false, -1, 0, NULL, run_native);
+}
+
+static void check_test_program_source_char(CheckTest* test, const char* source, const char* name, const char* clang, bool char_unsigned)
+{
+    check_test_program_source_limits(test, source, name, clang, char_unsigned, -1, 0);
 }
 
 // A program fixture with plain char signed, x86-64's.
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
 {
-    check_test_program_source_char(test, source, name, clang, false, NULL);
+    check_test_program_source_char(test, source, name, clang, false);
 }
 
 static void check_test_program_initializer_facts(CheckTest* test)
@@ -1546,7 +1602,7 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
                  size - 1, size - 1, size - 1);
         char name[64];
         snprintf(name, sizeof(name), "automatic-string-%u", size);
-        check_test_program_source_limits(test, source, name, clang, false, size > BUSTER_CHECK_LOWER_INIT_UNROLLED, 320, NULL);
+        check_test_program_source_limits(test, source, name, clang, false, size > BUSTER_CHECK_LOWER_INIT_UNROLLED, 320);
     }
     if (source != NULL)
     {
@@ -1557,7 +1613,7 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
         }
         snprintf(source + length, 40000 - length,
                  "};int bad=(unsigned long)a%%64;for(int i=0;i<1025;i++)bad|=a[i]!=i*7-2000;a[(unsigned)n%%1025]=n;return bad?123456:n;}");
-        check_test_program_source_limits(test, source, "automatic-constant-list", clang, false, 1, 320, NULL);
+        check_test_program_source_limits(test, source, "automatic-constant-list", clang, false, 1, 320);
     }
     free(source);
     const char* letters = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
@@ -1566,51 +1622,51 @@ static void check_test_program_initializers(CheckTest* test, const char* clang)
              "int tested(int n){char a[130]=\"%s\";char b[257]=\"%s\\0XY\";"
              "int bad=0;for(int i=0;i<130;i++)bad|=a[i]!=('a'+i%%26);for(int i=0;i<130;i++)bad|=b[i]!=a[i];"
              "bad|=b[130]|(b[131]!='X')|(b[132]!='Y');for(int i=133;i<257;i++)bad|=b[i];return bad?123456:n;}", letters, letters);
-    check_test_program_source_limits(test, text, "automatic-truncated-embedded-nul-tail", clang, false, 2, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-truncated-embedded-nul-tail", clang, false, 2, 320);
     snprintf(text, sizeof(text),
              "int tested(int n){int a[257]=L\"%s\\0XY\\u1234\";unsigned short b[257]=u\"%s\\0XY\\u1234\";"
              "int bad=0;for(int i=0;i<130;i++)bad|=(a[i]!=('a'+i%%26))|(b[i]!=a[i]);"
              "for(int i=130;i<257;i++)bad|=a[i]!=b[i];bad|=a[130]|(a[131]!='X')|(a[132]!='Y');"
              "bad|=a[133]!=0x1234;for(int i=134;i<257;i++)bad|=a[i];return bad?123456:n;}", letters, letters);
-    check_test_program_source_limits(test, text, "automatic-wide-embedded-nul-tail", clang, false, 2, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-wide-embedded-nul-tail", clang, false, 2, 320);
     snprintf(text, sizeof(text),
              "struct __attribute__((packed)) S{char x;char a[131];int y;};int tested(int n){int k=n;struct S s={(char)k++,\"%s\",k++};"
              "int bad=(s.x!=(char)n)|(s.y!=n+1)|(k!=n+2);for(int i=0;i<130;i++)bad|=s.a[i]!=('a'+i%%26);"
              "bad|=s.a[130];return bad?123456:n;}", letters);
-    check_test_program_source_limits(test, text, "automatic-mixed-runtime-string", clang, false, 1, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-mixed-runtime-string", clang, false, 1, 320);
     snprintf(text, sizeof(text),
              "int tested(int n){char a[]=\"%s\";double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x;}", letters);
-    check_test_program_source_limits(test, text, "automatic-pool-synthesized-errno-symbol", clang, false, 1, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-pool-synthesized-errno-symbol", clang, false, 1, 320);
     snprintf(text, sizeof(text),
              "int*__errno_location(void);int tested(int n){char a[]=\"%s\";*__errno_location()=7;"
              "double x=__builtin_sqrt((double)(n&3)+1.0);return a[(unsigned)n%%130]+(int)x+*__errno_location();}", letters);
-    check_test_program_source_limits(test, text, "automatic-pool-existing-errno-symbol", clang, false, 1, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-pool-existing-errno-symbol", clang, false, 1, 320);
     snprintf(text, sizeof(text),
              "struct S{char bytes[513];};int tested(int n){struct S a={\"%s\"};struct S b;b=a;"
              "double x=__builtin_sqrt((double)(n&3)+1.0);return b.bytes[(unsigned)n%%130]+(int)x+1000*(a.bytes[512]!=0||b.bytes[512]!=0);}", letters);
-    check_test_program_source_limits(test, text, "automatic-pool-copy-errno-and-zero-tail", clang, false, 1, 320, NULL);
+    check_test_program_source_limits(test, text, "automatic-pool-copy-errno-and-zero-tail", clang, false, 1, 320);
     check_test_program_source_limits(test,
         "int tested(int n){int a[257]={[0 ... 256]=3,[31]=9,[256]=17};int bad=0;"
         "for(int i=0;i<257;i++)bad|=a[i]!=(i==31?9:i==256?17:3);return bad?123456:n;}",
-        "automatic-designated-overrides", clang, false, 1, 320, NULL);
+        "automatic-designated-overrides", clang, false, 1, 320);
     check_test_program_source_limits(test,
         "int tested(int n){int* a=(int[65]){[0 ... 64]=7};a[0]=n;return a[0]==n&&a[64]==7?n:123456;}",
-        "automatic-compound-literal-image", clang, false, 1, 320, NULL);
+        "automatic-compound-literal-image", clang, false, 1, 320);
     check_test_program_source_limits(test,
         "int tested(int n){return sizeof((int[65]){[0 ... 64]=7})==260?n:123456;}",
-        "automatic-unevaluated-compound-no-image", clang, false, 0, 320, NULL);
+        "automatic-unevaluated-compound-no-image", clang, false, 0, 320);
     check_test_program_source_limits(test,
         "int tested(int n){int k=n;int a[40]={k++,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,k++};"
-        "return a[0]==n&&a[39]==n+1&&k==n+2?n:123456;}", "automatic-runtime-list", clang, false, 0, 0, NULL);
+        "return a[0]==n&&a[39]==n+1&&k==n+2?n:123456;}", "automatic-runtime-list", clang, false, 0, 0);
     check_test_program_source_limits(test,
         "int tested(int n){volatile int a[40]={[0 ... 39]=7};int bad=0;for(int i=0;i<40;i++)bad|=a[i]!=7;return bad?123456:n;}",
-        "automatic-volatile-list", clang, false, 0, 0, NULL);
+        "automatic-volatile-list", clang, false, 0, 0);
     check_test_program_source_limits(test,
         "struct S{int a[65];volatile int flag;};int tested(int n){struct S s={{[0 ... 64]=7}};"
-        "return s.a[0]==7&&s.a[64]==7&&s.flag==0?n:123456;}", "automatic-omitted-volatile-member", clang, false, 0, 0, NULL);
+        "return s.a[0]==7&&s.a[64]==7&&s.flag==0?n:123456;}", "automatic-omitted-volatile-member", clang, false, 0, 0);
     check_test_program_source_limits(test,
         "int tested(int n){int a[8193]={[0 ... 32]=7,[8192]=9};return a[0]==7&&a[32]==7&&a[8191]==0&&a[8192]==9?n:123456;}",
-        "automatic-sparse-no-large-image", clang, false, 0, 0, NULL);
+        "automatic-sparse-no-large-image", clang, false, 0, 0);
 }
 
 // A program fixture checked and lowered by both paths for a target (null for x86-64's): accepted or not, lowered or
@@ -2055,8 +2111,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int tested(int n){char c=(char)(n*37+128);int r=c/3+(c>>1)+(c>100)+widen(pass(c))+'\\xff'+(char)-1;"
         "r+=table[(unsigned)n%5]+(table[(unsigned)n%5]<0)*1000;switch(c){case '\\xff':r+=7;break;case '\\x80':r+=11;break;default:break;}"
         "table[(unsigned)n%5]=c;return r;}";
-    check_test_program_source_char(test, plain_char, "plain-char-unsigned", clang, true, NULL);
-    check_test_program_source_char(test, plain_char, "plain-char-signed", clang, false, NULL);
+    check_test_program_source_char(test, plain_char, "plain-char-unsigned", clang, true);
+    check_test_program_source_char(test, plain_char, "plain-char-signed", clang, false);
     check_test_program_source(test,
         "int global=7;int helper(int x){global+=x;return global;}"
         "int tested(int n){int a=helper(n);global+=2;return a*3+global;}", "shared-code-and-data", clang);
@@ -2476,6 +2532,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         "int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();"
         "float x=1.0+0x1p-24;int a=x>1.0f;int f=fp_state();change_rounding(0);return a*100+f;}",
         "fenv-implicit-narrowing-conversion", clang);
+    if (!check_test_program_daz())
+    {
+        printf("  fenv classification: DAZ toggle skipped (MXCSR does not support it)\n");
+    }
     check_test_program_source(test,
         "#pragma STDC FENV_ACCESS ON\n"
         "int clear_fp(void);int fp_state(void);int change_daz(int);double fp_special(int);int tested(int n){"
@@ -2662,9 +2722,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
     check_test_program_source(test,
         "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
         "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
-        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "union wide b=external_wide(n+1);union wide c=external_wide(n+2);__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c.c[0]*5+a.c[39]+e.c[7];}"
         "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
         "hidden-result-canonical-alignment", clang);
+    // The direct member access needs a canonical-aligned return temporary too. The helper reports a misaligned
+    // hidden result in its first byte; its Buster-only expected result is independent of Clang's weaker alignment.
+    check_test_program_source(test,
+        "union wide{long double x;signed char c[40];};typedef union wide W __attribute__((aligned(1)));struct eight{signed char c[8];};W external_wide(int n);"
+        "int shifted(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);union wide a=external_wide(n);struct eight e=__builtin_va_arg(ap,struct eight);"
+        "union wide b=external_wide(n+1);int c=external_wide(n+2).c[0];__builtin_va_end(ap);return a.c[0]+b.c[0]*3+c*5+a.c[39]+e.c[7];}"
+        "int tested(int n){struct eight e={{1,2,3,4,5,6,7,(char)n}};return shifted(n,e);}",
+        "hidden-result-direct-temporary-alignment", clang);
     check_test_program_source(test,
         "struct cx{_Complex long double z;};struct cx external_complex(long double a,long double b);"
         "long double external_complex_apply(struct cx(*f)(long double,long double),long double a);"

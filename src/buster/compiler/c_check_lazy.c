@@ -179,6 +179,8 @@ static uint32_t check_lazy_header(const Parser* parser, const Preprocessor* pp, 
 
 static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
 {
+    (void)scalar;
+
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     CheckLazy candidate = { .status = CHECK_LAZY_INVALID };
@@ -205,7 +207,7 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
     ParseBindings bindings = { 0 };
     Parser replay = valid ? *parser : (Parser){ 0 };
     replay.scratch = *scratch;
-    valid = valid && parse_bindings_build(&bindings, &replay, output) && parse_bindings_resolve(&bindings, scalar, scratch);
+    valid = valid && parse_bindings_build(&bindings, &replay, output) && parse_bindings_resolve(&bindings, BUSTER_SCALAR_PATH(scalar), scratch);
     uint32_t* owners = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* firsts = owners != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* targets = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, names) : 0;
@@ -344,7 +346,7 @@ static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Prepr
             .reference_kind = kinds,
         };
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (scalar ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
+        valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
         if (valid)
         {
             for (uint32_t body = 0; body < body_count; body += 1)
